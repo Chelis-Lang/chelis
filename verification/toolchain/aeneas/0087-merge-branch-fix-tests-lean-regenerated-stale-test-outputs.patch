@@ -1,0 +1,2735 @@
+# aeneas integration step 87 after cba11f3beb: commit 58a68b72cdc20d973bfa6a8842a17156489676dc
+# first parent e1d9126eca9ed76acef1db3194de1274891ef8db, merged d236e65aa2d2ed85407c2a35640fd86b162a6bf4
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/tests-lean' (regenerated stale test outputs; closure call kinds test; impl_def self-reference; external functions file only for functions without a body)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index b312b7a..b7525d4 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -647,7 +647,9 @@ type gen_config = {
+           file if needed. *)
+ }
+ 
+-(** Returns the pair: (has opaque type decls, has opaque fun decls).
++(** Returns the pair: (has opaque type decls, has opaque fun decls), where an
++    opaque fun decl is one the external functions file declares: a function
++    whose translation has no body.
+ 
+     [filter_builtin]: if [true], do not consider as opaque the external
+     definitions that we will map to definitions from the standard library. *)
+@@ -663,6 +665,20 @@ let crate_has_opaque_non_builtin_decls (ctx : gen_ctx) (filter_builtin : bool) :
+          (fun id _ -> not (SC.is_external (IdFun id)))
+          ctx.trans_ctx.fun_ctx.to_extract)
+   in
++  (* A function without a Rust body can be given one by the translation: the
++     partial-monomorphization instances of modeled functions at a borrowing
++     state are the model at an extended state (see
++     [ModelStateABI.threaded_instance_of_decl]). Only the functions whose
++     translation has no body are holes of the external functions file (a
++     function whose translation failed is not emitted at all). *)
++  let funs =
++    List.filter
++      (fun (d : fun_decl) ->
++        match FunDeclId.Map.find_opt d.def_id ctx.trans_funs with
++        | Some trans -> Option.is_none trans.f.body
++        | None -> false)
++      funs
++  in
+   [%ldebug
+     "- opaque types:\n"
+     ^ String.concat "\n\n"
+@@ -1334,6 +1350,14 @@ let export_trait_impl (fmt : Format.formatter) (_config : gen_config)
+       (TraitImplId.Map.find_opt trait_impl_id ctx.trans_trait_impls)
+   in
+   if not (trait_impl_is_builtin ctx trait_impl_id) then (
++    let ctx =
++      if is_rec then
++        {
++          ctx with
++          local_trait_impl_refs = TraitImplId.Set.singleton trait_impl_id;
++        }
++      else ctx
++    in
+     Extract.extract_trait_impl ctx fmt ~is_rec trait_impl;
+     sc_record ctx (IdTraitImpl trait_impl_id))
+ 
+@@ -1950,6 +1974,7 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+       trans_globals;
+       functions_with_decreases_clause = rec_functions;
+       local_function_refs = PureUtils.FunLoopIdSet.empty;
++      local_trait_impl_refs = Pure.TraitImplId.Set.empty;
+       inline_trait_impls = Pure.TraitImplId.Map.empty;
+       inline_trait_impl_stack = Pure.TraitImplId.Set.empty;
+       extract_inline_trait_impl = Extract.extract_inline_trait_impl;
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index b25d05f..b378377 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -597,6 +597,10 @@ type extraction_ctx = {
+   local_function_refs : PureUtils.FunLoopIdSet.t;
+       (** Lean recursive group members are lexical binders during elaboration.
+       *)
++  local_trait_impl_refs : Pure.TraitImplId.Set.t;
++      (** The recursive trait implementation extracted with Lean's [impl_def]:
++          its body names it through the auxiliary binder of [impl_def], which
++          [_root_]-qualified names do not resolve to. *)
+   trans_trait_decls : Pure.trait_decl Pure.TraitDeclId.Map.t;
+   trans_trait_impls : Pure.trait_impl Pure.TraitImplId.Map.t;
+   inline_trait_impls : Pure.trait_impl Pure.TraitImplId.Map.t;
+@@ -832,6 +836,9 @@ let ctx_get_reference (span : Meta.span option) (id : id) (ctx : extraction_ctx)
+       | TerminationMeasureId _ | DecreasesProofId _ -> true
+       | TraitDeclId id | TraitDeclConstructorId id ->
+           (TraitDeclId.Map.find id ctx.trans_trait_decls).builtin_info = None
++      | TraitImplId id when Pure.TraitImplId.Set.mem id ctx.local_trait_impl_refs
++        ->
++          false
+       | TraitImplId id ->
+           (TraitImplId.Map.find id ctx.trans_trait_impls).builtin_info = None
+       | _ -> false
+diff --git a/tests/lean/ClosureCallKinds.lean b/tests/lean/ClosureCallKinds.lean
+new file mode 100644
+index 0000000..e2ec891
+--- /dev/null
++++ b/tests/lean/ClosureCallKinds.lean
+@@ -0,0 +1 @@
++import ClosureCallKinds.Checks
+diff --git a/tests/lean/ClosureCallKinds/Checks.lean b/tests/lean/ClosureCallKinds/Checks.lean
+new file mode 100644
+index 0000000..144dae4
+--- /dev/null
++++ b/tests/lean/ClosureCallKinds/Checks.lean
+@@ -0,0 +1,80 @@
++import ClosureCallKinds.ClosureCallKinds
++
++/-! Evaluate the model of `tests/src/closure-call-kinds.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace closure_call_kinds.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def val {α} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++-- `FnOnce` by value, consuming an owned vector moved into the closure
++#guard val (·.val) (once_owned (vec []) (u 7)) == some 8
++#guard val (·.val) (once_owned (vec [1, 2, 3]) (u 10)) == some 14
++#guard val (·.val) (once_owned (vec [0]) (u 4294967295)) == some 1
++
++-- `FnOnce` by value, capturing a shared borrow
++#guard val (·.val) (once_shared (sl [4, 5, 6]) 1#usize (u 10)) == some 15
++#guard val (·.val) (once_shared (sl [4294967295]) 0#usize (u 2)) == some 1
++
++-- `FnOnce` by value, capturing a mutable borrow: the update is visible after
++-- the call
++def runOnceMut (start x : Nat) : Option (Nat × Nat) :=
++  val (fun (r, a) => (r.val, a.val)) (once_mut (u start) (u x))
++
++#guard runOnceMut 10 5 == some (30, 15)
++#guard runOnceMut 4294967295 1 == some (0, 0)
++#guard runOnceMut 3 2147483648 == some (6, 2147483651)
++
++-- `FnOnce`-only closures (moving a captured vector out) capturing a mutable
++-- borrow: one through `run_once`, one called directly
++def runOnly (v w : List Nat) (x : Nat)
++    (hv : v.length ≤ Usize.max := by scalar_tac) (hw : w.length ≤ Usize.max := by scalar_tac) :
++    Option (Nat × Nat × Nat) :=
++  val (fun (a, b, s) => (a.val, b.val, s.val)) (once_only (vec v) (vec w) (u x))
++
++#guard runOnly [1, 2] [7] 10 == some (4, 3, 15)
++#guard runOnly [] [] 4294967295 == some (2, 0, 4)
++
++-- `FnMut` by `&mut`, capturing a mutable borrow (a call counter) and a value
++def runCounter (k x : Nat) : Option (Nat × Nat) :=
++  val (fun (r, c) => (r.val, c.val)) (mut_counter (u k) (u x))
++
++#guard runCounter 3 2 == some (18, 2)
++#guard runCounter 0 9 == some (0, 2)
++#guard runCounter 65536 65536 == some (0, 2)
++
++-- `FnMut` by `&mut` owning its state, then called directly
++def runOwned (x : Nat) : Option (Nat × Nat) :=
++  val (fun (a, b) => (a.val, b.val)) (mut_owned_state (u x))
++
++#guard runOwned 5 == some (10, 11)
++#guard runOwned 0 == some (0, 1)
++#guard runOwned 2147483648 == some (0, 1)
++
++-- `Fn` by `&`, capturing a shared borrow of a struct
++def runShared (scale offset x : Nat) : Option Nat :=
++  val (·.val) (fn_shared { scale := u scale, offset := u offset } (u x))
++
++#guard runShared 3 1 4 == some 26
++#guard runShared 0 7 100 == some 14
++#guard runShared 2 0 2147483648 == some 0
++
++-- `FnOnce(&mut Ctx)` callback of a context helper, capturing a mutable borrow
++def runCtx (x : Nat) : Option (Nat × Nat × Nat × Nat) :=
++  val (fun (r, d, l, s) => (r.val, d.val, l.val, s.val)) (ctx_callback (u x))
++
++#guard runCtx 3 == some (9, 5, 1, 6)
++#guard runCtx 4294967295 == some (5, 5, 1, 6)
++
++end closure_call_kinds.checks
+diff --git a/tests/lean/ClosureCallKinds/ClosureCallKinds.lean b/tests/lean/ClosureCallKinds/ClosureCallKinds.lean
+new file mode 100644
+index 0000000..2c13ff8
+--- /dev/null
++++ b/tests/lean/ClosureCallKinds/ClosureCallKinds.lean
+@@ -0,0 +1,738 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [closure_call_kinds]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace closure_call_kinds
++
++/-- [closure_call_kinds::mut_counter::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 81:16-84:5 -/
++def mut_counter.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::once_mut::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 48:8-51:9 -/
++@[reducible]
++def once_mut.closure := _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::once_only::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 62:8-66:9 -/
++def once_only.closure :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::once_only::closure#1]
++    Source: 'tests/src/closure-call-kinds.rs', lines 69:12-73:5 -/
++def once_only.closure_1 :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::ctx_callback::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 131:31-135:5 -/
++def ctx_callback.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<closure_call_kinds::ctx_callback::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<closure_call_kinds::ctx_callback::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<closure_call_kinds::ctx_callback::closure<'0, '1>, (&'2 mut @T0), @T1>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_2b1cae65b7d7456d9593f104d048a513
++  (T0 : Type) (T1 : Type) where
++  call_once : _root_.closure_call_kinds.ctx_callback.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 ×
++    _root_.closure_call_kinds.ctx_callback.closure × T0)
++
++/-- [closure_call_kinds::run_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 14:0-16:1
++    Visibility: public -/
++def run_once
++  {F : Type} (coreopsfunctionFnOnceFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ← coreopsfunctionFnOnceFTupleU32U32Inst.call_once f x
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [closure_call_kinds::run_once::<closure_call_kinds::once_mut::closure<0>>]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 14:0-16:1
++    Visibility: public -/
++def run_onceclosure_specialized_107481a73cfbcd0608806712ff206323
++  (coreopsfunctionFnOnceclosureTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_mut.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : _root_.closure_call_kinds.once_mut.closure)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.once_mut.closure)
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnOnceclosureTupleU32U32Inst.call_once f x
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1)
++
++/-- [closure_call_kinds::run_once::<closure_call_kinds::once_only::closure<0>>]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 14:0-16:1
++    Visibility: public -/
++def run_onceclosure_specialized_2a9af1f0d0f0eac886cb6950c1bd5055
++  (coreopsfunctionFnOnceclosureTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_only.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : _root_.closure_call_kinds.once_only.closure)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.once_only.closure)
++  := do
++  let (_, v) := f
++  let (model_state, model_state1) ←
++    coreopsfunctionFnOnceclosureTupleU32U32Inst.call_once f x
++  let (i, _) := model_state1
++  _root_.Aeneas.Std.Result.ok (model_state, (i, v))
++
++/-- [closure_call_kinds::run_mut]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 18:0-21:1
++    Visibility: public -/
++def run_mut
++  {F : Type} (coreopsfunctionFnMutFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × F)
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutFTupleU32U32Inst.call_mut f x
++  coreopsfunctionFnMutFTupleU32U32Inst.call_mut model_state1 model_state
++
++/-- [closure_call_kinds::run_mut::<0, closure_call_kinds::mut_counter::closure<1, 2>>]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 18:0-21:1
++    Visibility: public -/
++def run_mut0closure_specialized_3a75d580f040f84a4822eac4252a45ef
++  (coreopsfunctionFnMutclosureTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closure_call_kinds.mut_counter.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : _root_.closure_call_kinds.mut_counter.closure)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.mut_counter.closure ×
++    (_root_.closure_call_kinds.mut_counter.closure →
++    _root_.closure_call_kinds.mut_counter.closure))
++  := do
++  let (_, i) := f
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosureTupleU32U32Inst.call_mut f x
++  let (_, i1) := model_state1
++  let (model_state2, model_state3) ←
++    coreopsfunctionFnMutclosureTupleU32U32Inst.call_mut model_state1
++      model_state
++  let back :=
++    (fun f1 =>
++       let (i2, _) := (f1.#0, model_state3.#1)
++       let (i3, _) := (i2, i1)
++       (i3, i) : _root_.closure_call_kinds.mut_counter.closure →
++      _root_.closure_call_kinds.mut_counter.closure)
++  _root_.Aeneas.Std.Result.ok (model_state2, model_state3, back)
++
++/-- [closure_call_kinds::run_ref]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 23:0-25:1
++    Visibility: public -/
++def run_ref
++  {F : Type} (coreopsfunctionFnFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.Fn F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let model_state ← coreopsfunctionFnFTupleU32U32Inst.call f x
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add model_state
++    model_state)
++
++/-- [closure_call_kinds::once_owned::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 30:8-34:9 -/
++@[reducible]
++def once_owned.closure := _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::once_owned::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_owned::closure}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 30:8-34:9 -/
++def once_owned.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.once_owned.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push c tupled_args
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len v
++  let i1 ← lift (UScalar.cast .U32 i)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 tupled_args)
++
++/-- Trait implementation: [closure_call_kinds::once_owned::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_owned::closure}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 30:8-34:9 -/
++@[reducible]
++def once_owned.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_owned.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closure_call_kinds.once_owned.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [closure_call_kinds::once_owned]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 28:0-37:1
++    Visibility: public -/
++def once_owned
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.closure_call_kinds.run_once
++    _root_.closure_call_kinds.once_owned.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++    v x
++
++/-- [closure_call_kinds::once_shared::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 41:13-41:37 -/
++def once_shared.closure :=
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize
++
++/-- [closure_call_kinds::once_shared::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_shared::closure<0, 1>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 41:13-41:37 -/
++def once_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.once_shared.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (s, i) := c
++  let i1 ← Slice.index_usize s i
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 tupled_args)
++
++/-- Trait implementation: [closure_call_kinds::once_shared::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_shared::closure<0, 1>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 41:13-41:37 -/
++@[reducible]
++def once_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_shared.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closure_call_kinds.once_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [closure_call_kinds::once_shared]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 40:0-42:1
++    Visibility: public -/
++def once_shared
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.closure_call_kinds.run_once
++    _root_.closure_call_kinds.once_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++    (a, i) x
++
++/-- [closure_call_kinds::once_mut::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_mut::closure<0>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 48:8-51:9 -/
++def once_mut.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.once_mut.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.once_mut.closure)
++  := do
++  let i ← lift (core.num.U32.wrapping_add c tupled_args)
++  let i1 ← lift (core.num.U32.wrapping_mul i 2#u32)
++  _root_.Aeneas.Std.Result.ok (i1, i)
++
++/-- Trait implementation: [closure_call_kinds::once_mut::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_mut::closure<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 48:8-51:9 -/
++@[reducible]
++def once_mut.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_mut.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.once_mut.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [closure_call_kinds::once_mut]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 45:0-55:1
++    Visibility: public -/
++def once_mut
++  (start : _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, c) ←
++    _root_.closure_call_kinds.run_onceclosure_specialized_107481a73cfbcd0608806712ff206323
++      _root_.closure_call_kinds.once_mut.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++      start x
++  _root_.Aeneas.Std.Result.ok (r, c)
++
++/-- [closure_call_kinds::once_only::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_only::closure#1<0>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 69:12-73:5 -/
++def once_only.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.once_only.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.once_only.closure_1)
++  := do
++  let (i, w) := c
++  let i1 ← lift (core.num.U32.wrapping_add i tupled_args)
++  let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len w
++  let i3 ← lift (UScalar.cast .U32 i2)
++  let i4 ← lift (core.num.U32.wrapping_mul i3 tupled_args)
++  _root_.Aeneas.Std.Result.ok (i4, (i1, w))
++
++/-- [closure_call_kinds::once_only::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_only::closure<0>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 62:8-66:9 -/
++def once_only.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.once_only.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.once_only.closure)
++  := do
++  let (i, v) := c
++  let i1 ← lift (core.num.U32.wrapping_add i tupled_args)
++  let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len v
++  let i3 ← lift (UScalar.cast .U32 i2)
++  let i4 ← lift (core.num.U32.wrapping_add i3 tupled_args)
++  _root_.Aeneas.Std.Result.ok (i4, (i1, v))
++
++/-- Trait implementation: [closure_call_kinds::once_only::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_only::closure<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 62:8-66:9 -/
++@[reducible]
++def once_only.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_only.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.once_only.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- [closure_call_kinds::once_only]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 59:0-76:1
++    Visibility: public -/
++def once_only
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (w : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r1, c) ←
++    _root_.closure_call_kinds.run_onceclosure_specialized_2a9af1f0d0f0eac886cb6950c1bd5055
++      _root_.closure_call_kinds.once_only.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++      (x, v) 2#u32
++  let (seen, _) := c
++  let (r2, c1) ←
++    _root_.closure_call_kinds.once_only.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++      (seen, w) 3#u32
++  let (seen1, _) := c1
++  _root_.Aeneas.Std.Result.ok (r1, r2, seen1)
++
++/-- Trait implementation: [closure_call_kinds::once_only::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::once_only::closure#1<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 69:12-73:5 -/
++@[reducible]
++def once_only.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.once_only.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.once_only.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- [closure_call_kinds::mut_counter::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::mut_counter::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 81:16-84:5 -/
++def mut_counter.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.closure_call_kinds.mut_counter.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.mut_counter.closure ×
++    (_root_.closure_call_kinds.mut_counter.closure →
++    _root_.closure_call_kinds.mut_counter.closure))
++  := do
++  let (i, i1) := c
++  let i2 ← i + 1#u32
++  let i3 ← lift (core.num.U32.wrapping_mul tupled_args i1)
++  let back :=
++    (fun c1 => let (i4, _) := c1
++               (i4, i1) : _root_.closure_call_kinds.mut_counter.closure →
++      _root_.closure_call_kinds.mut_counter.closure)
++  _root_.Aeneas.Std.Result.ok (i3, (i2, i1), back)
++
++/-- [closure_call_kinds::mut_counter::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::mut_counter::closure<0, 1>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 81:16-84:5 -/
++def mut_counter.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.mut_counter.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.mut_counter.closure)
++  := do
++  let (_, i1) := c
++  let (i2, c1, call_mut_back) ←
++    _root_.closure_call_kinds.mut_counter.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (i3, _) := c2
++  _root_.Aeneas.Std.Result.ok (i2, (i3, i1))
++
++/-- Trait implementation: [closure_call_kinds::mut_counter::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::mut_counter::closure<0, 1>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 81:16-84:5 -/
++@[reducible]
++def mut_counter.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.mut_counter.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.mut_counter.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- Trait implementation: [closure_call_kinds::mut_counter::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::mut_counter::closure<0, 1>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 81:16-84:5 -/
++@[reducible]
++def mut_counter.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closure_call_kinds.mut_counter.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closure_call_kinds.mut_counter.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.closure_call_kinds.mut_counter.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1))
++}
++
++/-- [closure_call_kinds::mut_counter]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 79:0-87:1
++    Visibility: public -/
++def mut_counter
++  (k : _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, f, run_mut_back) ←
++    _root_.closure_call_kinds.run_mut0closure_specialized_3a75d580f040f84a4822eac4252a45ef
++      _root_.closure_call_kinds.mut_counter.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++      (0#u32, k) x
++  let c := run_mut_back f
++  let (calls, _) := c
++  _root_.Aeneas.Std.Result.ok (r, calls)
++
++/-- [closure_call_kinds::mut_owned_state::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 93:16-96:5 -/
++@[reducible]
++def mut_owned_state.closure := _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::mut_owned_state::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::mut_owned_state::closure}::call_mut]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 93:16-96:5 -/
++def mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.closure_call_kinds.mut_owned_state.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.mut_owned_state.closure)
++  := do
++  let i ← lift (core.num.U32.wrapping_add c tupled_args)
++  _root_.Aeneas.Std.Result.ok (i, i)
++
++/-- [closure_call_kinds::mut_owned_state::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::mut_owned_state::closure}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 93:16-96:5 -/
++def mut_owned_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.mut_owned_state.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [closure_call_kinds::mut_owned_state::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::mut_owned_state::closure}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 93:16-96:5 -/
++@[reducible]
++def mut_owned_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.mut_owned_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [closure_call_kinds::mut_owned_state::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::mut_owned_state::closure}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 93:16-96:5 -/
++@[reducible]
++def mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closure_call_kinds.mut_owned_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [closure_call_kinds::mut_owned_state]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 91:0-100:1
++    Visibility: public -/
++def mut_owned_state
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, f) ←
++    _root_.closure_call_kinds.run_mut
++      _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++      0#u32 x
++  let (b, _) ←
++    _root_.closure_call_kinds.mut_owned_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      f 1#u32
++  _root_.Aeneas.Std.Result.ok (a, b)
++
++/-- [closure_call_kinds::Cfg]
++    Source: 'tests/src/closure-call-kinds.rs', lines 102:0-105:1
++    Visibility: public -/
++structure Cfg where
++  scale : _root_.Aeneas.Std.U32
++  offset : _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::fn_shared::closure]
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++@[reducible]
++def fn_shared.closure := _root_.closure_call_kinds.Cfg
++
++/-- [closure_call_kinds::fn_shared::{core::ops::function::Fn<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}::call]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++def fn_shared.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++  (c : _root_.closure_call_kinds.fn_shared.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← lift (core.num.U32.wrapping_mul tupled_args c.scale)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i c.offset)
++
++/-- [closure_call_kinds::fn_shared::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}::call_mut]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++def fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (state : _root_.closure_call_kinds.fn_shared.closure)
++  (args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.fn_shared.closure)
++  := do
++  let i ←
++    _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, state)
++
++/-- [closure_call_kinds::fn_shared::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++def fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.closure_call_kinds.fn_shared.closure) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [closure_call_kinds::fn_shared::{core::ops::function::FnOnce<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++@[reducible]
++def fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closure_call_kinds.fn_shared.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [closure_call_kinds::fn_shared::{core::ops::function::FnMut<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++@[reducible]
++def fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closure_call_kinds.fn_shared.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [closure_call_kinds::fn_shared::{core::ops::function::Fn<(u32), u32> for closure_call_kinds::fn_shared::closure<0>}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 109:12-109:71 -/
++@[reducible]
++def fn_shared.closure.Insts.CoreOpsFunctionFnTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.closure_call_kinds.fn_shared.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- [closure_call_kinds::fn_shared]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 108:0-111:1
++    Visibility: public -/
++def fn_shared
++  (cfg : _root_.closure_call_kinds.Cfg) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.closure_call_kinds.run_ref
++    _root_.closure_call_kinds.fn_shared.closure.Insts.CoreOpsFunctionFnTupleU32U32
++    cfg x
++
++/-- [closure_call_kinds::Ctx]
++    Source: 'tests/src/closure-call-kinds.rs', lines 113:0-116:1
++    Visibility: public -/
++structure Ctx where
++  depth : _root_.Aeneas.Std.U32
++  log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [closure_call_kinds::with_ctx]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 119:0-124:1
++    Visibility: public -/
++def with_ctx
++  {R : Type} {F : Type}
++  (coreopsfunctionFnOnceFTupleMut0CtxR_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg F
++  _root_.closure_call_kinds.Ctx R) (ctx : _root_.closure_call_kinds.Ctx)
++  (f : F) :
++  _root_.Aeneas.Std.Result (R × _root_.closure_call_kinds.Ctx)
++  := do
++  let i ← lift (core.num.U32.wrapping_add ctx.depth 1#u32)
++  let (r, ctx1) ←
++    coreopsfunctionFnOnceFTupleMut0CtxR_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst.call_once
++      f { ctx with depth := i }
++  let i1 ← lift (core.num.U32.wrapping_sub ctx1.depth 1#u32)
++  _root_.Aeneas.Std.Result.ok (r, { ctx1 with depth := i1 })
++
++/-- [closure_call_kinds::with_ctx::<0, T0, closure_call_kinds::ctx_callback::closure<1, 2>>]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 119:0-124:1
++    Visibility: public -/
++def with_ctx0T0closure_specialized_3f68a92fb50a81f45c7c991e0be26ceb
++  {T0 : Type}
++  (coreopsfunctionFnOnceclosureTupleMut0CtxT0_specialized_2b1cae65b7d7456d9593f104d048a513Inst
++  :
++  _root_.closure_call_kinds.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_2b1cae65b7d7456d9593f104d048a513
++  _root_.closure_call_kinds.Ctx T0) (ctx : _root_.closure_call_kinds.Ctx)
++  (f : _root_.closure_call_kinds.ctx_callback.closure) :
++  _root_.Aeneas.Std.Result (T0 × _root_.closure_call_kinds.Ctx ×
++    _root_.closure_call_kinds.ctx_callback.closure)
++  := do
++  let (i, _) := f
++  let i1 ← lift (core.num.U32.wrapping_add ctx.depth 1#u32)
++  let (r, c, ctx1) ←
++    coreopsfunctionFnOnceclosureTupleMut0CtxT0_specialized_2b1cae65b7d7456d9593f104d048a513Inst.call_once
++      f { ctx with depth := i1 }
++  let i2 ← lift (core.num.U32.wrapping_sub ctx1.depth 1#u32)
++  let (_, i3) := c
++  _root_.Aeneas.Std.Result.ok (r, { ctx1 with depth := i2 }, (i, i3))
++
++/-- [closure_call_kinds::ctx_callback::{core::ops::function::FnOnce::<closure_call_kinds::ctx_callback::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for closure_call_kinds::Ctx}::call_once]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 131:31-135:5 -/
++def
++  ctx_callback.closure.Insts.CoreOpsFunctionFnOnceTupleMutCtxU32_specialized_2b1cae65b7d7456d9593f104d048a513.call_once
++  (c : _root_.closure_call_kinds.ctx_callback.closure)
++  (tupled_args : _root_.closure_call_kinds.Ctx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_call_kinds.ctx_callback.closure ×
++    _root_.closure_call_kinds.Ctx)
++  := do
++  let (i, i1) := c
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push tupled_args.log i
++  let i2 ← lift (core.num.U32.wrapping_add i1 tupled_args.depth)
++  let i3 ← lift (core.num.U32.wrapping_add tupled_args.depth i)
++  _root_.Aeneas.Std.Result.ok (i3, (i, i2), { tupled_args with log := v })
++
++/-- Trait implementation: [closure_call_kinds::ctx_callback::{core::ops::function::FnOnce::<closure_call_kinds::ctx_callback::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for closure_call_kinds::Ctx}]
++    Source: 'tests/src/closure-call-kinds.rs', lines 131:31-135:5 -/
++@[reducible]
++def
++  ctx_callback.closure.Insts.CoreOpsFunctionFnOnceTupleMutCtxU32_specialized_2b1cae65b7d7456d9593f104d048a513
++  :
++  _root_.closure_call_kinds.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_2b1cae65b7d7456d9593f104d048a513
++  _root_.closure_call_kinds.Ctx _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_call_kinds.ctx_callback.closure.Insts.CoreOpsFunctionFnOnceTupleMutCtxU32_specialized_2b1cae65b7d7456d9593f104d048a513.call_once
++}
++
++/-- [closure_call_kinds::ctx_callback]:
++    Source: 'tests/src/closure-call-kinds.rs', lines 128:0-137:1
++    Visibility: public -/
++def ctx_callback
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, ctx, c) ←
++    _root_.closure_call_kinds.with_ctx0T0closure_specialized_3f68a92fb50a81f45c7c991e0be26ceb
++      _root_.closure_call_kinds.ctx_callback.closure.Insts.CoreOpsFunctionFnOnceTupleMutCtxU32_specialized_2b1cae65b7d7456d9593f104d048a513
++      {
++        depth := 5#u32,
++        log := (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++      } (x, 0#u32)
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len ctx.log
++  let i1 ← lift (UScalar.cast .U32 i)
++  let (_, seen) := c
++  _root_.Aeneas.Std.Result.ok (r, ctx.depth, i1, seen)
++
++end closure_call_kinds
+diff --git a/tests/lean/Closures.lean b/tests/lean/Closures.lean
+index b09c312..466bc3e 100644
+--- a/tests/lean/Closures.lean
++++ b/tests/lean/Closures.lean
+@@ -14,327 +14,505 @@ namespace closures
+ /-- [closures::call_fn_no_state::closure]
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ @[reducible]
+-def call_fn_no_state.closure := Unit
++def call_fn_no_state.closure := _root_.Unit
+ 
+ /-- [closures::call_fn_no_state::{core::ops::function::Fn<(u32), u32> for closures::call_fn_no_state::closure}::call]:
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
+-  (c : call_fn_no_state.closure) (tupled_args : Std.U32) : Result Std.U32 := do
++  (c : _root_.closures.call_fn_no_state.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
+   tupled_args + 1#u32
+ 
+ /-- [closures::call_fn_no_state]:
+     Source: 'tests/src/closures.rs', lines 3:0-6:1 -/
+-def call_fn_no_state (i : Std.U32) : Result Std.U32 := do
+-  call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call () i
++def call_fn_no_state
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++    () i
+ 
+ /-- [closures::call_fn_no_state::{core::ops::function::FnMut<(u32), u32> for closures::call_fn_no_state::closure}::call_mut]:
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+-  (state : call_fn_no_state.closure) (args : Std.U32) :
+-  Result (Std.U32 × call_fn_no_state.closure)
++  (state : _root_.closures.call_fn_no_state.closure)
++  (args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closures.call_fn_no_state.closure)
+   := do
+   let i ←
+-    call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call state args
+-  ok (i, state)
++    _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+ /-- [closures::call_fn_no_state::{core::ops::function::FnOnce<(u32), u32> for closures::call_fn_no_state::closure}::call_once]:
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+-  (c : call_fn_no_state.closure) (i : Std.U32) : Result Std.U32 := do
++  (c : _root_.closures.call_fn_no_state.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
+   let (i1, _) ←
+-    call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut c i
+-  ok i1
++    _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
+ 
+ /-- Trait implementation: [closures::call_fn_no_state::{core::ops::function::FnOnce<(u32), u32> for closures::call_fn_no_state::closure}]
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ @[reducible]
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
+-  core.ops.function.FnOnce call_fn_no_state.closure Std.U32 Std.U32 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closures.call_fn_no_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
+   call_once :=
+-    call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [closures::call_fn_no_state::{core::ops::function::FnMut<(u32), u32> for closures::call_fn_no_state::closure}]
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ @[reducible]
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
+-  core.ops.function.FnMut call_fn_no_state.closure Std.U32 Std.U32 := {
+-  FnOnceInst := call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closures.call_fn_no_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
+   call_mut :=
+-    call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- Trait implementation: [closures::call_fn_no_state::{core::ops::function::Fn<(u32), u32> for closures::call_fn_no_state::closure}]
+     Source: 'tests/src/closures.rs', lines 4:15-4:40 -/
+ @[reducible]
+ def call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32 :
+-  core.ops.function.Fn call_fn_no_state.closure Std.U32 Std.U32 := {
+-  FnMutInst := call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
+-  call := call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.closures.call_fn_no_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_fn_no_state.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ /-- [closures::call_fn_shared::closure]
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ @[reducible]
+-def call_fn_shared.closure := Slice Std.U8
++def call_fn_shared.closure := _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8
+ 
+ /-- [closures::call_fn_shared::{core::ops::function::Fn<(usize), u8> for closures::call_fn_shared::closure<0>}::call]:
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call
+-  (c : call_fn_shared.closure) (tupled_args : Std.Usize) : Result Std.U8 := do
++  (c : _root_.closures.call_fn_shared.closure)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U8
++  := do
+   Slice.index_usize c tupled_args
+ 
+ /-- [closures::call_fn_shared]:
+     Source: 'tests/src/closures.rs', lines 8:0-11:1 -/
+-def call_fn_shared (a : Slice Std.U8) (i : Std.Usize) : Result Std.U8 := do
+-  call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call a i
++def call_fn_shared
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U8
++  := do
++  _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call
++    a i
+ 
+ /-- [closures::call_fn_shared::{core::ops::function::FnMut<(usize), u8> for closures::call_fn_shared::closure<0>}::call_mut]:
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8.call_mut
+-  (state : call_fn_shared.closure) (args : Std.Usize) :
+-  Result (Std.U8 × call_fn_shared.closure)
++  (state : _root_.closures.call_fn_shared.closure)
++  (args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U8 ×
++    _root_.closures.call_fn_shared.closure)
+   := do
+   let i ←
+-    call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call state args
+-  ok (i, state)
++    _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+ /-- [closures::call_fn_shared::{core::ops::function::FnOnce<(usize), u8> for closures::call_fn_shared::closure<0>}::call_once]:
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8.call_once
+-  (c : call_fn_shared.closure) (i : Std.Usize) : Result Std.U8 := do
++  (c : _root_.closures.call_fn_shared.closure) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U8
++  := do
+   let (i1, _) ←
+-    call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8.call_mut c i
+-  ok i1
++    _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
+ 
+ /-- Trait implementation: [closures::call_fn_shared::{core::ops::function::FnOnce<(usize), u8> for closures::call_fn_shared::closure<0>}]
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ @[reducible]
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8 :
+-  core.ops.function.FnOnce call_fn_shared.closure Std.Usize Std.U8 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closures.call_fn_shared.closure _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U8 := {
+   call_once :=
+-    call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [closures::call_fn_shared::{core::ops::function::FnMut<(usize), u8> for closures::call_fn_shared::closure<0>}]
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ @[reducible]
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8 :
+-  core.ops.function.FnMut call_fn_shared.closure Std.Usize Std.U8 := {
+-  FnOnceInst := call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closures.call_fn_shared.closure _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U8 := {
++  FnOnceInst :=
++    _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeU8
+   call_mut :=
+-    call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8.call_mut
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- Trait implementation: [closures::call_fn_shared::{core::ops::function::Fn<(usize), u8> for closures::call_fn_shared::closure<0>}]
+     Source: 'tests/src/closures.rs', lines 9:15-9:40 -/
+ @[reducible]
+ def call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8 :
+-  core.ops.function.Fn call_fn_shared.closure Std.Usize Std.U8 := {
+-  FnMutInst := call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8
+-  call := call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call
++  _root_.Aeneas.Std.core.ops.function.Fn _root_.closures.call_fn_shared.closure
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.U8 := {
++  FnMutInst :=
++    _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnMutTupleUsizeU8
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_fn_shared.closure.Insts.CoreOpsFunctionFnTupleUsizeU8.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ /-- [closures::call_closure]:
+     Source: 'tests/src/closures.rs', lines 30:0-32:1 -/
+ def call_closure
+-  {F : Type} (coreopsfunctionFnFTupleU32Inst : core.ops.function.Fn F Unit
+-  Std.U32) (f : F) :
+-  Result Std.U32
++  {F : Type} (coreopsfunctionFnFTupleU32Inst :
++  _root_.Aeneas.Std.core.ops.function.Fn F _root_.Unit _root_.Aeneas.Std.U32)
++  (f : F) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+   := do
+   coreopsfunctionFnFTupleU32Inst.call f ()
+ 
+ /-- [closures::call_closure1::closure]
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ @[reducible]
+-def call_closure1.closure := Unit
++def call_closure1.closure := _root_.Unit
+ 
+ /-- [closures::call_closure1::{core::ops::function::Fn<(), u32> for closures::call_closure1::closure}::call]:
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ def call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32.call
+-  (c : call_closure1.closure) (_ : Unit) : Result Std.U32 := do
+-  ok 0#u32
++  (c : _root_.closures.call_closure1.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 0#u32
+ 
+ /-- [closures::call_closure1::{core::ops::function::FnMut<(), u32> for closures::call_closure1::closure}::call_mut]:
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ def call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
+-  (state : call_closure1.closure) (_ : Unit) :
+-  Result (Std.U32 × call_closure1.closure)
++  (state : _root_.closures.call_closure1.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closures.call_closure1.closure)
+   := do
+-  let i ← call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32.call state ()
+-  ok (i, state)
++  let i ←
++    _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32.call
++      state ()
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+ /-- [closures::call_closure1::{core::ops::function::FnOnce<(), u32> for closures::call_closure1::closure}::call_once]:
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ def call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
+-  (c : call_closure1.closure) (_ : Unit) : Result Std.U32 := do
++  (c : _root_.closures.call_closure1.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
+   let (i, _) ←
+-    call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut c ()
+-  ok i
++    _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++      c ()
++  _root_.Aeneas.Std.Result.ok i
+ 
+ /-- Trait implementation: [closures::call_closure1::{core::ops::function::FnOnce<(), u32> for closures::call_closure1::closure}]
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ @[reducible]
+ def call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
+-  core.ops.function.FnOnce call_closure1.closure Unit Std.U32 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closures.call_closure1.closure _root_.Unit _root_.Aeneas.Std.U32 := {
+   call_once :=
+-    call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure1::{core::ops::function::FnMut<(), u32> for closures::call_closure1::closure}]
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ @[reducible]
+ def call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32 :
+-  core.ops.function.FnMut call_closure1.closure Unit Std.U32 := {
+-  FnOnceInst := call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32
+-  call_mut := call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closures.call_closure1.closure _root_.Unit _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure1::{core::ops::function::Fn<(), u32> for closures::call_closure1::closure}]
+     Source: 'tests/src/closures.rs', lines 35:17-35:21 -/
+ @[reducible]
+ def call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32 :
+-  core.ops.function.Fn call_closure1.closure Unit Std.U32 := {
+-  FnMutInst := call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32
+-  call := call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32.call
++  _root_.Aeneas.Std.core.ops.function.Fn _root_.closures.call_closure1.closure
++  _root_.Unit _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnMutTupleU32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ /-- [closures::call_closure1]:
+     Source: 'tests/src/closures.rs', lines 34:0-36:1 -/
+-def call_closure1 : Result Std.U32 := do
+-  call_closure call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32 ()
++def call_closure1 : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  _root_.closures.call_closure
++    _root_.closures.call_closure1.closure.Insts.CoreOpsFunctionFnTupleU32 ()
+ 
+ /-- [closures::call_closure2::closure#1]
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ @[reducible]
+-def call_closure2.closure_1 := Unit
++def call_closure2.closure_1 := _root_.Unit
+ 
+ /-- [closures::call_closure2::{core::ops::function::Fn<(), u32> for closures::call_closure2::closure#1}::call]:
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32.call
+-  (c : call_closure2.closure_1) (_ : Unit) : Result Std.U32 := do
+-  ok 0#u32
++  (c : _root_.closures.call_closure2.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 0#u32
+ 
+ /-- [closures::call_closure2::{core::ops::function::FnMut<(), u32> for closures::call_closure2::closure#1}::call_mut]:
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
+-  (state : call_closure2.closure_1) (_ : Unit) :
+-  Result (Std.U32 × call_closure2.closure_1)
++  (state : _root_.closures.call_closure2.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closures.call_closure2.closure_1)
+   := do
+   let i ←
+-    call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32.call state ()
+-  ok (i, state)
++    _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32.call
++      state ()
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+ /-- [closures::call_closure2::{core::ops::function::FnOnce<(), u32> for closures::call_closure2::closure#1}::call_once]:
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
+-  (c : call_closure2.closure_1) (_ : Unit) : Result Std.U32 := do
++  (c : _root_.closures.call_closure2.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
+   let (i, _) ←
+-    call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32.call_mut c ()
+-  ok i
++    _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++      c ()
++  _root_.Aeneas.Std.Result.ok i
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::FnOnce<(), u32> for closures::call_closure2::closure#1}]
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ @[reducible]
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32 :
+-  core.ops.function.FnOnce call_closure2.closure_1 Unit Std.U32 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closures.call_closure2.closure_1 _root_.Unit _root_.Aeneas.Std.U32
++  := {
+   call_once :=
+-    call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::FnMut<(), u32> for closures::call_closure2::closure#1}]
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ @[reducible]
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32 :
+-  core.ops.function.FnMut call_closure2.closure_1 Unit Std.U32 := {
+-  FnOnceInst := call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closures.call_closure2.closure_1 _root_.Unit _root_.Aeneas.Std.U32
++  := {
++  FnOnceInst :=
++    _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
+   call_mut :=
+-    call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::Fn<(), u32> for closures::call_closure2::closure#1}]
+     Source: 'tests/src/closures.rs', lines 40:17-40:21 -/
+ @[reducible]
+ def call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32 :
+-  core.ops.function.Fn call_closure2.closure_1 Unit Std.U32 := {
+-  FnMutInst := call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32
+-  call := call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32.call
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.closures.call_closure2.closure_1 _root_.Unit _root_.Aeneas.Std.U32
++  := {
++  FnMutInst :=
++    _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnMutTupleU32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ /-- [closures::call_closure2::closure]
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ @[reducible]
+-def call_closure2.closure := Unit
++def call_closure2.closure := _root_.Unit
+ 
+ /-- [closures::call_closure2::{core::ops::function::Fn<(), u32> for closures::call_closure2::closure}::call]:
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ def call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32.call
+-  (c : call_closure2.closure) (_ : Unit) : Result Std.U32 := do
+-  ok 0#u32
++  (c : _root_.closures.call_closure2.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 0#u32
+ 
+ /-- [closures::call_closure2::{core::ops::function::FnMut<(), u32> for closures::call_closure2::closure}::call_mut]:
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ def call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
+-  (state : call_closure2.closure) (_ : Unit) :
+-  Result (Std.U32 × call_closure2.closure)
++  (state : _root_.closures.call_closure2.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closures.call_closure2.closure)
+   := do
+-  let i ← call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32.call state ()
+-  ok (i, state)
++  let i ←
++    _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32.call
++      state ()
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+ /-- [closures::call_closure2::{core::ops::function::FnOnce<(), u32> for closures::call_closure2::closure}::call_once]:
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ def call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
+-  (c : call_closure2.closure) (_ : Unit) : Result Std.U32 := do
++  (c : _root_.closures.call_closure2.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
+   let (i, _) ←
+-    call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut c ()
+-  ok i
++    _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++      c ()
++  _root_.Aeneas.Std.Result.ok i
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::FnOnce<(), u32> for closures::call_closure2::closure}]
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ @[reducible]
+ def call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
+-  core.ops.function.FnOnce call_closure2.closure Unit Std.U32 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.closures.call_closure2.closure _root_.Unit _root_.Aeneas.Std.U32 := {
+   call_once :=
+-    call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::FnMut<(), u32> for closures::call_closure2::closure}]
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ @[reducible]
+ def call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32 :
+-  core.ops.function.FnMut call_closure2.closure Unit Std.U32 := {
+-  FnOnceInst := call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32
+-  call_mut := call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.closures.call_closure2.closure _root_.Unit _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- Trait implementation: [closures::call_closure2::{core::ops::function::Fn<(), u32> for closures::call_closure2::closure}]
+     Source: 'tests/src/closures.rs', lines 39:17-39:21 -/
+ @[reducible]
+ def call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32 :
+-  core.ops.function.Fn call_closure2.closure Unit Std.U32 := {
+-  FnMutInst := call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32
+-  call := call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32.call
++  _root_.Aeneas.Std.core.ops.function.Fn _root_.closures.call_closure2.closure
++  _root_.Unit _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnMutTupleU32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ /-- [closures::call_closure2]:
+     Source: 'tests/src/closures.rs', lines 38:0-41:1 -/
+-def call_closure2 : Result Std.U32 := do
++def call_closure2 : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
+   let _ ←
+-    call_closure call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32 ()
+-  call_closure call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32 ()
++    _root_.closures.call_closure
++      _root_.closures.call_closure2.closure.Insts.CoreOpsFunctionFnTupleU32 ()
++  _root_.closures.call_closure
++    _root_.closures.call_closure2.closure_1.Insts.CoreOpsFunctionFnTupleU32 ()
+ 
+ /-- [closures::u8_id]:
+     Source: 'tests/src/closures.rs', lines 43:0-45:1 -/
+-def u8_id (x : Std.U8) : Result Std.U8 := do
+-  ok x
++def u8_id
++  (x : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U8
++  := do
++  _root_.Aeneas.Std.Result.ok x
+ 
+ /-- [closures::map_fn_pointer]:
+     Source: 'tests/src/closures.rs', lines 47:0-49:1 -/
+-def map_fn_pointer (x : alloc.vec.Vec Std.U8) : Result Unit := do
+-  let ii ← alloc.vec.IntoIteratorVec.into_iter x
++def map_fn_pointer
++  (x : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter x
+   let _ ←
+-    alloc.vec.into_iter.IntoIter.Insts.CoreIterTraitsIteratorIterator.map
+-      (BuiltinFnMut Std.U8 Std.U8) ii (u8_id)
+-  ok ()
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U8) (BuiltinFnMut _root_.Aeneas.Std.U8
++      _root_.Aeneas.Std.U8) model_state (_root_.closures.u8_id)
++  _root_.Aeneas.Std.Result.ok ()
+ 
+ end closures
+diff --git a/tests/lean/ConstantsLean.lean b/tests/lean/ConstantsLean.lean
+index 20016c8..464928e 100644
+--- a/tests/lean/ConstantsLean.lean
++++ b/tests/lean/ConstantsLean.lean
+@@ -14,72 +14,83 @@ namespace constants_lean
+ /-- Trait declaration: [constants_lean::Params]
+     Source: 'tests/src/constants-lean.rs', lines 3:0-6:1 -/
+ structure Params (Self : Type) where
+-  N : Result Std.Usize
+-  M : Result Std.Usize
++  N : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  M : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
+ 
+ /-- [constants_lean::use_params]:
+     Source: 'tests/src/constants-lean.rs', lines 8:0-10:1 -/
+ def use_params
+-  {P : Type} (ParamsInst : Params P) (n : Std.Usize) : Result Bool := do
++  {P : Type} (ParamsInst : _root_.constants_lean.Params P)
++  (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
+   let i ← ParamsInst.N
+   let i1 ← ParamsInst.M
+   let i2 ← i * i1
+-  lift (core.cmp.impls.PartialEqUsize.eq n i2)
++  _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq core.cmp.PartialEqUsize n
++    i2
+ 
+ /-- [constants_lean::N]
+     Source: 'tests/src/constants-lean.rs', lines 12:0-12:19 -/
+-@[global_simps, irreducible] def N : Std.Usize := 3#usize
++@[global_simps, irreducible] def N : _root_.Aeneas.Std.Usize := 3#usize
+ 
+ /-- [constants_lean::M]
+     Source: 'tests/src/constants-lean.rs', lines 13:0-13:19 -/
+-@[global_simps, irreducible] def M : Std.Usize := 4#usize
++@[global_simps, irreducible] def M : _root_.Aeneas.Std.Usize := 4#usize
+ 
+ /-- [constants_lean::NM]
+     Source: 'tests/src/constants-lean.rs', lines 14:0-14:24 -/
+-@[global_simps, irreducible] def NM : Result Std.Usize := N * M
++@[global_simps, irreducible]
++def NM : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize :=
++  _root_.constants_lean.N * _root_.constants_lean.M
+ 
+ /-- [constants_lean::Wrapper]
+     Source: 'tests/src/constants-lean.rs', lines 16:0-16:65 -/
+-def Wrapper (N1 : Std.Usize) (M1 : Std.Usize) :=
+-  Array Std.U8 N1 × Array Std.U8 N1
++def Wrapper (N1 : _root_.Aeneas.Std.Usize) (M1 : _root_.Aeneas.Std.Usize) :=
++  _root_.Aeneas.Std.Array _root_.Aeneas.Std.U8 N1 × _root_.Aeneas.Std.Array
++  _root_.Aeneas.Std.U8 N1
+ 
+ /-- [constants_lean::{constants_lean::Wrapper<N, M>}::NM]
+     Source: 'tests/src/constants-lean.rs', lines 19:4-19:28 -/
+ @[global_simps, irreducible]
+-def Wrapper.NM (N1 : Std.Usize) (M1 : Std.Usize) : Result Std.Usize := N1 * M1
++def Wrapper.NM (N1 : _root_.Aeneas.Std.Usize) (M1 : _root_.Aeneas.Std.Usize)
++  : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize :=
++  N1 * M1
+ 
+ /-- Trait declaration: [constants_lean::Trait]
+     Source: 'tests/src/constants-lean.rs', lines 22:0-24:1 -/
+ structure Trait (Self : Type) where
+-  NM : Result Std.Usize
++  NM : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
+ 
+ /-- [constants_lean::{constants_lean::Trait for constants_lean::Wrapper<N, M>}::NM]
+     Source: 'tests/src/constants-lean.rs', lines 27:4-27:28 -/
+ @[global_simps, irreducible]
+-def Wrapper.Insts.Constants_leanTrait.NM (N1 : Std.Usize) (M1 : Std.Usize)
+-  : Result Std.Usize :=
++def Wrapper.Insts.Constants_leanTrait.NM (N1 : _root_.Aeneas.Std.Usize) (M1 :
++  _root_.Aeneas.Std.Usize)
++  : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize :=
+   N1 * M1
+ 
+ /-- Trait implementation: [constants_lean::{constants_lean::Trait for constants_lean::Wrapper<N, M>}]
+     Source: 'tests/src/constants-lean.rs', lines 26:0-28:1 -/
+ @[reducible]
+-def Wrapper.Insts.Constants_leanTrait (N1 : Std.Usize) (M1 : Std.Usize) : Trait
+-  (Wrapper N1 M1) := {
+-  NM := Wrapper.Insts.Constants_leanTrait.NM N1 M1
++def Wrapper.Insts.Constants_leanTrait (N1 : _root_.Aeneas.Std.Usize) (M1 :
++  _root_.Aeneas.Std.Usize) : _root_.constants_lean.Trait
++  (_root_.constants_lean.Wrapper N1 M1) := {
++  NM := _root_.constants_lean.Wrapper.Insts.Constants_leanTrait.NM N1 M1
+ }
+ 
+ /-- Trait declaration: [constants_lean::Trait1]
+     Source: 'tests/src/constants-lean.rs', lines 30:0-34:1 -/
+ structure Trait1 (Self : Type) where
+-  N : Result Std.Usize
+-  M : Result Std.Usize
+-  NM : Result Std.Usize
++  N : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  M : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  NM : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
+ 
+ /-- [constants_lean::Trait1::NM]
+     Source: 'tests/src/constants-lean.rs', lines 33:4-33:40 -/
+ @[global_simps, irreducible, trait_default]
+-def Trait1.NM.default {Self : Type} (Trait1Inst : Trait1 Self)
+-  : Result Std.Usize := do
++def Trait1.NM.default {Self : Type} (Trait1Inst : _root_.constants_lean.Trait1
++  Self) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize := do
+   let i ← Trait1Inst.N
+   let i1 ← Trait1Inst.M
+   i * i1
+@@ -87,35 +98,39 @@ def Trait1.NM.default {Self : Type} (Trait1Inst : Trait1 Self)
+ /-- [constants_lean::{constants_lean::Trait1 for bool}::M]
+     Source: 'tests/src/constants-lean.rs', lines 38:4-38:23 -/
+ @[global_simps, irreducible]
+-def Bool.Insts.Constants_leanTrait1.M : Std.Usize := 1#usize
++def Bool.Insts.Constants_leanTrait1.M : _root_.Aeneas.Std.Usize := 1#usize
+ 
+ /-- [constants_lean::{constants_lean::Trait1 for bool}::N]
+     Source: 'tests/src/constants-lean.rs', lines 37:4-37:23 -/
+ @[global_simps, irreducible]
+-def Bool.Insts.Constants_leanTrait1.N : Std.Usize := 0#usize
++def Bool.Insts.Constants_leanTrait1.N : _root_.Aeneas.Std.Usize := 0#usize
+ 
+ /-- Trait implementation: [constants_lean::{constants_lean::Trait1 for bool}]
+     Source: 'tests/src/constants-lean.rs', lines 36:0-39:1 -/
+ @[reducible]
+-impl_def Bool.Insts.Constants_leanTrait1 : Trait1 Bool := {
+-  N := ok Bool.Insts.Constants_leanTrait1.N
+-  M := ok Bool.Insts.Constants_leanTrait1.M
+-  NM := Trait1.NM.default Bool.Insts.Constants_leanTrait1
++impl_def Bool.Insts.Constants_leanTrait1 : _root_.constants_lean.Trait1
++  _root_.Bool := {
++  N := _root_.Aeneas.Std.Result.ok
++    _root_.constants_lean.Bool.Insts.Constants_leanTrait1.N
++  M := _root_.Aeneas.Std.Result.ok
++    _root_.constants_lean.Bool.Insts.Constants_leanTrait1.M
++  NM := _root_.constants_lean.Trait1.NM.default Bool.Insts.Constants_leanTrait1
+ }
+ 
+ /-- Trait declaration: [constants_lean::Params1]
+     Source: 'tests/src/constants-lean.rs', lines 41:0-47:1 -/
+ structure Params1 (Self : Type) where
+-  N : Result Std.Usize
+-  LOGQ : Result Std.Usize
+-  PACKED_LEN : Result Std.Usize
+-  CT1_LEN : Result Std.Usize
++  N : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  LOGQ : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  PACKED_LEN : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  CT1_LEN : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
+ 
+ /-- [constants_lean::Params1::PACKED_LEN]
+     Source: 'tests/src/constants-lean.rs', lines 45:4-45:57 -/
+ @[global_simps, irreducible, trait_default]
+-def Params1.PACKED_LEN.default {Self : Type} (Params1Inst : Params1 Self)
+-  : Result Std.Usize := do
++def Params1.PACKED_LEN.default {Self : Type} (Params1Inst :
++  _root_.constants_lean.Params1 Self)
++  : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize := do
+   let i ← Params1Inst.N
+   let i1 ← Params1Inst.LOGQ
+   let i2 ← i * i1
+@@ -124,8 +139,9 @@ def Params1.PACKED_LEN.default {Self : Type} (Params1Inst : Params1 Self)
+ /-- [constants_lean::Params1::CT1_LEN]
+     Source: 'tests/src/constants-lean.rs', lines 46:4-46:44 -/
+ @[global_simps, irreducible, trait_default]
+-def Params1.CT1_LEN.default {Self : Type} (Params1Inst : Params1 Self)
+-  : Result Std.Usize :=
++def Params1.CT1_LEN.default {Self : Type} (Params1Inst :
++  _root_.constants_lean.Params1 Self)
++  : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize :=
+   Params1Inst.PACKED_LEN
+ 
+ end constants_lean
+diff --git a/tests/lean/Dyn.lean b/tests/lean/Dyn.lean
+index 0f74c96..d9ebee3 100644
+--- a/tests/lean/Dyn.lean
++++ b/tests/lean/Dyn.lean
+@@ -14,59 +14,69 @@ namespace dyn
+ /-- Trait declaration: [dyn::Trait]
+     Source: 'tests/src/dyn.rs', lines 3:0-5:1 -/
+ structure Trait (Self : Type) where
+-  get : Self → Result Std.U32
++  get : Self → _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+ 
+ /-- [dyn::{dyn::Trait for u32}::get]:
+     Source: 'tests/src/dyn.rs', lines 8:4-10:5 -/
+-def U32.Insts.DynTrait.get (self : Std.U32) : Result Std.U32 := do
+-  ok self
++def U32.Insts.DynTrait.get
++  (self : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok self
+ 
+ /-- Trait implementation: [dyn::{dyn::Trait for u32}]
+     Source: 'tests/src/dyn.rs', lines 7:0-11:1 -/
+ @[reducible]
+-def U32.Insts.DynTrait : Trait Std.U32 := {
+-  get := U32.Insts.DynTrait.get
++def U32.Insts.DynTrait : _root_.dyn.Trait _root_.Aeneas.Std.U32 := {
++  get := _root_.dyn.U32.Insts.DynTrait.get
+ }
+ 
+ /-- [dyn::{dyn::Trait for bool}::get]:
+     Source: 'tests/src/dyn.rs', lines 14:4-16:5 -/
+-def Bool.Insts.DynTrait.get (self : Bool) : Result Std.U32 := do
+-  ok (UScalar.cast_fromBool .U32 self)
++def Bool.Insts.DynTrait.get
++  (self : _root_.Bool) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  _root_.Aeneas.Std.Result.ok (UScalar.cast_fromBool .U32 self)
+ 
+ /-- Trait implementation: [dyn::{dyn::Trait for bool}]
+     Source: 'tests/src/dyn.rs', lines 13:0-17:1 -/
+ @[reducible]
+-def Bool.Insts.DynTrait : Trait Bool := {
+-  get := Bool.Insts.DynTrait.get
++def Bool.Insts.DynTrait : _root_.dyn.Trait _root_.Bool := {
++  get := _root_.dyn.Bool.Insts.DynTrait.get
+ }
+ 
+ /-- [dyn::bool_to_trait]:
+     Source: 'tests/src/dyn.rs', lines 19:0-21:1 -/
+-def bool_to_trait (b : Bool) : Result Bool := do
+-  ok b
++def bool_to_trait
++  (b : _root_.Bool) : _root_.Aeneas.Std.Result _root_.Bool := do
++  _root_.Aeneas.Std.Result.ok b
+ 
+ /-- [dyn::mk_trait]:
+     Source: 'tests/src/dyn.rs', lines 23:0-29:1 -/
+-def mk_trait (b : Bool) : Result (Dyn (fun _dyn => Trait _dyn)) := do
++def mk_trait
++  (b : _root_.Bool) :
++  _root_.Aeneas.Std.Result (Dyn (fun _dyn => _root_.dyn.Trait _dyn))
++  := do
+   if b
+-  then ok (Dyn.mk _ Bool.Insts.DynTrait true)
+-  else ok (Dyn.mk _ U32.Insts.DynTrait 0#u32)
++  then
++    _root_.Aeneas.Std.Result.ok (Dyn.mk _ _root_.dyn.Bool.Insts.DynTrait true)
++  else
++    _root_.Aeneas.Std.Result.ok (Dyn.mk _ _root_.dyn.U32.Insts.DynTrait 0#u32)
+ 
+ /-- Trait declaration: [dyn::Into]
+     Source: 'tests/src/dyn.rs', lines 31:0-33:1 -/
+ structure Into (Self : Type) (T : Type) where
+-  into : Self → Result T
++  into : Self → _root_.Aeneas.Std.Result T
+ 
+ /-- [dyn::mk_into]:
+     Source: 'tests/src/dyn.rs', lines 36:0-46:1 -/
+ def mk_into
+-  (U : Type) {V : Type} {T : Type} {W : Type} (IntoInst : Into T V) (IntoInst1
+-  : Into W V) (b : Bool) (x : T) (y : W) :
+-  Result (Dyn (fun _dyn => Into _dyn V))
++  (U : Type) {V : Type} {T : Type} {W : Type} (IntoInst : _root_.dyn.Into T V)
++  (IntoInst1 : _root_.dyn.Into W V) (b : _root_.Bool) (x : T) (y : W) :
++  _root_.Aeneas.Std.Result (Dyn (fun _dyn => _root_.dyn.Into _dyn V))
+   := do
+   if b
+-  then ok (Dyn.mk _ IntoInst x)
+-  else ok (Dyn.mk _ IntoInst1 y)
++  then _root_.Aeneas.Std.Result.ok (Dyn.mk _ IntoInst x)
++  else _root_.Aeneas.Std.Result.ok (Dyn.mk _ IntoInst1 y)
+ 
+ /-- Trait declaration: [dyn::Trivial]
+     Source: 'tests/src/dyn.rs', lines 48:0-48:16 -/
+@@ -75,81 +85,106 @@ structure Trivial (Self : Type) where
+ /-- [dyn::dyn_closure::closure]
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ @[reducible]
+-def dyn_closure.closure (T0 : Type) := Unit
++def dyn_closure.closure {T0 : Type} (TrivialInst : _root_.dyn.Trivial T0) :=
++_root_.Unit
+ 
+ /-- [dyn::dyn_closure]:
+     Source: 'tests/src/dyn.rs', lines 50:0-52:1 -/
+ def dyn_closure
+-  {T0 : Type} (TrivialInst : Trivial T0) (t : T0) : Result Unit := do
+-  ok ()
++  {T0 : Type} (TrivialInst : _root_.dyn.Trivial T0) (t : T0) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
+ 
+-/-- [dyn::dyn_closure::{core::ops::function::Fn<(u32), u32> for dyn::dyn_closure::closure<T0>}::call]:
++/-- [dyn::dyn_closure::{core::ops::function::Fn<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}::call]:
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
+-  {T0 : Type} (TrivialInst : Trivial T0) (c : dyn_closure.closure T0)
+-  (tupled_args : Std.U32) :
+-  Result Std.U32
++  {T0 : Type} (TrivialInst : _root_.dyn.Trivial T0)
++  (c : _root_.dyn.dyn_closure.closure TrivialInst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+   := do
+-  ok tupled_args
++  _root_.Aeneas.Std.Result.ok tupled_args
+ 
+-/-- [dyn::dyn_closure::{core::ops::function::FnMut<(u32), u32> for dyn::dyn_closure::closure<T0>}::call_mut]:
++/-- [dyn::dyn_closure::{core::ops::function::FnMut<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}::call_mut]:
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+-  {T0 : Type} (TrivialInst : Trivial T0) (state : dyn_closure.closure T0)
+-  (args : Std.U32) :
+-  Result (Std.U32 × (dyn_closure.closure T0))
++  {T0 : Type} (TrivialInst : _root_.dyn.Trivial T0)
++  (state : _root_.dyn.dyn_closure.closure TrivialInst)
++  (args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.dyn.dyn_closure.closure TrivialInst))
+   := do
+   let i ←
+-    dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32.call TrivialInst
+-      state args
+-  ok (i, state)
++    _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++      TrivialInst state args
++  _root_.Aeneas.Std.Result.ok (i, state)
+ 
+-/-- [dyn::dyn_closure::{core::ops::function::FnOnce<(u32), u32> for dyn::dyn_closure::closure<T0>}::call_once]:
++/-- [dyn::dyn_closure::{core::ops::function::FnOnce<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}::call_once]:
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+-  {T0 : Type} (TrivialInst : Trivial T0) (c : dyn_closure.closure T0)
+-  (i : Std.U32) :
+-  Result Std.U32
++  {T0 : Type} (TrivialInst : _root_.dyn.Trivial T0)
++  (c : _root_.dyn.dyn_closure.closure TrivialInst) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+   := do
+   let (i1, _) ←
+-    dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++    _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+       TrivialInst c i
+-  ok i1
++  _root_.Aeneas.Std.Result.ok i1
+ 
+-/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::FnOnce<(u32), u32> for dyn::dyn_closure::closure<T0>}]
++/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::FnOnce<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}]
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ @[reducible]
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 {T0 : Type}
+-  (TrivialInst : Trivial T0) : core.ops.function.FnOnce (dyn_closure.closure
+-  T0) Std.U32 Std.U32 := {
++  (TrivialInst : _root_.dyn.Trivial T0) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce (_root_.dyn.dyn_closure.closure
++  TrivialInst) _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
+   call_once :=
+-    dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+-    TrivialInst
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          TrivialInst arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+-/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::FnMut<(u32), u32> for dyn::dyn_closure::closure<T0>}]
++/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::FnMut<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}]
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ @[reducible]
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 {T0 : Type}
+-  (TrivialInst : Trivial T0) : core.ops.function.FnMut (dyn_closure.closure T0)
+-  Std.U32 Std.U32 := {
+-  FnOnceInst := dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  (TrivialInst : _root_.dyn.Trivial T0) :
++  _root_.Aeneas.Std.core.ops.function.FnMut (_root_.dyn.dyn_closure.closure
++  TrivialInst) _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
+     TrivialInst
+   call_mut :=
+-    dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+-    TrivialInst
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          TrivialInst arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+-/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::Fn<(u32), u32> for dyn::dyn_closure::closure<T0>}]
++/-- Trait implementation: [dyn::dyn_closure::{core::ops::function::Fn<(u32), u32> for dyn::dyn_closure::closure<T0>[TraitClause@0]}]
+     Source: 'tests/src/dyn.rs', lines 51:12-51:33 -/
+ @[reducible]
+ def dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32 {T0 : Type}
+-  (TrivialInst : Trivial T0) : core.ops.function.Fn (dyn_closure.closure T0)
+-  Std.U32 Std.U32 := {
+-  FnMutInst := dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
+-    TrivialInst
+-  call := dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++  (TrivialInst : _root_.dyn.Trivial T0) :
++  _root_.Aeneas.Std.core.ops.function.Fn (_root_.dyn.dyn_closure.closure
++  TrivialInst) _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
+     TrivialInst
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.dyn.dyn_closure.closure.Insts.CoreOpsFunctionFnTupleU32U32.call
++          TrivialInst arg arg1
++      _root_.Aeneas.Std.Result.ok output
+ }
+ 
+ end dyn
+diff --git a/tests/lean/Issue804ClosureReturnRef.lean b/tests/lean/Issue804ClosureReturnRef.lean
+index 6ecfd17..9d84274 100644
+--- a/tests/lean/Issue804ClosureReturnRef.lean
++++ b/tests/lean/Issue804ClosureReturnRef.lean
+@@ -20,56 +20,83 @@ namespace issue_804_closure_return_ref
+     Visibility: public -/
+ @[rust_fun "core::array::from_fn"]
+ axiom core.array.from_fn
+-  {T : Type} {F : Type} (N : Std.Usize) (opsfunctionFnMutFTupleUsizeTInst :
+-  core.ops.function.FnMut F Std.Usize T) :
+-  F → Result (Array T N)
++  {T : Type} {F : Type} (N : _root_.Aeneas.Std.Usize)
++  (opsfunctionFnMutFTupleUsizeTInst : _root_.Aeneas.Std.core.ops.function.FnMut
++  F _root_.Aeneas.Std.Usize T) :
++  F → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array T N)
+ 
+ /-- [issue_804_closure_return_ref::each_ref::closure]
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 6:24-6:33 -/
+ @[reducible]
+-def each_ref.closure := Array Std.U8 10#usize
++def each_ref.closure := _root_.Aeneas.Std.Array _root_.Aeneas.Std.U8 10#usize
+ 
+ /-- [issue_804_closure_return_ref::each_ref::{core::ops::function::FnMut<(usize), &'_ (u8)> for issue_804_closure_return_ref::each_ref::closure<0>}::call_mut]:
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 6:24-6:33 -/
+ def each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8.call_mut
+-  (c : each_ref.closure) (tupled_args : Std.Usize) :
+-  Result (Std.U8 × each_ref.closure)
++  (c : _root_.issue_804_closure_return_ref.each_ref.closure)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U8 ×
++    _root_.issue_804_closure_return_ref.each_ref.closure)
+   := do
+   let i ← Array.index_usize c tupled_args
+-  ok (i, c)
++  _root_.Aeneas.Std.Result.ok (i, c)
+ 
+ /-- [issue_804_closure_return_ref::each_ref::{core::ops::function::FnOnce<(usize), &'_ (u8)> for issue_804_closure_return_ref::each_ref::closure<0>}::call_once]:
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 6:24-6:33 -/
+ def each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8.call_once
+-  (c : each_ref.closure) (i : Std.Usize) : Result Std.U8 := do
++  (c : _root_.issue_804_closure_return_ref.each_ref.closure)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U8
++  := do
+   let (i1, _) ←
+-    each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8.call_mut c i
+-  ok i1
++    _root_.issue_804_closure_return_ref.each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
+ 
+ /-- Trait implementation: [issue_804_closure_return_ref::each_ref::{core::ops::function::FnOnce<(usize), &'_ (u8)> for issue_804_closure_return_ref::each_ref::closure<0>}]
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 6:24-6:33 -/
+ @[reducible]
+ def each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8 :
+-  core.ops.function.FnOnce each_ref.closure Std.Usize Std.U8 := {
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.issue_804_closure_return_ref.each_ref.closure _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U8 := {
+   call_once :=
+-    each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8.call_once
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.issue_804_closure_return_ref.each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- Trait implementation: [issue_804_closure_return_ref::each_ref::{core::ops::function::FnMut<(usize), &'_ (u8)> for issue_804_closure_return_ref::each_ref::closure<0>}]
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 6:24-6:33 -/
+ @[reducible]
+ def each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8 :
+-  core.ops.function.FnMut each_ref.closure Std.Usize Std.U8 := {
+-  FnOnceInst := each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.issue_804_closure_return_ref.each_ref.closure _root_.Aeneas.Std.Usize
++  _root_.Aeneas.Std.U8 := {
++  FnOnceInst :=
++    _root_.issue_804_closure_return_ref.each_ref.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeSharedU8
+   call_mut :=
+-    each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8.call_mut
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.issue_804_closure_return_ref.each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
+ }
+ 
+ /-- [issue_804_closure_return_ref::each_ref]:
+     Source: 'tests/src/issue-804-closure-return-ref.rs', lines 5:0-7:1
+     Visibility: public -/
+-def each_ref (s : Array Std.U8 10#usize) : Result (Array Std.U8 10#usize) := do
+-  core.array.from_fn 10#usize
+-    each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8 s
++def each_ref
++  (s : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U8 10#usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U8
++    10#usize)
++  := do
++  _root_.issue_804_closure_return_ref.core.array.from_fn 10#usize
++    _root_.issue_804_closure_return_ref.each_ref.closure.Insts.CoreOpsFunctionFnMutTupleUsizeSharedU8
++    s
+ 
+ end issue_804_closure_return_ref
+diff --git a/tests/lean/IteratorsArray.lean b/tests/lean/IteratorsArray.lean
+index d516843..5c43227 100644
+--- a/tests/lean/IteratorsArray.lean
++++ b/tests/lean/IteratorsArray.lean
+@@ -15,32 +15,46 @@ namespace iterators_array
+     Source: 'tests/src/iterators-array.rs', lines 6:4-8:5 -/
+ @[rust_loop_body]
+ def iter_array_loop.body
+-  (iter : alloc.vec.into_iter.IntoIter Std.U32) (x : Std.I32) :
+-  Result (ControlFlow ((alloc.vec.into_iter.IntoIter Std.U32) × Std.I32) Unit)
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.I32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.I32) _root_.Unit)
+   := do
+-  let (o, iter1) ← alloc.vec.into_iter.IteratorIntoIter.next iter
+-  match o with
+-  | none => ok (done ())
+-  | some _ => let x1 ← x + 1#i32
+-              ok (cont (iter1, x1))
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done ())
++  | some _ =>
++    let x1 ← x + 1#i32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, x1))
+ 
+ /-- [iterators_array::iter_array]: loop 0:
+     Source: 'tests/src/iterators-array.rs', lines 6:4-8:5 -/
+ @[rust_loop]
+ def iter_array_loop
+-  (iter : alloc.vec.into_iter.IntoIter Std.U32) (x : Std.I32) :
+-  Result Unit
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.I32) :
++  _root_.Aeneas.Std.Result _root_.Unit
+   := do
+   loop
+-    (fun (iter1, x1) => iter_array_loop.body iter1 x1)
++    (fun (iter1, x1) => _root_.iterators_array.iter_array_loop.body iter1 x1 :
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.I32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.I32) _root_.Unit))
+     (iter, x)
+ 
+ /-- [iterators_array::iter_array]:
+     Source: 'tests/src/iterators-array.rs', lines 3:0-9:1 -/
+-def iter_array : Result Unit := do
++def iter_array : _root_.Aeneas.Std.Result _root_.Unit := do
+   let v ←
+-    alloc.vec.FromVecArray.from (Array.make 3#usize [ 1#u32, 2#u32, 3#u32 ])
+-  let iter ← alloc.vec.IntoIteratorVec.into_iter v
+-  iter_array_loop iter 0#i32
++    _root_.Aeneas.Std.alloc.vec.FromVecArray.from
++      (_root_.Aeneas.Std.Array.make 3#usize [ 1#u32, 2#u32, 3#u32 ])
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter v
++  _root_.iterators_array.iter_array_loop model_state 0#i32
+ 
+ end iterators_array
+diff --git a/tests/lean/ShellBorrowingStates/ChelisIr.lean b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+index 3fe5c7d..34dce5b 100644
+--- a/tests/lean/ShellBorrowingStates/ChelisIr.lean
++++ b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+@@ -9,9 +9,6 @@ set_option linter.unusedVariables false
+ /- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
+ set_option maxHeartbeats 1000000
+ 
+-/- You can remove the following line by using the CLI option `-all-computable`: -/
+-noncomputable section
+-
+ namespace chelis_ir
+ 
+ /-- [chelis_ir::Cx]
+diff --git a/tests/lean/TraitDefaultSelf.lean b/tests/lean/TraitDefaultSelf.lean
+new file mode 100644
+index 0000000..2aad809
+--- /dev/null
++++ b/tests/lean/TraitDefaultSelf.lean
+@@ -0,0 +1 @@
++import TraitDefaultSelf.Checks
+diff --git a/tests/lean/TraitDefaultSelf/Checks.lean b/tests/lean/TraitDefaultSelf/Checks.lean
+new file mode 100644
+index 0000000..217d249
+--- /dev/null
++++ b/tests/lean/TraitDefaultSelf/Checks.lean
+@@ -0,0 +1,18 @@
++import TraitDefaultSelf.TraitDefaultSelf
++
++/-! Evaluate the model of `tests/src/trait-default-self.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace trait_default_self.checks
++open Aeneas Aeneas.Std Result
++
++def val : Result Usize → Option Nat
++  | ok x => some x.val
++  | _ => none
++
++-- The default constants of the recursive implementation (`impl_def`)
++#guard val grid_nm == some 12
++#guard val (grid_area 0#usize) == some 15
++#guard val (grid_area 5#usize) == some 20
++
++end trait_default_self.checks
+diff --git a/tests/lean/TraitDefaultSelf/TraitDefaultSelf.lean b/tests/lean/TraitDefaultSelf/TraitDefaultSelf.lean
+new file mode 100644
+index 0000000..45e614e
+--- /dev/null
++++ b/tests/lean/TraitDefaultSelf/TraitDefaultSelf.lean
+@@ -0,0 +1,92 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [trait_default_self]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace trait_default_self
++
++/-- Trait declaration: [trait_default_self::Dims]
++    Source: 'tests/src/trait-default-self.rs', lines 12:0-17:1
++    Visibility: public -/
++structure Dims (Self : Type) where
++  N : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  M : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  NM : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  AREA : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++
++/-- [trait_default_self::Dims::NM]
++    Source: 'tests/src/trait-default-self.rs', lines 15:4-15:40
++    Visibility: public -/
++@[global_simps, irreducible, trait_default]
++def Dims.NM.default {Self : Type} (DimsInst : _root_.trait_default_self.Dims
++  Self) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize := do
++  let i ← DimsInst.N
++  let i1 ← DimsInst.M
++  i * i1
++
++/-- [trait_default_self::Dims::AREA]
++    Source: 'tests/src/trait-default-self.rs', lines 16:4-16:43
++    Visibility: public -/
++@[global_simps, irreducible, trait_default]
++def Dims.AREA.default {Self : Type} (DimsInst : _root_.trait_default_self.Dims
++  Self) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize := do
++  let i ← DimsInst.NM
++  let i1 ← DimsInst.N
++  i + i1
++
++/-- [trait_default_self::Grid]
++    Source: 'tests/src/trait-default-self.rs', lines 19:0-19:16
++    Visibility: public -/
++@[reducible]
++def Grid := _root_.Unit
++
++/-- [trait_default_self::{trait_default_self::Dims for trait_default_self::Grid}::M]
++    Source: 'tests/src/trait-default-self.rs', lines 23:4-23:23
++    Visibility: public -/
++@[global_simps, irreducible]
++def Grid.Insts.Trait_default_selfDims.M : _root_.Aeneas.Std.Usize := 4#usize
++
++/-- [trait_default_self::{trait_default_self::Dims for trait_default_self::Grid}::N]
++    Source: 'tests/src/trait-default-self.rs', lines 22:4-22:23
++    Visibility: public -/
++@[global_simps, irreducible]
++def Grid.Insts.Trait_default_selfDims.N : _root_.Aeneas.Std.Usize := 3#usize
++
++/-- Trait implementation: [trait_default_self::{trait_default_self::Dims for trait_default_self::Grid}]
++    Source: 'tests/src/trait-default-self.rs', lines 21:0-24:1 -/
++@[reducible]
++impl_def Grid.Insts.Trait_default_selfDims : _root_.trait_default_self.Dims
++  _root_.trait_default_self.Grid := {
++  N := _root_.Aeneas.Std.Result.ok
++    _root_.trait_default_self.Grid.Insts.Trait_default_selfDims.N
++  M := _root_.Aeneas.Std.Result.ok
++    _root_.trait_default_self.Grid.Insts.Trait_default_selfDims.M
++  NM := _root_.trait_default_self.Dims.NM.default
++    Grid.Insts.Trait_default_selfDims
++  AREA := _root_.trait_default_self.Dims.AREA.default
++    Grid.Insts.Trait_default_selfDims
++}
++
++/-- [trait_default_self::grid_nm]:
++    Source: 'tests/src/trait-default-self.rs', lines 26:0-28:1
++    Visibility: public -/
++def grid_nm : _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize := do
++  _root_.trait_default_self.Grid.Insts.Trait_default_selfDims.NM
++
++/-- [trait_default_self::grid_area]:
++    Source: 'tests/src/trait-default-self.rs', lines 30:0-32:1
++    Visibility: public -/
++def grid_area
++  (extra : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let i ← _root_.trait_default_self.Grid.Insts.Trait_default_selfDims.AREA
++  i + extra
++
++end trait_default_self
+diff --git a/tests/lean/VecRetainMut/VecRetainMut.lean b/tests/lean/VecRetainMut/VecRetainMut.lean
+index eecd024..72ccfe9 100644
+--- a/tests/lean/VecRetainMut/VecRetainMut.lean
++++ b/tests/lean/VecRetainMut/VecRetainMut.lean
+@@ -9,9 +9,6 @@ set_option linter.unusedVariables false
+ /- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
+ set_option maxHeartbeats 1000000
+ 
+-/- You can remove the following line by using the CLI option `-all-computable`: -/
+-noncomputable section
+-
+ namespace vec_retain_mut
+ 
+ /-- [vec_retain_mut::merge::closure]
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 5e01c3b..dcda6eb 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -29,6 +29,8 @@ package «tests» {}
+ @[default_target] lean_lib ClosureUncapturedGenerics
+ @[default_target] lean_lib ClosureMutContext
+ @[default_target] lean_lib ClosureMutArgOrder
++@[default_target] lean_lib ClosureCallKinds
++@[default_target] lean_lib TraitDefaultSelf
+ @[default_target] lean_lib ZipBorrowedAdapters
+ @[default_target] lean_lib NestedBorrowsFourLevels
+ @[default_target] lean_lib NestedBorrowsModelState
+diff --git a/tests/separate-compilation/external-holes.sh b/tests/separate-compilation/external-holes.sh
+new file mode 100755
+index 0000000..0ebf08f
+--- /dev/null
++++ b/tests/separate-compilation/external-holes.sh
+@@ -0,0 +1,116 @@
++#!/usr/bin/env bash
++# The external functions file of a chunk: generated, and imported by the Funs
++# module, exactly when it has holes.
++#
++# Usage: external-holes.sh <charon> <aeneas> [<work directory>]
++#
++# Chunks of external_holes.rs, extracted like the chunks of a workspace
++# (-canonical-names, -split-files, one -subdir per chunk, -abort-on-error):
++# - A owns double.
++# - B (nested) with -external <manifest of A>: double has no body in B's LLBC
++#   (A emits it), and neither has the partial-monomorphization instance of the
++#   hard-opaque primitive scoped at the state Cx<'_>, whose translation is the
++#   model at an extended state. B has no hole: it generates no
++#   FunsExternal_Template and its Funs module does not import FunsExternal;
++#   every module imported by the files of A and B is generated.
++# - C is B with bias opaque too (an unknown external, run without
++#   -warnings-as-errors): the template declares bias, its one hole, and the
++#   Funs module imports FunsExternal, the file the user writes from the
++#   template; every other imported module is generated.
++set -uo pipefail
++
++charon=$1
++aeneas=$2
++here=$(cd "$(dirname "$0")" && pwd)
++work=${3:-$(mktemp -d)}
++mkdir -p "$work"
++failures=0
++
++check() { # check <description> <command...>
++  local what=$1
++  shift
++  if "$@"; then
++    echo "ok: $what"
++  else
++    echo "FAILED: $what"
++    failures=$((failures + 1))
++  fi
++}
++absent() { # absent <grep arguments...>: the files exist and do not match
++  grep -q "$@"
++  [ $? -eq 1 ]
++}
++
++llbc() { # llbc <chunk> <charon options...>
++  local chunk=$1
++  shift
++  "$charon" rustc --preset=aeneas --mir=promoted --monomorphize-mut=except-types \
++    --remove-adt-clauses '--lift-associated-types=*' --error-on-warnings \
++    --opaque-hard=chelis_ir::lowering_runtime::scoped "$@" \
++    --dest-file "$work/$chunk.llbc" -- "$here/external_holes.rs" \
++    --crate-name=chelis_ir --crate-type=rlib --edition=2021 \
++    >"$work/$chunk.charon.log" 2>&1 ||
++    { echo "charon failed on chunk $chunk (see $work/$chunk.charon.log)"; exit 1; }
++}
++
++strict=(-warnings-as-errors)
++run() { # run <name> <chunk> <aeneas options...>; sets $status
++  local name=$1 chunk=$2
++  shift 2
++  rm -rf "${work:?}/$name" && mkdir -p "$work/$name"
++  "$aeneas" -backend lean -checks -abort-on-error ${strict[@]+"${strict[@]}"} -strict-joins \
++    -sequential -no-progress-bar -canonical-names -split-files -subdir "Chunk$chunk" \
++    -dest "$work/$name/lean" -emit-manifest "$work/$name/manifest.json" "$@" \
++    "$work/$chunk.llbc" >"$work/$name/log" 2>&1
++  status=$?
++}
++
++# unresolved <lean root>... : the modules imported by the files under the
++# roots which none of them generates (Aeneas aside), one per line.
++unresolved() {
++  python3 -c '
++import pathlib, sys
++roots = [pathlib.Path(r) for r in sys.argv[1:]]
++files = [f for r in roots for f in r.rglob("*.lean")]
++modules = {".".join(f.relative_to(r).with_suffix("").parts) for r in roots for f in r.rglob("*.lean")}
++imports = {l.split()[1] for f in files for l in f.read_text().splitlines() if l.startswith("import ")}
++print("\n".join(sorted(i for i in imports if i != "Aeneas" and i not in modules)))' "$@"
++}
++
++llbc A --start-from chelis_ir::double
++llbc B --opaque chelis_ir::double --start-from chelis_ir::nested
++llbc C --opaque chelis_ir::double --opaque chelis_ir::bias --start-from chelis_ir::nested
++
++run a A
++check "A exits with status 0" test "$status" -eq 0
++
++run b B -external "$work/a/manifest.json"
++check "B exits with status 0" test "$status" -eq 0
++check "B uses the double of A" absent -rE '^def chelis_ir\.double$' "$work/b/lean"
++check "B defines the instance of scoped at Cx<'_>" \
++  grep -qE '^  chelis_ir\.lowering_runtime\.scoped0Cx.*_specialized_' "$work/b/lean/ChunkB/Funs.lean"
++check "B generates no external functions template" \
++  test ! -e "$work/b/lean/ChunkB/FunsExternal_Template.lean"
++check "the Funs module of B does not import FunsExternal" \
++  absent -q '^import ChunkB.FunsExternal$' "$work/b/lean/ChunkB/Funs.lean"
++check "every module imported by A and B is generated" \
++  test -z "$(unresolved "$work/a/lean" "$work/b/lean")"
++
++strict=()
++run c C -external "$work/a/manifest.json"
++strict=(-warnings-as-errors)
++check "C exits with status 0" test "$status" -eq 0
++check "the template of C declares bias" \
++  grep -qE '^axiom chelis_ir\.bias$' "$work/c/lean/ChunkC/FunsExternal_Template.lean"
++check "the template of C declares nothing else" \
++  test "$(grep -cE '^axiom ' "$work/c/lean/ChunkC/FunsExternal_Template.lean")" -eq 1
++check "the Funs module of C imports FunsExternal" \
++  grep -q '^import ChunkC.FunsExternal$' "$work/c/lean/ChunkC/Funs.lean"
++check "FunsExternal is the only module imported by A and C and not generated" \
++  test "$(unresolved "$work/a/lean" "$work/c/lean")" = "ChunkC.FunsExternal"
++
++if [ "$failures" -ne 0 ]; then
++  echo "$failures check(s) failed; outputs in $work"
++  exit 1
++fi
++echo "all checks passed"
+diff --git a/tests/separate-compilation/external_holes.rs b/tests/separate-compilation/external_holes.rs
+new file mode 100644
+index 0000000..4f97375
+--- /dev/null
++++ b/tests/separate-compilation/external_holes.rs
+@@ -0,0 +1,59 @@
++//! Chunks of external-holes.sh (crate `chelis_ir`, so that the native shell
++//! models of `chelis_ir::lowering_runtime` apply). The Funs module imports the
++//! FunsExternal module exactly when the external functions template has holes:
++//! - chunk A owns `double`;
++//! - chunk B calls `double` (opaque in its LLBC, owned by A) and the
++//!   hard-opaque native primitive `scoped` at a state holding a mutable
++//!   borrow: Charon's partial-monomorphization instance `scoped::<'_, Cx<'_>,
++//!   ..>` has no Rust body, but its translation is the model at an extended
++//!   state (ModelStateABI). Nothing is left for the user to write;
++//! - chunk C is B with `bias` opaque as well: an unknown external, the one
++//!   hole of the template.
++
++pub mod lowering_runtime {
++    /// Primitive (hard-opaque). Model: `let t := enter s; let r := body s;
++    /// exit s t; r`.
++    pub(crate) fn scoped<S, T, R>(
++        state: &mut S,
++        enter: impl FnOnce(&mut S) -> T,
++        exit: impl FnOnce(&mut S, T),
++        body: impl FnOnce(&mut S) -> R,
++    ) -> R {
++        let token = enter(state);
++        let result = body(state);
++        exit(state, token);
++        result
++    }
++}
++
++use lowering_runtime::scoped;
++
++// Chunk A
++
++pub fn double(x: u32) -> u32 {
++    x.wrapping_mul(2)
++}
++
++// Chunk B
++
++pub struct Cx<'a> {
++    pub depth: &'a mut u32,
++}
++
++pub fn bias(x: u32) -> u32 {
++    x.wrapping_add(1)
++}
++
++/// `scoped` at the state `Cx<'_>`, which holds a mutable borrow.
++pub fn nested(depth: &mut u32, x: u32) -> u32 {
++    let mut cx = Cx { depth };
++    scoped(
++        &mut cx,
++        |cx| {
++            *cx.depth = cx.depth.wrapping_add(1);
++            *cx.depth
++        },
++        |cx, previous| *cx.depth = previous.wrapping_sub(1),
++        |cx| double(bias(x)).wrapping_add(*cx.depth),
++    )
++}
+diff --git a/tests/src/closure-call-kinds.rs b/tests/src/closure-call-kinds.rs
+new file mode 100644
+index 0000000..e9bcd99
+--- /dev/null
++++ b/tests/src/closure-call-kinds.rs
+@@ -0,0 +1,195 @@
++//@ [!lean] skip
++//@ [lean] subdir=ClosureCallKinds
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Closures called through each closure trait the way production code passes
++//! them: `FnOnce` by value, `FnMut` by `&mut`, `Fn` by `&`, with captures by
++//! value, by shared borrow and by mutable borrow, and the `FnOnce(&mut Ctx)`
++//! callback of a context helper. The effects on the captured and borrowed
++//! state must be visible after the calls. Each call goes through the model's
++//! `core.ops.function` records (`call_once` returns the consumed state).
++//! `ClosureCallKinds/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub fn run_once<F: FnOnce(u32) -> u32>(f: F, x: u32) -> u32 {
++    f(x)
++}
++
++pub fn run_mut<F: FnMut(u32) -> u32>(f: &mut F, x: u32) -> u32 {
++    let a = f(x);
++    f(a)
++}
++
++pub fn run_ref<F: Fn(u32) -> u32>(f: &F, x: u32) -> u32 {
++    f(x).wrapping_add(f(x))
++}
++
++/// `FnOnce` consuming an owned vector moved into the closure.
++pub fn once_owned(v: Vec<u32>, x: u32) -> u32 {
++    run_once(
++        move |y| {
++            let mut v = v;
++            v.push(y);
++            (v.len() as u32).wrapping_add(y)
++        },
++        x,
++    )
++}
++
++/// `FnOnce` capturing a shared borrow.
++pub fn once_shared(a: &[u32], i: usize, x: u32) -> u32 {
++    run_once(|y| a[i].wrapping_add(y), x)
++}
++
++/// `FnOnce` capturing a mutable borrow: the update is visible after the call.
++pub fn once_mut(start: u32, x: u32) -> (u32, u32) {
++    let mut acc = start;
++    let r = run_once(
++        |y| {
++            acc = acc.wrapping_add(y);
++            acc.wrapping_mul(2)
++        },
++        x,
++    );
++    (r, acc)
++}
++
++/// Closures that are only `FnOnce` (they move a captured vector out) and
++/// capture a mutable borrow: one called through `run_once`, one directly.
++pub fn once_only(v: Vec<u32>, w: Vec<u32>, x: u32) -> (u32, u32, u32) {
++    let mut seen = x;
++    let r1 = run_once(
++        |y| {
++            seen = seen.wrapping_add(y);
++            let v = v;
++            (v.len() as u32).wrapping_add(y)
++        },
++        2,
++    );
++    let f = |y: u32| {
++        seen = seen.wrapping_add(y);
++        let w = w;
++        (w.len() as u32).wrapping_mul(y)
++    };
++    let r2 = f(3);
++    (r1, r2, seen)
++}
++
++/// `FnMut` by `&mut`, capturing a mutable borrow (a call counter) and a value.
++pub fn mut_counter(k: u32, x: u32) -> (u32, u32) {
++    let mut calls = 0u32;
++    let mut f = |y: u32| {
++        calls += 1;
++        y.wrapping_mul(k)
++    };
++    let r = run_mut(&mut f, x);
++    (r, calls)
++}
++
++/// `FnMut` by `&mut` owning its state, called through the helper and then
++/// directly: the second direct call sees the state left by the helper.
++pub fn mut_owned_state(x: u32) -> (u32, u32) {
++    let mut n = 0u32;
++    let mut f = move |y: u32| {
++        n = n.wrapping_add(y);
++        n
++    };
++    let a = run_mut(&mut f, x);
++    let b = f(1);
++    (a, b)
++}
++
++pub struct Cfg {
++    pub scale: u32,
++    pub offset: u32,
++}
++
++/// `Fn` by `&`, capturing a shared borrow of a struct.
++pub fn fn_shared(cfg: &Cfg, x: u32) -> u32 {
++    let f = |y: u32| y.wrapping_mul(cfg.scale).wrapping_add(cfg.offset);
++    run_ref(&f, x)
++}
++
++pub struct Ctx {
++    pub depth: u32,
++    pub log: Vec<u32>,
++}
++
++/// A context helper running a callback on the borrowed context.
++pub fn with_ctx<R, F: FnOnce(&mut Ctx) -> R>(ctx: &mut Ctx, f: F) -> R {
++    ctx.depth = ctx.depth.wrapping_add(1);
++    let r = f(ctx);
++    ctx.depth = ctx.depth.wrapping_sub(1);
++    r
++}
++
++/// `FnOnce(&mut Ctx)` capturing a mutable borrow of a local counter and a
++/// value: both the context and the counter are updated.
++pub fn ctx_callback(x: u32) -> (u32, u32, u32, u32) {
++    let mut ctx = Ctx { depth: 5, log: Vec::new() };
++    let mut seen = 0u32;
++    let r = with_ctx(&mut ctx, |c| {
++        c.log.push(x);
++        seen = seen.wrapping_add(c.depth);
++        c.depth.wrapping_add(x)
++    });
++    (r, ctx.depth, ctx.log.len() as u32, seen)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn once_owned_native() {
++        assert_eq!(once_owned(vec![], 7), 8);
++        assert_eq!(once_owned(vec![1, 2, 3], 10), 14);
++        assert_eq!(once_owned(vec![0], u32::MAX), 1);
++    }
++
++    #[test]
++    fn once_shared_native() {
++        assert_eq!(once_shared(&[4, 5, 6], 1, 10), 15);
++        assert_eq!(once_shared(&[u32::MAX], 0, 2), 1);
++    }
++
++    #[test]
++    fn once_only_native() {
++        assert_eq!(once_only(vec![1, 2], vec![7], 10), (4, 3, 15));
++        assert_eq!(once_only(vec![], vec![], u32::MAX), (2, 0, 4));
++    }
++
++    #[test]
++    fn once_mut_native() {
++        assert_eq!(once_mut(10, 5), (30, 15));
++        assert_eq!(once_mut(u32::MAX, 1), (0, 0));
++        assert_eq!(once_mut(3, 2147483648), (6, 2147483651));
++    }
++
++    #[test]
++    fn mut_counter_native() {
++        assert_eq!(mut_counter(3, 2), (18, 2));
++        assert_eq!(mut_counter(0, 9), (0, 2));
++        assert_eq!(mut_counter(65536, 65536), (0, 2));
++    }
++
++    #[test]
++    fn mut_owned_state_native() {
++        assert_eq!(mut_owned_state(5), (10, 11));
++        assert_eq!(mut_owned_state(0), (0, 1));
++        assert_eq!(mut_owned_state(2147483648), (0, 1));
++    }
++
++    #[test]
++    fn fn_shared_native() {
++        assert_eq!(fn_shared(&Cfg { scale: 3, offset: 1 }, 4), 26);
++        assert_eq!(fn_shared(&Cfg { scale: 0, offset: 7 }, 100), 14);
++        assert_eq!(fn_shared(&Cfg { scale: 2, offset: 0 }, 2147483648), 0);
++    }
++
++    #[test]
++    fn ctx_callback_native() {
++        assert_eq!(ctx_callback(3), (9, 5, 1, 6));
++        assert_eq!(ctx_callback(u32::MAX), (5, 5, 1, 6));
++    }
++}
+diff --git a/tests/src/trait-default-self.rs b/tests/src/trait-default-self.rs
+new file mode 100644
+index 0000000..b4b546a
+--- /dev/null
++++ b/tests/src/trait-default-self.rs
+@@ -0,0 +1,44 @@
++//@ [!lean] skip
++//@ [lean] subdir=TraitDefaultSelf
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A trait implementation using default items that refer to the
++//! implementation itself (a recursive implementation, extracted with Lean's
++//! `impl_def`): the default constants read the implementation's own
++//! constants.
++//! `TraitDefaultSelf/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub trait Dims {
++    const N: usize;
++    const M: usize;
++    const NM: usize = Self::N * Self::M;
++    const AREA: usize = Self::NM + Self::N;
++}
++
++pub struct Grid;
++
++impl Dims for Grid {
++    const N: usize = 3;
++    const M: usize = 4;
++}
++
++pub fn grid_nm() -> usize {
++    <Grid as Dims>::NM
++}
++
++pub fn grid_area(extra: usize) -> usize {
++    <Grid as Dims>::AREA + extra
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn dims_native() {
++        assert_eq!(grid_nm(), 12);
++        assert_eq!(grid_area(0), 15);
++        assert_eq!(grid_area(5), 20);
++    }
++}

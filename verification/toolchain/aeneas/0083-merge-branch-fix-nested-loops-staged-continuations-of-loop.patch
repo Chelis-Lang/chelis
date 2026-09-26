@@ -1,0 +1,2632 @@
+# aeneas integration step 83 after cba11f3beb: commit 2734961a7eb7414dd6a75be9aa617ec1205148ef
+# first parent 570e06ccf3f5c7ec67d63bb14e254d968c2424cd, merged 4a69b973b79a800b78c8936dc7f586d963a3d10e
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (staged continuations of loop abstractions with pending loans; loops over calls of a &mut closure capturing a mutable borrow)
+
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index d32de09..25bef01 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -621,7 +621,7 @@ type merge_duplicates_funcs = {
+     Abstract children are projected in place, preserving their positional shape
+     and ended wrappers rather than flattening their ownership into the parent.
+ *)
+-let tavalue_split_marker (span : Meta.span) (_ctx : eval_ctx) (av : tavalue) :
++let tavalue_split_marker (span : Meta.span) (ctx : eval_ctx) (av : tavalue) :
+     tavalue list =
+   let project branch =
+     let visitor =
+@@ -659,7 +659,21 @@ let tavalue_split_marker (span : Meta.span) (_ctx : eval_ctx) (av : tavalue) :
+                 | _ -> AIgnored None
+               in
+               { av with value }
+-          | _ -> super#visit_tavalue env av
++          | _ -> (
++              match av.value with
++              | ALoan (AIgnoredMutLoan (bid, child))
++                when tavalue_has_ownership span ctx child ->
++                  (* Nested borrows: the loan of a region the abstraction does
++                     not own only belongs to the branches which own some of
++                     the inner loans it holds (e.g., the loan of a reborrow of
++                     a [&'a mut C<'b>] in the abstraction of ['b], when the
++                     reborrow only exists in one branch: see the pending loans
++                     of that reborrow in [merge_abstractions_merge_loan_borrow_pairs]) *)
++                  let child = self#visit_tavalue env child in
++                  if tavalue_has_ownership span ctx child then
++                    { av with value = ALoan (AIgnoredMutLoan (bid, child)) }
++                  else { av with value = AIgnored None }
++              | _ -> super#visit_tavalue env av)
+ 
+         (* A shared payload contains concrete ownership, not independently
+            marked abstract slots. Do not reinterpret or re-project it. *)
+@@ -921,7 +935,48 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+   let right_avalues =
+     List.filter keep_avalue (List.map reduce_right abs1.avalues)
+   in
+-  (!left_avalues @ right_avalues, !discharged_shared_projs)
++  (* Nested borrows: the pending loans of a parent borrow [bid] (the loans of
++     the inner borrows of the value given back when [bid] ends, see
++     {!InterpBorrows.destructure_abs}) and an ignored loan of [bid] whose
++     inner loans were all merged away (it only receives the inner borrows of
++     that value, as borrows) cancel out: the merged abstraction lends and
++     borrows back the same inner borrows. E.g., at the end of a loop
++     iteration over [bump(&mut r)] with [r : &'a mut Counter<'b>], the
++     abstraction of ['b] at the loop entry lends the counter to the call
++     (ignored loan of the reborrow), and the region group ['b] of the call
++     lends the inner borrows of the counter it gives back (pending loans).
++     With markers, the ignored loan of a reborrow which only exists in one
++     branch is only in the projection of that branch (see
++     {!tavalue_split_marker}), like the pending loans of that reborrow: they
++     cancel out one to one. *)
++  let pending_loan bid (av : tavalue) =
++    match av.value with
++    | ASymbolic (_, APendingLoans bid') -> bid = bid'
++    | _ -> false
++  in
++  let empty_ignored_loan (av : tavalue) =
++    match av.value with
++    | ALoan (AIgnoredMutLoan (Some bid, child))
++      when not (tavalue_has_ownership span ctx child) -> Some bid
++    | _ -> None
++  in
++  let rec remove_first f = function
++    | [] -> []
++    | x :: xs -> if f x then xs else x :: remove_first f xs
++  in
++  let cancel (loans : tavalue list) (pendings : tavalue list) =
++    List.fold_left
++      (fun (loans, pendings) av ->
++        match empty_ignored_loan av with
++        | Some bid when List.exists (pending_loan bid) pendings ->
++            ( remove_first (( == ) av) loans,
++              remove_first (pending_loan bid) pendings )
++        | _ -> (loans, pendings))
++      (loans, pendings) loans
++  in
++  let left_avalues, right_avalues = cancel !left_avalues right_avalues in
++  let right_avalues, left_avalues = cancel right_avalues left_avalues in
++  (left_avalues @ right_avalues, !discharged_shared_projs)
+ 
+ let shared_payloads_correspond (sv0 : tvalue) (sv1 : tvalue) =
+   if sv0 = sv1 then true
+diff --git a/src/interp/InterpJoinCore.ml b/src/interp/InterpJoinCore.ml
+index 70e4bce..ccfe430 100644
+--- a/src/interp/InterpJoinCore.ml
++++ b/src/interp/InterpJoinCore.ml
+@@ -419,6 +419,22 @@ module type PrimMatcher = sig
+     tavalue ->
+     tavalue
+ 
++  (** Match the loans of a region the abstractions do not own (nested borrows:
++      e.g., the loan of the outer region of a [&'a mut C<'b>] in the
++      abstraction of ['b], which only lends the inner borrows of [C]).
++
++      Parameters: as for [match_aignored_mut_borrow], [child] being the result
++      of matching the children. *)
++  val match_aignored_mut_loan :
++    tvalue_matcher ->
++    eval_ctx ->
++    eval_ctx ->
++    rty * borrow_id option * tavalue ->
++    rty * borrow_id option * tavalue ->
++    ty ->
++    tavalue ->
++    tavalue
++
+   val match_aignored_mut_borrow :
+     tvalue_matcher ->
+     eval_ctx ->
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index acc78ea..819a5d4 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -684,7 +684,13 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+               value = ALoan (AEndedIgnoredMutLoan { l1 with child; given_back });
+               ty;
+             }
+-        | AIgnoredMutLoan _, AIgnoredMutLoan _
++        | AIgnoredMutLoan (bid0, child0), AIgnoredMutLoan (bid1, child1) ->
++            (* Nested borrows: the abstraction of the inner region of a
++               [&'a mut C<'b>] lends the inner borrows of the value it gave to
++               the region ['a] (see {!InterpBorrows.destructure_abs}) *)
++            let child = match_arec child0 child1 in
++            M.match_aignored_mut_loan match_rec ctx0 ctx1
++              (v0.ty, bid0, child0) (v1.ty, bid1, child1) ty child
+         | AIgnoredSharedLoan _, AIgnoredSharedLoan _ ->
+             (* Those should have been filtered when destructuring the abstractions -
+                they are necessary only when there are nested borrows *)
+@@ -1977,6 +1983,15 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       "Distinct pending parent dependencies";
+     { value = ASymbolic (PNone, APendingLoans bid0); ty }
+ 
++  let match_aignored_mut_loan (_match_rec : tvalue_matcher) (_ctx0 : eval_ctx)
++      (_ctx1 : eval_ctx)
++      ((_ty0, bid0, _child0) : rty * borrow_id option * tavalue)
++      ((_ty1, bid1, _child1) : rty * borrow_id option * tavalue) (ty : ty)
++      (child : tavalue) : tavalue =
++    (* For now we only support the case where the loans are the same *)
++    [%cassert_recover] S.recover span (bid0 = bid1) "Unimplemented";
++    { value = ALoan (AIgnoredMutLoan (bid0, child)); ty }
++
+   let match_aignored_mut_borrow (_match_rec : tvalue_matcher) (_ctx0 : eval_ctx)
+       (_ctx1 : eval_ctx)
+       ((_ty0, bid0, _child0) : rty * borrow_id option * tavalue)
+@@ -2401,6 +2416,19 @@ struct
+     let bid = match_borrow_id bid0 bid1 in
+     { value = ASymbolic (PNone, APendingLoans bid); ty }
+ 
++  let match_aignored_mut_loan (_match_rec : tvalue_matcher) (_ctx0 : eval_ctx)
++      (_ctx1 : eval_ctx)
++      ((_ty0, bid0, _child0) : rty * borrow_id option * tavalue)
++      ((_ty1, bid1, _child1) : rty * borrow_id option * tavalue) (ty : ty)
++      (child : tavalue) : tavalue =
++    let bid =
++      match (bid0, bid1) with
++      | None, None -> None
++      | Some bid0, Some bid1 -> Some (match_loan_id bid0 bid1)
++      | _ -> raise (Distinct "match_aignored_mut_loan: bids")
++    in
++    { value = ALoan (AIgnoredMutLoan (bid, child)); ty }
++
+   let match_aignored_mut_borrow (_match_rec : tvalue_matcher) (_ctx0 : eval_ctx)
+       (_ctx1 : eval_ctx)
+       ((_ty0, bid0, _child0) : rty * borrow_id option * tavalue)
+diff --git a/src/pure/PureMicroPassesLoops.ml b/src/pure/PureMicroPassesLoops.ml
+index 1dde3e0..ad09afe 100644
+--- a/src/pure/PureMicroPassesLoops.ml
++++ b/src/pure/PureMicroPassesLoops.ml
+@@ -394,7 +394,16 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+ 
+              We detect this by doing a flow analysis.
+           *)
+-          if expr_chains_loop_conts span ctx all_loop_outputs e then (
++          (* As for the calls below, the lambda can only become an output of
++             the loop if its free variables are all available at the exit of
++             the loop (e.g., not a value computed after the loop from another
++             output, like the value given back by a region of an outer borrow
++             which the staged continuation of the region of its inner borrows
++             receives, see [SymbolicToPureCore.staged_cont]) *)
++          if
++            FVarId.Set.subset (texpr_get_fvars e) all_vars
++            && expr_chains_loop_conts span ctx all_loop_outputs e
++          then (
+             (* It is a subset: introduce a fresh output var *)
+             [%ldebug
+               "Simplifying output:\n" ^ texpr_to_string ctx e ^ "\n- ty: "
+@@ -647,7 +656,6 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+             let fresh_output_values, fresh_output_conts, next =
+               simplify_in vars loop_varset loop_conts next
+             in
+-            let fresh_outputs = fresh_output_values @ fresh_output_conts in
+             [%ldebug
+               "After calling simplify_in:" ^ "\n- fresh_output_values:\n"
+               ^ Print.list_to_string ~sep:"\n" (texpr_to_string ctx)
+@@ -722,31 +730,44 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+                 loop.loop_body
+             in
+ 
+-            (* Update the signature *)
++            (* Update the signature: the fresh output values are values *)
+             let num_output_values =
+               List.length
+                 (List.filter fst
+                    (Collections.List.prefix loop.num_output_values keep_varsl))
++              + List.length fresh_output_values
+             in
+             let loop = { loop with num_output_values; output_tys; loop_body } in
+             let loop : texpr =
+               { e = Loop loop; ty = mk_loop_result_ty continue_ty break_ty }
+             in
+ 
+-            (* Reconstruct the let-binding *)
++            (* Reconstruct the let-binding, in the order of the outputs of the
++               loop (see [update_loop_body]): the output values, the fresh
++               output values, the output continuations, then the fresh output
++               continuations *)
+             let filtered_pats =
+               List.filter_map
+                 (fun ((keep, _), pat) -> if keep then Some pat else None)
+                 (List.combine keep_varsl pats)
+             in
+-            let new_pats =
++            let filtered_value_pats, filtered_cont_pats =
++              Collections.List.split_at filtered_pats
++                (List.length filt_output_value_tys)
++            in
++            let new_pats (fresh : (FVarId.id * texpr) list) =
+               List.map
+                 (fun ((id, e) : _ * texpr) ->
+-                  ({ id; basename = Some "back"; ty = e.ty } : fvar))
+-                fresh_outputs
++                  mk_tpat_from_fvar None
++                    ({ id; basename = Some "back"; ty = e.ty } : fvar))
++                fresh
++            in
++            let pats =
++              filtered_value_pats
++              @ new_pats fresh_output_values
++              @ filtered_cont_pats
++              @ new_pats fresh_output_conts
+             in
+-            let new_pats = List.map (mk_tpat_from_fvar None) new_pats in
+-            let pats = filtered_pats @ new_pats in
+             let pat = mk_simpl_tuple_pat pats in
+             mk_closed_let span monadic pat loop next
+         | _ ->
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 1b7f903..8703594 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -90,8 +90,9 @@ and aproj_to_consumed_ty_aux (ctx : bs_ctx) (_abs_regions : T.RegionId.Set.t)
+   | V.AEndedProjLoans _ | AEndedProjBorrows _ | AEmpty | AProjBorrows _ ->
+       [%craise] ctx.span "Unreachable"
+ 
+-let tavalue_to_consumed_ty (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+-    (abs_level : abs_level) (av : V.tavalue) : ty option =
++let tavalue_to_consumed_ty ?(whole_ignored_loans : bool = false)
++    (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
++    (av : V.tavalue) : ty option =
+   [%cassert] ctx.span (abs_level = 0) "Unimplemented";
+   (* Check if the value was generated from a loan projector: if yes, and if
+      it contains mutable loans, then we generate a consumed value (because
+@@ -102,9 +103,19 @@ let tavalue_to_consumed_ty (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+     compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+       abs_level 0 av
+   with
+-  | LoanProj BMut ->
++  | LoanProj BMut -> (
+       [%ltrace "the value contains mutable loan projectors"];
+-      tavalue_to_consumed_ty_aux ~filter:true ctx abs_regions abs_level 0 av
++      match av.value with
++      | ALoan (AIgnoredMutLoan (Some _, _)) when whole_ignored_loans ->
++          (* Staged continuations: the loan of a region the abstraction does
++             not own consumes the value of the loans of its borrowed value,
++             like the loan projector it replaced (e.g., the reborrow of a
++             joined [&'a mut C<'b>] at the exit of a loop, in the abstraction
++             of ['b], see [register_inputs]) *)
++          Some (ctx_translate_fwd_ty ctx av.ty)
++      | _ ->
++          tavalue_to_consumed_ty_aux ~filter:true ctx abs_regions abs_level 0
++            av)
+   | LoanProj BShared | BorrowProj _ | UnknownProj ->
+       (* If it is a borrow proj we ignore it. If it is an unknown projection,
+          it means the value doesn't contain loans nor borrows, so nothing
+@@ -267,7 +278,8 @@ let abs_to_ty (ctx : bs_ctx) (abs : V.abs) : ty option =
+         List.partition_map
+           (fun (index, av) ->
+             match
+-              tavalue_to_consumed_ty ctx abs.regions.owned abs_level av
++              tavalue_to_consumed_ty ~whole_ignored_loans:true ctx
++                abs.regions.owned abs_level av
+             with
+             | None -> Right None
+             | Some ty -> if List.mem index pending then Left ty else Right (Some ty))
+@@ -283,6 +295,48 @@ let abs_to_ty (ctx : bs_ctx) (abs : V.abs) : ty option =
+       let stage2 = mk_arrows inputs (mk_simpl_tuple_ty outputs) in
+       Some (mk_arrows [ stage1 ] (mk_simpl_tuple_ty [ stage1; stage2 ]))
+ 
++(** The staged continuation of an abstraction, if it has pending loans (see
++    [staged_cont]). *)
++let abs_staged_cont (ctx : bs_ctx) (abs : V.abs) : staged_cont option =
++  match abs_pending_indices ctx abs with
++  | [] -> None
++  | pending_indices ->
++      let inputs =
++        List.filter_map
++          (fun (index, av) ->
++            Option.map
++              (fun _ -> index)
++              (tavalue_to_consumed_ty ~whole_ignored_loans:true ctx
++                 abs.regions.owned 0 av))
++          (List.mapi (fun index av -> (index, av)) abs.avalues)
++      in
++      let pending_inputs =
++        List.filter_map
++          (fun (position, index) ->
++            if List.mem index pending_indices then Some position else None)
++          (List.mapi (fun position index -> (position, index)) inputs)
++      in
++      Some
++        {
++          pending_indices;
++          pending_inputs;
++          num_inputs = List.length inputs;
++          stage_applied = false;
++        }
++
++(** Register the staged continuations of join or loop abstractions which were
++    just bound to variables (see [staged_cont]). *)
++let register_staged_conts (ctx : bs_ctx) (absl : V.abs list) : bs_ctx =
++  let staged_conts =
++    List.fold_left
++      (fun staged (abs : V.abs) ->
++        match abs_staged_cont ctx abs with
++        | None -> V.AbsId.Map.remove abs.abs_id staged
++        | Some cont -> V.AbsId.Map.add abs.abs_id cont staged)
++      ctx.staged_conts absl
++  in
++  { ctx with staged_conts }
++
+ let compute_tevalue_proj_kind (span : Meta.span) (type_infos : type_infos)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (ev : V.tevalue) : proj_kind =
+@@ -1048,7 +1102,29 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+                            the flat argument list used by joins and loops. *)
+                         let args =
+                           match (f, args) with
+-                          | (V.ELoop _ | V.EJoin _), [ args ] -> args
++                          | (V.ELoop (aid, _) | V.EJoin aid), [ args ] -> (
++                              (* A staged continuation whose first stage was
++                                 applied receives the inputs of its second
++                                 stage only (see [staged_cont]) *)
++                              match
++                                V.AbsId.Map.find_opt aid ctx.staged_conts
++                              with
++                              | Some
++                                  {
++                                    stage_applied = true;
++                                    pending_inputs;
++                                    num_inputs;
++                                    _;
++                                  } ->
++                                  [%cassert] span
++                                    (List.length args = num_inputs)
++                                    "Nested borrows: the application of a \
++                                     staged continuation does not list its \
++                                     inputs";
++                                  List.filteri
++                                    (fun i _ -> not (List.mem i pending_inputs))
++                                    args
++                              | _ -> args)
+                           | V.EFunCall _, _ ->
+                               List.filter_map
+                                 (function
+@@ -1159,6 +1235,10 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+             (* Return the meta-value *)
+             let out = Some (tvalue_to_texpr ctx ectx given_back_meta) in
+             (ctx, false, out)
++        | V.EIgnoredMutLoan (Some bid, _)
++          when V.BorrowId.Map.mem bid bound_inputs.concrete ->
++            (* A whole input of a staged continuation (see [register_inputs]) *)
++            (ctx, false, V.BorrowId.Map.find_opt bid bound_inputs.concrete)
+         | V.EIgnoredMutLoan (_, child) | V.EEndedIgnoredMutLoan { child; _ } ->
+             (* The loan belongs to a region the abstraction does not own: the
+                abstraction only lends the inner values of the borrowed value,
+@@ -1288,8 +1368,9 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+     We need this to fix the order of the *inputs*: the *avalues* act as a
+     function signature, while the order of the borrows inside the *evalues* is
+     arbitrary. *)
+-let register_inputs (ctx : bs_ctx) (rids : T.RegionId.Set.t)
+-    (avl : V.tavalue list) : bound_borrows_loans * fvar list =
++let register_inputs ?(whole_ignored_loans : bool = false) (ctx : bs_ctx)
++    (rids : T.RegionId.Set.t) (avl : V.tavalue list) :
++    bound_borrows_loans * fvar list =
+   let span = ctx.span in
+   let type_infos = ctx.type_ctx.type_infos in
+   let concrete = ref V.BorrowId.Map.empty in
+@@ -1337,6 +1418,12 @@ let register_inputs (ctx : bs_ctx) (rids : T.RegionId.Set.t)
+         | V.ASharedLoan (pm, _, _, child) | V.AEndedSharedLoan (pm, _, child) ->
+             [%sanity_check] span (pm = PNone);
+             register child
++        | V.AIgnoredMutLoan (Some bid, _) when whole_ignored_loans ->
++            (* Staged continuations (see [staged_cont]): the loan of a region
++               the abstraction does not own is one input, the value of the
++               loans of the borrowed value, as for the loan projector it
++               replaced (see [tavalue_to_consumed_ty_aux]) *)
++            add_concrete bid av.ty
+         | V.AIgnoredMutLoan (_, child) | V.AIgnoredSharedLoan child ->
+             register child
+         | V.AEndedMutLoan _ | V.AEndedIgnoredMutLoan _ -> [%internal_error] span)
+@@ -1477,19 +1564,25 @@ let register_outputs (ctx : bs_ctx) (bound_outputs : bound_borrows_loans)
+     Where the joined value was given back by a call whose region group of the
+     abstraction has a staged backward function (its first stage is exactly
+     this routing, see [Pure.back_sg_info.early]), it is the first stage of
+-    that function, and the continuation calls the second one.
+-
+-    Returns the function call abstraction, if any, with the context in which
+-    the continuation calls its second stage, and the pattern and expression of
+-    the outputs of the first stage, with the variable for the second stage.
+-    The first stage is then applied in that context (see
+-    [fun_call_stage.early_outputs]): the outputs of the first stage are bound
+-    to variables per level, as for a stage applied when a sub-abstraction of
+-    the call ends (see [SymbolicToPureExpressions.translate_apply_early_stage]),
+-    and the application of the call in the continuation receives the inputs
+-    of the second stage. *)
++    that function, and the continuation calls the second one. Where the
++    continuation applies the (staged) continuation of a join or loop
++    abstraction to the pending loans (the continuation of a loop abstraction
++    at a [continue] or a [break] applies the continuation of the loop
++    abstraction of the next iteration), the first stage of that one comes
++    first: the routing from the parent borrows to the value it joined, then
++    through the call.
++
++    Returns the chain of first stages (the function, the pattern and the
++    expression of its outputs, and the variable for its second stage), with
++    the context in which the continuation calls the second stages. The first
++    stage of the call is then applied in that context (see
++    [fun_call_stage.early_outputs]): its outputs are bound to variables per
++    level, as for a stage applied when a sub-abstraction of the call ends (see
++    [SymbolicToPureExpressions.translate_apply_early_stage]), and the
++    application of the call in the continuation receives the inputs of the
++    second stage. *)
+ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+-    : bs_ctx * (texpr * tpat * texpr * fvar) option =
++    : bs_ctx * (texpr * tpat * texpr * fvar) list =
+   let span = ctx.span in
+   let apps = ref [] in
+   let visitor =
+@@ -1502,38 +1595,35 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+     end
+   in
+   visitor#visit_tevalue () input;
+-  match List.rev !apps with
+-  | [] -> (ctx, None)
+-  | [ V.EFunCall aid ] -> (
+-      match
+-        ( V.AbsId.Map.find_opt aid ctx.fun_call_stages,
+-          V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
+-      with
+-      | Some ({ signature; early_outputs = []; _ } as stage), Some info
+-        when List.length signature.early = 1 ->
+-          [%cassert] span
+-            (not (info.can_fail || signature.effect_info.can_fail))
+-            "Nested borrows: the continuation of a join or loop abstraction \
+-             with pending loans calls a staged backward function which can \
+-             fail";
+-          let arg_ty, ret_ty = dest_arrow_ty span info.fvar.ty in
+-          let out_ty, later_ty =
+-            match opt_destruct_tuple span ret_ty with
+-            | Some [ out_ty; later_ty ] -> (out_ty, later_ty)
+-            | _ -> [%internal_error] span
+-          in
+-          [%cassert] span
+-            (arg_ty = stage1_ty && out_ty = stage1_ty)
+-            "Nested borrows: the first stage of the backward function called \
+-             by the continuation of a join or loop abstraction with pending \
+-             loans does not route the values given back to them";
+-          let ctx, outputs =
+-            List.fold_left_map
+-              (fun ctx (level, tys) ->
+-                let ctx, vars = fresh_vars tys ctx in
+-                (ctx, (level, vars)))
+-              ctx (List.hd signature.early).early_outputs
+-          in
++  let conts, calls =
++    List.partition
++      (function
++        | V.ELoop _ | V.EJoin _ -> true
++        | _ -> false)
++      (List.rev !apps)
++  in
++  (* The first stage of a staged function [f : stage1_ty -> (stage1_ty *
++     later)], whose second stage the continuation calls; [outputs]: the
++     variables for the outputs of the stage, per level (a single variable by
++     default) *)
++  let first_stage ?outputs ctx (info : back_fun_info) =
++    let arg_ty, ret_ty = dest_arrow_ty span info.fvar.ty in
++    let out_ty, later_ty =
++      match opt_destruct_tuple span ret_ty with
++      | Some [ out_ty; later_ty ] -> (out_ty, later_ty)
++      | _ -> [%internal_error] span
++    in
++    [%cassert] span
++      (arg_ty = stage1_ty && out_ty = stage1_ty)
++      "Nested borrows: the first stage of a staged function applied by the \
++       continuation of a join or loop abstraction with pending loans does not \
++       route the values given back to them";
++    let ctx, out_pat, out_e =
++      match outputs with
++      | None ->
++          let ctx, out = fresh_var (Some "back") out_ty ctx in
++          (ctx, mk_tpat_from_fvar None out, mk_texpr_from_fvar out)
++      | Some outputs ->
+           let out_pat =
+             mk_simpl_tuple_pat
+               (List.map
+@@ -1549,30 +1639,99 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+                  outputs)
+           in
+           [%sanity_check] span (out_e.ty = out_ty);
+-          let ctx, later = fresh_var (Some "back") later_ty ctx in
+-          let ctx =
+-            {
+-              ctx with
+-              abs_id_to_info =
+-                V.AbsId.Map.add aid
+-                  { fvar = mk_texpr_from_fvar later; can_fail = false }
+-                  ctx.abs_id_to_info;
+-              fun_call_stages =
+-                V.AbsId.Map.add aid
+-                  { stage with early_outputs = [ outputs ] }
+-                  ctx.fun_call_stages;
+-            }
+-          in
+-          (ctx, Some (info.fvar, out_pat, out_e, later))
+-      | _ ->
+-          [%craise] span
+-            "Nested borrows: the continuation of a join or loop abstraction \
+-             with pending loans calls a function whose backward function is \
+-             not staged in two stages, or whose first stage was applied")
+-  | _ ->
+-      [%craise] span
+-        "Nested borrows: the continuation of a join or loop abstraction with \
+-         pending loans composes several continuations"
++          (ctx, out_pat, out_e)
++    in
++    let ctx, later = fresh_var (Some "back") later_ty ctx in
++    (ctx, (info.fvar, out_pat, out_e, later))
++  in
++  let set_info ctx aid later =
++    {
++      ctx with
++      abs_id_to_info =
++        V.AbsId.Map.add aid
++          { fvar = mk_texpr_from_fvar later; can_fail = false }
++          ctx.abs_id_to_info;
++    }
++  in
++  let ctx, cont_chain =
++    match conts with
++    | [] -> (ctx, [])
++    | [ (V.ELoop (aid, _) | V.EJoin aid) ] -> (
++        match
++          ( V.AbsId.Map.find_opt aid ctx.staged_conts,
++            V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
++        with
++        | Some ({ stage_applied = false; _ } as staged), Some info ->
++            let ctx, ((_, _, _, later) as stage) = first_stage ctx info in
++            let ctx = set_info ctx aid later in
++            let ctx =
++              {
++                ctx with
++                staged_conts =
++                  V.AbsId.Map.add aid
++                    { staged with stage_applied = true }
++                    ctx.staged_conts;
++              }
++            in
++            (ctx, [ stage ])
++        | _ ->
++            [%craise] span
++              "Nested borrows: the continuation of a join or loop abstraction \
++               with pending loans applies the continuation of a join or loop \
++               abstraction which is not staged, or whose first stage was \
++               applied")
++    | _ ->
++        [%craise] span
++          "Nested borrows: the continuation of a join or loop abstraction with \
++           pending loans applies several continuations of join or loop \
++           abstractions"
++  in
++  let ctx, call_chain =
++    match calls with
++    | [] -> (ctx, [])
++    | [ V.EFunCall aid ] -> (
++        match
++          ( V.AbsId.Map.find_opt aid ctx.fun_call_stages,
++            V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
++        with
++        | Some ({ signature; early_outputs = []; _ } as call_stage), Some info
++          when List.length signature.early = 1 ->
++            [%cassert] span
++              (not (info.can_fail || signature.effect_info.can_fail))
++              "Nested borrows: the continuation of a join or loop abstraction \
++               with pending loans calls a staged backward function which can \
++               fail";
++            let ctx, outputs =
++              List.fold_left_map
++                (fun ctx (level, tys) ->
++                  let ctx, vars = fresh_vars tys ctx in
++                  (ctx, (level, vars)))
++                ctx (List.hd signature.early).early_outputs
++            in
++            let ctx, ((_, _, _, later) as stage) =
++              first_stage ~outputs ctx info
++            in
++            let ctx =
++              {
++                (set_info ctx aid later) with
++                fun_call_stages =
++                  V.AbsId.Map.add aid
++                    { call_stage with early_outputs = [ outputs ] }
++                    ctx.fun_call_stages;
++              }
++            in
++            (ctx, [ stage ])
++        | _ ->
++            [%craise] span
++              "Nested borrows: the continuation of a join or loop abstraction \
++               with pending loans calls a function whose backward function is \
++               not staged in two stages, or whose first stage was applied")
++    | _ ->
++        [%craise] span
++          "Nested borrows: the continuation of a join or loop abstraction with \
++           pending loans composes several function calls"
++  in
++  (ctx, cont_chain @ call_chain)
+ 
+ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+     (output : V.tevalue) (input : V.tevalue) : texpr option =
+@@ -1584,7 +1743,8 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+      by the abstraction expression itself is arbitrary)
+   *)
+   let bound_inputs, inputs =
+-    register_inputs ctx abs.regions.owned abs.avalues
++    register_inputs ~whole_ignored_loans:(abs_pending_indices ctx abs <> [])
++      ctx abs.regions.owned abs.avalues
+   in
+   (* Staged continuation (see [staged_cont]): the pending loans are the inputs
+      of the first stage *)
+@@ -1602,7 +1762,7 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+   in
+   let ctx, stage1 =
+     if staged then staged_cont_first_stage ctx stage1_pat.ty input
+-    else (ctx, None)
++    else (ctx, [])
+   in
+ 
+   (* Translate the abstraction expression *)
+@@ -1634,19 +1794,20 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+     in
+     if not staged then Some e
+     else
+-      (* [fun pending => (pending', fun inputs => outputs)] *)
++      (* [fun pending => let (o1, k1) := f1 pending in ... (on, fun inputs =>
++         outputs)] *)
+       let pending_e =
+         mk_simpl_tuple_texpr span (List.map mk_texpr_from_fvar pending_inputs)
+       in
+-      let body =
+-        match stage1 with
+-        | None -> mk_simpl_tuple_texpr span [ pending_e; e ]
+-        | Some (f, out_pat, out_e, later) ->
++      let rec chain (arg : texpr) = function
++        | [] -> mk_simpl_tuple_texpr span [ arg; e ]
++        | (f, out_pat, out_e, later) :: stages ->
+             mk_closed_checked_let __FILE__ __LINE__ ctx false
+               (mk_simpl_tuple_pat [ out_pat; mk_tpat_from_fvar None later ])
+-              ([%add_loc] mk_app span f pending_e)
+-              (mk_simpl_tuple_texpr span [ out_e; e ])
++              ([%add_loc] mk_app span f arg)
++              (chain out_e stages)
+       in
++      let body = chain pending_e stage1 in
+       Some (mk_closed_lambdas span [ stage1_pat ] body)
+ 
+ (** Translate the continuation of a region abstraction to a pure continuation.
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 0ebc2ad..69f6369 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -160,6 +160,13 @@ type staged_cont = {
+       (** The positions of the pending loans in the values of the
+           abstraction (they become loan projectors once their parent borrow
+           ended). *)
++  pending_inputs : int list;
++      (** The positions of the pending loans among the inputs of the
++          continuation (the values of the abstraction which consume values),
++          as listed by the continuations which apply it (the application of
++          the continuation of a join or loop abstraction in another
++          continuation lists all its inputs). *)
++  num_inputs : int;  (** The number of inputs of the continuation *)
+   stage_applied : bool;
+       (** Whether the first stage was applied: the continuation registered
+           in [bs_ctx.abs_id_to_info] is then the second stage. *)
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 1598339..c3e0a3b 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -4219,10 +4219,6 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+     let ctx, absl =
+       (* Compute the type of the input abstractions *)
+       let abs_tys = List.map (abs_to_ty ctx) absl in
+-      [%cassert] ctx.span
+-        (List.for_all (fun abs -> abs_pending_indices ctx abs = []) absl)
+-        "Nested borrows: the continuations of loop abstractions with pending \
+-         loans are not supported yet";
+       let abs_tys, ignored =
+         List.partition_map
+           (fun (abs, ty) ->
+@@ -4247,11 +4243,13 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+               (aid, { fvar = mk_texpr_from_fvar fv; can_fail = false }))
+             fvars
+         in
+-        {
+-          ctx with
+-          abs_id_to_info = V.AbsId.Map.add_list fvars ctx.abs_id_to_info;
+-          ignored_abs_ids = V.AbsId.Set.add_list ignored ctx.ignored_abs_ids;
+-        }
++        register_staged_conts
++          {
++            ctx with
++            abs_id_to_info = V.AbsId.Map.add_list fvars ctx.abs_id_to_info;
++            ignored_abs_ids = V.AbsId.Set.add_list ignored ctx.ignored_abs_ids;
++          }
++          absl
+       in
+       (* *)
+       (ctx, List.map snd fvars)
+@@ -4657,25 +4655,13 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+               (aid, { fvar = mk_texpr_from_fvar fv; can_fail = false }))
+             fvars
+         in
+-        (* The continuations of the abstractions with pending loans are
+-           staged (see [staged_cont]) *)
+-        let staged_conts =
+-          List.fold_left
+-            (fun staged (abs : V.abs) ->
+-              match abs_pending_indices ctx abs with
+-              | [] -> staged
+-              | pending_indices ->
+-                  V.AbsId.Map.add abs.abs_id
+-                    { pending_indices; stage_applied = false }
+-                    staged)
+-            ctx.staged_conts absl
+-        in
+-        {
+-          ctx with
+-          abs_id_to_info = V.AbsId.Map.add_list fvars ctx.abs_id_to_info;
+-          ignored_abs_ids = V.AbsId.Set.add_list ignored ctx.ignored_abs_ids;
+-          staged_conts;
+-        }
++        register_staged_conts
++          {
++            ctx with
++            abs_id_to_info = V.AbsId.Map.add_list fvars ctx.abs_id_to_info;
++            ignored_abs_ids = V.AbsId.Set.add_list ignored ctx.ignored_abs_ids;
++          }
++          absl
+       in
+       (* *)
+       (ctx, List.map snd fvars)
+diff --git a/tests/lean/LoopNestedClosure.lean b/tests/lean/LoopNestedClosure.lean
+new file mode 100644
+index 0000000..93c49f1
+--- /dev/null
++++ b/tests/lean/LoopNestedClosure.lean
+@@ -0,0 +1 @@
++import LoopNestedClosure.Checks
+diff --git a/tests/lean/LoopNestedClosure/Checks.lean b/tests/lean/LoopNestedClosure/Checks.lean
+new file mode 100644
+index 0000000..439a665
+--- /dev/null
++++ b/tests/lean/LoopNestedClosure/Checks.lean
+@@ -0,0 +1,27 @@
++import LoopNestedClosure.LoopNestedClosure
++namespace loop_nested_closure.checks
++open Aeneas Aeneas.Std Result
++
++def v (l : List U32) (h : l.length ≤ Usize.max := by first | (simp; done) | (simp; scalar_tac)) : alloc.vec.Vec U32 := ⟨l, h⟩
++
++def res (r : Result (core.result.Result (alloc.vec.Vec U32) U32)) : Option (Sum (List Nat) Nat) :=
++  match r with
++  | ok (.Ok xs) => some (.inl (xs.val.map (·.val)))
++  | ok (.Err e) => some (.inr e.val)
++  | _ => none
++
++def num (r : Result U32) : Option Nat :=
++  match r with
++  | ok x => some x.val
++  | _ => none
++
++#guard res (run (v [1#u32, 5#u32, 2#u32, 9#u32]) true 100#u32) == some (.inr 23)
++#guard res (run (v [1#u32, 5#u32, 2#u32, 9#u32]) true 2#u32) == some (.inr 2)
++#guard res (run (v [1#u32, 5#u32, 2#u32, 9#u32]) false 2#u32) == some (.inl [11, 52, 94])
++#guard res (run (v []) true 2#u32) == some (.inl [])
++#guard res (run (v [5#u32, 3#u32, 1#u32]) true 100#u32) == some (.inr 32)
++#guard num (run_pick 2#u32) == some 301
++#guard num (run_pick 5#u32) == some 1103
++#guard num (run_pick 7#u32) == some 802
++#guard num (run_pick 6#u32) == some 601
++end loop_nested_closure.checks
+diff --git a/tests/lean/LoopNestedClosure/LoopNestedClosure.lean b/tests/lean/LoopNestedClosure/LoopNestedClosure.lean
+new file mode 100644
+index 0000000..3a530a9
+--- /dev/null
++++ b/tests/lean/LoopNestedClosure/LoopNestedClosure.lean
+@@ -0,0 +1,1394 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_nested_closure]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_nested_closure
++
++/-- [loop_nested_closure::eval_with::closure]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 43:27-49:5 -/
++@[reducible]
++def eval_with.closure {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :=
++  F
++
++/-- [loop_nested_closure::pick_with::closure]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 81:16-81:27 -/
++@[reducible]
++def pick_with.closure {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :=
++  F
++
++/-- [loop_nested_closure::Demand]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 11:0-14:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Demand where
++| Selected : Demand
++| Shape : Demand
++
++/-- [loop_nested_closure::resolve_inputs]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop_body]
++def resolve_inputs_loop.body
++  {F : Type} (coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : F)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool × F
++    × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok out))
++  | some n =>
++    let demand ←
++      if n > 3#u32
++      then
++        _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Selected
++      else _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Shape
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst.call_mut load
++        (n, demand)
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let joined ←
++        match val with
++        | none =>
++          if strict
++          then
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Aeneas.Std.core.result.Result.Err n, names, true,
++              model_state3, (), (), ())) : _root_.Sum (_root_.Bool × F ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++              (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × F ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++              _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × F × _root_.Unit ×
++              _root_.Unit × _root_.Unit)))
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (false, model_state3,
++              out) : _root_.Sum (_root_.Bool × F ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++              (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × F ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++              _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × F × _root_.Unit ×
++              _root_.Unit × _root_.Unit)))
++        | some v =>
++          do
++          let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out v
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (strict, model_state3,
++            out1) : _root_.Sum (_root_.Bool × F ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++            (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Bool × F ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++            _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Bool × F × _root_.Unit ×
++            _root_.Unit × _root_.Unit)))
++      match joined with
++      | _root_.Sum.inl (strict1, load1, out1) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, names, strict1, load1, out1, s))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4,
++        exit5, ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit5,
++          exit, exit1, exit2, exit3, exit4))
++      | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, _, (), (), ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++          (_root_.Aeneas.Std.core.convert.FromSame _root_.Aeneas.Std.U32)
++          residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r)
++
++/-- [loop_nested_closure::resolve_inputs]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop]
++def resolve_inputs_loop
++  {F : Type} (coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : F)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, names1, strict1, load1, out1, s1) =>
++       _root_.loop_nested_closure.resolve_inputs_loop.body
++       coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst iter1 names1
++       strict1 load1 out1 s1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Bool × F ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++      F × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)))
++    (iter, names, strict, load, out, s)
++
++/-- [loop_nested_closure::resolve_inputs]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 16:0-30:1 -/
++def resolve_inputs
++  {F : Type} (coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : F) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref names
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.loop_nested_closure.resolve_inputs_loop
++    coreopsfunctionFnMutFPairU32DemandResultOptionU32U32Inst iter names strict
++    load (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) s
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (T0)>]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop_body]
++def
++  resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296_loop.body
++  {T0 : Type} (coreopsfunctionFnMutMutT0PairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : T0 → T0)
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : T0)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) × (T0 →
++    T0) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Bool × T0 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) × T0))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok out, back load))
++  | some n =>
++    let demand ←
++      if n > 3#u32
++      then
++        _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Selected
++      else _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Shape
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutMutT0PairU32DemandResultOptionU32U32Inst.call_mut
++        load (n, demand)
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let joined ←
++        match val with
++        | none =>
++          if strict
++          then
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Aeneas.Std.core.result.Result.Err n, names, true,
++              model_state3, (), (), (), back)) : _root_.Sum (_root_.Bool × T0
++              × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (T0
++              → T0)) (_root_.Sum ((T0 → T0) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Bool × T0 × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.Aeneas.Std.U32) × _root_.Unit)
++              ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × T0 × _root_.Unit ×
++              _root_.Unit × _root_.Unit × (T0 → T0))))
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (false, model_state3,
++              out, back) : _root_.Sum (_root_.Bool × T0 ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (T0
++              → T0)) (_root_.Sum ((T0 → T0) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Bool × T0 × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.Aeneas.Std.U32) × _root_.Unit)
++              ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool × T0 × _root_.Unit ×
++              _root_.Unit × _root_.Unit × (T0 → T0))))
++        | some v =>
++          do
++          let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out v
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (strict, model_state3,
++            out1, back) : _root_.Sum (_root_.Bool × T0 ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (T0 →
++            T0)) (_root_.Sum ((T0 → T0) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Bool × T0 ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++            _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Bool × T0 × _root_.Unit ×
++            _root_.Unit × _root_.Unit × (T0 → T0))))
++      match joined with
++      | _root_.Sum.inl (strict1, load1, out1, back1) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, back1, names, strict1, load1, out1, s))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4,
++        exit5, exit6, ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit6,
++          exit, exit1, exit2, exit3, exit4, exit5))
++      | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, exit1, (), (), (), exit2))
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++          exit2 exit1))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++          (_root_.Aeneas.Std.core.convert.FromSame _root_.Aeneas.Std.U32)
++          residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, back
++        model_state3))
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (T0)>]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop]
++def resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296_loop
++  {T0 : Type} (coreopsfunctionFnMutMutT0PairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : T0 → T0)
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : T0)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × T0)
++  := do
++  loop
++    (fun (iter1, back1, names1, strict1, load1, out1, s1) =>
++       _root_.loop_nested_closure.resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296_loop.body
++       coreopsfunctionFnMutMutT0PairU32DemandResultOptionU32U32Inst iter1 back1
++       names1 strict1 load1 out1 s1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × (T0 → T0) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Bool × T0 ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) × (T0
++      → T0) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Bool × T0 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.core.result.Result
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.U32) × T0)))
++    (iter, back, names, strict, load, out, s)
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (T0)>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 16:0-30:1 -/
++def resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296
++  {T0 : Type} (coreopsfunctionFnMutMut1T0PairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : T0) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × T0)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref names
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.loop_nested_closure.resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296_loop
++    coreopsfunctionFnMutMut1T0PairU32DemandResultOptionU32U32Inst iter
++    (fun t => t) names strict load (_root_.Aeneas.Std.alloc.vec.Vec.new
++    _root_.Aeneas.Std.U32) s
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (loop_nested_closure::eval_with::closure<2, T0>[TraitClause@0])>]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop_body]
++def
++  resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab_loop.body
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutMutclosurePairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++  _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  (back1 : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++  ((_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0)))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool)
++  (load : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    _root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    ((_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    ((_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0)))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok out, back load,
++      fun c => let (back2, back3) := back1 c
++               (back2, fun c1 => back3 c1)))
++  | some n =>
++    let demand ←
++      if n > 3#u32
++      then
++        _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Selected
++      else _root_.Aeneas.Std.Result.ok _root_.loop_nested_closure.Demand.Shape
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutMutclosurePairU32DemandResultOptionU32U32Inst.call_mut
++        load (n, demand)
++    let call_mut_back :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        ((_root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++        (_root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        _root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst)))
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let joined ←
++        match val with
++        | none =>
++          if strict
++          then
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Aeneas.Std.core.result.Result.Err n, names, true,
++              model_state3, (), (), (), back,
++              fun c =>
++                let (back2, back3) := back1 c
++                let (c1, back4) := call_mut_back back2
++                (c1, fun c2 => back3 (back4 c2)))) : _root_.Sum (_root_.Bool ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++              (_root_.Sum ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              _root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Bool × (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++              _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) × _root_.Unit ×
++              _root_.Unit × _root_.Unit ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              _root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))))))
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (false, out) :
++              _root_.Sum (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32)) (_root_.Sum
++              ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              _root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Bool × (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++              _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Bool ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) × _root_.Unit ×
++              _root_.Unit × _root_.Unit ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              _root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++              ((_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++              (_root_.loop_nested_closure.eval_with.closure
++              coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))))))
++        | some v =>
++          do
++          let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out v
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (strict, out1) :
++            _root_.Sum (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32)) (_root_.Sum
++            ((_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++            _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++            ((_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            _root_.Bool × (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++            _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Bool ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) × _root_.Unit ×
++            _root_.Unit × _root_.Unit ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++            _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++            ((_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++            (_root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))))))
++      match joined with
++      | _root_.Sum.inl (strict1, out1) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, back,
++          fun c =>
++            let (back2, back3) := back1 c
++            let (c1, back4) := call_mut_back back2
++            (c1, fun c2 => back3 (back4 c2)), names, strict1, model_state3,
++          out1, s))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4,
++        exit5, exit6, exit7, ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit7,
++          exit, exit1, exit2, exit3, exit4, exit5, exit6))
++      | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, exit1, (), (), (), exit2,
++        exit3)) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++          exit2 exit1, exit3))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++          (_root_.Aeneas.Std.core.convert.FromSame _root_.Aeneas.Std.U32)
++          residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, back
++        model_state3,
++        fun c =>
++          let (back2, back3) := back1 c
++          let (c1, back4) := call_mut_back back2
++          (c1, fun c2 => back3 (back4 c2))))
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (loop_nested_closure::eval_with::closure<2, T0>[TraitClause@0])>]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 1:0-30:1 -/
++@[rust_loop]
++def
++  resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab_loop
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutMutclosurePairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++  _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  (back1 : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++  ((_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0)))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool)
++  (load : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    ((_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))))
++  := do
++  loop
++    (fun (iter1, back2, back3, names1, strict1, load1, out1, s1) =>
++       _root_.loop_nested_closure.resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab_loop.body
++       coreopsfunctionFnMutT0TupleU32OptionU32Inst
++       coreopsfunctionFnMutMutclosurePairU32DemandResultOptionU32U32Inst iter1
++       back2 back3 names1 strict1 load1 out1 s1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      _root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      ((_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      _root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      ((_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      ((_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))))))
++    (iter, back, back1, names, strict, load, out, s)
++
++/-- [loop_nested_closure::resolve_inputs::<0, &1 mut (loop_nested_closure::eval_with::closure<2, T0>[TraitClause@0])>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 16:0-30:1 -/
++def resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutMut1closurePairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool)
++  (load : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    _root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref names
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let (r, back, back1) ←
++    _root_.loop_nested_closure.resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab_loop
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst
++      coreopsfunctionFnMutMut1closurePairU32DemandResultOptionU32U32Inst iter
++      (fun c => c) (fun c => (c, fun c1 => c1)) names strict load
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) s
++  let back2 :=
++    (fun load1 => let (t, back3) := back1 load1
++                  let t1 := back3 t
++                  t1 : _root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      _root_.loop_nested_closure.eval_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  _root_.Aeneas.Std.Result.ok (r, back, back2)
++
++/-- [loop_nested_closure::prepare]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 32:0-37:1 -/
++def prepare
++  {G : Type} (coreopsfunctionFnMutGPairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut G (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : G) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, _) ←
++    _root_.loop_nested_closure.resolve_inputs0Mut1T0_specialized_9ab4eb3932b47b400416ae03f5489296
++      (_root_.Aeneas.Std.core.ops.function.FnMutMutRef
++      coreopsfunctionFnMutGPairU32DemandResultOptionU32U32Inst) names strict
++      load
++  _root_.Aeneas.Std.Result.ok r
++
++/-- [loop_nested_closure::prepare::<0, loop_nested_closure::eval_with::closure<1, T0>[TraitClause@0]>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 32:0-37:1 -/
++def prepare0closure_specialized_ce344142ff1f341a9fb357234e2e7d1d
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutclosurePairU32DemandResultOptionU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool)
++  (load : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++  := do
++  let (r, c, resolve_inputs_back) ←
++    _root_.loop_nested_closure.resolve_inputs0Mut1closure_specialized_1dec1a40f4fa42a3591c35c62427aeab
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst
++      (_root_.Aeneas.Std.core.ops.function.FnMutMutRef
++      coreopsfunctionFnMutclosurePairU32DemandResultOptionU32U32Inst) names
++      strict load
++  let c1 := resolve_inputs_back c
++  _root_.Aeneas.Std.Result.ok (r, c1)
++
++/-- [loop_nested_closure::eval_with::{core::ops::function::FnMut<(u32, loop_nested_closure::Demand), core::result::Result<core::option::Option<u32>, u32>> for loop_nested_closure::eval_with::closure<0, F>[TraitClause@0]}::call_mut]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 43:27-49:5 -/
++def
++  eval_with.closure.Insts.CoreOpsFunctionFnMutPairU32DemandResultOptionU32U32.call_mut
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (c : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.loop_nested_closure.Demand))
++  :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst →
++    _root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst))
++  := do
++  let (n, d) := tupled_args
++  match d with
++  | _root_.loop_nested_closure.Demand.Selected =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutFTupleU32OptionU32Inst.call_mut c n
++    let back :=
++      (fun c1 => c1 : _root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutFTupleU32OptionU32Inst →
++        _root_.loop_nested_closure.eval_with.closure
++        coreopsfunctionFnMutFTupleU32OptionU32Inst)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      model_state, model_state1, back)
++  | _root_.loop_nested_closure.Demand.Shape =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutFTupleU32OptionU32Inst.call_mut c n
++    match model_state with
++    | none =>
++      let back :=
++        (fun c1 => c1 : _root_.loop_nested_closure.eval_with.closure
++          coreopsfunctionFnMutFTupleU32OptionU32Inst →
++          _root_.loop_nested_closure.eval_with.closure
++          coreopsfunctionFnMutFTupleU32OptionU32Inst)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        none, model_state1, back)
++    | some v =>
++      if v > 20#u32
++      then
++        let back :=
++          (fun c1 => c1 : _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutFTupleU32OptionU32Inst →
++            _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutFTupleU32OptionU32Inst)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++          v, model_state1, back)
++      else
++        let back :=
++          (fun c1 => c1 : _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutFTupleU32OptionU32Inst →
++            _root_.loop_nested_closure.eval_with.closure
++            coreopsfunctionFnMutFTupleU32OptionU32Inst)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          model_state, model_state1, back)
++
++/-- [loop_nested_closure::eval_with::{core::ops::function::FnOnce<(u32, loop_nested_closure::Demand), core::result::Result<core::option::Option<u32>, u32>> for loop_nested_closure::eval_with::closure<0, F>[TraitClause@0]}::call_once]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 43:27-49:5 -/
++def
++  eval_with.closure.Insts.CoreOpsFunctionFnOncePairU32DemandResultOptionU32U32.call_once
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (c : _root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.loop_nested_closure.Demand)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.eval_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst))
++  := do
++  let (r, c1, call_mut_back) ←
++    _root_.loop_nested_closure.eval_with.closure.Insts.CoreOpsFunctionFnMutPairU32DemandResultOptionU32U32.call_mut
++      coreopsfunctionFnMutFTupleU32OptionU32Inst c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (r, c2)
++
++/-- Trait implementation: [loop_nested_closure::eval_with::{core::ops::function::FnOnce<(u32, loop_nested_closure::Demand), core::result::Result<core::option::Option<u32>, u32>> for loop_nested_closure::eval_with::closure<0, F>[TraitClause@0]}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 43:27-49:5 -/
++@[reducible]
++def
++  eval_with.closure.Insts.CoreOpsFunctionFnOncePairU32DemandResultOptionU32U32
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_nested_closure.eval_with.closure.Insts.CoreOpsFunctionFnOncePairU32DemandResultOptionU32U32.call_once
++          coreopsfunctionFnMutFTupleU32OptionU32Inst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [loop_nested_closure::eval_with::{core::ops::function::FnMut<(u32, loop_nested_closure::Demand), core::result::Result<core::option::Option<u32>, u32>> for loop_nested_closure::eval_with::closure<0, F>[TraitClause@0]}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 43:27-49:5 -/
++@[reducible]
++def eval_with.closure.Insts.CoreOpsFunctionFnMutPairU32DemandResultOptionU32U32
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.eval_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.loop_nested_closure.Demand) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.loop_nested_closure.eval_with.closure.Insts.CoreOpsFunctionFnOncePairU32DemandResultOptionU32U32
++    coreopsfunctionFnMutFTupleU32OptionU32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.loop_nested_closure.eval_with.closure.Insts.CoreOpsFunctionFnMutPairU32DemandResultOptionU32U32.call_mut
++          coreopsfunctionFnMutFTupleU32OptionU32Inst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [loop_nested_closure::eval_with]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 39:0-50:1 -/
++def eval_with
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (load : F) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, _) ←
++    _root_.loop_nested_closure.prepare0closure_specialized_ce344142ff1f341a9fb357234e2e7d1d
++      coreopsfunctionFnMutFTupleU32OptionU32Inst
++      (_root_.loop_nested_closure.eval_with.closure.Insts.CoreOpsFunctionFnMutPairU32DemandResultOptionU32U32
++      coreopsfunctionFnMutFTupleU32OptionU32Inst) names strict load
++  _root_.Aeneas.Std.Result.ok r
++
++/-- [loop_nested_closure::run::closure]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 55:29-58:5 -/
++def run.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [loop_nested_closure::run::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::run::closure}::call_mut]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 55:29-58:5 -/
++def run.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++  (c : _root_.loop_nested_closure.run.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.loop_nested_closure.run.closure)
++  := do
++  let (i, i1) := c
++  let i2 ← lift (core.num.U32.wrapping_add i 1#u32)
++  if tupled_args = i1
++  then _root_.Aeneas.Std.Result.ok (none, (i2, i1))
++  else
++    let i3 ← lift (core.num.U32.wrapping_mul tupled_args 10#u32)
++    let i4 ← lift (core.num.U32.wrapping_add i3 i2)
++    _root_.Aeneas.Std.Result.ok (some i4, (i2, i1))
++
++/-- [loop_nested_closure::run::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::run::closure}::call_once]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 55:29-58:5 -/
++def run.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++  (c : _root_.loop_nested_closure.run.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (o, _) ←
++    _root_.loop_nested_closure.run.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [loop_nested_closure::run::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::run::closure}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 55:29-58:5 -/
++@[reducible]
++def run.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_nested_closure.run.closure _root_.Aeneas.Std.U32 (_root_.Option
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_nested_closure.run.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_nested_closure::run::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::run::closure}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 55:29-58:5 -/
++@[reducible]
++def run.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_nested_closure.run.closure _root_.Aeneas.Std.U32 (_root_.Option
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.loop_nested_closure.run.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_nested_closure.run.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_nested_closure::run]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 53:0-59:1
++    Visibility: public -/
++def run
++  (names : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (strict : _root_.Bool) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.loop_nested_closure.eval_with
++    _root_.loop_nested_closure.run.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32
++    names strict (0#u32, k)
++
++/-- [loop_nested_closure::pick]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 61:0-68:1 -/
++def pick
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32) 
++  (load : F) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (load1, a) ←
++    if n > 3#u32
++    then
++      do
++      let (model_state, model_state1) ←
++        coreopsfunctionFnMutFTupleU32OptionU32Inst.call_mut load n
++      _root_.Aeneas.Std.Result.ok (model_state1, model_state)
++    else _root_.Aeneas.Std.Result.ok (load, none)
++  let i ← lift (core.num.U32.wrapping_add n 1#u32)
++  let (model_state, _) ←
++    coreopsfunctionFnMutFTupleU32OptionU32Inst.call_mut load1 i
++  let i1 ← lift (_root_.Aeneas.Std.core.option.Option.unwrap_or a 0#u32)
++  let i2 ←
++    lift (_root_.Aeneas.Std.core.option.Option.unwrap_or model_state 0#u32)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 i2)
++
++/-- [loop_nested_closure::pick::<&0 mut (T0)>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 61:0-68:1 -/
++def pickMut0T0_specialized_804ec0828543e8126bcaaf3429e8bf98
++  {T0 : Type} (coreopsfunctionFnMutMut0T0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32)
++  (load : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T0)
++  := do
++  let (load1, a, back) ←
++    if n > 3#u32
++    then
++      do
++      let (model_state, model_state1) ←
++        coreopsfunctionFnMutMut0T0TupleU32OptionU32Inst.call_mut load n
++      _root_.Aeneas.Std.Result.ok (model_state1, model_state, (fun t => t : T0
++        → T0))
++    else _root_.Aeneas.Std.Result.ok (load, none, (fun t => t : T0 → T0))
++  let i ← lift (core.num.U32.wrapping_add n 1#u32)
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutMut0T0TupleU32OptionU32Inst.call_mut load1 i
++  let i1 ← lift (_root_.Aeneas.Std.core.option.Option.unwrap_or a 0#u32)
++  let i2 ←
++    lift (_root_.Aeneas.Std.core.option.Option.unwrap_or model_state 0#u32)
++  let i3 ← lift (core.num.U32.wrapping_add i1 i2)
++  let load2 := back model_state1
++  _root_.Aeneas.Std.Result.ok (i3, load2)
++
++/-- [loop_nested_closure::pick::<&0 mut (loop_nested_closure::pick_with::closure<1, T0>[TraitClause@0])>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 61:0-68:1 -/
++def pickMut0closure_specialized_0dd73fc8d9bc4e980de828b3aa9fefc3
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutMut0closureTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32)
++  (load : _root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++    _root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++  := do
++  let (load1, a, back, back1) ←
++    if n > 3#u32
++    then
++      do
++      let (model_state, model_state1) ←
++        coreopsfunctionFnMutMut0closureTupleU32OptionU32Inst.call_mut load n
++      let call_mut_back :=
++        (fun state_back => (state_back, fun state_back1 => state_back1) :
++          _root_.loop_nested_closure.pick_with.closure
++          coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++          ((_root_.loop_nested_closure.pick_with.closure
++          coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++          (_root_.loop_nested_closure.pick_with.closure
++          coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++          _root_.loop_nested_closure.pick_with.closure
++          coreopsfunctionFnMutT0TupleU32OptionU32Inst)))
++      _root_.Aeneas.Std.Result.ok (model_state1, model_state,
++        (fun c =>
++           let (c1, back2) := call_mut_back c
++           (c1, fun c2 => let t := back2 c2
++                          t) : _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        ((_root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++        (_root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))), (fun c => c :
++        _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++    else
++      _root_.Aeneas.Std.Result.ok (load, none, (fun c => (c, fun c1 => c1) :
++        _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        ((_root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++        (_root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst → T0))), (fun c => c :
++        _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++        _root_.loop_nested_closure.pick_with.closure
++        coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++  let i ← lift (core.num.U32.wrapping_add n 1#u32)
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutMut0closureTupleU32OptionU32Inst.call_mut load1 i
++  let call_mut_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      ((_root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
++      (_root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst)))
++  let i1 ← lift (_root_.Aeneas.Std.core.option.Option.unwrap_or a 0#u32)
++  let i2 ←
++    lift (_root_.Aeneas.Std.core.option.Option.unwrap_or model_state 0#u32)
++  let i3 ← lift (core.num.U32.wrapping_add i1 i2)
++  let load2 := back1 model_state1
++  let back2 :=
++    (fun load3 =>
++       let (c, back3) := back load3
++       let (c1, back4) := call_mut_back c
++       let c2 := back4 c1
++       let t := back3 c2
++       t : _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst →
++      _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst)
++  _root_.Aeneas.Std.Result.ok (i3, load2, back2)
++
++/-- [loop_nested_closure::pick_ref]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 70:0-75:1 -/
++def pick_ref
++  {G : Type} (coreopsfunctionFnMutGTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut G _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32) 
++  (load : G) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.loop_nested_closure.pickMut0T0_specialized_804ec0828543e8126bcaaf3429e8bf98
++      (_root_.Aeneas.Std.core.ops.function.FnMutMutRef
++      coreopsfunctionFnMutGTupleU32OptionU32Inst) n load
++  _root_.Aeneas.Std.Result.ok i
++
++/-- [loop_nested_closure::pick_ref::<loop_nested_closure::pick_with::closure<0, T0>[TraitClause@0]>]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 70:0-75:1 -/
++def pick_refclosure_specialized_4c6eae4c16040dd36317ff4299b7f6a2
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (coreopsfunctionFnMutclosureTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32)
++  (load : _root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutT0TupleU32OptionU32Inst) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutT0TupleU32OptionU32Inst))
++  := do
++  let (i, c, pick_back) ←
++    _root_.loop_nested_closure.pickMut0closure_specialized_0dd73fc8d9bc4e980de828b3aa9fefc3
++      coreopsfunctionFnMutT0TupleU32OptionU32Inst
++      (_root_.Aeneas.Std.core.ops.function.FnMutMutRef
++      coreopsfunctionFnMutclosureTupleU32OptionU32Inst) n load
++  let c1 := pick_back c
++  _root_.Aeneas.Std.Result.ok (i, c1)
++
++/-- [loop_nested_closure::pick_with::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::pick_with::closure<0, F>[TraitClause@0]}::call_mut]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 81:16-81:27 -/
++def pick_with.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (c : _root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst) ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst →
++    _root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutFTupleU32OptionU32Inst.call_mut c tupled_args
++  let back :=
++    (fun c1 => c1 : _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutFTupleU32OptionU32Inst →
++      _root_.loop_nested_closure.pick_with.closure
++      coreopsfunctionFnMutFTupleU32OptionU32Inst)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [loop_nested_closure::pick_with::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::pick_with::closure<0, F>[TraitClause@0]}::call_once]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 81:16-81:27 -/
++def pick_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32))
++  (c : _root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.loop_nested_closure.pick_with.closure
++    coreopsfunctionFnMutFTupleU32OptionU32Inst))
++  := do
++  let (o, c1, call_mut_back) ←
++    _root_.loop_nested_closure.pick_with.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++      coreopsfunctionFnMutFTupleU32OptionU32Inst c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (o, c2)
++
++/-- Trait implementation: [loop_nested_closure::pick_with::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::pick_with::closure<0, F>[TraitClause@0]}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 81:16-81:27 -/
++@[reducible]
++def pick_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32 {F : Type}
++  (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst) _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_nested_closure.pick_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++          coreopsfunctionFnMutFTupleU32OptionU32Inst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [loop_nested_closure::pick_with::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::pick_with::closure<0, F>[TraitClause@0]}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 81:16-81:27 -/
++@[reducible]
++def pick_with.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32 {F : Type}
++  (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.loop_nested_closure.pick_with.closure
++  coreopsfunctionFnMutFTupleU32OptionU32Inst) _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.loop_nested_closure.pick_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32
++    coreopsfunctionFnMutFTupleU32OptionU32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.loop_nested_closure.pick_with.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++          coreopsfunctionFnMutFTupleU32OptionU32Inst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [loop_nested_closure::pick_with]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 77:0-82:1 -/
++def pick_with
++  {F : Type} (coreopsfunctionFnMutFTupleU32OptionU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.U32) 
++  (load : F) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.loop_nested_closure.pick_refclosure_specialized_4c6eae4c16040dd36317ff4299b7f6a2
++      coreopsfunctionFnMutFTupleU32OptionU32Inst
++      (_root_.loop_nested_closure.pick_with.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32
++      coreopsfunctionFnMutFTupleU32OptionU32Inst) n load
++  _root_.Aeneas.Std.Result.ok i
++
++/-- [loop_nested_closure::run_pick::closure]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 87:17-90:5 -/
++@[reducible]
++def run_pick.closure := _root_.Aeneas.Std.U32
++
++/-- [loop_nested_closure::run_pick::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::run_pick::closure}::call_mut]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 87:17-90:5 -/
++def run_pick.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++  (c : _root_.loop_nested_closure.run_pick.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.loop_nested_closure.run_pick.closure)
++  := do
++  let i ← lift (core.num.U32.wrapping_add c 1#u32)
++  if tupled_args = 7#u32
++  then _root_.Aeneas.Std.Result.ok (none, i)
++  else
++    let i1 ← lift (core.num.U32.wrapping_mul tupled_args 100#u32)
++    let i2 ← lift (core.num.U32.wrapping_add i1 i)
++    _root_.Aeneas.Std.Result.ok (some i2, i)
++
++/-- [loop_nested_closure::run_pick::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::run_pick::closure}::call_once]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 87:17-90:5 -/
++def run_pick.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++  (c : _root_.loop_nested_closure.run_pick.closure) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (o, _) ←
++    _root_.loop_nested_closure.run_pick.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [loop_nested_closure::run_pick::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for loop_nested_closure::run_pick::closure}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 87:17-90:5 -/
++@[reducible]
++def run_pick.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_nested_closure.run_pick.closure _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_nested_closure.run_pick.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_nested_closure::run_pick::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for loop_nested_closure::run_pick::closure}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 87:17-90:5 -/
++@[reducible]
++def run_pick.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_nested_closure.run_pick.closure _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.loop_nested_closure.run_pick.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_nested_closure.run_pick.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_nested_closure::run_pick]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-closure.rs', lines 85:0-91:1
++    Visibility: public -/
++def run_pick
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_nested_closure.pick_with
++    _root_.loop_nested_closure.run_pick.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32
++    n 0#u32
++
++end loop_nested_closure
+diff --git a/tests/lean/LoopNestedStaged.lean b/tests/lean/LoopNestedStaged.lean
+new file mode 100644
+index 0000000..8717532
+--- /dev/null
++++ b/tests/lean/LoopNestedStaged.lean
+@@ -0,0 +1 @@
++import LoopNestedStaged.Checks
+diff --git a/tests/lean/LoopNestedStaged/Checks.lean b/tests/lean/LoopNestedStaged/Checks.lean
+new file mode 100644
+index 0000000..d47b738
+--- /dev/null
++++ b/tests/lean/LoopNestedStaged/Checks.lean
+@@ -0,0 +1,21 @@
++import LoopNestedStaged.LoopNestedStaged
++
++/-! Evaluate the model of `tests/src/loop-nested-staged.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace loop_nested_staged.checks
++open Aeneas Aeneas.Std Result
++
++def val3 (r : Result (U32 × U32 × U32)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++-- native::drives
++#guard val3 (drive_n 0#u32) == some (0, 1, 5)
++#guard val3 (drive_n 1#u32) == some (2, 2, 5)
++#guard val3 (drive_n 4#u32) == some (14, 5, 11)
++#guard val3 (drive_n_then_write 0#u32) == some (0, 1, 15)
++#guard val3 (drive_n_then_write 3#u32) == some (9, 4, 24)
++
++end loop_nested_staged.checks
+diff --git a/tests/lean/LoopNestedStaged/LoopNestedStaged.lean b/tests/lean/LoopNestedStaged/LoopNestedStaged.lean
+new file mode 100644
+index 0000000..ec94723
+--- /dev/null
++++ b/tests/lean/LoopNestedStaged/LoopNestedStaged.lean
+@@ -0,0 +1,167 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_nested_staged]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_nested_staged
++
++/-- [loop_nested_staged::Counter]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 14:0-17:1
++    Visibility: public -/
++structure Counter where
++  total : _root_.Aeneas.Std.U32
++  calls : _root_.Aeneas.Std.U32
++
++/-- [loop_nested_staged::bump]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 19:0-23:1
++    Visibility: public -/
++def bump
++  (c : _root_.loop_nested_staged.Counter) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter →
++    _root_.loop_nested_staged.Counter) × (_root_.loop_nested_staged.Counter
++    → (_root_.loop_nested_staged.Counter ×
++    (_root_.loop_nested_staged.Counter →
++    _root_.loop_nested_staged.Counter))))
++  := do
++  let i ← lift (core.num.U32.wrapping_add c.total v)
++  let i1 ← lift (core.num.U32.wrapping_add c.calls 1#u32)
++  let back :=
++    (fun c1 => (c1, fun c2 => { c with total := c2.total }) :
++      _root_.loop_nested_staged.Counter → (_root_.loop_nested_staged.Counter
++      × (_root_.loop_nested_staged.Counter →
++      _root_.loop_nested_staged.Counter)))
++  _root_.Aeneas.Std.Result.ok (i1, { total := i, calls := i1 }, fun c1 => c1,
++    back)
++
++/-- [loop_nested_staged::bump_n]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 30:4-33:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_n_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_staged.Counter →
++  _root_.loop_nested_staged.Counter)
++  (back1 : _root_.loop_nested_staged.Counter →
++  (_root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter →
++  _root_.Aeneas.Std.U32))) (r : _root_.loop_nested_staged.Counter)
++  (i : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.loop_nested_staged.Counter → _root_.loop_nested_staged.Counter)
++    × (_root_.loop_nested_staged.Counter →
++    (_root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter
++    → _root_.Aeneas.Std.U32))) × _root_.loop_nested_staged.Counter ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.loop_nested_staged.Counter ×
++    (_root_.loop_nested_staged.Counter → (_root_.loop_nested_staged.Counter
++    × (_root_.loop_nested_staged.Counter → _root_.Aeneas.Std.U32)))))
++  := do
++  if i < n
++  then
++    let (i1, r1, bump_back, bump_back1) ← _root_.loop_nested_staged.bump r i
++    let acc1 ← lift (core.num.U32.wrapping_add acc i1)
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun c => let c1 := bump_back c
++                back c1,
++      fun c =>
++        let (back2, back3) := back1 c
++        let (c1, back4) := bump_back1 back2
++        (c1, fun c2 => back3 { r with total := (back4 c2).total }), r1, i2,
++      acc1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (
++      r.calls, acc, back r, fun c => back1 c))
++
++/-- [loop_nested_staged::bump_n]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 30:4-33:5
++    Visibility: public -/
++@[rust_loop]
++def bump_n_loop
++  (back : _root_.loop_nested_staged.Counter →
++  _root_.loop_nested_staged.Counter)
++  (back1 : _root_.loop_nested_staged.Counter →
++  (_root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter →
++  _root_.Aeneas.Std.U32))) (n : _root_.Aeneas.Std.U32)
++  (r : _root_.loop_nested_staged.Counter) (i : _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter →
++    (_root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter
++    → _root_.Aeneas.Std.U32))))
++  := do
++  loop
++    (fun (back2, back3, r1, i1, acc1) =>
++       _root_.loop_nested_staged.bump_n_loop.body n back2 back3 r1 i1 acc1 :
++      ((_root_.loop_nested_staged.Counter →
++      _root_.loop_nested_staged.Counter) × (_root_.loop_nested_staged.Counter
++      → (_root_.loop_nested_staged.Counter ×
++      (_root_.loop_nested_staged.Counter → _root_.Aeneas.Std.U32))) ×
++      _root_.loop_nested_staged.Counter × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.loop_nested_staged.Counter →
++      _root_.loop_nested_staged.Counter) × (_root_.loop_nested_staged.Counter
++      → (_root_.loop_nested_staged.Counter ×
++      (_root_.loop_nested_staged.Counter → _root_.Aeneas.Std.U32))) ×
++      _root_.loop_nested_staged.Counter × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      _root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter
++      → (_root_.loop_nested_staged.Counter ×
++      (_root_.loop_nested_staged.Counter → _root_.Aeneas.Std.U32))))))
++    (back, back1, r, i, acc)
++
++/-- [loop_nested_staged::bump_n]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 26:0-35:1
++    Visibility: public -/
++def bump_n
++  (c : _root_.loop_nested_staged.Counter) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_staged.Counter × (_root_.loop_nested_staged.Counter →
++    _root_.loop_nested_staged.Counter))
++  := do
++  let (i, acc, back, back1) ←
++    _root_.loop_nested_staged.bump_n_loop (fun c1 => c1)
++      (fun c1 => (c1, fun c2 => let ⟨ i1, _ ⟩ := c2
++                                i1)) n c 0#u32 0#u32
++  let back2 :=
++    (fun c1 =>
++       let (⟨ i1, _ ⟩, back3) := back1 { back with total := c1.total }
++       let i2 := back3 { total := i1, calls := i }
++       { c with total := i2 } : _root_.loop_nested_staged.Counter →
++      _root_.loop_nested_staged.Counter)
++  _root_.Aeneas.Std.Result.ok (acc, back, back2)
++
++/-- [loop_nested_staged::drive_n]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 37:0-43:1
++    Visibility: public -/
++def drive_n
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_n_back) ←
++    _root_.loop_nested_staged.bump_n { total := 5#u32, calls := 1#u32 } n
++  let c1 := bump_n_back c
++  _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
++
++/-- [loop_nested_staged::drive_n_then_write]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-staged.rs', lines 47:0-54:1
++    Visibility: public -/
++def drive_n_then_write
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_n_back) ←
++    _root_.loop_nested_staged.bump_n { total := 5#u32, calls := 1#u32 } n
++  let i ← lift (core.num.U32.wrapping_mul c.total 3#u32)
++  let c1 := bump_n_back { c with total := i }
++  _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
++
++end loop_nested_staged
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 2f2bc58..0d11214 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -105,6 +105,8 @@ package «tests» {}
+ @[default_target] lean_lib LoopJoinBorrows
+ @[default_target] lean_lib LoopHigherRankedClause
+ @[default_target] lean_lib LoopJoinClosures
++@[default_target] lean_lib LoopNestedClosure
++@[default_target] lean_lib LoopNestedStaged
+ @[default_target] lean_lib LoopOptionNestedBorrow
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopSharedComponents
+diff --git a/tests/src/loop-nested-closure.rs b/tests/src/loop-nested-closure.rs
+new file mode 100644
+index 0000000..a78b22e
+--- /dev/null
++++ b/tests/src/loop-nested-closure.rs
+@@ -0,0 +1,110 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopNestedClosure
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `chelis_ir::eval::resolve_load_inputs` (eval.rs:2155): a loop (and an
++//! if-join) over calls of a `&mut F` where `F` is a closure which captures a
++//! mutable borrow of another closure: the value of type
++//! `&'a mut Closure<'b, T>` given back by `call_mut` is joined with the one
++//! the loop (or the branch) started with.
++
++pub enum Demand {
++    Selected,
++    Shape,
++}
++
++fn resolve_inputs<F>(names: &Vec<u32>, strict: bool, mut load: F) -> Result<Vec<u32>, u32>
++where
++    F: FnMut(u32, Demand) -> Result<Option<u32>, u32>,
++{
++    let mut out = Vec::new();
++    for n in names.iter() {
++        let demand = if *n > 3 { Demand::Selected } else { Demand::Shape };
++        match load(*n, demand)? {
++            Some(v) => out.push(v),
++            None if strict => return Err(*n),
++            None => {}
++        }
++    }
++    Ok(out)
++}
++
++fn prepare<G>(names: &Vec<u32>, strict: bool, mut load: G) -> Result<Vec<u32>, u32>
++where
++    G: FnMut(u32, Demand) -> Result<Option<u32>, u32>,
++{
++    resolve_inputs(names, strict, &mut load)
++}
++
++fn eval_with<F>(names: &Vec<u32>, strict: bool, mut load: F) -> Result<Vec<u32>, u32>
++where
++    F: FnMut(u32) -> Option<u32>,
++{
++    prepare(names, strict, |n, d| match d {
++        Demand::Selected => Ok(load(n)),
++        Demand::Shape => match load(n) {
++            Some(v) if v > 20 => Err(v),
++            r => Ok(r),
++        },
++    })
++}
++
++/// The loader counts its calls in its own state
++pub fn run(names: &Vec<u32>, strict: bool, k: u32) -> Result<Vec<u32>, u32> {
++    let mut calls = 0u32;
++    eval_with(names, strict, move |n| {
++        calls = calls.wrapping_add(1);
++        if n == k { None } else { Some(n.wrapping_mul(10).wrapping_add(calls)) }
++    })
++}
++
++fn pick<F>(n: u32, mut load: F) -> u32
++where
++    F: FnMut(u32) -> Option<u32>,
++{
++    let a = if n > 3 { load(n) } else { None };
++    let b = load(n.wrapping_add(1));
++    a.unwrap_or(0).wrapping_add(b.unwrap_or(0))
++}
++
++fn pick_ref<G>(n: u32, mut load: G) -> u32
++where
++    G: FnMut(u32) -> Option<u32>,
++{
++    pick(n, &mut load)
++}
++
++fn pick_with<F>(n: u32, mut load: F) -> u32
++where
++    F: FnMut(u32) -> Option<u32>,
++{
++    pick_ref(n, |x| load(x))
++}
++
++/// if-join: the loader is called in one branch only, then once more
++pub fn run_pick(n: u32) -> u32 {
++    let mut calls = 0u32;
++    pick_with(n, move |x| {
++        calls = calls.wrapping_add(1);
++        if x == 7 { None } else { Some(x.wrapping_mul(100).wrapping_add(calls)) }
++    })
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        let v = vec![1u32, 5, 2, 9];
++        println!("{:?}", run(&v, true, 100));
++        println!("{:?}", run(&v, true, 2));
++        println!("{:?}", run(&v, false, 2));
++        println!("{:?}", run(&vec![], true, 2));
++        println!("{:?}", run(&vec![5u32, 3, 1], true, 100));
++        println!("{}", run_pick(2));
++        println!("{}", run_pick(5));
++        println!("{}", run_pick(7));
++        println!("{}", run_pick(6));
++    }
++}
+diff --git a/tests/src/loop-nested-staged.rs b/tests/src/loop-nested-staged.rs
+new file mode 100644
+index 0000000..22fdcbe
+--- /dev/null
++++ b/tests/src/loop-nested-staged.rs
+@@ -0,0 +1,68 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopNestedStaged
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over a reborrowed `&'a mut Counter<'b>` whose inner borrow of `'b`
++//! goes through a call at each iteration (the shape of
++//! `chelis_ir::eval::resolve_load_inputs`, where a `&mut F` closure capturing
++//! mutable state is called in a loop). The loop abstraction of `'b` holds the
++//! pending loans of the value given back to the outer borrow: its
++//! continuation is staged like the backward function of the region group `'b`
++//! of `bump` (first stage: the value given back to the outer borrow at level
++//! 1; second stage: the current inner borrows at level 0).
++
++pub struct Counter<'b> {
++    pub total: &'b mut u32,
++    pub calls: u32,
++}
++
++pub fn bump(c: &mut &mut Counter<'_>, v: u32) -> u32 {
++    *c.total = (*c.total).wrapping_add(v);
++    c.calls = c.calls.wrapping_add(1);
++    c.calls
++}
++
++/// The reference is given back by the call at each iteration
++pub fn bump_n(c: &mut Counter<'_>, n: u32) -> u32 {
++    let mut r = c;
++    let mut i = 0;
++    let mut acc = 0u32;
++    while i < n {
++        acc = acc.wrapping_add(bump(&mut r, i));
++        i += 1;
++    }
++    acc
++}
++
++pub fn drive_n(n: u32) -> (u32, u32, u32) {
++    let mut t = 5u32;
++    let mut c = Counter { total: &mut t, calls: 1 };
++    let r = bump_n(&mut c, n);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
++/// The caller writes through the inner borrow after the loop: the value
++/// given back at level 1 goes through the staged continuation
++pub fn drive_n_then_write(n: u32) -> (u32, u32, u32) {
++    let mut t = 5u32;
++    let mut c = Counter { total: &mut t, calls: 1 };
++    let r = bump_n(&mut c, n);
++    *c.total = (*c.total).wrapping_mul(3);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        println!("{:?}", drive_n(0));
++        println!("{:?}", drive_n(1));
++        println!("{:?}", drive_n(4));
++        println!("{:?}", drive_n_then_write(0));
++        println!("{:?}", drive_n_then_write(3));
++    }
++}

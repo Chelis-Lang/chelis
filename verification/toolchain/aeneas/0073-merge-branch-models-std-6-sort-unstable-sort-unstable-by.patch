@@ -1,0 +1,774 @@
+# aeneas integration step 73 after cba11f3beb: commit 6c1d03858458033bd47eb5e239d274237085970d
+# first parent 7fbb2b0ee8ee309a33b66eae31a5559fd9f99110, merged 1ee0d74752409cdecb6de49c1846544d832e5e12
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-6' (sort_unstable/sort_unstable_by admitted only where every sorted permutation is the same list; char comparisons; option::expect_failed)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Cmp.lean b/backends/lean/Aeneas/Std/Core/Cmp.lean
+index a12f010..3fd394b 100644
+--- a/backends/lean/Aeneas/Std/Core/Cmp.lean
++++ b/backends/lean/Aeneas/Std/Core/Cmp.lean
+@@ -218,17 +218,79 @@ def core.cmp.PartialEqBool : core.cmp.PartialEq Bool Bool := {
+ def core.option.EqOption.assert_receiver_is_total_eq {T : Type} (_ : core.cmp.Eq T)
+   (_ : Option T) : Result Unit := .ok ()
+ 
+-/-- `impl Ord for char` (core/src/cmp.rs `ord_impl!`):
+-    `three_way_compare(*self, *other)`, the order of the Unicode scalar values. -/
++/-! `char`'s comparison impls (core/src/cmp.rs `partial_eq_impl!`, `eq_impl!` and
++    `ord_impl!`): the order of the Unicode scalar values. -/
++
++/-- `impl PartialEq for char`: `*self == *other`. -/
++@[rust_fun "core::cmp::impls::{core::cmp::PartialEq<char, char>}::eq" -canFail]
++def core.cmp.impls.PartialEqChar.eq (x y : Char) : Bool := x == y
++
++/-- `impl PartialEq for char`: `*self != *other`. -/
++@[rust_fun "core::cmp::impls::{core::cmp::PartialEq<char, char>}::ne" -canFail]
++def core.cmp.impls.PartialEqChar.ne (x y : Char) : Bool := x != y
++
++@[reducible, rust_trait_impl "core::cmp::PartialEq<char, char>"]
++def core.cmp.PartialEqChar : core.cmp.PartialEq Char Char := {
++  eq := fun x y => ok (core.cmp.impls.PartialEqChar.eq x y)
++  ne := fun x y => ok (core.cmp.impls.PartialEqChar.ne x y)
++}
++
++@[reducible, rust_trait_impl "core::cmp::Eq<char>"]
++def core.cmp.EqChar : core.cmp.Eq Char := {
++  partialEqInst := core.cmp.PartialEqChar
++}
++
++/-- `impl Ord for char`: `three_way_compare(*self, *other)`. -/
+ @[rust_fun "core::cmp::impls::{core::cmp::Ord<char>}::cmp" -canFail]
+ def core.cmp.impls.OrdChar.cmp (x y : Char) : Ordering := compare x.val y.val
+ 
+-/-- `impl PartialOrd for char` (core/src/cmp.rs `partial_ord_impl!`):
+-    `Some(three_way_compare(*self, *other))`. -/
++/-- `impl PartialOrd for char`: `Some(three_way_compare(*self, *other))`. -/
+ @[rust_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::partial_cmp" -canFail]
+ def core.cmp.impls.PartialOrdChar.partial_cmp (x y : Char) : Option Ordering :=
+   some (compare x.val y.val)
+ 
++/-- `partial_ord_methods_primitive_impl!`: `*self < *other` on `char`. -/
++@[rust_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::lt" -canFail]
++def core.cmp.impls.PartialOrdChar.lt (x y : Char) : Bool := decide (x.val < y.val)
++
++@[rust_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::le" -canFail]
++def core.cmp.impls.PartialOrdChar.le (x y : Char) : Bool := decide (x.val ≤ y.val)
++
++@[rust_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::gt" -canFail]
++def core.cmp.impls.PartialOrdChar.gt (x y : Char) : Bool := decide (y.val < x.val)
++
++@[rust_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::ge" -canFail]
++def core.cmp.impls.PartialOrdChar.ge (x y : Char) : Bool := decide (y.val ≤ x.val)
++
++/-- `impl Ord for char` (`ord_impl!`): `const_assert!(min <= max, ..)` panics when
++    `min > max`, then `if self < min { min } else if self > max { max } else { self }`. -/
++@[rust_fun "core::cmp::impls::{core::cmp::Ord<char>}::clamp"]
++def core.cmp.impls.OrdChar.clamp (self min max : Char) : Result Char := do
++  massert (core.cmp.impls.PartialOrdChar.le min max)
++  if core.cmp.impls.PartialOrdChar.lt self min then ok min
++  else if core.cmp.impls.PartialOrdChar.gt self max then ok max
++  else ok self
++
++@[reducible, rust_trait_impl "core::cmp::PartialOrd<char, char>"]
++def core.cmp.PartialOrdChar : core.cmp.PartialOrd Char Char := {
++  partialEqInst := core.cmp.PartialEqChar
++  partial_cmp := fun x y => ok (core.cmp.impls.PartialOrdChar.partial_cmp x y)
++  lt := fun x y => ok (core.cmp.impls.PartialOrdChar.lt x y)
++  le := fun x y => ok (core.cmp.impls.PartialOrdChar.le x y)
++  gt := fun x y => ok (core.cmp.impls.PartialOrdChar.gt x y)
++  ge := fun x y => ok (core.cmp.impls.PartialOrdChar.ge x y)
++}
++
++/-- `max` and `min` are `Ord`'s default methods (`if other < self { self } else { other }`
++    and `if other < self { other } else { self }`). -/
++@[reducible, rust_trait_impl "core::cmp::Ord<char>"]
++def core.cmp.OrdChar : core.cmp.Ord Char := {
++  eqInst := core.cmp.EqChar
++  partialOrdInst := core.cmp.PartialOrdChar
++  cmp := fun x y => ok (core.cmp.impls.OrdChar.cmp x y)
++  clamp := core.cmp.impls.OrdChar.clamp
++}
++
+ @[simp, rust_fun "core::cmp::impls::{core::cmp::PartialEq<&'a @A, &'b @B>}::eq"]
+ def core.cmp.impls.PartialEqShared.eq {A : Type} {B : Type} (PartialEqInst : core.cmp.PartialEq A B)
+   (x : A) (y : B) : Result Bool :=
+diff --git a/backends/lean/Aeneas/Std/Core/CoreOption.lean b/backends/lean/Aeneas/Std/Core/CoreOption.lean
+index a2c8e3f..1f7d315 100644
+--- a/backends/lean/Aeneas/Std/Core/CoreOption.lean
++++ b/backends/lean/Aeneas/Std/Core/CoreOption.lean
+@@ -7,6 +7,11 @@ namespace Aeneas.Std
+ @[rust_fun "core::option::unwrap_failed"]
+ def core.option.unwrap_failed : Result Empty := .fail .panic
+ 
++/-- `core::option::expect_failed(msg: &str) -> !` (core/src/option.rs), the cold path of
++    `Option::expect`: `panic_display(&msg)`. -/
++@[rust_fun "core::option::expect_failed"]
++def core.option.expect_failed (_ : Str) : Result Never := .fail .panic
++
+ @[rust_fun "core::option::{core::clone::Clone<core::option::Option<@T>>}::clone"]
+ def core.option.Option.Clone.clone {T : Type} (cloneInst : core.clone.Clone T)
+     (self : Option T) : Result (Option T) := do
+diff --git a/backends/lean/Aeneas/Std/Sort.lean b/backends/lean/Aeneas/Std/Sort.lean
+index ab62880..9a1f9ec 100644
+--- a/backends/lean/Aeneas/Std/Sort.lean
++++ b/backends/lean/Aeneas/Std/Sort.lean
+@@ -81,4 +81,33 @@ def Slice.sort_by_key {T K F : Type}
+   return ((), ⟨out.val, by rw [out.property]; exact self.property⟩, f)
+ 
+ end alloc.slice
++
++/-- `<[T]>::sort_unstable` (core/src/slice/mod.rs): `sort::unstable::sort(self, &mut T::lt)`
++ (ipnsort). Natively, the order of the elements that compare `Equal`, and the sequence of
++ comparisons, are unspecified. Aeneas admits a call only where `Ord` is total and `Equal`
++ holds exactly for indistinguishable values (llbc/SortContracts.ml: integers, `bool`,
++ `char`, `str`, `String`, references, boxes, tuples and derived `Ord` types of those):
++ there every sorted permutation is the same list, which this stable sort returns. -/
++@[rust_fun "core::slice::{[@T]}::sort_unstable"]
++def core.slice.Slice.sort_unstable {T : Type} (ordInst : core.cmp.Ord T) (self : Std.Slice T) :
++    Result (Std.Slice T) := do
++  let (out, _) ← alloc.slice.stableSort
++    (fun (_ : Unit) x y => do return (← ordInst.partialOrdInst.lt x y, ())) self.val ()
++  return ⟨out.val, by rw [out.property]; exact self.property⟩
++
++/-- `<[T]>::sort_unstable_by` (core/src/slice/mod.rs):
++ `sort::unstable::sort(self, &mut |a, b| compare(a, b) == Ordering::Less)`. Aeneas admits a
++ call only where `compare` is a closure returning `Ord::cmp(a, b)` or `Ord::cmp(b, a)` on
++ an element type as for `sort_unstable` (llbc/SortContracts.ml): the comparator is pure,
++ total and returns `Equal` only for indistinguishable values, so the list sorted by it is
++ unique and this stable sort returns the native result. -/
++@[rust_fun "core::slice::{[@T]}::sort_unstable_by"]
++def core.slice.Slice.sort_unstable_by {T F : Type}
++    (fnInst : core.ops.function.FnMut F (T × T) Ordering) (self : Std.Slice T) (compare : F) :
++    Result (Unit × Std.Slice T × F) := do
++  let (out, compare) ← alloc.slice.stableSort (fun compare x y => do
++    let (order, compare) ← fnInst.call_mut compare (x, y)
++    return (order matches .lt, compare)) self.val compare
++  return ((), ⟨out.val, by rw [out.property]; exact self.property⟩, compare)
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Tuple.lean b/backends/lean/Aeneas/Std/Tuple.lean
+index 3896b59..b624942 100644
+--- a/backends/lean/Aeneas/Std/Tuple.lean
++++ b/backends/lean/Aeneas/Std/Tuple.lean
+@@ -17,6 +17,16 @@ def core.tuple.PartialEqPair.ne {U T : Type}
+     (x y : U × T) : Result Bool := do
+   if ← first.ne x.1 y.1 then ok true else second.ne x.2 y.2
+ 
++/-- `PartialEq for (V, U, T)` (core/src/tuple.rs): the components compared in order with
++    `&&`, so a later component is only compared when the earlier ones are equal. -/
++@[rust_fun "core::tuple::{core::cmp::PartialEq<(@V, @U, @T), (@V, @U, @T)>}::eq"]
++def core.tuple.PartialEqTriple.eq {V U T : Type}
++    (first : core.cmp.PartialEq V V) (second : core.cmp.PartialEq U U)
++    (third : core.cmp.PartialEq T T) (x y : V × U × T) : Result Bool := do
++  if ← first.eq x.1 y.1 then
++    if ← second.eq x.2.1 y.2.1 then third.eq x.2.2 y.2.2 else ok false
++  else ok false
++
+ /-- `PartialEq for (W, V, U, T)` (core/src/tuple.rs): the components compared in order with
+     `&&`, so a later component is only compared when the earlier ones are equal. -/
+ @[rust_fun "core::tuple::{core::cmp::PartialEq<(@W, @V, @U, @T), (@W, @V, @U, @T)>}::eq"]
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 40c723d..8a6cc61 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -4252,5 +4252,6 @@ let apply_passes (crate : crate) : crate =
+   let crate = resolve_modeled_defaults crate in
+   let crate = simplify_trait_calls crate in
+   let crate = CollectionContracts.check ~evidence:collection_evidence crate in
++  let crate = SortContracts.check crate in
+   [%ltrace "After pre-passes:\n" ^ Print.crate_to_string crate ^ "\n"];
+   crate
+diff --git a/src/dune b/src/dune
+index de1273a..5b07d4a 100644
+--- a/src/dune
++++ b/src/dune
+@@ -35,6 +35,7 @@
+   Builtin
+   Collections
+   CollectionContracts
++  SortContracts
+   Config
+   ConstStrings
+   Contexts
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 90b389b..44c18e6 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -240,21 +240,21 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<[@T]>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 196 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<str>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxStr.clone";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 309 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 371 *)
+   mk_fun "alloc::boxed::{core::cmp::Ord<Box<@T>>}::cmp" "_root_.Aeneas.Std.alloc.boxed.OrdBox.cmp" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 249 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 311 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialEq<Box<@T>, Box<@T>>}::eq" "_root_.Aeneas.Std.alloc.boxed.PartialEqBox.eq" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 254 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 316 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialEq<Box<@T>, Box<@T>>}::ne" "_root_.Aeneas.Std.alloc.boxed.PartialEqBox.ne" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 293 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 355 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialOrd<Box<@T>, Box<@T>>}::ge" "_root_.Aeneas.Std.alloc.boxed.PartialOrdBox.ge" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 288 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 350 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialOrd<Box<@T>, Box<@T>>}::gt" "_root_.Aeneas.Std.alloc.boxed.PartialOrdBox.gt" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 283 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 345 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialOrd<Box<@T>, Box<@T>>}::le" "_root_.Aeneas.Std.alloc.boxed.PartialOrdBox.le" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 278 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 340 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialOrd<Box<@T>, Box<@T>>}::lt" "_root_.Aeneas.Std.alloc.boxed.PartialOrdBox.lt" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 273 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 335 *)
+   mk_fun "alloc::boxed::{core::cmp::PartialOrd<Box<@T>, Box<@T>>}::partial_cmp" "_root_.Aeneas.Std.alloc.boxed.PartialOrdBox.partial_cmp" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 14 *)
+   mk_fun "alloc::boxed::{core::convert::AsMut<Box<@T>, @T>}::as_mut" "_root_.Aeneas.Std.alloc.boxed.AsMutBox.as_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+@@ -650,11 +650,13 @@ let lean_builtin_funs = [
+   mk_fun "core::clone::impls::{core::clone::Clone<f64>}::clone" "_root_.Aeneas.Std.F64.clone";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 203 *)
+   mk_fun "core::cmp::impls::{core::cmp::Ord<()>}::cmp" "_root_.Aeneas.Std.core.cmp.impls.OrdUnit.cmp";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 223 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 267 *)
++  mk_fun "core::cmp::impls::{core::cmp::Ord<char>}::clamp" "_root_.Aeneas.Std.core.cmp.impls.OrdChar.clamp";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 244 *)
+   mk_fun "core::cmp::impls::{core::cmp::Ord<char>}::cmp" "_root_.Aeneas.Std.core.cmp.impls.OrdChar.cmp" ~can_fail:false;
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 232 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 294 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<&'a @A, &'b @B>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 237 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 299 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<&'a @A, &'b @B>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqShared.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 187 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<(), ()>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqUnit.eq";
+@@ -662,6 +664,10 @@ let lean_builtin_funs = [
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<(), ()>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqUnit.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 207 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<bool, bool>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqBool.eq";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 225 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialEq<char, char>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqChar.eq" ~can_fail:false;
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 229 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialEq<char, char>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqChar.ne" ~can_fail:false;
+   (* file: "Aeneas/Std/Float.lean", line: 420 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f32, f32>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF32.eq";
+   (* file: "Aeneas/Std/Float.lean", line: 422 *)
+@@ -672,7 +678,15 @@ let lean_builtin_funs = [
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f64, f64>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF64.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 199 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<(), ()>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdUnit.partial_cmp";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 228 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 262 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::ge" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdChar.ge" ~can_fail:false;
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 259 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::gt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdChar.gt" ~can_fail:false;
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 256 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::le" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdChar.le" ~can_fail:false;
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 253 *)
++  mk_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::lt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdChar.lt" ~can_fail:false;
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 248 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<char, char>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdChar.partial_cmp" ~can_fail:false;
+   (* file: "Aeneas/Std/Float.lean", line: 438 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::ge" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.ge";
+@@ -1358,13 +1372,15 @@ let lean_builtin_funs = [
+   mk_fun "core::ops::range::{core::ops::range::RangeInclusive<@Idx>}::new" "_root_.Aeneas.Std.core.ops.range.RangeInclusive.new";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 177 *)
+   mk_fun "core::option::Option::Some" "_root_.Aeneas.Std.core.option.Option.Some";
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 12 *)
++  mk_fun "core::option::expect_failed" "_root_.Aeneas.Std.core.option.expect_failed";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 7 *)
+   mk_fun "core::option::unwrap_failed" "_root_.Aeneas.Std.core.option.unwrap_failed";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 10 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 15 *)
+   mk_fun "core::option::{core::clone::Clone<core::option::Option<@T>>}::clone" "_root_.Aeneas.Std.core.option.Option.Clone.clone";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 217 *)
+   mk_fun "core::option::{core::cmp::Eq<core::option::Option<@T>>}::assert_receiver_is_total_eq" "_root_.Aeneas.Std.core.option.EqOption.assert_receiver_is_total_eq";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 43 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 48 *)
+   mk_fun "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq" "_root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 13 *)
+   mk_fun "core::option::{core::default::Default<core::option::Option<@T>>}::default" "_root_.Aeneas.Std.core.option.DefaultOption.default";
+@@ -1382,7 +1398,7 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::next" "_root_.Aeneas.Std.core.option.IteratorIter.next";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 402 *)
+   mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::size_hint" "_root_.Aeneas.Std.core.option.IteratorIter.size_hint";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 32 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 37 *)
+   mk_fun "core::option::{core::option::Option<@T>}::expect" "_root_.Aeneas.Std.core.option.Option.expect";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 204 *)
+   mk_fun "core::option::{core::option::Option<@T>}::is_none" "_root_.Aeneas.Std.core.option.Option.is_none" ~can_fail:false ~lift:false;
+@@ -1390,7 +1406,7 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::option::Option<@T>}::is_some" "_root_.Aeneas.Std.core.option.Option.is_some" ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 392 *)
+   mk_fun "core::option::{core::option::Option<@T>}::iter" "_root_.Aeneas.Std.core.option.Option.iter";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 36 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 41 *)
+   mk_fun "core::option::{core::option::Option<@T>}::ok_or" "_root_.Aeneas.Std.core.option.Option.ok_or";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 201 *)
+   mk_fun "core::option::{core::option::Option<@T>}::take" "_root_.Aeneas.Std.core.option.Option.take" ~can_fail:false ~lift:false;
+@@ -1610,6 +1626,10 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::len" "_root_.Aeneas.Std.Slice.len" ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/Slice.lean", line: 291 *)
+   mk_fun "core::slice::{[@T]}::reverse" "_root_.Aeneas.Std.core.slice.Slice.reverse" ~can_fail:false;
++  (* file: "Aeneas/Std/Sort.lean", line: 91 *)
++  mk_fun "core::slice::{[@T]}::sort_unstable" "_root_.Aeneas.Std.core.slice.Slice.sort_unstable";
++  (* file: "Aeneas/Std/Sort.lean", line: 104 *)
++  mk_fun "core::slice::{[@T]}::sort_unstable_by" "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by";
+   (* file: "Aeneas/Std/Slice.lean", line: 667 *)
+   mk_fun "core::slice::{[@T]}::split_at" "_root_.Aeneas.Std.core.slice.Slice.split_at";
+   (* file: "Aeneas/Std/Slice.lean", line: 678 *)
+@@ -1674,23 +1694,25 @@ let lean_builtin_funs = [
+   mk_fun "core::str::{str}::split" "_root_.Aeneas.Std.core.str.Str.split";
+   (* file: "Aeneas/Std/String.lean", line: 288 *)
+   mk_fun "core::str::{str}::starts_with" "_root_.Aeneas.Std.core.str.Str.starts_with";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 101 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 111 *)
+   mk_fun "core::tuple::{core::cmp::Ord<(@U, @T)>}::cmp" "_root_.Aeneas.Std.core.tuple.OrdPair.cmp";
+   (* file: "Aeneas/Std/Tuple.lean", line: 7 *)
+   mk_fun "core::tuple::{core::cmp::PartialEq<(@U, @T), (@U, @T)>}::eq" "_root_.Aeneas.Std.core.tuple.PartialEqPair.eq";
+   (* file: "Aeneas/Std/Tuple.lean", line: 14 *)
+   mk_fun "core::tuple::{core::cmp::PartialEq<(@U, @T), (@U, @T)>}::ne" "_root_.Aeneas.Std.core.tuple.PartialEqPair.ne";
+   (* file: "Aeneas/Std/Tuple.lean", line: 22 *)
++  mk_fun "core::tuple::{core::cmp::PartialEq<(@V, @U, @T), (@V, @U, @T)>}::eq" "_root_.Aeneas.Std.core.tuple.PartialEqTriple.eq";
++  (* file: "Aeneas/Std/Tuple.lean", line: 32 *)
+   mk_fun "core::tuple::{core::cmp::PartialEq<(@W, @V, @U, @T), (@W, @V, @U, @T)>}::eq" "_root_.Aeneas.Std.core.tuple.PartialEqQuad.eq";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 81 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 91 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::ge" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.ge";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 73 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 83 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::gt" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.gt";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 65 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 75 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::le" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.le";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 57 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 67 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::lt" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.lt";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 47 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 57 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::partial_cmp" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.partial_cmp";
+   (* file: "Aeneas/Std/Float.lean", line: 630 *)
+   mk_fun "half::bfloat::{core::clone::Clone<half::bfloat::bf16>}::clone" "_root_.Aeneas.Std.BF16.clone";
+@@ -2044,7 +2066,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<core::num::niche_types::NonZeroU8Inner>" "_root_.Aeneas.Std.core.clone.CloneNonZeroU8Inner";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 245 *)
+   mk_trait_impl "core::clone::Clone<core::num::niche_types::NonZeroUsizeInner>" "_root_.Aeneas.Std.core.clone.CloneNonZeroUsizeInner";
+-  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 23 *)
++  (* file: "Aeneas/Std/Core/CoreOption.lean", line: 28 *)
+   mk_trait_impl "core::clone::Clone<core::option::Option<@T>>" "_root_.Aeneas.Std.core.clone.CloneOption";
+   (* file: "Aeneas/Std/Float.lean", line: 451 *)
+   mk_trait_impl "core::clone::Clone<f32>" "_root_.Aeneas.Std.core.clone.CloneF32";
+@@ -2056,37 +2078,41 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<half::binary16::f16>" "_root_.Aeneas.Std.core.clone.CloneF16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 96 *)
+   mk_trait_impl "core::clone::Clone<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.CloneBigUint";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 41 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 51 *)
+   mk_trait_impl "core::cmp::Eq<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.EqPair";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 266 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 328 *)
+   mk_trait_impl "core::cmp::Eq<Box<@T>>" "_root_.Aeneas.Std.core.cmp.EqBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 70 *)
+   mk_trait_impl "core::cmp::Eq<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.EqSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 129 *)
+   mk_trait_impl "core::cmp::Eq<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.EqString";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 238 *)
++  mk_trait_impl "core::cmp::Eq<char>" "_root_.Aeneas.Std.core.cmp.EqChar";
+   (* file: "Aeneas/Std/BigUint.lean", line: 106 *)
+   mk_trait_impl "core::cmp::Eq<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.EqBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 138 *)
+   mk_trait_impl "core::cmp::Eq<str>" "_root_.Aeneas.Std.core.cmp.EqStr";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 109 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 119 *)
+   mk_trait_impl "core::cmp::Ord<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.OrdPair";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 313 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 375 *)
+   mk_trait_impl "core::cmp::Ord<Box<@T>>" "_root_.Aeneas.Std.core.cmp.OrdBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 146 *)
+   mk_trait_impl "core::cmp::Ord<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.OrdSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 158 *)
+   mk_trait_impl "core::cmp::Ord<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.OrdString";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 286 *)
++  mk_trait_impl "core::cmp::Ord<char>" "_root_.Aeneas.Std.core.cmp.OrdChar";
+   (* file: "Aeneas/Std/BigUint.lean", line: 117 *)
+   mk_trait_impl "core::cmp::Ord<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.OrdBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 179 *)
+   mk_trait_impl "core::cmp::Ord<str>" "_root_.Aeneas.Std.core.cmp.OrdStr";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 242 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 304 *)
+   mk_trait_impl "core::cmp::PartialEq<&'a @A, &'b @B>" "_root_.Aeneas.Std.core.cmp.PartialEqShared";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 193 *)
+   mk_trait_impl "core::cmp::PartialEq<(), ()>" "_root_.Aeneas.Std.core.cmp.PartialEqUnit";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 33 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 43 *)
+   mk_trait_impl "core::cmp::PartialEq<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialEqPair";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 259 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 321 *)
+   mk_trait_impl "core::cmp::PartialEq<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialEqBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 63 *)
+   mk_trait_impl "core::cmp::PartialEq<[@T], [@U]>" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst";
+@@ -2102,6 +2128,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>" "_root_.Aeneas.Std.core.cmp.PartialEqVec" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 210 *)
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 232 *)
++  mk_trait_impl "core::cmp::PartialEq<char, char>" "_root_.Aeneas.Std.core.cmp.PartialEqChar";
+   (* file: "Aeneas/Std/Core/Discriminant.lean", line: 72 *)
+   mk_trait_impl "core::cmp::PartialEq<core::mem::Discriminant<@T>, core::mem::Discriminant<@T>>" "_root_.Aeneas.Std.core.mem.PartialEqDiscriminant";
+   (* file: "Aeneas/Std/Float.lean", line: 424 *)
+@@ -2116,14 +2144,16 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.PartialEqBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 120 *)
+   mk_trait_impl "core::cmp::PartialEq<str, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStr";
+-  (* file: "Aeneas/Std/Tuple.lean", line: 89 *)
++  (* file: "Aeneas/Std/Tuple.lean", line: 99 *)
+   mk_trait_impl "core::cmp::PartialOrd<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialOrdPair";
+-  (* file: "Aeneas/Std/Core/Cmp.lean", line: 298 *)
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 360 *)
+   mk_trait_impl "core::cmp::PartialOrd<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialOrdBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 120 *)
+   mk_trait_impl "core::cmp::PartialOrd<[@T], [@T]>" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSliceInst";
+   (* file: "Aeneas/Std/String.lean", line: 152 *)
+   mk_trait_impl "core::cmp::PartialOrd<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialOrdString";
++  (* file: "Aeneas/Std/Core/Cmp.lean", line: 274 *)
++  mk_trait_impl "core::cmp::PartialOrd<char, char>" "_root_.Aeneas.Std.core.cmp.PartialOrdChar";
+   (* file: "Aeneas/Std/Float.lean", line: 440 *)
+   mk_trait_impl "core::cmp::PartialOrd<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialOrdF32";
+   (* file: "Aeneas/Std/Float.lean", line: 580 *)
+diff --git a/src/llbc/SortContracts.ml b/src/llbc/SortContracts.ml
+new file mode 100644
+index 0000000..3faf355
+--- /dev/null
++++ b/src/llbc/SortContracts.ml
+@@ -0,0 +1,318 @@
++(** Admission for the models of [<[T]>::sort_unstable] and
++    [<[T]>::sort_unstable_by] (Aeneas.Std.Sort).
++
++    Natively, the order of the elements that compare [Equal], and the sequence of
++    comparisons, are unspecified. The models (a stable sort) return the native
++    result exactly when the comparison is pure and total and returns [Equal] only
++    for indistinguishable values: then every sorted permutation is the same list.
++
++    [sort_unstable] compares with the element type's [Ord]. By coherence a type
++    has a single [Ord] impl, so this is a property of the element type. It holds
++    for the integer types, [bool], [char], [str] and [String], for references,
++    boxes and tuples of such types, and for non-generic crate types whose [Ord]
++    impl is derived and whose fields all have such types (the derived [cmp]
++    compares the variants, then the fields in order). A derived impl is the one
++    rustc marks [#[automatically_derived]], which Charon keeps as an unknown
++    attribute.
++
++    [sort_unstable_by] is admitted when its comparator is a closure whose body
++    returns [Ord::cmp(a, b)] (ascending) or [Ord::cmp(b, a)] (descending) of its
++    two arguments, for an element type as above; the model sorts with that
++    comparator. Every other comparator, and every call to [sort_unstable_by_key]
++    (equal keys may hide distinct elements), is rejected with
++    [E_UNSUPPORTED_SORT]. *)
++
++open Types
++open Expressions
++open LlbcAst
++open Errors
++
++let check (crate : crate) : crate =
++  if Config.backend () <> Config.Lean then crate
++  else
++    let env = Print.crate_to_fmt_env crate in
++    let mctx = NameMatcher.ctx_from_crate crate in
++    let config =
++      {
++        NameMatcher.map_vars_to_vars = true;
++        match_with_trait_decl_refs = Config.match_patterns_with_trait_decl_refs;
++      }
++    in
++    let pattern s = NameMatcher.parse_pattern s in
++    let sort_unstable = pattern "core::slice::{[@T]}::sort_unstable" in
++    let sort_by = pattern "core::slice::{[@T]}::sort_unstable_by" in
++    let sort_by_key = pattern "core::slice::{[@T]}::sort_unstable_by_key" in
++    let matches pat (name : name) = NameMatcher.match_name mctx config pat name in
++    let name_of (name : name) = Print.name_to_string env name in
++    let reject span reason =
++      [%craise] span
++        ("E_UNSUPPORTED_SORT: " ^ reason
++       ^ ". The sort_unstable models are admitted only where the comparison is \
++          Ord::cmp on a type whose Equal holds exactly for indistinguishable \
++          values (integers, bool, char, str, String, references, boxes, tuples \
++          and #[derive(Ord)] types of those), where every sorted permutation is \
++          the same list.")
++    in
++    let trait_name id =
++      name_of (TraitDeclId.Map.find id crate.trait_decls).item_meta.name
++    in
++    let derived (impl : trait_impl) =
++      List.exists
++        (function
++          | Meta.AttrUnknown { path = "automatically_derived"; args = None } ->
++              true
++          | _ -> false)
++        impl.item_meta.attr_info.attributes
++    in
++    let ord_impl (adt : TypeDeclId.id) =
++      TraitImplId.Map.fold
++        (fun _ (impl : trait_impl) found ->
++          match found with
++          | Some _ -> found
++          | None -> (
++              if trait_name impl.impl_trait.id <> "core::cmp::Ord" then None
++              else
++                match impl.impl_trait.generics.types with
++                | [ TAdt { id = TAdtId id; _ } ] when id = adt -> Some impl
++                | _ -> None))
++        crate.trait_impls None
++    in
++    (* [visiting]: the crate types under examination (a recursive type is
++       structural if its other fields are). *)
++    let rec structural span visiting (ty : ty) : unit =
++      let unsupported why =
++        reject span ("the element type " ^ Print.ty_to_string env ty ^ " " ^ why)
++      in
++      match ty with
++      | TLiteral (TInt _ | TUInt _ | TBool | TChar) -> ()
++      | TLiteral (TFloat _) -> unsupported "has no total order"
++      | TRef (_, inner, _) -> structural span visiting inner
++      | TAdt { id = TTuple; generics } | TAdt { id = TBuiltin TBox; generics } ->
++          List.iter (structural span visiting) generics.types
++      | TAdt { id = TBuiltin TStr; _ } -> ()
++      | TAdt { id = TAdtId id; generics } -> (
++          let decl = TypeDeclId.Map.find id crate.type_decls in
++          if name_of decl.item_meta.name = "alloc::string::String" then ()
++          else if List.mem id visiting then ()
++          else if generics.types <> [] || generics.const_generics <> [] then
++            unsupported "is generic"
++          else
++            match ord_impl id with
++            | None -> unsupported "has no Ord impl in the crate"
++            | Some impl when not (derived impl) ->
++                unsupported
++                  "has an Ord impl without #[automatically_derived] (a \
++                   hand-written Equal may hold between distinct values)"
++            | Some _ -> (
++                let fields =
++                  match decl.kind with
++                  | Struct fields -> fields
++                  | Enum variants ->
++                      List.concat_map (fun (v : variant) -> v.fields) variants
++                  | _ -> unsupported "is not a struct or an enum"
++                in
++                List.iter
++                  (fun (field : field) ->
++                    structural span (id :: visiting) field.field_ty)
++                  fields))
++      | _ -> unsupported "is not a reviewed Ord type"
++    in
++    (* Whether a call target is [Ord::cmp] (of any impl: the argument types fix
++       the implementing type). *)
++    let is_ord_cmp (ptr : fn_ptr) =
++      match ptr.kind with
++      | TraitMethod (tr, "cmp", _) ->
++          trait_name tr.trait_decl_ref.binder_value.id = "core::cmp::Ord"
++      | FunId (FRegular id) -> (
++          match (FunDeclId.Map.find id crate.fun_decls).src with
++          | TraitImplItem (_, trait_ref, "cmp", _) ->
++              trait_name trait_ref.id = "core::cmp::Ord"
++          | _ -> false)
++      | _ -> false
++    in
++    (* The comparator of [sort_unstable_by] over [elem]: the [FnMut] impl [tr]
++       must be a closure's, whose [call_mut] body, apart from storage markers
++       and references to the unit metadata (the metadata of the reborrows),
++       only moves or reborrows the two arguments (fields 0 and 1 of the tupled
++       arguments) and returns [Ord::cmp] of them, in either order. The closure
++       state is never read. *)
++    let comparator span (elem : ty) (tr : trait_ref) =
++      let unsupported why =
++        reject span ("sort_unstable_by: the comparator " ^ why)
++      in
++      let impl_ref =
++        match tr.kind with
++        | TraitImpl impl_ref -> impl_ref
++        | _ -> unsupported "is not a closure"
++      in
++      let impl = TraitImplId.Map.find impl_ref.id crate.trait_impls in
++      let is_closure_impl =
++        match impl.impl_trait.generics.types with
++        | TAdt { id = TAdtId id; _ } :: _ -> (
++            match (TypeDeclId.Map.find id crate.type_decls).src with
++            | ClosureItem { fn_mut_impl = Some fn_mut; _ } ->
++                fn_mut.binder_value.id = impl_ref.id
++            | _ -> false)
++        | _ -> false
++      in
++      if not is_closure_impl then unsupported "is not a closure";
++      let call_mut =
++        match List.assoc_opt "call_mut" impl.methods with
++        | Some method_ref -> method_ref.binder_value.id
++        | None -> unsupported "has no call_mut"
++      in
++      let body =
++        match (FunDeclId.Map.find call_mut crate.fun_decls).body with
++        | StructuredBody body when body.locals.arg_count = 2 -> body
++        | _ -> unsupported "has no body"
++      in
++      let tupled_args = LocalId.of_int 2 in
++      let return_local = LocalId.of_int 0 in
++      (* The locals holding a reference to argument 0 or 1, and the locals
++         holding a reference to the unit metadata global (the pre-pass
++         decompose_global_accesses introduces them for the metadata operand of
++         the reborrows [&*a]). *)
++      let origins = ref LocalId.Map.empty in
++      let unit_refs = ref LocalId.Set.empty in
++      let is_unit_metadata (gref : global_decl_ref) =
++        gref.id = crate.unit_metadata.id
++      in
++      let unit_metadata_operand = function
++        | Copy { kind = PlaceGlobal gref; _ } -> is_unit_metadata gref
++        | Copy { kind = PlaceProjection ({ kind = PlaceLocal id; _ }, Deref); _ }
++          ->
++            LocalId.Set.mem id !unit_refs
++        | _ -> false
++      in
++      let place_origin (place : place) =
++        match place.kind with
++        | PlaceLocal id -> LocalId.Map.find_opt id !origins
++        | PlaceProjection
++            ({ kind = PlaceLocal id; _ }, Field (ProjTuple 2, field))
++          when id = tupled_args ->
++            Some (FieldId.to_int field)
++        | _ -> None
++      in
++      let rvalue_origin = function
++        | Use (Move place | Copy place) -> place_origin place
++        | RvRef ({ kind = PlaceProjection (inner, Deref); _ }, BShared, metadata)
++          when unit_metadata_operand metadata ->
++            place_origin inner
++        | _ -> None
++      in
++      let argument (operand : operand) =
++        match operand with
++        | Move place | Copy place -> (
++            match
++              (place_origin place, TypesUtils.ty_erase_regions place.ty)
++            with
++            | Some index, TRef (_, pointee, RShared)
++              when pointee = TypesUtils.ty_erase_regions elem ->
++                index
++            | _ -> unsupported "does not pass its arguments to Ord::cmp")
++        | Constant _ -> unsupported "does not pass its arguments to Ord::cmp"
++      in
++      let rec walk compared (statements : statement list) =
++        match (statements, compared) with
++        | [ { kind = Return; _ } ], true -> ()
++        | { kind = StorageLive _ | StorageDead _ | Nop; _ } :: rest, _ ->
++            walk compared rest
++        | {
++            kind =
++              Assign
++                ( { kind = PlaceLocal id; _ },
++                  RvRef ({ kind = PlaceGlobal gref; _ }, BShared, metadata) );
++            _;
++          }
++          :: rest,
++          false
++          when id <> return_local && is_unit_metadata gref
++               && unit_metadata_operand metadata ->
++            origins := LocalId.Map.remove id !origins;
++            unit_refs := LocalId.Set.add id !unit_refs;
++            walk compared rest
++        | { kind = Assign ({ kind = PlaceLocal id; _ }, rvalue); _ } :: rest, false
++          when id <> return_local -> (
++            match rvalue_origin rvalue with
++            | Some index ->
++                origins := LocalId.Map.add id index !origins;
++                unit_refs := LocalId.Set.remove id !unit_refs;
++                walk compared rest
++            | None -> unsupported "computes more than Ord::cmp of its arguments")
++        | { kind = Call { func = FnOpRegular ptr; args = [ a; b ]; dest }; _ }
++          :: rest,
++          false
++          when dest.kind = PlaceLocal return_local && is_ord_cmp ptr ->
++            (match (argument a, argument b) with
++            | 0, 1 | 1, 0 -> ()
++            | _ -> unsupported "does not compare its two arguments");
++            walk true rest
++        | _ ->
++            unsupported "is not Ord::cmp(a, b) or Ord::cmp(b, a) of its arguments"
++      in
++      walk false body.body.statements;
++      structural span [] elem
++    in
++    (* A partial-monomorphization instance (last name element [PeInstantiated],
++       e.g. [sort_unstable_by] at a closure that captures a mutable borrow) is
++       the generic function at the instantiated arguments, and
++       [PrePasses.admit_modeled_fun_instances] gives it the same model: check
++       the generic name at those arguments. *)
++    let check_ptr span (ptr : fn_ptr) =
++      match ptr.kind with
++      | FunId (FRegular id) -> (
++          let decl = FunDeclId.Map.find id crate.fun_decls in
++          let name, generics =
++            NameMatcher.instantiate_name_generics decl.item_meta.name
++              ptr.generics
++          in
++          if matches sort_by name then
++            match (generics.types, generics.trait_refs) with
++            | [ element; _ ], [ compare ] -> comparator span element compare
++            | _ -> reject span "unexpected generics of sort_unstable_by"
++          else if matches sort_by_key name then
++            reject span
++              "sort_unstable_by_key: equal keys may hide distinct elements"
++          else if matches sort_unstable name then
++            match generics.types with
++            | [ element ] -> structural span [] element
++            | _ -> reject span "unexpected generics of sort_unstable")
++      | _ -> ()
++    in
++    let failed = ref FunDeclId.Map.empty in
++    FunDeclId.Map.iter
++      (fun id (decl : fun_decl) ->
++        match decl.body with
++        | StructuredBody body -> (
++            let visitor =
++              object
++                inherit [_] iter_statement as super
++                method! visit_fn_ptr span ptr = check_ptr span ptr
++
++                method! visit_statement _ st =
++                  super#visit_statement st.span st
++              end
++            in
++            try
++              [%recover_internal_errors] decl.item_meta.span (fun () ->
++                  visitor#visit_block decl.item_meta.span body.body)
++            with CFailure e -> failed := FunDeclId.Map.add id e !failed)
++        | _ -> ())
++      crate.fun_decls;
++    let fun_decls =
++      FunDeclId.Map.mapi
++        (fun id (decl : fun_decl) ->
++          match FunDeclId.Map.find_opt id !failed with
++          | None -> decl
++          | Some e ->
++              [%save_error] decl.item_meta.span
++                ("Ignoring the body of '"
++                ^ name_of decl.item_meta.name
++                ^ "' because of previous error");
++              let msg =
++                format_error_message_with_file_line e.file e.line e.span e.msg
++              in
++              { decl with body = ErrorBody { span = decl.item_meta.span; msg } })
++        crate.fun_decls
++    in
++    { crate with fun_decls }
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 00d6040..fb87b73 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -369,7 +369,8 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+   | "_root_.Aeneas.Std.core.slice.iter.IntoIteratorMutSlice.into_iter"
+   | "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ->
+       Some (BorrowedStorage 0)
+-  | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key" ->
++  | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key"
++  | "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by" ->
+       Some (Canonical (State [ 0; 1 ]))
+   | "_root_.Aeneas.Std.core.hint.must_use"
+   | "_root_.Aeneas.Std.core.convert.FromSame.from_"

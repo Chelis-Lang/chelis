@@ -1,0 +1,1478 @@
+# aeneas integration step 76 after cba11f3beb: commit 001522562ed420f2dc2a8ed63d807721ddea8291
+# first parent 2900db8bf923aa012703688fc37a2fbd3f92a717, merged 82d33a439f15c32efb95f9eed1889b931cb02173
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/collection-contracts' (W3b: collection obligations across chunks via manifest facts; E26: obligations of trait methods called through generic dictionaries)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 07d08c0..005fa4d 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -778,6 +778,7 @@ let sc_fun_facts (ctx : gen_ctx) (id : FunDeclId.id) : SC.fun_facts =
+         state_inputs = ModelStateInputs.for_decl ctx.crate decl;
+         canonical_body =
+           ModelStateInputs.canonical_body_state_inputs ctx.crate decl;
++        collection_obligations = CollectionContracts.manifest_obligations id;
+       }
+   | None ->
+       [%craise] decl.item_meta.span
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 0f0984d..097acb6 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -14,7 +14,17 @@
+     fold, for_each, try_fold, size_hint) agrees with them: see [LawfulIterator]
+     in the Lean library. A crate iterator's own size_hint leaves a collection
+     obligation, its totality, stated in the generated Lean and listed by
+-    [-emit-collection-obligations] for a checked theorem to prove. *)
++    [-emit-collection-obligations] for a checked theorem to prove.
++
++    A trait method's implementation is also called through generic
++    dictionaries, which do not name it. Its obligations on the clauses of its
++    implementation are therefore discharged wherever the implementation's
++    dictionary is built; obligations on the method's own parameters could only
++    be discharged at a call that names the implementation, so they are
++    rejected (except for the reviewed collectors FromIterator::from_iter and
++    Extend::extend, whose generic dispatch is itself rejected). Across chunks,
++    the obligations of an earlier chunk's functions come from its manifest
++    facts. *)
+ 
+ open Types
+ open Expressions
+@@ -44,9 +54,45 @@ let size_hint_impls : TraitImplId.Set.t ref = ref TraitImplId.Set.empty
+     checked theorem to discharge. *)
+ let size_hint_obligations : TraitImplId.Set.t ref = ref TraitImplId.Set.empty
+ 
++(** The deferred obligations of the declarations that the last [check] saw
++    (none for a body without them, or a declaration without a body); rejected
++    bodies and opaque custom FromIterator::from_iter are absent. *)
++let reviewed : obligation list FunDeclId.Map.t ref = ref FunDeclId.Map.empty
++
++(** A dictionary as a path from one of the function's own clauses through
++    parent clauses (innermost first), if it is one. *)
++let rec clause_path (tr : trait_ref) : (int * int list) option =
++  match tr.kind with
++  | Clause (Free clause) -> Some (TraitClauseId.to_int clause, [])
++  | ParentClause (inner, clause) ->
++      Option.map
++        (fun (root, parents) -> (root, parents @ [ TraitClauseId.to_int clause ]))
++        (clause_path inner)
++  | _ -> None
++
++(** The separate-compilation facts of a reviewed body: its deferred
++    obligations as clause paths, for the callers in later chunks. [None] if the
++    body was not reviewed or an obligation is not a clause path. *)
++let manifest_obligations (id : FunDeclId.id) :
++    SeparateCompilation.collection_obligation list option =
++  Option.bind (FunDeclId.Map.find_opt id !reviewed) (fun obligations ->
++      let path into tr =
++        Option.map
++          (fun (clause, parents) -> { SeparateCompilation.into; clause; parents })
++          (clause_path tr)
++      in
++      let paths =
++        List.map
++          (function Iter tr -> path false tr | Into tr -> path true tr)
++          obligations
++      in
++      if List.for_all Option.is_some paths then Some (List.map Option.get paths)
++      else None)
++
+ let check ~(evidence : crate) (crate : crate) : crate =
+   if Config.backend () <> Config.Lean then crate
+   else
++    let () = reviewed := FunDeclId.Map.empty in
+     let mctx = NameMatcher.ctx_from_crate evidence in
+     let rec native_name name =
+       match List.rev name with
+@@ -118,6 +164,78 @@ let check ~(evidence : crate) (crate : crate) : crate =
+     let obligations : obligation list FunDeclId.Map.t ref =
+       ref FunDeclId.Map.empty
+     in
++    (* The reviewed bodies that an earlier chunk owns: a later chunk keeps only
++       their declarations, and their deferred obligations come from the owner's
++       manifest facts, as clause paths over the declaration's own clauses. A
++       path that does not fit the declaration is not evidence: the function is
++       then treated as unreviewed. *)
++    let external_obligations (decl : fun_decl)
++        (paths : SeparateCompilation.collection_obligation list) =
++      let find_clause (params : trait_param list) index =
++        List.find_opt
++          (fun (param : trait_param) -> TraitClauseId.to_int param.clause_id = index)
++          params
++      in
++      let parent (inner : trait_ref option) index =
++        Option.bind inner (fun (inner : trait_ref) ->
++            let decl_ref = inner.trait_decl_ref.binder_value in
++            if inner.trait_decl_ref.binder_regions <> [] then None
++            else
++              Option.bind
++                (TraitDeclId.Map.find_opt decl_ref.id evidence.trait_decls)
++                (fun (trait_decl : trait_decl) ->
++                  Option.bind (find_clause trait_decl.implied_clauses index)
++                    (fun (param : trait_param) ->
++                      if param.trait.binder_regions <> [] then None
++                      else
++                        try
++                          let subst =
++                            Charon.Substitute.make_subst_from_generics
++                              trait_decl.generics decl_ref.generics inner.kind
++                          in
++                          Some
++                            {
++                              kind = ParentClause (inner, param.clause_id);
++                              trait_decl_ref =
++                                {
++                                  param.trait with
++                                  binder_value =
++                                    Substitute.trait_decl_ref_substitute subst
++                                      param.trait.binder_value;
++                                };
++                            }
++                        with Not_found | Invalid_argument _ -> None)))
++      in
++      let obligation (path : SeparateCompilation.collection_obligation) =
++        let root =
++          Option.map
++            (fun (param : trait_param) ->
++              { kind = Clause (Free param.clause_id); trait_decl_ref = param.trait })
++            (find_clause decl.generics.trait_clauses path.clause)
++        in
++        Option.map
++          (fun tr -> if path.into then Into tr else Iter tr)
++          (List.fold_left parent root path.parents)
++      in
++      let required = List.map obligation paths in
++      if List.for_all Option.is_some required then
++        Some (List.map Option.get required)
++      else None
++    in
++    let external_reviewed =
++      FunDeclId.Map.fold
++        (fun id (decl : fun_decl) reviewed ->
++          match SeparateCompilation.external_collection_obligations id with
++          | None -> reviewed
++          | Some paths -> (
++              match external_obligations decl paths with
++              | None -> reviewed
++              | Some required ->
++                  if required <> [] then
++                    obligations := FunDeclId.Map.add id required !obligations;
++                  FunDeclId.Set.add id reviewed))
++        evidence.fun_decls FunDeclId.Set.empty
++    in
+     let current : FunDeclId.id option ref = ref None in
+     let changed = ref false in
+     let rec generic_root (tr : trait_ref) =
+@@ -494,7 +612,21 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       | _ -> false
+     in
+     let check_into span tr = check_into span [] tr in
++    (* A function owned by an earlier chunk defers its obligations to its
++       callers here too: without its reviewed collection facts, a call that
++       could instantiate them (any trait clause) is not admitted. *)
+     let discharge span (callee : fun_decl) (generics : generic_args) =
++      if
++        SeparateCompilation.is_external (IdFun callee.def_id)
++        && callee.generics.trait_clauses <> []
++        && not (FunDeclId.Set.mem callee.def_id external_reviewed)
++      then
++        reject span
++          ("the collection obligations of "
++          ^ Print.name_to_string (Print.crate_to_fmt_env evidence)
++              callee.item_meta.name
++          ^ ", owned by an earlier chunk, are unknown: its manifest entry has \
++             no reviewed collection facts");
+       match FunDeclId.Map.find_opt callee.def_id !obligations with
+       | None -> ()
+       | Some required ->
+@@ -516,6 +648,137 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               | Into tr -> check_into span tr)
+             required
+     in
++    let name_of (decl : fun_decl) =
++      Print.name_to_string (Print.crate_to_fmt_env evidence) decl.item_meta.name
++    in
++    let rec root_clause (tr : trait_ref) =
++      match tr.kind with
++      | Clause (Free clause) -> Some (TraitClauseId.to_int clause)
++      | ParentClause (inner, _) | ItemClause (inner, _, _) -> root_clause inner
++      | _ -> None
++    in
++    let obligation_root = function Iter tr | Into tr -> root_clause tr in
++    (* The number of trait clauses of an implementation: the generics of its
++       methods start with its own, so that an obligation of a method rooted in a
++       clause below it is on the implementation's parameters (impl-level), and
++       one above it on the method's own (method-level). *)
++    let impl_clauses (id : TraitImplId.id) =
++      List.length (TraitImplId.Map.find id evidence.trait_impls).generics.trait_clauses
++    in
++    (* A method of a trait implementation is also called through generic
++       dictionaries (a clause of the caller, later instantiated with the
++       implementation), where [check_ptr] does not see the callee. Its
++       impl-level obligations are discharged where the dictionary is built:
++       every implementation reference of a body, and the dictionaries that its
++       header implies (parent and associated-type clauses, trait arguments),
++       which generic code reaches by projection. Its method-level obligations
++       cannot be: see [dispatch_only]. Memoized per function and scan pass. *)
++    let constructed : (FunDeclId.id option * trait_ref, unit) Hashtbl.t =
++      Hashtbl.create 256
++    in
++    let dictionaries =
++      object (self)
++        inherit [_] iter_statement as super
++
++        method! visit_trait_ref span tr =
++          super#visit_trait_ref span tr;
++          self#construct span tr
++
++        (* An implementation that Charon did not translate has neither method
++           bodies nor a header here. *)
++        method construct span (tr : trait_ref) =
++          match tr.kind with
++          | TraitImpl reference
++            when TraitImplId.Map.mem reference.id evidence.trait_impls
++                 && not (Hashtbl.mem constructed (!current, tr)) ->
++              Hashtbl.add constructed (!current, tr) ();
++              let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
++              let clauses = List.length impl.generics.trait_clauses in
++              let subst =
++                instantiate span "an implementation dictionary" (fun () ->
++                    [%add_loc] Substitute.make_subst_from_generics (Some span)
++                      impl.generics reference.generics (TraitImpl reference))
++              in
++              List.iter
++                (fun (_, (method_ref : fun_decl_ref binder)) ->
++                  let id = method_ref.binder_value.id in
++                  match FunDeclId.Map.find_opt id evidence.fun_decls with
++                  | None -> ()
++                  | Some callee -> (
++                      if
++                        clauses > 0
++                        && SeparateCompilation.is_external (IdFun id)
++                        && not (FunDeclId.Set.mem id external_reviewed)
++                      then
++                        reject span
++                          ("the collection obligations of " ^ name_of callee
++                         ^ ", owned by an earlier chunk, are unknown: its \
++                            manifest entry has no reviewed collection facts");
++                      match FunDeclId.Map.find_opt id !obligations with
++                      | None -> ()
++                      | Some required ->
++                          (match callee.src with
++                          | TraitImplItem (impl_ref, _, _, _)
++                            when impl_ref.id = impl.def_id -> ()
++                          | _ ->
++                              reject span
++                                ("the collection obligations of " ^ name_of callee
++                               ^ ", which is not a method of its implementation's \
++                                  own, cannot be instantiated with that \
++                                  implementation's dictionary"));
++                          List.iter
++                            (fun obligation ->
++                              match obligation_root obligation with
++                              | Some clause when clause < clauses -> (
++                                  match
++                                    instantiate span
++                                      "an implementation's collection obligation"
++                                      (fun () ->
++                                        match obligation with
++                                        | Iter tr ->
++                                            Iter (Substitute.trait_ref_substitute subst tr)
++                                        | Into tr ->
++                                            Into (Substitute.trait_ref_substitute subst tr))
++                                  with
++                                  | Iter tr -> check_iterator span [] tr
++                                  | Into tr -> check_into span tr)
++                              | _ -> ())
++                            required))
++                impl.methods;
++              List.iter
++                (fun parent ->
++                  self#visit_trait_ref span (Substitute.trait_ref_substitute subst parent))
++                impl.implied_trait_refs;
++              self#visit_trait_decl_ref span
++                (Substitute.trait_decl_ref_substitute subst impl.impl_trait)
++          | _ -> ()
++      end
++    in
++    (* A method-level obligation of a trait method's implementation: it would be
++       lost when the method is called through a generic dictionary. The
++       reviewed collectors are exempt: FromIterator::from_iter and Extend::extend
++       through a generic dictionary are rejected ([needs_check], the extend
++       dispatch of [check_ptr]). *)
++    let dispatch_only (decl : fun_decl) (required : obligation list) =
++      match decl.src with
++      | TraitImplItem (impl_ref, trait, name, _) ->
++          let exempt =
++            match trait_name trait.id with
++            | Some trait -> (trait = from_iterator && name = "from_iter")
++                            || (trait = extend && name = "extend")
++            | None -> false
++          in
++          (not exempt)
++          &&
++          let clauses = impl_clauses impl_ref.id in
++          List.exists
++            (fun obligation ->
++              match obligation_root obligation with
++              | Some clause -> clause >= clauses
++              | None -> true)
++            required
++      | _ -> false
++    in
+     let modeled_collectors =
+       List.map (( ^ ) prefix)
+         [ "core.iter.traits.collect.FromIteratorVec";
+@@ -542,15 +805,16 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           needs_check span seen (one span from_iterator args)
+       | Some _ -> reject span "unreviewed modeled FromIterator dispatch"
+       | None ->
+-          (* Its real Rust body is translated and independently checked below.
+-             A wrapper is not permission to ignore a generic collector call. *)
++          (* Its real Rust body is translated and independently checked below
++             (or, owned by an earlier chunk, was checked there). A wrapper is
++             not permission to ignore a generic collector call. *)
+           (match List.assoc_opt "from_iter" impl.methods with
+           | Some method_ref -> (
+-              match
+-                (FunDeclId.Map.find method_ref.binder_value.id evidence.fun_decls).body
+-              with
+-              | StructuredBody _ ->
+-                  FunDeclId.Map.mem method_ref.binder_value.id !obligations
++              let id = method_ref.binder_value.id in
++              match (FunDeclId.Map.find id evidence.fun_decls).body with
++              | StructuredBody _ -> FunDeclId.Map.mem id !obligations
++              | _ when FunDeclId.Set.mem id external_reviewed ->
++                  FunDeclId.Map.mem id !obligations
+               | _ -> reject span "opaque custom FromIterator implementation")
+           | None -> reject span "missing custom FromIterator implementation")
+     in
+@@ -642,13 +906,14 @@ let check ~(evidence : crate) (crate : crate) : crate =
+             check_iterator span [] tr
+       | _ -> ()
+     in
+-    (* Obligations only grow; rescan until every call has seen its callee's
+-       complete obligations. A rejected collector makes its function body
+-       untranslatable, exactly as an error in a body prepass does: it is
+-       reported and only that body is dropped. *)
++    (* Obligations only grow; rescan until every call and every dictionary
++       construction has seen its callee's complete obligations. A rejected
++       collector makes its function body untranslatable, exactly as an error in
++       a body prepass does: it is reported and only that body is dropped. *)
+     let failed = ref FunDeclId.Map.empty in
+     let rec scan () =
+       changed := false;
++      Hashtbl.reset constructed;
+       FunDeclId.Map.iter
+         (fun id (decl : fun_decl) ->
+           if Option.is_none (fun_name decl) && not (FunDeclId.Map.mem id !failed) then
+@@ -658,7 +923,14 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                 let visitor =
+                   object
+                     inherit [_] iter_statement as super
+-                    method! visit_fn_ptr span ptr = check_ptr span ptr
++
++                    method! visit_fn_ptr span ptr =
++                      check_ptr span ptr;
++                      super#visit_fn_ptr span ptr
++
++                    method! visit_trait_ref span tr =
++                      super#visit_trait_ref span tr;
++                      dictionaries#construct span tr
+ 
+                     method! visit_statement _ st =
+                       super#visit_statement st.span st
+@@ -674,6 +946,42 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       if !changed then scan ()
+     in
+     scan ();
++    FunDeclId.Map.iter
++      (fun id required ->
++        match FunDeclId.Map.find_opt id crate.fun_decls with
++        | Some decl
++          when (not (FunDeclId.Map.mem id !failed)) && dispatch_only decl required
++          -> (
++            try
++              [%recover_internal_errors] decl.item_meta.span (fun () ->
++                  reject decl.item_meta.span
++                    ("the trait method implementation " ^ name_of decl
++                   ^ " collects from an iterator given by its own generic \
++                      parameters: its collection obligation cannot be \
++                      discharged when it is called through a generic \
++                      dictionary, where the implementation is unknown"))
++            with CFailure e -> failed := FunDeclId.Map.add id e !failed)
++        | _ -> ())
++      !obligations;
++    (* The facts of this chunk's declarations, as its own checks use them: a
++       reviewed body has its obligations; a declaration without a body calls no
++       collector ([discharge] admits calls to it), except the from_iter of a
++       custom FromIterator, which is admitted only through its reviewed body
++       ([needs_check] rejects it): no facts, so that a later chunk rejects it
++       too. Rejected bodies have no facts. *)
++    reviewed :=
++      FunDeclId.Map.filter_map
++        (fun id (decl : fun_decl) ->
++          if FunDeclId.Map.mem id !failed then None
++          else
++            match (decl.body, decl.src) with
++            | StructuredBody _, _ ->
++                Some (Option.value ~default:[] (FunDeclId.Map.find_opt id !obligations))
++            | _, TraitImplItem (_, trait, "from_iter", _)
++              when trait_name trait.id = Some from_iterator ->
++                None
++            | _ -> Some [])
++        crate.fun_decls;
+     let fun_decls =
+       FunDeclId.Map.mapi
+         (fun id (decl : fun_decl) ->
+diff --git a/src/llbc/SeparateCompilation.ml b/src/llbc/SeparateCompilation.ml
+index f4a721d..9a90fad 100644
+--- a/src/llbc/SeparateCompilation.ml
++++ b/src/llbc/SeparateCompilation.ml
+@@ -25,6 +25,13 @@ open LlbcAst
+ 
+ let log = Logging.translate_log
+ 
++(** A deferred collection obligation of a function (see
++    [CollectionContracts]): at every call, the function's own trait clause
++    [clause], projected through the parent clauses [parents] (innermost first),
++    must resolve to a reviewed iterator, or, if [into], to an IntoIterator whose
++    iterator is reviewed. *)
++type collection_obligation = { into : bool; clause : int; parents : int list }
++
+ (** Facts about a function that the translation of its callers (and its own
+     signature) derives from its body. External functions may be opaque in a
+     later chunk: they use the owner's facts. *)
+@@ -38,6 +45,14 @@ type fun_facts = {
+           an output of the translated signature) *)
+   canonical_body : int list option;
+       (** See [ModelStateInputs.canonical_body_state_inputs] *)
++  collection_obligations : collection_obligation list option;
++      (** The deferred collection obligations of a function that
++          [CollectionContracts] saw ([Some []]: none, as for a declaration
++          without a body). [None]: its body was rejected, it is the opaque
++          from_iter of a custom FromIterator, or its obligations are not clause
++          paths; the calls that could instantiate them are then rejected, as
++          without a manifest. Absent from manifests written before this field,
++          which therefore read as [None]. *)
+ }
+ 
+ type entry = {
+@@ -163,26 +178,45 @@ let external_fun_facts (id : FunDeclId.id) : fun_facts option =
+   | Some { facts = Some facts; _ } -> Some facts
+   | _ -> None
+ 
++let external_collection_obligations (id : FunDeclId.id) :
++    collection_obligation list option =
++  Option.bind (external_fun_facts id) (fun facts -> facts.collection_obligations)
++
+ (** {1 Manifests} *)
+ 
+ (** Register an error. The run fails (and writes no complete manifest), but all
+     the inconsistencies are reported, even with [-abort-on-error]. *)
+ let fail (msg : string) : unit = Errors.push_error __FILE__ __LINE__ None msg
+ 
+-let facts_to_json (f : fun_facts) : Yojson.Basic.t =
++let collection_obligation_to_json (o : collection_obligation) : Yojson.Basic.t =
+   `Assoc
+     [
+-      ("can_fail", `Bool f.can_fail);
+-      ("stateful", `Bool f.stateful);
+-      ("can_diverge", `Bool f.can_diverge);
+-      ("is_rec", `Bool f.is_rec);
+-      ("state_inputs", `List (List.map (fun i -> `Int i) f.state_inputs));
+-      ( "canonical_body",
+-        match f.canonical_body with
+-        | None -> `Null
+-        | Some l -> `List (List.map (fun i -> `Int i) l) );
++      ("into", `Bool o.into);
++      ("clause", `Int o.clause);
++      ("parents", `List (List.map (fun i -> `Int i) o.parents));
+     ]
+ 
++let facts_to_json (f : fun_facts) : Yojson.Basic.t =
++  `Assoc
++    ([
++       ("can_fail", `Bool f.can_fail);
++       ("stateful", `Bool f.stateful);
++       ("can_diverge", `Bool f.can_diverge);
++       ("is_rec", `Bool f.is_rec);
++       ("state_inputs", `List (List.map (fun i -> `Int i) f.state_inputs));
++       ( "canonical_body",
++         match f.canonical_body with
++         | None -> `Null
++         | Some l -> `List (List.map (fun i -> `Int i) l) );
++     ]
++    @
++    (* Written only when known, so that the manifests of chunks without
++       reviewed collectors keep their earlier form. *)
++    match f.collection_obligations with
++    | None -> []
++    | Some l ->
++        [ ("collection_obligations", `List (List.map collection_obligation_to_json l)) ])
++
+ let entry_to_json (e : entry) : Yojson.Basic.t =
+   let strings l = `List (List.map (fun s -> `String s) l) in
+   `Assoc
+@@ -205,6 +239,13 @@ exception Malformed of string
+ let facts_of_json (js : Yojson.Basic.t) : fun_facts =
+   let open Yojson.Basic.Util in
+   let ints js = List.map to_int (to_list js) in
++  let obligation js =
++    {
++      into = to_bool (member "into" js);
++      clause = to_int (member "clause" js);
++      parents = ints (member "parents" js);
++    }
++  in
+   {
+     can_fail = to_bool (member "can_fail" js);
+     stateful = to_bool (member "stateful" js);
+@@ -215,6 +256,10 @@ let facts_of_json (js : Yojson.Basic.t) : fun_facts =
+       (match member "canonical_body" js with
+       | `Null -> None
+       | l -> Some (ints l));
++    collection_obligations =
++      (match member "collection_obligations" js with
++      | `Null -> None
++      | l -> Some (List.map obligation (to_list l)));
+   }
+ 
+ let entry_of_json (js : Yojson.Basic.t) : entry =
+diff --git a/tests/lean/CollectDispatch.lean b/tests/lean/CollectDispatch.lean
+new file mode 100644
+index 0000000..c0fd6c4
+--- /dev/null
++++ b/tests/lean/CollectDispatch.lean
+@@ -0,0 +1 @@
++import CollectDispatch.Checks
+diff --git a/tests/lean/CollectDispatch/Checks.lean b/tests/lean/CollectDispatch/Checks.lean
+new file mode 100644
+index 0000000..039cf1c
+--- /dev/null
++++ b/tests/lean/CollectDispatch/Checks.lean
+@@ -0,0 +1,19 @@
++import CollectDispatch.CollectDispatch
++
++/-! Evaluate the model of `tests/src/collect-dispatch.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_dispatch.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def uv (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (slice_run (sl [3, 1, 2])) == some [3, 1, 2]
++#guard nats (slice_run (sl [])) == some []
++#guard nats (relay_slice (sl [3, 1, 2])) == some [4, 2, 3]
++#guard nats (owned_run (uv [5, 6])) == some [5, 6]
++
++end collect_dispatch.checks
+diff --git a/tests/lean/CollectDispatch/CollectDispatch.lean b/tests/lean/CollectDispatch/CollectDispatch.lean
+new file mode 100644
+index 0000000..cf9ba05
+--- /dev/null
++++ b/tests/lean/CollectDispatch/CollectDispatch.lean
+@@ -0,0 +1,264 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_dispatch]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_dispatch
++
++/-- Trait declaration: [collect_dispatch::Run]
++    Source: 'tests/src/collect-dispatch.rs', lines 13:0-15:1
++    Visibility: public -/
++structure Run (Self : Type) where
++  run : Self → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++
++/-- [collect_dispatch::W]
++    Source: 'tests/src/collect-dispatch.rs', lines 17:0-17:23
++    Visibility: public -/
++@[reducible]
++def W (I : Type) := I
++
++/-- [collect_dispatch::{collect_dispatch::Run for collect_dispatch::W<I>}::run]:
++    Source: 'tests/src/collect-dispatch.rs', lines 20:4-22:5
++    Visibility: public -/
++def W.Insts.Collect_dispatchRun.run
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (self : _root_.collect_dispatch.W I)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst.into_iter self
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst.iteratorInst
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- Trait implementation: [collect_dispatch::{collect_dispatch::Run for collect_dispatch::W<I>}]
++    Source: 'tests/src/collect-dispatch.rs', lines 19:0-23:1 -/
++@[reducible]
++def W.Insts.Collect_dispatchRun {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) : _root_.collect_dispatch.Run
++  (_root_.collect_dispatch.W I) := {
++  run := _root_.collect_dispatch.W.Insts.Collect_dispatchRun.run
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst
++}
++
++/-- [collect_dispatch::go_run]:
++    Source: 'tests/src/collect-dispatch.rs', lines 25:0-27:1
++    Visibility: public -/
++def go_run
++  {R : Type} (RunInst : _root_.collect_dispatch.Run R) (r : R) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  RunInst.run r
++
++/-- [collect_dispatch::slice_run]:
++    Source: 'tests/src/collect-dispatch.rs', lines 29:0-31:1
++    Visibility: public -/
++def slice_run
++  (items : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter items
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  _root_.collect_dispatch.go_run
++    (_root_.collect_dispatch.W.Insts.Collect_dispatchRun
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++    _root_.Aeneas.Std.U32) core.marker.CopyU32))) c
++
++/-- [collect_dispatch::relay]:
++    Source: 'tests/src/collect-dispatch.rs', lines 33:0-35:1
++    Visibility: public -/
++def relay
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (items : I) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.collect_dispatch.go_run
++    (_root_.collect_dispatch.W.Insts.Collect_dispatchRun
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst) items
++
++/-- [collect_dispatch::relay_slice::closure]
++    Source: 'tests/src/collect-dispatch.rs', lines 38:36-38:45 -/
++@[reducible]
++def relay_slice.closure := _root_.Unit
++
++/-- [collect_dispatch::relay_slice::{core::ops::function::FnMut<(u32), u32> for collect_dispatch::relay_slice::closure}::call_mut]:
++    Source: 'tests/src/collect-dispatch.rs', lines 38:36-38:45 -/
++def relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.collect_dispatch.relay_slice.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.collect_dispatch.relay_slice.closure)
++  := do
++  let i ← tupled_args + 1#u32
++  _root_.Aeneas.Std.Result.ok (i, c)
++
++/-- [collect_dispatch::relay_slice::{core::ops::function::FnOnce<(u32), u32> for collect_dispatch::relay_slice::closure}::call_once]:
++    Source: 'tests/src/collect-dispatch.rs', lines 38:36-38:45 -/
++def relay_slice.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.collect_dispatch.relay_slice.closure) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [collect_dispatch::relay_slice::{core::ops::function::FnOnce<(u32), u32> for collect_dispatch::relay_slice::closure}]
++    Source: 'tests/src/collect-dispatch.rs', lines 38:36-38:45 -/
++@[reducible]
++def relay_slice.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_dispatch.relay_slice.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_dispatch::relay_slice::{core::ops::function::FnMut<(u32), u32> for collect_dispatch::relay_slice::closure}]
++    Source: 'tests/src/collect-dispatch.rs', lines 38:36-38:45 -/
++@[reducible]
++def relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_dispatch.relay_slice.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_dispatch::relay_slice]:
++    Source: 'tests/src/collect-dispatch.rs', lines 37:0-39:1
++    Visibility: public -/
++def relay_slice
++  (items : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter items
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) core.marker.CopyU32)
++      _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++      c ()
++  _root_.collect_dispatch.relay
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++    _root_.Aeneas.Std.U32) core.marker.CopyU32)
++    _root_.collect_dispatch.relay_slice.closure.Insts.CoreOpsFunctionFnMutTupleU32U32))
++    model_state
++
++/-- Trait declaration: [collect_dispatch::Source]
++    Source: 'tests/src/collect-dispatch.rs', lines 41:0-44:1
++    Visibility: public -/
++structure Source (Self : Type) (Self_Out : Type) where
++  RunInst : _root_.collect_dispatch.Run Self_Out
++  make : Self → _root_.Aeneas.Std.Result Self_Out
++
++/-- [collect_dispatch::Owned]
++    Source: 'tests/src/collect-dispatch.rs', lines 46:0-46:31
++    Visibility: public -/
++@[reducible]
++def Owned := _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [collect_dispatch::{collect_dispatch::Source<collect_dispatch::W<alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>>> for collect_dispatch::Owned}::make]:
++    Source: 'tests/src/collect-dispatch.rs', lines 51:4-53:5
++    Visibility: public -/
++def Owned.Insts.Collect_dispatchSourceWIntoIterU32Global.make
++  (self : _root_.collect_dispatch.Owned) :
++  _root_.Aeneas.Std.Result (_root_.collect_dispatch.W
++    (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter self
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- Trait implementation: [collect_dispatch::{collect_dispatch::Source<collect_dispatch::W<alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>>> for collect_dispatch::Owned}]
++    Source: 'tests/src/collect-dispatch.rs', lines 48:0-54:1 -/
++@[reducible]
++def Owned.Insts.Collect_dispatchSourceWIntoIterU32Global :
++  _root_.collect_dispatch.Source _root_.collect_dispatch.Owned
++  (_root_.collect_dispatch.W (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  _root_.Aeneas.Std.U32)) := {
++  RunInst := _root_.collect_dispatch.W.Insts.Collect_dispatchRun
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++    _root_.Aeneas.Std.U32))
++  make :=
++    _root_.collect_dispatch.Owned.Insts.Collect_dispatchSourceWIntoIterU32Global.make
++}
++
++/-- [collect_dispatch::via_source]:
++    Source: 'tests/src/collect-dispatch.rs', lines 56:0-58:1
++    Visibility: public -/
++def via_source
++  {S : Type} {Clause0_Out : Type} (SourceInst : _root_.collect_dispatch.Source
++  S Clause0_Out) (source : S) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let t ← SourceInst.make source
++  SourceInst.RunInst.run t
++
++/-- [collect_dispatch::owned_run]:
++    Source: 'tests/src/collect-dispatch.rs', lines 60:0-62:1
++    Visibility: public -/
++def owned_run
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.collect_dispatch.via_source
++    _root_.collect_dispatch.Owned.Insts.Collect_dispatchSourceWIntoIterU32Global
++    items
++
++end collect_dispatch
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 584301a..1183506 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -44,6 +44,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsSharedCapture
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
++@[default_target] lean_lib CollectDispatch
+ @[default_target] lean_lib CollectFlatten
+ @[default_target] lean_lib CollectGenericClosure
+ @[default_target] lean_lib CollectOption
+diff --git a/tests/separate-compilation/collection-facts.sh b/tests/separate-compilation/collection-facts.sh
+new file mode 100755
+index 0000000..ce13559
+--- /dev/null
++++ b/tests/separate-compilation/collection-facts.sh
+@@ -0,0 +1,239 @@
++#!/usr/bin/env bash
++# Collection obligations across chunks (CollectionContracts, manifest facts).
++#
++# Usage: collection-facts.sh <charon> <aeneas> [<work directory>]
++#
++# Chunks of collection_facts.rs, extracted like the chunks of a workspace
++# (-canonical-names, -split-files, one -subdir per chunk, -abort-on-error):
++# - A (gather, Bag's FromIterator, first) writes, in each function's facts, its
++#   deferred collection obligations as clause paths: gather and Bag::from_iter
++#   require the iterator of their IntoIterator clause (its parent Iterator
++#   clause) to be reviewed; first has none.
++# - B keeps the functions of A opaque (their bodies are not in its LLBC, as in
++#   a later chunk) and reads A's manifest with -external:
++#   - calls that instantiate the obligations with a slice iterator are admitted
++#     (gather_slice, bag_slice), as is a call without obligations (first_slice);
++#   - a call with a crate iterator whose size_hint is an observable callback is
++#     rejected with E_UNSUPPORTED_COLLECTION (gather_hinted, bag_hinted), as it
++#     is within one chunk (A+B);
++#   - relay defers gather's obligation to its own clause: B's facts carry it
++#     to C, where relay_slice is admitted and relay_hinted rejected.
++# - With a manifest of A without collection facts (as written before them), a
++#   call to a function of A with trait clauses is rejected (gather, even with a
++#   reviewed source, and first), while a function without trait clauses is
++#   still usable (double).
++# - Collecting into Bag needs the reviewed facts of Bag::from_iter: without them
++#   (as for an opaque from_iter) bag_slice is rejected, as within one chunk
++#   with an opaque from_iter (ABOS).
++# - A declaration without a body in its own chunk (first, opaque in AO) calls
++#   no collector: its facts are empty and first_slice is admitted, as within
++#   one chunk. (AO is run without -warnings-as-errors, which rejects the
++#   unknown external itself.)
++# - Run for W<I> (A) collects behind a clause of the implementation, and
++#   go_run calls it through a generic dictionary: B builds the dictionary of
++#   W<_> and discharges run's obligation there (run_slice admitted, run_hinted
++#   rejected; without the facts of run, run_slice is rejected too).
++set -uo pipefail
++
++charon=$1
++aeneas=$2
++here=$(cd "$(dirname "$0")" && pwd)
++work=${3:-$(mktemp -d)}
++mkdir -p "$work"
++failures=0
++
++check() { # check <description> <command...>
++  local what=$1
++  shift
++  if "$@"; then
++    echo "ok: $what"
++  else
++    echo "FAILED: $what"
++    failures=$((failures + 1))
++  fi
++}
++
++absent() { # absent <grep arguments...>: the files exist and do not match
++  grep -q "$@"
++  [ $? -eq 1 ]
++}
++
++from_iter='collection_facts::{impl core::iter::traits::collect::FromIterator<u32> for collection_facts::Bag}'
++run_impl='collection_facts::{impl collection_facts::Run for collection_facts::W<_>}'
++run_fun='fun collection_facts::{collection_facts::Run for collection_facts::W<I>}::run'
++
++llbc() { # llbc <chunk> <charon options...>
++  local chunk=$1
++  shift
++  "$charon" rustc --preset=aeneas --mir=promoted --monomorphize-mut=except-types \
++    --remove-adt-clauses '--lift-associated-types=*' --error-on-warnings "$@" \
++    --dest-file "$work/$chunk.llbc" -- "$here/collection_facts.rs" \
++    --crate-name=collection_facts --crate-type=rlib --edition=2021 \
++    >"$work/$chunk.charon.log" 2>&1 ||
++    { echo "charon failed on chunk $chunk (see $work/$chunk.charon.log)"; exit 1; }
++}
++
++strict=(-warnings-as-errors)
++run() { # run <name> <chunk> <aeneas options...>; sets $status
++  local name=$1 chunk=$2
++  shift 2
++  rm -rf "${work:?}/$name" && mkdir -p "$work/$name"
++  "$aeneas" -backend lean -checks -abort-on-error ${strict[@]+"${strict[@]}"} -strict-joins \
++    -sequential -no-progress-bar -canonical-names -split-files -subdir "Chunk$chunk" \
++    -dest "$work/$name/lean" -emit-manifest "$work/$name/manifest.json" "$@" \
++    "$work/$chunk.llbc" >"$work/$name/log" 2>&1
++  status=$?
++}
++
++# The facts of the function whose manifest key is $2, in manifest $1.
++facts() {
++  python3 -c '
++import json, sys
++entries = json.load(open(sys.argv[1]))["entries"]
++facts = [e.get("facts") for e in entries if e["key"] == sys.argv[2]]
++print(json.dumps(facts[0].get("collection_obligations") if facts and facts[0] else "missing"))' "$1" "$2"
++}
++
++opaque_a=(--opaque collection_facts::gather --opaque collection_facts::first
++  --opaque collection_facts::double --opaque "$from_iter"
++  --opaque collection_facts::go_run --opaque "$run_impl")
++llbc A --start-from collection_facts::gather --start-from collection_facts::first \
++  --start-from collection_facts::double --start-from "$from_iter" \
++  --start-from collection_facts::go_run --start-from "$run_impl"
++llbc B "${opaque_a[@]}" --start-from collection_facts::gather_slice \
++  --start-from collection_facts::bag_slice --start-from collection_facts::first_slice \
++  --start-from collection_facts::relay
++llbc BGH "${opaque_a[@]}" --start-from collection_facts::gather_hinted
++llbc BBH "${opaque_a[@]}" --start-from collection_facts::bag_hinted
++llbc BF "${opaque_a[@]}" --start-from collection_facts::first_slice
++llbc BD "${opaque_a[@]}" --start-from collection_facts::twice
++llbc C "${opaque_a[@]}" --opaque collection_facts::relay \
++  --start-from collection_facts::relay_slice
++llbc CH "${opaque_a[@]}" --opaque collection_facts::relay \
++  --start-from collection_facts::relay_hinted
++llbc BR "${opaque_a[@]}" --start-from collection_facts::run_slice
++llbc BRH "${opaque_a[@]}" --start-from collection_facts::run_hinted
++llbc ABGH --start-from collection_facts::gather_hinted
++llbc AO --opaque collection_facts::first --start-from collection_facts::first
++llbc BBS "${opaque_a[@]}" --start-from collection_facts::bag_slice
++llbc ABOS --opaque "$from_iter" --start-from collection_facts::bag_slice
++
++run a A
++check "A exits with status 0" test "$status" -eq 0
++check "gather defers the iterator of its IntoIterator clause" \
++  test "$(facts "$work/a/manifest.json" "fun collection_facts::gather")" \
++  = '[{"into": false, "clause": 0, "parents": [0]}]'
++check "Bag::from_iter defers the iterator of its IntoIterator clause" \
++  test "$(facts "$work/a/manifest.json" \
++    "fun collection_facts::{core::iter::traits::collect::FromIterator<u32> for collection_facts::Bag}::from_iter")" \
++  = '[{"into": false, "clause": 0, "parents": [0]}]'
++check "first has no collection obligation" \
++  test "$(facts "$work/a/manifest.json" "fun collection_facts::first")" = '[]'
++check "double has no collection obligation" \
++  test "$(facts "$work/a/manifest.json" "fun collection_facts::double")" = '[]'
++check "run defers the iterator of its implementation's IntoIterator clause" \
++  test "$(facts "$work/a/manifest.json" "$run_fun")" \
++  = '[{"into": false, "clause": 0, "parents": [0]}]'
++check "go_run has no collection obligation" \
++  test "$(facts "$work/a/manifest.json" "fun collection_facts::go_run")" = '[]'
++
++run b B -external "$work/a/manifest.json"
++check "B (reviewed sources) exits with status 0" test "$status" -eq 0
++check "B does not emit gather" absent -rE '^def collection_facts\.gather$' "$work/b/lean"
++check "relay defers the obligation of gather to its own clause" \
++  test "$(facts "$work/b/manifest.json" "fun collection_facts::relay")" \
++  = '[{"into": false, "clause": 0, "parents": [0]}]'
++
++run c C -external "$work/a/manifest.json" -external "$work/b/manifest.json"
++check "relay_slice is admitted in C" test "$status" -eq 0
++run ch CH -external "$work/a/manifest.json" -external "$work/b/manifest.json"
++check "relay_hinted is rejected in C" test "$status" -ne 0
++check "relay_hinted is rejected by the collection contract" \
++  grep -q "E_UNSUPPORTED_COLLECTION" "$work/ch/log"
++
++run br BR -external "$work/a/manifest.json"
++check "run_slice (a reviewed source behind W's clause) is admitted" test "$status" -eq 0
++run brh BRH -external "$work/a/manifest.json"
++check "run_hinted is rejected where the dictionary of W<Hinted> is built" \
++  test "$status" -ne 0
++check "run_hinted is rejected by the collection contract" \
++  grep -q "E_UNSUPPORTED_COLLECTION" "$work/brh/log"
++python3 -c '
++import json, sys
++manifest = json.load(open(sys.argv[1]))
++for entry in manifest["entries"]:
++    if entry["key"] == sys.argv[3]:
++        entry["facts"].pop("collection_obligations")
++json.dump(manifest, open(sys.argv[2], "w"))' "$work/a/manifest.json" "$work/a-run.json" "$run_fun"
++run br-run BR -external "$work/a-run.json"
++check "run_slice without the facts of run is rejected" test "$status" -ne 0
++check "the rejection names the unknown obligations of run" \
++  grep -q "the collection obligations of collection_facts::{collection_facts::Run for collection_facts::W<I>}::run, owned by an earlier chunk, are unknown" \
++  "$work/br-run/log"
++
++run bgh BGH -external "$work/a/manifest.json"
++check "gather_hinted is rejected" test "$status" -ne 0
++check "gather_hinted is rejected by the collection contract" \
++  grep -q "E_UNSUPPORTED_COLLECTION" "$work/bgh/log"
++run bbh BBH -external "$work/a/manifest.json"
++check "bag_hinted is rejected" test "$status" -ne 0
++check "bag_hinted is rejected by the collection contract" \
++  grep -q "E_UNSUPPORTED_COLLECTION" "$work/bbh/log"
++run abgh ABGH
++check "gather_hinted is rejected within one chunk" test "$status" -ne 0
++check "gather_hinted is rejected by the collection contract within one chunk" \
++  grep -q "E_UNSUPPORTED_COLLECTION" "$work/abgh/log"
++
++# The manifest of A as written before the collection facts.
++python3 -c '
++import json, sys
++manifest = json.load(open(sys.argv[1]))
++for entry in manifest["entries"]:
++    if entry.get("facts"):
++        entry["facts"].pop("collection_obligations", None)
++json.dump(manifest, open(sys.argv[2], "w"))' "$work/a/manifest.json" "$work/a-old.json"
++run b-old B -external "$work/a-old.json"
++check "B with an A manifest without collection facts is rejected" test "$status" -ne 0
++check "the rejection names the unknown obligations of gather" \
++  grep -q "the collection obligations of collection_facts::gather, owned by an earlier chunk, are unknown" \
++  "$work/b-old/log"
++run bf-old BF -external "$work/a-old.json"
++check "first_slice (a trait clause, no collector) is rejected with the old manifest" \
++  test "$status" -ne 0
++check "the rejection names the unknown obligations of first" \
++  grep -q "the collection obligations of collection_facts::first, owned by an earlier chunk, are unknown" \
++  "$work/bf-old/log"
++run bd-old BD -external "$work/a-old.json"
++check "twice (no trait clause) is admitted with the old manifest" test "$status" -eq 0
++
++# The manifest of A without the facts of Bag::from_iter only.
++python3 -c '
++import json, sys
++manifest = json.load(open(sys.argv[1]))
++for entry in manifest["entries"]:
++    if entry["key"].endswith("for collection_facts::Bag}::from_iter") and entry.get("facts"):
++        entry["facts"].pop("collection_obligations")
++json.dump(manifest, open(sys.argv[2], "w"))' "$work/a/manifest.json" "$work/a-bag.json"
++run bbs-bag BBS -external "$work/a-bag.json"
++check "bag_slice without the facts of Bag::from_iter is rejected" test "$status" -ne 0
++check "the rejection names the unreviewed FromIterator" \
++  grep -q "opaque custom FromIterator implementation" "$work/bbs-bag/log"
++run abos ABOS
++check "bag_slice with an opaque Bag::from_iter is rejected within one chunk" test "$status" -ne 0
++check "the rejection names the opaque FromIterator within one chunk" \
++  grep -q "opaque custom FromIterator implementation" "$work/abos/log"
++
++strict=()
++run ao AO
++strict=(-warnings-as-errors)
++check "AO (first without a body) exits with status 0" test "$status" -eq 0
++check "first without a body has no collection obligation" \
++  test "$(facts "$work/ao/manifest.json" "fun collection_facts::first")" = '[]'
++run bf-ao BF -external "$work/ao/manifest.json"
++check "first_slice is admitted with first without a body in its chunk" test "$status" -eq 0
++
++if [ "$failures" -ne 0 ]; then
++  echo "$failures check(s) failed; outputs in $work"
++  exit 1
++fi
++echo "all checks passed"
+diff --git a/tests/separate-compilation/collection_facts.rs b/tests/separate-compilation/collection_facts.rs
+new file mode 100644
+index 0000000..e122f1d
+--- /dev/null
++++ b/tests/separate-compilation/collection_facts.rs
+@@ -0,0 +1,142 @@
++//! Chunks of collection-facts.sh: chunk A owns the generic collectors `gather`
++//! and `Bag`'s FromIterator, whose collection obligations CollectionContracts
++//! defers to their callers; chunk B calls them with the bodies of A opaque, as
++//! in a workspace chunk, and chunk C calls B's `relay`, which defers `gather`'s
++//! obligation to its own clause. The obligations reach a later chunk only
++//! through the manifest facts of the earlier ones.
++
++/// An iterator whose size_hint is an observable callback: the value-only
++/// collectors must reject it.
++pub struct Hinted(pub bool);
++
++impl Iterator for Hinted {
++    type Item = u32;
++
++    fn next(&mut self) -> Option<u32> {
++        if self.0 {
++            None
++        } else {
++            self.0 = true;
++            Some(7)
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        panic!("observable size_hint callback")
++    }
++}
++
++// Chunk A
++
++/// Collects its argument into a Vec: the collector's obligation is on `I`.
++pub fn gather<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
++    items.into_iter().collect()
++}
++
++pub struct Bag(pub Vec<u32>);
++
++impl FromIterator<u32> for Bag {
++    fn from_iter<I: IntoIterator<Item = u32>>(items: I) -> Self {
++        Bag(items.into_iter().collect())
++    }
++}
++
++/// No collector: nothing to defer, whatever `T`.
++pub fn first<T: Copy>(items: &[T]) -> Option<T> {
++    match items.first() {
++        Some(item) => Some(*item),
++        None => None,
++    }
++}
++
++/// No trait clause.
++pub fn double(x: u32) -> u32 {
++    x * 2
++}
++
++/// A collector behind a clause of an implementation, called through a
++/// generic dictionary (`go_run`): its obligation is discharged where the
++/// dictionary of `W<_>` is built.
++pub trait Run {
++    fn run(self) -> Vec<u32>;
++}
++
++pub struct W<I>(pub I);
++
++impl<I: IntoIterator<Item = u32>> Run for W<I> {
++    fn run(self) -> Vec<u32> {
++        self.0.into_iter().collect()
++    }
++}
++
++pub fn go_run<R: Run>(r: R) -> Vec<u32> {
++    r.run()
++}
++
++// Chunk B
++
++pub fn gather_slice(items: &[u32]) -> Vec<u32> {
++    gather(items.iter().copied())
++}
++
++pub fn bag_slice(items: &[u32]) -> Bag {
++    items.iter().copied().collect()
++}
++
++pub fn first_slice(items: &[u32]) -> Option<u32> {
++    first(items)
++}
++
++pub fn twice(x: u32) -> u32 {
++    double(x)
++}
++
++pub fn gather_hinted() -> Vec<u32> {
++    gather(Hinted(false))
++}
++
++pub fn bag_hinted() -> Bag {
++    Hinted(false).collect()
++}
++
++pub fn run_slice(items: &[u32]) -> Vec<u32> {
++    go_run(W(items.iter().copied()))
++}
++
++pub fn run_hinted() -> Vec<u32> {
++    go_run(W(Hinted(false)))
++}
++
++/// Defers the obligation of `gather` to its own clause.
++pub fn relay<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
++    gather(items)
++}
++
++// Chunk C
++
++pub fn relay_slice(items: &[u32]) -> Vec<u32> {
++    relay(items.iter().copied())
++}
++
++pub fn relay_hinted() -> Vec<u32> {
++    relay(Hinted(false))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn collectors() {
++        assert_eq!(gather_slice(&[1, 2]), vec![1, 2]);
++        assert_eq!(bag_slice(&[3]).0, vec![3]);
++        assert_eq!(first_slice(&[4, 5]), Some(4));
++        assert_eq!(twice(3), 6);
++        assert_eq!(relay_slice(&[5, 6]), vec![5, 6]);
++        assert_eq!(run_slice(&[7, 8]), vec![7, 8]);
++        assert!(std::panic::catch_unwind(gather_hinted).is_err());
++        assert!(std::panic::catch_unwind(bag_hinted).is_err());
++        assert!(std::panic::catch_unwind(relay_hinted).is_err());
++        assert!(std::panic::catch_unwind(run_hinted).is_err());
++    }
++}
+diff --git a/tests/src/collect-dispatch-impl.lean.out b/tests/src/collect-dispatch-impl.lean.out
+new file mode 100644
+index 0000000..62c93c3
+--- /dev/null
++++ b/tests/src/collect-dispatch-impl.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/collect_dispatch_impl.llbc
++[[91mError[39m] E_UNSUPPORTED_COLLECTION: the crate iterator collect_dispatch_impl::{core::iter::traits::iterator::Iterator<u32> for collect_dispatch_impl::Hinted} defines size_hint, which native collectors call: its totality is a collection obligation, which needs -emit-collection-obligations. The value-only Vec/BTree collection model cannot preserve native size_hint/consumer dispatch for this dictionary. Use an explicit next-driven production loop, or provide a reviewed collector model with the required capacity and specialization semantics.
++Source: 'tests/src/collect-dispatch-impl.rs', lines 48:4-48:28
++Compiler source: llbc/CollectionContracts.ml, line 124
++
+diff --git a/tests/src/collect-dispatch-impl.rs b/tests/src/collect-dispatch-impl.rs
+new file mode 100644
+index 0000000..62caf12
+--- /dev/null
++++ b/tests/src/collect-dispatch-impl.rs
+@@ -0,0 +1,57 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A trait method implementation that collects from an iterator given by a
++//! clause of its implementation (`W<I>`): a caller that dispatches through a
++//! generic dictionary (`go_run`) does not see the implementation, so the
++//! obligation is discharged where the dictionary of `W<Hinted>` is built
++//! (`hinted_impl`). `Hinted`'s size_hint panics natively, while the value model
++//! would return its items: rejected with E_UNSUPPORTED_COLLECTION.
++
++pub struct Hinted(pub bool);
++
++impl Iterator for Hinted {
++    type Item = u32;
++
++    fn next(&mut self) -> Option<u32> {
++        if self.0 {
++            None
++        } else {
++            self.0 = true;
++            Some(7)
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        panic!("observable size_hint callback")
++    }
++}
++
++pub trait Run {
++    fn run(self) -> Vec<u32>;
++}
++
++pub struct W<I>(pub I);
++
++impl<I: IntoIterator<Item = u32>> Run for W<I> {
++    fn run(self) -> Vec<u32> {
++        self.0.into_iter().collect()
++    }
++}
++
++pub fn go_run<R: Run>(r: R) -> Vec<u32> {
++    r.run()
++}
++
++pub fn hinted_impl() -> Vec<u32> {
++    go_run(W(Hinted(false)))
++}
++
++#[cfg(test)]
++mod native {
++    #[test]
++    fn size_hint_panics() {
++        assert!(std::panic::catch_unwind(super::hinted_impl).is_err());
++    }
++}
+diff --git a/tests/src/collect-dispatch-method.lean.out b/tests/src/collect-dispatch-method.lean.out
+new file mode 100644
+index 0000000..241ed75
+--- /dev/null
++++ b/tests/src/collect-dispatch-method.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/collect_dispatch_method.llbc
++[[91mError[39m] E_UNSUPPORTED_COLLECTION: the trait method implementation collect_dispatch_method::{collect_dispatch_method::Collector for collect_dispatch_method::Plain}::go collects from an iterator given by its own generic parameters: its collection obligation cannot be discharged when it is called through a generic dictionary, where the implementation is unknown. The value-only Vec/BTree collection model cannot preserve native size_hint/consumer dispatch for this dictionary. Use an explicit next-driven production loop, or provide a reviewed collector model with the required capacity and specialization semantics.
++Source: 'tests/src/collect-dispatch-method.rs', lines 38:4-40:5
++Compiler source: llbc/CollectionContracts.ml, line 124
++
+diff --git a/tests/src/collect-dispatch-method.rs b/tests/src/collect-dispatch-method.rs
+new file mode 100644
+index 0000000..7180be3
+--- /dev/null
++++ b/tests/src/collect-dispatch-method.rs
+@@ -0,0 +1,57 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A trait method implementation that collects from an iterator given by its
++//! own generic parameter defers that collection obligation to its callers, but
++//! a caller that dispatches through a generic dictionary (`call`) does not see
++//! the implementation: `hinted_method` collects from `Hinted`, whose size_hint
++//! panics natively, while the value model would return its items. The
++//! implementation is rejected with E_UNSUPPORTED_COLLECTION.
++
++pub struct Hinted(pub bool);
++
++impl Iterator for Hinted {
++    type Item = u32;
++
++    fn next(&mut self) -> Option<u32> {
++        if self.0 {
++            None
++        } else {
++            self.0 = true;
++            Some(7)
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        panic!("observable size_hint callback")
++    }
++}
++
++pub trait Collector {
++    fn go<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32>;
++}
++
++pub struct Plain;
++
++impl Collector for Plain {
++    fn go<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
++        items.into_iter().collect()
++    }
++}
++
++pub fn call<C: Collector>(items: Hinted) -> Vec<u32> {
++    C::go(items)
++}
++
++pub fn hinted_method() -> Vec<u32> {
++    call::<Plain>(Hinted(false))
++}
++
++#[cfg(test)]
++mod native {
++    #[test]
++    fn size_hint_panics() {
++        assert!(std::panic::catch_unwind(super::hinted_method).is_err());
++    }
++}
+diff --git a/tests/src/collect-dispatch.rs b/tests/src/collect-dispatch.rs
+new file mode 100644
+index 0000000..9f70184
+--- /dev/null
++++ b/tests/src/collect-dispatch.rs
+@@ -0,0 +1,75 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectDispatch
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The collection obligation of a trait method implementation on a clause of
++//! its implementation (`W<I>`) is discharged where the implementation's
++//! dictionary is built, since callers may dispatch through a generic
++//! dictionary (`go_run`): with a reviewed source (`slice_run`), deferred to
++//! the clause of a generic builder (`relay`), or built by an implementation's
++//! header (the associated type of `Source for Owned`, reached by projection in
++//! `via_source`). Rejected sources: collect-dispatch-impl.rs.
++
++pub trait Run {
++    fn run(self) -> Vec<u32>;
++}
++
++pub struct W<I>(pub I);
++
++impl<I: IntoIterator<Item = u32>> Run for W<I> {
++    fn run(self) -> Vec<u32> {
++        self.0.into_iter().collect()
++    }
++}
++
++pub fn go_run<R: Run>(r: R) -> Vec<u32> {
++    r.run()
++}
++
++pub fn slice_run(items: &[u32]) -> Vec<u32> {
++    go_run(W(items.iter().copied()))
++}
++
++pub fn relay<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
++    go_run(W(items))
++}
++
++pub fn relay_slice(items: &[u32]) -> Vec<u32> {
++    relay(items.iter().copied().map(|x| x + 1))
++}
++
++pub trait Source {
++    type Out: Run;
++    fn make(self) -> Self::Out;
++}
++
++pub struct Owned(pub Vec<u32>);
++
++impl Source for Owned {
++    type Out = W<std::vec::IntoIter<u32>>;
++
++    fn make(self) -> W<std::vec::IntoIter<u32>> {
++        W(self.0.into_iter())
++    }
++}
++
++pub fn via_source<S: Source>(source: S) -> Vec<u32> {
++    source.make().run()
++}
++
++pub fn owned_run(items: Vec<u32>) -> Vec<u32> {
++    via_source(Owned(items))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn collected() {
++        assert_eq!(slice_run(&[3, 1, 2]), vec![3, 1, 2]);
++        assert_eq!(slice_run(&[]), Vec::<u32>::new());
++        assert_eq!(relay_slice(&[3, 1, 2]), vec![4, 2, 3]);
++        assert_eq!(owned_run(vec![5, 6]), vec![5, 6]);
++    }
++}

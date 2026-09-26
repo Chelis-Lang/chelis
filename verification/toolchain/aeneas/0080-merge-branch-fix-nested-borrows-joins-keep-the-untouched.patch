@@ -1,0 +1,2139 @@
+# aeneas integration step 80 after cba11f3beb: commit b8ead28b3b6e827f7ea0c441f903cd28e5263ce0
+# first parent 66aab9997f83a8b4281474b7cc33eec6742ad5cc, merged 0f2845f17f06b034342b69fdd757c0e12ee14e55
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (joins keep the untouched levels of staged function calls)
+
+diff --git a/src/interp/InterpStatements.ml b/src/interp/InterpStatements.ml
+index 9f7283d..afce9da 100644
+--- a/src/interp/InterpStatements.ml
++++ b/src/interp/InterpStatements.ml
+@@ -900,6 +900,201 @@ let eval_global_as_fresh_symbolic_value (span : Meta.span)
+       let cc = S.synthesize_global_eval gref sval in
+       (ctx, mk_tvalue_from_symbolic_value sval, cc)
+ 
++(** Whether a region group of a function call has a staged backward function
++    ([SymbolicToPureTypes.back_sig_stage_map], see [Pure.back_sg_info.early]).
++    [call] are the abstractions of the call, as introduced by
++    [eval_function_call_symbolic_from_inst_sig]: their values are the
++    projections of the inputs and of the output, whose types are those of the
++    instantiated signature, and their regions are those of their groups. *)
++let fun_call_is_staged (ctx : eval_ctx) (call : abs list) : bool =
++  (* The stage map is a property of the types: it only reads [type_ctx] *)
++  let decls_ctx : decls_ctx =
++    {
++      crate = ctx.crate;
++      graph_of_uses =
++        { graph = AnyDeclIdMap.empty; locals = AnyDeclIdSet.empty };
++      type_ctx = ctx.type_ctx;
++      fun_ctx = ctx.fun_ctx;
++      global_decls_to_extract = GlobalDeclId.Map.empty;
++      trait_decls_to_extract = TraitDeclId.Map.empty;
++      trait_impls_to_extract = TraitImplId.Map.empty;
++    }
++  in
++  let groups =
++    List.filter_map
++      (fun (abs : abs) ->
++        match abs.kind with
++        | FunCall (_, gid) -> Some (gid, abs)
++        | _ -> None)
++      call
++  in
++  let group_of_region =
++    List.fold_left
++      (fun map (gid, (abs : abs)) ->
++        RegionId.Set.fold
++          (fun rid map -> RegionId.Map.add rid gid map)
++          abs.regions.owned map)
++      RegionId.Map.empty groups
++  in
++  (* The regions which are not regions of the call (e.g., ['static]) are in no
++     group of the call *)
++  let get_region_group (r : region) : region_group_id =
++    match r with
++    | RVar (Free rid) -> (
++        match RegionId.Map.find_opt rid group_of_region with
++        | Some g -> g
++        | None -> RegionGroupId.of_int (-1))
++    | _ -> RegionGroupId.of_int (-1)
++  in
++  match groups with
++  | [] -> false
++  | (_, abs) :: _ -> (
++      match List.rev_map (fun (v : tavalue) -> v.ty) abs.avalues with
++      | [] -> false
++      | output :: rev_inputs ->
++          let inputs = List.rev rev_inputs in
++          List.exists
++            (fun (gid, _) ->
++              SymbolicToPureTypes.back_sig_is_nested None decls_ctx
++                get_region_group gid inputs output
++              && SymbolicToPureTypes.back_sig_stage_map None decls_ctx
++                   get_region_group gid inputs output
++                 <> [])
++            groups)
++
++(** Nested borrows: the abstractions of the function calls of [ctx0] which
++    have a staged backward function (see [fun_call_is_staged]), together with
++    the abstractions they depend on, transitively: the abstractions owning the
++    regions which appear in them (e.g., in the type of a symbolic value they
++    received), those holding the other side of their loans and borrows (e.g.,
++    the call which consumed the value they returned), and the other
++    abstractions of the same calls. Provided every context of [ctxl] holds all
++    of those unchanged. *)
++let untouched_staged_call_abs_ids (ctx0 : eval_ctx) (ctxl : eval_ctx list) :
++    abs_id list =
++  let abs0 = ctx_get_abs ctx0 in
++  let untouched =
++    List.fold_left
++      (fun ids ctx ->
++        AbsId.Set.inter ids (InterpJoinCore.compute_fixed_abs_ids ctx0 ctx))
++      (ctx_get_abs_ids ctx0) ctxl
++  in
++  let calls =
++    AbsId.Map.fold
++      (fun _ (abs : abs) calls ->
++        match abs.kind with
++        | FunCall (call_id, _) ->
++            FunCallId.Map.update call_id
++              (fun call -> Some (abs :: Option.value call ~default:[]))
++              calls
++        | _ -> calls)
++      abs0 FunCallId.Map.empty
++  in
++  (* The regions and the loan (and borrow) identifiers which appear in an
++     abstraction. The regions include those of the meta-values it retains; the
++     identifiers do not (the loans of a meta-value are not live). *)
++  let regions_and_ids (abs : abs) : RegionId.Set.t * BorrowId.Set.t =
++    let rids = ref RegionId.Set.empty in
++    let ids = ref BorrowId.Set.empty in
++    let visitor =
++      object (self)
++        inherit [_] iter_abs
++        method! visit_region_id _ rid = rids := RegionId.Set.add rid !rids
++
++        method! visit_borrow_id in_meta id =
++          if not in_meta then ids := BorrowId.Set.add id !ids
++
++        method! visit_loan_id in_meta id =
++          if not in_meta then ids := BorrowId.Set.add id !ids
++
++        method! visit_mvalue _ v = self#visit_tvalue true v
++      end
++    in
++    visitor#visit_abs false { abs with cont = None };
++    (!rids, !ids)
++  in
++  let contents = AbsId.Map.map regions_and_ids abs0 in
++  let region_owners =
++    AbsId.Map.fold
++      (fun _ (abs : abs) owners ->
++        RegionId.Set.fold
++          (fun rid owners -> RegionId.Map.add rid abs.abs_id owners)
++          abs.regions.owned owners)
++      abs0 RegionId.Map.empty
++  in
++  let id_holders =
++    AbsId.Map.fold
++      (fun abs_id (_, ids) holders ->
++        BorrowId.Set.fold
++          (fun id holders ->
++            BorrowId.Map.update id
++              (fun h ->
++                Some
++                  (AbsId.Set.add abs_id
++                     (Option.value h ~default:AbsId.Set.empty)))
++              holders)
++          ids holders)
++      contents BorrowId.Map.empty
++  in
++  let dependencies (abs : abs) : AbsId.Set.t =
++    let rids, ids = AbsId.Map.find abs.abs_id contents in
++    let deps =
++      RegionId.Set.fold
++        (fun rid deps ->
++          match RegionId.Map.find_opt rid region_owners with
++          | Some id -> AbsId.Set.add id deps
++          | None -> deps)
++        rids AbsId.Set.empty
++    in
++    let deps =
++      BorrowId.Set.fold
++        (fun id deps -> AbsId.Set.union (BorrowId.Map.find id id_holders) deps)
++        ids deps
++    in
++    let deps =
++      match abs.kind with
++      | FunCall (call_id, _) ->
++          List.fold_left
++            (fun deps (abs : abs) -> AbsId.Set.add abs.abs_id deps)
++            deps
++            (FunCallId.Map.find call_id calls)
++      | _ -> deps
++    in
++    AbsId.Set.remove abs.abs_id deps
++  in
++  (* The closure of a set of endable abstractions, if they are all untouched *)
++  let rec close (ids : AbsId.Set.t) (todo : abs_id list) : AbsId.Set.t option =
++    match todo with
++    | [] -> Some ids
++    | id :: todo ->
++        let abs = AbsId.Map.find id abs0 in
++        if not abs.can_end then close ids todo
++        else if not (AbsId.Set.mem id untouched) then None
++        else
++          let deps = AbsId.Set.diff (dependencies abs) ids in
++          close (AbsId.Set.union deps ids) (AbsId.Set.elements deps @ todo)
++  in
++  let frozen =
++    FunCallId.Map.fold
++      (fun _ (call : abs list) frozen ->
++        let ids = List.map (fun (abs : abs) -> abs.abs_id) call in
++        if
++          not
++            (List.for_all
++               (fun (abs : abs) ->
++                 (not abs.can_end) || AbsId.Set.mem abs.abs_id untouched)
++               call)
++        then frozen
++        else if not (fun_call_is_staged ctx0 call) then frozen
++        else
++          match close (AbsId.Set.of_list ids) ids with
++          | Some ids -> AbsId.Set.union ids frozen
++          | None -> frozen)
++      calls AbsId.Set.empty
++  in
++  AbsId.Set.elements
++    (AbsId.Set.filter (fun id -> (AbsId.Map.find id abs0).can_end) frozen)
++
+ (** Share evaluation of each repeated destination. The destinations may be
+     statement outcomes or match-arm indices; scoped joins preserve routing
+     between the separately shared continuations. *)
+@@ -921,6 +1116,31 @@ let rec join_contexts_by_destination (config : config) (span : Meta.span)
+           join_contexts_by_destination config span cf ctx0 destinations ctx_resl
+       | _ ->
+           let join_id = ctx0.fresh_symbolic_expr_id () in
++          (* Nested borrows: the levels of a staged function call which no
++             joined context modified are not modified by the join either. The
++             join would otherwise end the levels which can end in every context
++             separately (see [simplify_dummy_values_useless_abs]): the values
++             they give back are fresh in every context, so the other levels
++             differ and get merged into a join abstraction, whose continuation
++             then holds the staged backward function of the call before its
++             earlier stages are applied (see
++             [SymbolicToPureAbs.einput_to_texpr]). Freeze the abstractions of
++             such calls while joining and matching (which neither end nor merge
++             frozen abstractions), and release them in the joined context. The
++             levels of the calls whose backward functions are not staged are
++             joined as before: their continuations take the inputs of all
++             their levels at once. *)
++          let untouched = untouched_staged_call_abs_ids ctx0 ctxl in
++          let set_endable ~can_end ctx =
++            if untouched = [] then ctx
++            else InterpBorrowsCore.update_endable ctx untouched ~can_end
++          in
++          let outer_ctx0 = ctx0 in
++          let ctx0 = set_endable ~can_end:false ctx0 in
++          let ctxl = List.map (set_endable ~can_end:false) ctxl in
++          [%ldebug
++            "Untouched staged function calls: "
++            ^ String.concat ", " (List.map AbsId.to_string untouched)];
+           (* We need to join the contexts *)
+           [%ldebug
+             "About to join contexts after an [if then else]."
+@@ -1009,7 +1229,8 @@ let rec join_contexts_by_destination (config : config) (span : Meta.span)
+             let (_, ctx, output_values, output_abs), cf =
+               InterpJoin.match_ctx_with_target config span WithCont fixed_aids
+                 fixed_dids output_abs_ids output_svalue_ids
+-                ~recoverable:!Config.recover_joins joined_ctx ctx
++                ~recoverable:!Config.recover_joins joined_ctx
++                (set_endable ~can_end:false ctx)
+             in
+ 
+             let reorder_output_abs (map : abs AbsId.Map.t) (absl : abs_id list)
+@@ -1074,7 +1295,8 @@ let rec join_contexts_by_destination (config : config) (span : Meta.span)
+           in
+ 
+           (* The shared continuation still transfers to the original destination. *)
+-          join_contexts_by_destination config span cf ctx0 destinations
++          let joined_ctx = set_endable ~can_end:true joined_ctx in
++          join_contexts_by_destination config span cf outer_ctx0 destinations
+             ((joined_ctx, join_result) :: abrupt_results))
+ 
+ (** Evaluate a statement. *)
+diff --git a/tests/lean/NestedBorrowsUntouchedJoin.lean b/tests/lean/NestedBorrowsUntouchedJoin.lean
+new file mode 100644
+index 0000000..aaa9810
+--- /dev/null
++++ b/tests/lean/NestedBorrowsUntouchedJoin.lean
+@@ -0,0 +1 @@
++import NestedBorrowsUntouchedJoin.Checks
+diff --git a/tests/lean/NestedBorrowsUntouchedJoin/Checks.lean b/tests/lean/NestedBorrowsUntouchedJoin/Checks.lean
+new file mode 100644
+index 0000000..23b2336
+--- /dev/null
++++ b/tests/lean/NestedBorrowsUntouchedJoin/Checks.lean
+@@ -0,0 +1,55 @@
++import NestedBorrowsUntouchedJoin.NestedBorrowsUntouchedJoin
++
++/-! Evaluate the model of `tests/src/nested-borrows-untouched-join.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_untouched_join.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++
++def lit (n : Nat) : DimInfo := .Lit (us n)
++def named (n : Nat) (v : Option Nat := none) : DimInfo := .Named (u n) (v.map us)
++def node (dims : List DimInfo) (kind : Kind) (h : dims.length ≤ Usize.max := by scalar_tac) : Node :=
++  { dims := vec dims h, kind }
++
++def umax : Nat := 4294967295
++
++/-- The dimensions as the native test compares them: `(u32::MAX, Some(n))` for `Lit(n)` -/
++def dims (v : alloc.vec.Vec DimInfo) : List (Nat × Option Nat) :=
++  v.val.map fun
++    | .Lit n => (umax, some n.val)
++    | .Named n v => (n.val, v.map (·.val))
++
++def requiredR (nodes : alloc.vec.Vec Node) (k : Nat) : Option (List Nat) :=
++  match required nodes (u k) with
++  | ok names => some (names.val.map (·.val))
++  | _ => none
++
++def resolvedR (n : Node) (k v bad : Nat) : Option (List (Nat × Option Nat) × Nat × Nat) :=
++  match resolved n (u k) (us v) (u bad) with
++  | ok (ds, e, calls) => some (dims ds, e.val, calls.val)
++  | _ => none
++
++def nodes : alloc.vec.Vec Node := vec
++  [ node [named 1, lit 4] (.B (u 10)),
++    node [named 2, named 3 (some 5)] .A,
++    node [named 7] (.D (u 20)),
++    node [] .C ]
++
++-- required_native
++#guard requiredR nodes 2 == some [1, 7]
++#guard requiredR nodes 9 == some [1, 2, 7]
++#guard requiredR (vec []) 0 == some []
++
++-- resolved_native
++def n1 : Node := node [named 1, lit 4, named 2, named 1 (some 6)] (.B (u 10))
++#guard resolvedR n1 1 8 99 == some ([(1, some 8), (umax, some 4), (2, none), (1, some 6)], 10, 2)
++#guard resolvedR n1 1 8 2 == some ([], 2, 2)
++#guard resolvedR (node [named 2] .C) 2 5 99 == some ([(2, some 5)], 3, 1)
++#guard resolvedR (node [named 5, lit 1] (.D (u 7))) 5 9 99 == some ([(5, some 9), (umax, some 1)], 3, 1)
++#guard resolvedR (node [] .A) 5 9 99 == some ([], 3, 0)
++
++end nested_borrows_untouched_join.checks
+diff --git a/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean b/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean
+new file mode 100644
+index 0000000..254092f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsUntouchedJoin/NestedBorrowsUntouchedJoin.lean
+@@ -0,0 +1,1639 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_untouched_join]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_untouched_join
++
++/-- [nested_borrows_untouched_join::map_node::closure]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def map_node.closure {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E)) :=
++  T1
++
++/-- [nested_borrows_untouched_join::required::closure]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 60:43-65:9 -/
++def required.closure :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_untouched_join::map_node::closure::<0, T0, nested_borrows_untouched_join::required::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602 {T0
++  : Type} (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) :=
++  _root_.nested_borrows_untouched_join.required.closure
++
++/-- [nested_borrows_untouched_join::resolved::closure]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 79:39-85:5 -/
++def resolved.closure :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.Usize
++
++/-- [nested_borrows_untouched_join::map_node::closure::<0, T0, nested_borrows_untouched_join::resolved::closure<1, 2, 3, 4>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595 {T0
++  : Type} (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) :=
++  _root_.nested_borrows_untouched_join.resolved.closure
++
++/-- [nested_borrows_untouched_join::DimInfo]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 20:0-23:1
++    Visibility: public -/
++@[discriminant isize]
++inductive DimInfo where
++| Lit : _root_.Aeneas.Std.Usize → DimInfo
++| Named :
++  _root_.Aeneas.Std.U32 →
++  _root_.Option _root_.Aeneas.Std.Usize →
++  DimInfo
++
++/-- [nested_borrows_untouched_join::{core::clone::Clone for nested_borrows_untouched_join::DimInfo}::clone]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 19:9-19:14
++    Visibility: public -/
++def DimInfo.Insts.CoreCloneClone.clone
++  (self : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_untouched_join.DimInfo
++  := do
++  match self with
++  | _root_.nested_borrows_untouched_join.DimInfo.Lit __self_0 =>
++    let i ← lift (core.clone.impls.CloneUsize.clone __self_0)
++    _root_.Aeneas.Std.Result.ok
++      (_root_.nested_borrows_untouched_join.DimInfo.Lit i)
++  | _root_.nested_borrows_untouched_join.DimInfo.Named __self_0 __self_1 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    let o ←
++      _root_.Aeneas.Std.core.option.Option.Clone.clone core.clone.CloneUsize
++        __self_1
++    _root_.Aeneas.Std.Result.ok
++      (_root_.nested_borrows_untouched_join.DimInfo.Named i o)
++
++/-- Trait implementation: [nested_borrows_untouched_join::{core::clone::Clone for nested_borrows_untouched_join::DimInfo}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 19:9-19:14 -/
++@[reducible]
++def DimInfo.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_borrows_untouched_join.DimInfo := {
++  clone :=
++    _root_.nested_borrows_untouched_join.DimInfo.Insts.CoreCloneClone.clone
++}
++
++/-- [nested_borrows_untouched_join::Kind]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 25:0-30:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Kind where
++| A : Kind
++| B : _root_.Aeneas.Std.U32 → Kind
++| C : Kind
++| D : _root_.Aeneas.Std.U32 → Kind
++
++/-- [nested_borrows_untouched_join::Node]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 32:0-35:1
++    Visibility: public -/
++structure Node where
++  dims : _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_untouched_join.DimInfo
++  kind : _root_.nested_borrows_untouched_join.Kind
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE.call_mut
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E))
++  (c : _root_.nested_borrows_untouched_join.map_node.closure
++  coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++  (tupled_args : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo E) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure
++    coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure
++    coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++    _root_.nested_borrows_untouched_join.map_node.closure
++    coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst))
++  := do
++  let joined ←
++    match tupled_args with
++    | _root_.nested_borrows_untouched_join.DimInfo.Lit _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++        _root_.nested_borrows_untouched_join.DimInfo
++        ((_root_.Aeneas.Std.core.result.Result
++        _root_.nested_borrows_untouched_join.DimInfo E) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure
++        coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure
++        coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++        _root_.nested_borrows_untouched_join.map_node.closure
++        coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)))
++    | _root_.nested_borrows_untouched_join.DimInfo.Named name1 o =>
++      match o with
++      | none =>
++        do
++        let (model_state, model_state1) ←
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst.call_mut
++            c name1
++        let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++        match cf with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure
++              coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++              _root_.nested_borrows_untouched_join.map_node.closure
++              coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.Aeneas.Std.core.result.Result.Ok
++            (_root_.nested_borrows_untouched_join.DimInfo.Named name1 val),
++            model_state1, back) : _root_.Sum
++            _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo E) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++            _root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.nested_borrows_untouched_join.DimInfo
++              (_root_.Aeneas.Std.core.convert.FromSame E) residual
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure
++              coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++              _root_.nested_borrows_untouched_join.map_node.closure
++              coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r, model_state1, back) :
++            _root_.Sum _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo E) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++            _root_.nested_borrows_untouched_join.map_node.closure
++            coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)))
++      | some _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++          _root_.nested_borrows_untouched_join.DimInfo
++          ((_root_.Aeneas.Std.core.result.Result
++          _root_.nested_borrows_untouched_join.DimInfo E) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++          _root_.nested_borrows_untouched_join.map_node.closure
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)))
++  match joined with
++  | _root_.Sum.inl other =>
++    let di ←
++      _root_.nested_borrows_untouched_join.DimInfo.Insts.CoreCloneClone.clone
++        other
++    let back :=
++      (fun c1 => c1 : _root_.nested_borrows_untouched_join.map_node.closure
++        coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst →
++        _root_.nested_borrows_untouched_join.map_node.closure
++        coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok di, c,
++      back)
++  | _root_.Sum.inr (exit, exit1, exit2) =>
++    _root_.Aeneas.Std.Result.ok (exit, exit1, exit2)
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoE.call_once
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E))
++  (c : _root_.nested_borrows_untouched_join.map_node.closure
++  coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++  (di : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo E) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure
++    coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst))
++  := do
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE.call_mut
++      coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst c di
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (r, c2)
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def
++  map_node.closure.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoE
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_untouched_join.map_node.closure
++  coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo E) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoE.call_once
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_untouched_join.map_node.closure
++  coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo E) := {
++  FnOnceInst :=
++    _root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoE
++    coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE.call_mut
++          coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_untouched_join::map_node]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 37:0-53:1 -/
++def map_node
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  E)) (node : _root_.nested_borrows_untouched_join.Node) (resolve : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32) E)
++    × T1)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref node.dims
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE
++      coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) i resolve
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure
++      coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst) →
++      _root_.nested_borrows_untouched_join.map_node.closure
++      coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst)
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoE
++      coreopsfunctionFnMutT1TupleShared0U32ResultOptionUsizeEInst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorResult E
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.nested_borrows_untouched_join.DimInfo)) model_state
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state1
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let joined ←
++      match node.kind with
++      | _root_.nested_borrows_untouched_join.Kind.A =>
++        let c := map_back { model_state with f := model_state2.f }
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          (_root_.nested_borrows_untouched_join.Kind.A, c) : _root_.Sum
++          (_root_.nested_borrows_untouched_join.Kind × T1)
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) E) × T1))
++      | _root_.nested_borrows_untouched_join.Kind.B x =>
++        let c := map_back { model_state with f := model_state2.f }
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++          (_root_.Aeneas.Std.core.result.Result.Ok (val, x), c) : _root_.Sum
++          (_root_.nested_borrows_untouched_join.Kind × T1)
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) E) × T1))
++      | _root_.nested_borrows_untouched_join.Kind.C =>
++        let c := map_back { model_state with f := model_state2.f }
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          (_root_.nested_borrows_untouched_join.Kind.C, c) : _root_.Sum
++          (_root_.nested_borrows_untouched_join.Kind × T1)
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) E) × T1))
++      | _root_.nested_borrows_untouched_join.Kind.D _ =>
++        let c := map_back { model_state with f := model_state2.f }
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (node.kind, c) : _root_.Sum
++          (_root_.nested_borrows_untouched_join.Kind × T1)
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) E) × T1))
++    match joined with
++    | _root_.Sum.inl (_, resolve1) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (val, 3#u32), resolve1)
++    | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32)
++        (_root_.Aeneas.Std.core.convert.FromSame E) residual
++    let c := map_back { model_state with f := model_state2.f }
++    _root_.Aeneas.Std.Result.ok (r, c)
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 1, 4, T0, nested_borrows_untouched_join::required::closure<2, 3>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a.call_mut_specialized_a791c80a89674048f47b5d86962901c4
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0))
++  (c :
++  _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  (tupled_args : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo T0) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))))
++  := do
++  let (i, _) := c
++  let joined ←
++    match tupled_args with
++    | _root_.nested_borrows_untouched_join.DimInfo.Lit _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++        _root_.nested_borrows_untouched_join.DimInfo
++        ((_root_.Aeneas.Std.core.result.Result
++        _root_.nested_borrows_untouched_join.DimInfo T0) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++    | _root_.nested_borrows_untouched_join.DimInfo.Named name1 o =>
++      match o with
++      | none =>
++        do
++        let (model_state, model_state1) ←
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst.call_mut
++            c name1
++        let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++        match cf with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++          let back1 :=
++            (fun c1 => (c1,
++               fun c2 => let (_, v) := (model_state1.#0, c2.#1)
++                         (i, v)) :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++              ×
++              (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.Aeneas.Std.core.result.Result.Ok
++            (_root_.nested_borrows_untouched_join.DimInfo.Named name1 val),
++            model_state1, back, back1) : _root_.Sum
++            _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo T0) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.nested_borrows_untouched_join.DimInfo
++              (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++          let back1 :=
++            (fun c1 => (c1,
++               fun c2 => let (_, v) := (model_state1.#0, c2.#1)
++                         (i, v)) :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++              ×
++              (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r, model_state1, back,
++            back1) : _root_.Sum _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo T0) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++      | some _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++          _root_.nested_borrows_untouched_join.DimInfo
++          ((_root_.Aeneas.Std.core.result.Result
++          _root_.nested_borrows_untouched_join.DimInfo T0) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++  match joined with
++  | _root_.Sum.inl other =>
++    let di ←
++      _root_.nested_borrows_untouched_join.DimInfo.Insts.CoreCloneClone.clone
++        other
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++    let back1 :=
++      (fun c1 => (c1, fun c2 => let (_, v) := c2
++                                (i, v)) :
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok di, c,
++      back, back1)
++  | _root_.Sum.inr (exit, exit1, exit2, exit3) =>
++    _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3)
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_once::<0, 1, T0, nested_borrows_untouched_join::required::closure<2, 3>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_1a22123fe5bf4ff9864c845fdbc21183.call_once_specialized_e9518f73b2cde61462b977170d749dc9
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0))
++  (c :
++  _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  (di : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo T0) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))
++  := do
++  let (i, _) := c
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a.call_mut_specialized_a791c80a89674048f47b5d86962901c4
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst c di
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 (c2.#0, c3.#1)
++       let c5 := back1 c4
++       let (_, v) := c5
++       (i, v) :
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::<0, 1, T0, nested_borrows_untouched_join::required::closure<2, 3>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_1a22123fe5bf4ff9864c845fdbc21183
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_1a22123fe5bf4ff9864c845fdbc21183.call_once_specialized_e9518f73b2cde61462b977170d749dc9
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
++          arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::<0, 1, T0, nested_borrows_untouched_join::required::closure<2, 3>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_1a22123fe5bf4ff9864c845fdbc21183
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a.call_mut_specialized_a791c80a89674048f47b5d86962901c4
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
++          arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [nested_borrows_untouched_join::map_node::<0, 1, T0, nested_borrows_untouched_join::required::closure<2, 3>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 37:0-53:1 -/
++def map_node01T0closure_specialized_ca8b6627e9fc3d0a5eb80c2b99804be8
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) (node : _root_.nested_borrows_untouched_join.Node)
++  (resolve : _root_.nested_borrows_untouched_join.required.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32) T0)
++    × _root_.nested_borrows_untouched_join.required.closure ×
++    (_root_.nested_borrows_untouched_join.required.closure →
++    _root_.nested_borrows_untouched_join.required.closure))
++  := do
++  let (i, _) := resolve
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref node.dims
++  let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) i1
++      resolve
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++  let c := model_state.f
++  let (i2, _) := c
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_596a76d00a88e445dfd489021effb602.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_66ce5bc50a8f148266f17bc897b2e90a
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorResult T0
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.nested_borrows_untouched_join.DimInfo)) model_state
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state1
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let joined ←
++      match node.kind with
++      | _root_.nested_borrows_untouched_join.Kind.A =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.nested_borrows_untouched_join.Kind.A : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.required.closure ×
++          (_root_.nested_borrows_untouched_join.required.closure →
++          _root_.nested_borrows_untouched_join.required.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.B x =>
++        let c1 := map_back { model_state with f := model_state2.f }
++        let back :=
++          (fun resolve1 =>
++             let c2 := model_state2.f
++             let c3 := map_back { model_state with f := c2 }
++             let (m, back1) := map_back1 (c3.#0, resolve1.#1)
++             let c4 := m.f
++             let (_, v) := (c2.#0, c4.#1)
++             let c5 := back1 { model_state with f := (i2, v) }
++             let (_, v1) := c5
++             (i, v1) : _root_.nested_borrows_untouched_join.required.closure
++            → _root_.nested_borrows_untouched_join.required.closure)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++          (_root_.Aeneas.Std.core.result.Result.Ok (val, x), c1, back) :
++          _root_.Sum _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.required.closure ×
++          (_root_.nested_borrows_untouched_join.required.closure →
++          _root_.nested_borrows_untouched_join.required.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.C =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.nested_borrows_untouched_join.Kind.C : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.required.closure ×
++          (_root_.nested_borrows_untouched_join.required.closure →
++          _root_.nested_borrows_untouched_join.required.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.D _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl node.kind : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.required.closure ×
++          (_root_.nested_borrows_untouched_join.required.closure →
++          _root_.nested_borrows_untouched_join.required.closure)))
++    match joined with
++    | _root_.Sum.inl _ =>
++      let c1 := map_back { model_state with f := model_state2.f }
++      let back :=
++        (fun resolve1 =>
++           let c2 := model_state2.f
++           let c3 := map_back { model_state with f := c2 }
++           let (m, back1) := map_back1 (c3.#0, resolve1.#1)
++           let c4 := m.f
++           let (_, v) := (c2.#0, c4.#1)
++           let c5 := back1 { model_state with f := (i2, v) }
++           let (_, v1) := c5
++           (i, v1) : _root_.nested_borrows_untouched_join.required.closure →
++          _root_.nested_borrows_untouched_join.required.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (val, 3#u32), c1, back)
++    | _root_.Sum.inr (exit, exit1, exit2) =>
++      _root_.Aeneas.Std.Result.ok (exit, exit1, exit2)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32)
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let c1 := map_back { model_state with f := model_state2.f }
++    let back :=
++      (fun resolve1 =>
++         let c2 := model_state2.f
++         let c3 := map_back { model_state with f := c2 }
++         let (m, back1) := map_back1 (c3.#0, resolve1.#1)
++         let c4 := m.f
++         let (_, v) := (c2.#0, c4.#1)
++         let c5 := back1 { model_state with f := (i2, v) }
++         let (_, v1) := c5
++         (i, v1) : _root_.nested_borrows_untouched_join.required.closure →
++        _root_.nested_borrows_untouched_join.required.closure)
++    _root_.Aeneas.Std.Result.ok (r, c1, back)
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 1, 6, T0, nested_borrows_untouched_join::resolved::closure<2, 3, 4, 5>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e.call_mut_specialized_29c0b6b8369a7105ea9f5cc8cbe0a673
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0))
++  (c :
++  _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  (tupled_args : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo T0) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))))
++  := do
++  let (_, i, i1, i2) := c
++  let joined ←
++    match tupled_args with
++    | _root_.nested_borrows_untouched_join.DimInfo.Lit _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++        _root_.nested_borrows_untouched_join.DimInfo
++        ((_root_.Aeneas.Std.core.result.Result
++        _root_.nested_borrows_untouched_join.DimInfo T0) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++    | _root_.nested_borrows_untouched_join.DimInfo.Named name1 o =>
++      match o with
++      | none =>
++        do
++        let (model_state, model_state1) ←
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst.call_mut
++            c name1
++        let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++        match cf with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++          let back1 :=
++            (fun c1 => (c1,
++               fun c2 =>
++                 let (i3, _, _, _) :=
++                   (c2.#0, model_state1.#1, model_state1.#2, model_state1.#3)
++                 (i3, i, i1, i2)) :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++              ×
++              (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.Aeneas.Std.core.result.Result.Ok
++            (_root_.nested_borrows_untouched_join.DimInfo.Named name1 val),
++            model_state1, back, back1) : _root_.Sum
++            _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo T0) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.nested_borrows_untouched_join.DimInfo
++              (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++          let back :=
++            (fun c1 => c1 :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++          let back1 :=
++            (fun c1 => (c1,
++               fun c2 =>
++                 let (i3, _, _, _) :=
++                   (c2.#0, model_state1.#1, model_state1.#2, model_state1.#3)
++                 (i3, i, i1, i2)) :
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++              ×
++              (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++              →
++              _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++              coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r, model_state1, back,
++            back1) : _root_.Sum _root_.nested_borrows_untouched_join.DimInfo
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_borrows_untouched_join.DimInfo T0) ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++            ×
++            (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++            →
++            _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++            coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++      | some _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl tupled_args : _root_.Sum
++          _root_.nested_borrows_untouched_join.DimInfo
++          ((_root_.Aeneas.Std.core.result.Result
++          _root_.nested_borrows_untouched_join.DimInfo T0) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++          (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++          _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))))
++  match joined with
++  | _root_.Sum.inl other =>
++    let di ←
++      _root_.nested_borrows_untouched_join.DimInfo.Insts.CoreCloneClone.clone
++        other
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++    let back1 :=
++      (fun c1 => (c1, fun c2 => let (i3, _, _, _) := c2
++                                (i3, i, i1, i2)) :
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        ((_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++        (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++        coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok di, c,
++      back, back1)
++  | _root_.Sum.inr (exit, exit1, exit2, exit3) =>
++    _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3)
++
++/-- [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::call_once::<0, 1, T0, nested_borrows_untouched_join::resolved::closure<2, 3, 4, 5>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++def
++  map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_c865c1269680c174a06a3d8dc553b831.call_once_specialized_caa5931827b6903edcb1854ebc6de745
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0))
++  (c :
++  _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  (di : _root_.nested_borrows_untouched_join.DimInfo) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_untouched_join.DimInfo T0) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) ×
++    (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))
++  := do
++  let (_, i, i1, i2) := c
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e.call_mut_specialized_29c0b6b8369a7105ea9f5cc8cbe0a673
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst c di
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 (c3.#0, c2.#1, c2.#2, c2.#3)
++       let c5 := back1 c4
++       let (i3, _, _, _) := c5
++       (i3, i, i1, i2) :
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnOnce<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::<0, 1, T0, nested_borrows_untouched_join::resolved::closure<2, 3, 4, 5>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_c865c1269680c174a06a3d8dc553b831
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_c865c1269680c174a06a3d8dc553b831.call_once_specialized_caa5931827b6903edcb1854ebc6de745
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
++          arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1, capture_state.#2, capture_state.#3))
++}
++
++/-- Trait implementation: [nested_borrows_untouched_join::map_node::{core::ops::function::FnMut<(&'_ (nested_borrows_untouched_join::DimInfo)), core::result::Result<nested_borrows_untouched_join::DimInfo, E>> for nested_borrows_untouched_join::map_node::closure<0, E, T1>[TraitClause@0]}::<0, 1, T0, nested_borrows_untouched_join::resolved::closure<2, 3, 4, 5>>]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 44:13-47:9 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++  coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  _root_.nested_borrows_untouched_join.DimInfo
++  (_root_.Aeneas.Std.core.result.Result
++  _root_.nested_borrows_untouched_join.DimInfo T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnOnceTupleSharedDimInfoResultDimInfoT0_specialized_c865c1269680c174a06a3d8dc553b831
++    coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e.call_mut_specialized_29c0b6b8369a7105ea9f5cc8cbe0a673
++          coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst arg
++          arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1, capture_state.#2, capture_state.#3))
++}
++
++/-- [nested_borrows_untouched_join::map_node::<0, 1, T0, nested_borrows_untouched_join::resolved::closure<2, 3, 4, 5>>]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 37:0-53:1 -/
++def map_node01T0closure_specialized_3ac36acd7dc30787d8260d6cf8844e6f
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  T0)) (node : _root_.nested_borrows_untouched_join.Node)
++  (resolve : _root_.nested_borrows_untouched_join.resolved.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32) T0)
++    × _root_.nested_borrows_untouched_join.resolved.closure ×
++    (_root_.nested_borrows_untouched_join.resolved.closure →
++    _root_.nested_borrows_untouched_join.resolved.closure))
++  := do
++  let (_, i, i1, i2) := resolve
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref node.dims
++  let i3 ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) i3
++      resolve
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst) →
++      _root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst)))
++  let c := model_state.f
++  let (_, i4, i5, i6) := c
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_untouched_join.DimInfo)
++      (_root_.nested_borrows_untouched_join.map_node.closure0T0closure_specialized_9ecf1ab45857ca73156823250e708595.Insts.CoreOpsFunctionFnMutTupleSharedDimInfoResultDimInfoT0_specialized_39b19f20d6345cf013d219d00ff7e87e
++      coreopsfunctionFnMutclosureTupleShared0U32ResultOptionUsizeT0Inst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorResult T0
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.nested_borrows_untouched_join.DimInfo)) model_state
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state1
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let joined ←
++      match node.kind with
++      | _root_.nested_borrows_untouched_join.Kind.A =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.nested_borrows_untouched_join.Kind.A : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.resolved.closure ×
++          (_root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.B x =>
++        let c1 := map_back { model_state with f := model_state2.f }
++        let back :=
++          (fun resolve1 =>
++             let c2 := model_state2.f
++             let c3 := map_back { model_state with f := c2 }
++             let (m, back1) := map_back1 (resolve1.#0, c3.#1, c3.#2, c3.#3)
++             let c4 := m.f
++             let (i7, _, _, _) := (c4.#0, c2.#1, c2.#2, c2.#3)
++             let c5 := back1 { model_state with f := (i7, i4, i5, i6) }
++             let (i8, _, _, _) := c5
++             (i8, i, i1, i2) :
++            _root_.nested_borrows_untouched_join.resolved.closure →
++            _root_.nested_borrows_untouched_join.resolved.closure)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++          (_root_.Aeneas.Std.core.result.Result.Ok (val, x), c1, back) :
++          _root_.Sum _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.resolved.closure ×
++          (_root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.C =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          _root_.nested_borrows_untouched_join.Kind.C : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.resolved.closure ×
++          (_root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)))
++      | _root_.nested_borrows_untouched_join.Kind.D _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl node.kind : _root_.Sum
++          _root_.nested_borrows_untouched_join.Kind
++          ((_root_.Aeneas.Std.core.result.Result
++          ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_borrows_untouched_join.DimInfo) ×
++          _root_.Aeneas.Std.U32) T0) ×
++          _root_.nested_borrows_untouched_join.resolved.closure ×
++          (_root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)))
++    match joined with
++    | _root_.Sum.inl _ =>
++      let c1 := map_back { model_state with f := model_state2.f }
++      let back :=
++        (fun resolve1 =>
++           let c2 := model_state2.f
++           let c3 := map_back { model_state with f := c2 }
++           let (m, back1) := map_back1 (resolve1.#0, c3.#1, c3.#2, c3.#3)
++           let c4 := m.f
++           let (i7, _, _, _) := (c4.#0, c2.#1, c2.#2, c2.#3)
++           let c5 := back1 { model_state with f := (i7, i4, i5, i6) }
++           let (i8, _, _, _) := c5
++           (i8, i, i1, i2) :
++          _root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (val, 3#u32), c1, back)
++    | _root_.Sum.inr (exit, exit1, exit2) =>
++      _root_.Aeneas.Std.Result.ok (exit, exit1, exit2)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32)
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let c1 := map_back { model_state with f := model_state2.f }
++    let back :=
++      (fun resolve1 =>
++         let c2 := model_state2.f
++         let c3 := map_back { model_state with f := c2 }
++         let (m, back1) := map_back1 (resolve1.#0, c3.#1, c3.#2, c3.#3)
++         let c4 := m.f
++         let (i7, _, _, _) := (c4.#0, c2.#1, c2.#2, c2.#3)
++         let c5 := back1 { model_state with f := (i7, i4, i5, i6) }
++         let (i8, _, _, _) := c5
++         (i8, i, i1, i2) :
++        _root_.nested_borrows_untouched_join.resolved.closure →
++        _root_.nested_borrows_untouched_join.resolved.closure)
++    _root_.Aeneas.Std.Result.ok (r, c1, back)
++
++/-- [nested_borrows_untouched_join::required::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<core::option::Option<usize>, core::convert::Infallible>> for nested_borrows_untouched_join::required::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 60:43-65:9 -/
++def
++  required.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeInfallible.call_mut
++  (c : _root_.nested_borrows_untouched_join.required.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.Usize)
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_borrows_untouched_join.required.closure ×
++    (_root_.nested_borrows_untouched_join.required.closure →
++    _root_.nested_borrows_untouched_join.required.closure))
++  := do
++  let (i, v) := c
++  if tupled_args != i
++  then
++    let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v tupled_args
++    let back :=
++      (fun c1 => let (_, v2) := c1
++                 (i, v2) :
++        _root_.nested_borrows_untouched_join.required.closure →
++        _root_.nested_borrows_untouched_join.required.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok none,
++      (i, v1), back)
++  else
++    let back :=
++      (fun c1 => let (_, v1) := c1
++                 (i, v1) :
++        _root_.nested_borrows_untouched_join.required.closure →
++        _root_.nested_borrows_untouched_join.required.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok none,
++      c, back)
++
++/-- [nested_borrows_untouched_join::required::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<core::option::Option<usize>, core::convert::Infallible>> for nested_borrows_untouched_join::required::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 60:43-65:9 -/
++def
++  required.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeInfallible.call_once
++  (c : _root_.nested_borrows_untouched_join.required.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.Usize)
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_borrows_untouched_join.required.closure)
++  := do
++  let (i1, _) := c
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_untouched_join.required.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeInfallible.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (_, v) := c2
++  _root_.Aeneas.Std.Result.ok (r, (i1, v))
++
++/-- Trait implementation: [nested_borrows_untouched_join::required::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<core::option::Option<usize>, core::convert::Infallible>> for nested_borrows_untouched_join::required::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 60:43-65:9 -/
++@[reducible]
++def
++  required.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  _root_.Aeneas.Std.core.convert.Infallible) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_untouched_join.required.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeInfallible.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1))
++}
++
++/-- Trait implementation: [nested_borrows_untouched_join::required::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<core::option::Option<usize>, core::convert::Infallible>> for nested_borrows_untouched_join::required::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 60:43-65:9 -/
++@[reducible]
++def
++  required.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.required.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  _root_.Aeneas.Std.core.convert.Infallible) := {
++  FnOnceInst :=
++    _root_.nested_borrows_untouched_join.required.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeInfallible
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_untouched_join.required.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeInfallible.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (captured.#0, capture_state.#1))
++}
++
++/-- [nested_borrows_untouched_join::required]: loop body 0:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 59:4-70:5
++    Visibility: public -/
++@[rust_loop_body]
++def required_loop.body
++  (k : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_untouched_join.Node)
++  (required1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_borrows_untouched_join.Node) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done required1)
++  | some node =>
++    let (_, c, map_node_back) ←
++      _root_.nested_borrows_untouched_join.map_node01T0closure_specialized_ca8b6627e9fc3d0a5eb80c2b99804be8
++        _root_.nested_borrows_untouched_join.required.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeInfallible
++        node (k, required1)
++    let c1 := map_node_back c
++    let (_, required2) := c1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, required2))
++
++/-- [nested_borrows_untouched_join::required]: loop 0:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 59:4-70:5
++    Visibility: public -/
++@[rust_loop]
++def required_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_untouched_join.Node) (k : _root_.Aeneas.Std.U32)
++  (required1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, required2) =>
++       _root_.nested_borrows_untouched_join.required_loop.body k iter1
++       required2 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.Node) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_untouched_join.Node) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (iter, required1)
++
++/-- [nested_borrows_untouched_join::required]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 57:0-72:1
++    Visibility: public -/
++def required
++  (nodes : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_borrows_untouched_join.Node) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref nodes
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.nested_borrows_untouched_join.required_loop iter k
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [nested_borrows_untouched_join::resolved::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<core::option::Option<usize>, u32>> for nested_borrows_untouched_join::resolved::closure<0, 1, 2, 3>}::call_mut]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 79:39-85:5 -/
++def
++  resolved.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeU32.call_mut
++  (c : _root_.nested_borrows_untouched_join.resolved.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_untouched_join.resolved.closure ×
++    (_root_.nested_borrows_untouched_join.resolved.closure →
++    _root_.nested_borrows_untouched_join.resolved.closure))
++  := do
++  let (i, i1, i2, i3) := c
++  let i4 ← lift (core.num.U32.wrapping_add i 1#u32)
++  if tupled_args = i1
++  then
++    let back :=
++      (fun c1 => let (i5, _, _, _) := c1
++                 (i5, i1, i2, i3) :
++        _root_.nested_borrows_untouched_join.resolved.closure →
++        _root_.nested_borrows_untouched_join.resolved.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      tupled_args, (i4, i1, i2, i3), back)
++  else
++    if tupled_args = i2
++    then
++      let back :=
++        (fun c1 => let (i5, _, _, _) := c1
++                   (i5, i1, i2, i3) :
++          _root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (some i3), (i4, i1, i2, i3), back)
++    else
++      let back :=
++        (fun c1 => let (i5, _, _, _) := c1
++                   (i5, i1, i2, i3) :
++          _root_.nested_borrows_untouched_join.resolved.closure →
++          _root_.nested_borrows_untouched_join.resolved.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        none, (i4, i1, i2, i3), back)
++
++/-- [nested_borrows_untouched_join::resolved::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<core::option::Option<usize>, u32>> for nested_borrows_untouched_join::resolved::closure<0, 1, 2, 3>}::call_once]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 79:39-85:5 -/
++def
++  resolved.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeU32.call_once
++  (c : _root_.nested_borrows_untouched_join.resolved.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_untouched_join.resolved.closure)
++  := do
++  let (_, i1, i2, i3) := c
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_untouched_join.resolved.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeU32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (i4, _, _, _) := c2
++  _root_.Aeneas.Std.Result.ok (r, (i4, i1, i2, i3))
++
++/-- Trait implementation: [nested_borrows_untouched_join::resolved::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<core::option::Option<usize>, u32>> for nested_borrows_untouched_join::resolved::closure<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 79:39-85:5 -/
++@[reducible]
++def
++  resolved.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_untouched_join.resolved.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1, 
++        arg.#2, arg.#3))
++}
++
++/-- Trait implementation: [nested_borrows_untouched_join::resolved::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<core::option::Option<usize>, u32>> for nested_borrows_untouched_join::resolved::closure<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 79:39-85:5 -/
++@[reducible]
++def
++  resolved.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeU32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_untouched_join.resolved.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_untouched_join.resolved.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultOptionUsizeU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_untouched_join.resolved.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeU32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1,
++        captured.#2, captured.#3))
++}
++
++/-- [nested_borrows_untouched_join::resolved]:
++    Source: 'tests/src/nested-borrows-untouched-join.rs', lines 77:0-90:1
++    Visibility: public -/
++def resolved
++  (node : _root_.nested_borrows_untouched_join.Node)
++  (k : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.Usize)
++  (bad : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_borrows_untouched_join.DimInfo) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (observed, c, map_node_back) ←
++    _root_.nested_borrows_untouched_join.map_node01T0closure_specialized_3ac36acd7dc30787d8260d6cf8844e6f
++      _root_.nested_borrows_untouched_join.resolved.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultOptionUsizeU32
++      node (0#u32, bad, k, v)
++  match observed with
++  | _root_.Aeneas.Std.core.result.Result.Ok p =>
++    let (dims, e) := p
++    let c1 := map_node_back c
++    let (calls, _, _, _) := c1
++    _root_.Aeneas.Std.Result.ok (dims, e, calls)
++  | _root_.Aeneas.Std.core.result.Result.Err name1 =>
++    let c1 := map_node_back c
++    let (calls, _, _, _) := c1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_borrows_untouched_join.DimInfo, name1, calls)
++
++end nested_borrows_untouched_join
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index cf85843..bea4c21 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -43,6 +43,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsSymbolicPaths
+ @[default_target] lean_lib NestedBorrowsSharedCapture
+ @[default_target] lean_lib NestedBorrowsAsDerefMut
++@[default_target] lean_lib NestedBorrowsUntouchedJoin
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectDispatch
+diff --git a/tests/src/nested-borrows-untouched-join.rs b/tests/src/nested-borrows-untouched-join.rs
+new file mode 100644
+index 0000000..252f6ab
+--- /dev/null
++++ b/tests/src/nested-borrows-untouched-join.rs
+@@ -0,0 +1,144 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsUntouchedJoin
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A join of contexts which all hold the same levels of a staged function
++//! call. `map_node` collects the dimensions of a node through a closure which
++//! captures `resolve: &mut F`, with `F` a closure which captures a mutable
++//! borrow: the backward functions of `map` for the regions of `F` are staged
++//! (the `Map` it returns holds the closure), and `collect` consumes that `Map`.
++//! The `_` arm of the match on the kind covers three variants, whose entry
++//! contexts are joined while these calls are pending. No branch modifies
++//! them: the join keeps them unchanged instead of ending the levels which can
++//! end in every branch separately (the values those give back are fresh in
++//! every branch, and the remaining levels would be merged into a join
++//! abstraction whose continuation holds the staged call before its earlier
++//! stages are applied). The shape of `map_node_symbolic_bindings` and
++//! `required_prebinding_symbols` in chelis-ir's dag.rs.
++
++#[derive(Clone)]
++pub enum DimInfo {
++    Lit(usize),
++    Named(u32, Option<usize>),
++}
++
++pub enum Kind {
++    A,
++    B(u32),
++    C,
++    D(u32),
++}
++
++pub struct Node {
++    pub dims: Vec<DimInfo>,
++    pub kind: Kind,
++}
++
++fn map_node<E>(
++    node: &Node,
++    resolve: &mut impl FnMut(&u32) -> Result<Option<usize>, E>,
++) -> Result<(Vec<DimInfo>, u32), E> {
++    let dims = node
++        .dims
++        .iter()
++        .map(|dim| match dim {
++            DimInfo::Named(name, None) => Ok(DimInfo::Named(*name, resolve(name)?)),
++            other => Ok(other.clone()),
++        })
++        .collect::<Result<Vec<DimInfo>, E>>()?;
++    match &node.kind {
++        Kind::B(x) => Ok((dims, *x)),
++        _ => Ok((dims, 3)),
++    }
++}
++
++/// The names other than `k` which the nodes need (the shape of
++/// `required_prebinding_symbols` in chelis-ir's dag.rs).
++pub fn required(nodes: &Vec<Node>, k: u32) -> Vec<u32> {
++    let mut required = Vec::new();
++    for node in nodes.iter() {
++        let observed = map_node(node, &mut |name| {
++            if *name != k {
++                required.push(*name);
++            }
++            Ok::<_, std::convert::Infallible>(None)
++        });
++        match observed {
++            Ok(_) => {}
++            Err(never) => match never {},
++        }
++    }
++    required
++}
++
++/// The dimensions of a node, with `k` resolved to `v`, and the kind; the name
++/// `bad` fails instead (no dimensions, and `bad` for the kind). Also the
++/// number of names resolved.
++pub fn resolved(node: &Node, k: u32, v: usize, bad: u32) -> (Vec<DimInfo>, u32, u32) {
++    let mut calls = 0u32;
++    let observed = map_node(node, &mut |name| {
++        calls = calls.wrapping_add(1);
++        if *name == bad {
++            return Err(*name);
++        }
++        Ok(if *name == k { Some(v) } else { None })
++    });
++    match observed {
++        Ok((dims, e)) => (dims, e, calls),
++        Err(name) => (Vec::new(), name, calls),
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn node(dims: Vec<DimInfo>, kind: Kind) -> Node {
++        Node { dims, kind }
++    }
++
++    fn named(dims: &[DimInfo]) -> Vec<(u32, Option<usize>)> {
++        dims.iter()
++            .map(|d| match d {
++                DimInfo::Lit(n) => (u32::MAX, Some(*n)),
++                DimInfo::Named(name, v) => (*name, *v),
++            })
++            .collect()
++    }
++
++    #[test]
++    fn required_native() {
++        let nodes = vec![
++            node(vec![DimInfo::Named(1, None), DimInfo::Lit(4)], Kind::B(10)),
++            node(vec![DimInfo::Named(2, None), DimInfo::Named(3, Some(5))], Kind::A),
++            node(vec![DimInfo::Named(7, None)], Kind::D(20)),
++            node(vec![], Kind::C),
++        ];
++        assert_eq!(required(&nodes, 2), vec![1, 7]);
++        assert_eq!(required(&nodes, 9), vec![1, 2, 7]);
++        assert_eq!(required(&vec![], 0), vec![]);
++    }
++
++    #[test]
++    fn resolved_native() {
++        let n = node(
++            vec![DimInfo::Named(1, None), DimInfo::Lit(4), DimInfo::Named(2, None), DimInfo::Named(1, Some(6))],
++            Kind::B(10),
++        );
++        let (dims, e, calls) = resolved(&n, 1, 8, 99);
++        assert_eq!(
++            (named(&dims), e, calls),
++            (vec![(1, Some(8)), (u32::MAX, Some(4)), (2, None), (1, Some(6))], 10, 2)
++        );
++        let (dims, e, calls) = resolved(&n, 1, 8, 2);
++        assert_eq!((named(&dims), e, calls), (vec![], 2, 2));
++        let n = node(vec![DimInfo::Named(2, None)], Kind::C);
++        let (dims, e, calls) = resolved(&n, 2, 5, 99);
++        assert_eq!((named(&dims), e, calls), (vec![(2, Some(5))], 3, 1));
++        let n = node(vec![DimInfo::Named(5, None), DimInfo::Lit(1)], Kind::D(7));
++        let (dims, e, calls) = resolved(&n, 5, 9, 99);
++        assert_eq!((named(&dims), e, calls), (vec![(5, Some(9)), (u32::MAX, Some(1))], 3, 1));
++        let (dims, e, calls) = resolved(&node(vec![], Kind::A), 5, 9, 99);
++        assert_eq!((named(&dims), e, calls), (vec![], 3, 0));
++    }
++}

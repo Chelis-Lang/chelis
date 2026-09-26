@@ -1,0 +1,1108 @@
+# aeneas integration step 72 after cba11f3beb: commit 7fbb2b0ee8ee309a33b66eae31a5559fd9f99110
+# first parent 97920b1e5a23d29b74b24a2b44dbba75bc83b8fd, merged 832291827f107603093fefffae14ea414fa267d7
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/impl-group-order' (E25: trait-impl methods give back in their trait method's region-group order; fail-closed check)
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 021e480..40c723d 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -2757,6 +2757,80 @@ let admit_modeled_fun_instances (crate : crate) : unit =
+           | _ -> admitted)
+         crate.fun_decls FunDeclId.Set.empty
+ 
++(** Reorder the region parameters of the functions of [orders] (for every
++    function, the positions of its region parameters in their new order), and
++    the region arguments of every reference to them. *)
++let reorder_fun_region_params (crate : crate) (orders : int list FunDeclId.Map.t)
++    : crate =
++  if FunDeclId.Map.is_empty orders then crate
++  else
++    let reorder (order : int list) l = List.map (List.nth l) order in
++    let reorder_args (fid : FunDeclId.id) (generics : generic_args) =
++      match FunDeclId.Map.find_opt fid orders with
++      | None -> generics
++      | Some order -> { generics with regions = reorder order generics.regions }
++    in
++    (* Reorder the region parameters of a function, and rename accordingly its
++       free region variables, which are those parameters. Its name keeps its own
++       specialization binder. *)
++    let reorder_params (f : fun_decl) (order : int list) : fun_decl =
++      let params = reorder order f.generics.regions in
++      let renaming =
++        RegionId.Map.of_list
++          (List.mapi
++             (fun i (r : region_param) -> (r.index, RegionId.of_int i))
++             params)
++      in
++      let rename =
++        object
++          inherit [_] map_crate as super
++
++          method! visit_region env r =
++            match r with
++            | RVar (Free id) -> RVar (Free (RegionId.Map.find id renaming))
++            | _ -> super#visit_region env r
++        end
++      in
++      let f = rename#visit_fun_decl () f in
++      let regions =
++        List.mapi
++          (fun i (r : region_param) -> { r with index = RegionId.of_int i })
++          params
++      in
++      { f with generics = { f.generics with regions } }
++    in
++    let fun_decls =
++      FunDeclId.Map.map
++        (fun (f : fun_decl) ->
++          match FunDeclId.Map.find_opt f.def_id orders with
++          | None -> f
++          | Some order ->
++              let f = reorder_params f order in
++              [%ltrace
++                let env = Print.crate_to_fmt_env crate in
++                "Reordered the region parameters of: "
++                ^ Print.fun_decl_to_string env "" " " f];
++              f)
++        crate.fun_decls
++    in
++    let visitor =
++      object
++        inherit [_] map_crate as super
++
++        method! visit_fun_decl_ref env fref =
++          let fref = super#visit_fun_decl_ref env fref in
++          { fref with generics = reorder_args fref.id fref.generics }
++
++        method! visit_fn_ptr env ptr =
++          let ptr = super#visit_fn_ptr env ptr in
++          match ptr.kind with
++          | FunId (FRegular fid) ->
++              { ptr with generics = reorder_args fid ptr.generics }
++          | FunId (FBuiltin _) | TraitMethod _ -> ptr
++      end
++    in
++    visitor#visit_crate () { crate with fun_decls }
++
+ (** Lay out the region parameters of every method as those of its trait (or
+     implementation) followed by its own.
+ 
+@@ -2844,74 +2918,128 @@ let order_method_region_params (crate : crate) : crate =
+             else None)
+       crate.fun_decls
+   in
+-  if FunDeclId.Map.is_empty orders then crate
+-  else
+-    let reorder (order : int list) l = List.map (List.nth l) order in
+-    let reorder_args (fid : FunDeclId.id) (generics : generic_args) =
+-      match FunDeclId.Map.find_opt fid orders with
+-      | None -> generics
+-      | Some order -> { generics with regions = reorder order generics.regions }
+-    in
+-    (* Reorder the region parameters of a method, and rename accordingly its
+-       free region variables, which are those parameters. Its name keeps its own
+-       specialization binder. *)
+-    let reorder_params (f : fun_decl) (order : int list) : fun_decl =
+-      let params = reorder order f.generics.regions in
+-      let renaming =
+-        RegionId.Map.of_list
+-          (List.mapi
+-             (fun i (r : region_param) -> (r.index, RegionId.of_int i))
+-             params)
+-      in
+-      let rename =
+-        object
+-          inherit [_] map_crate as super
+-
+-          method! visit_region env r =
+-            match r with
+-            | RVar (Free id) -> RVar (Free (RegionId.Map.find id renaming))
+-            | _ -> super#visit_region env r
+-        end
+-      in
+-      let f = rename#visit_fun_decl () f in
+-      let regions =
+-        List.mapi
+-          (fun i (r : region_param) -> { r with index = RegionId.of_int i })
+-          params
+-      in
+-      { f with generics = { f.generics with regions } }
+-    in
+-    let fun_decls =
+-      FunDeclId.Map.map
+-        (fun (f : fun_decl) ->
+-          match FunDeclId.Map.find_opt f.def_id orders with
+-          | None -> f
+-          | Some order ->
+-              let f = reorder_params f order in
+-              [%ltrace
+-                let env = Print.crate_to_fmt_env crate in
+-                "Reordered the region parameters of: "
+-                ^ Print.fun_decl_to_string env "" " " f];
+-              f)
+-        crate.fun_decls
+-    in
+-    let visitor =
+-      object
+-        inherit [_] map_crate as super
+-
+-        method! visit_fun_decl_ref env fref =
+-          let fref = super#visit_fun_decl_ref env fref in
+-          { fref with generics = reorder_args fref.id fref.generics }
+-
+-        method! visit_fn_ptr env ptr =
+-          let ptr = super#visit_fn_ptr env ptr in
+-          match ptr.kind with
+-          | FunId (FRegular fid) ->
+-              { ptr with generics = reorder_args fid ptr.generics }
+-          | FunId (FBuiltin _) | TraitMethod _ -> ptr
+-      end
+-    in
+-    visitor#visit_crate () { crate with fun_decls }
++  reorder_fun_region_params crate orders
++
++(** Lay out the region parameters of every trait-impl method so that its region
++    groups are those of its trait method, in the same order.
++
++    The region groups of a signature are ordered by a depth-first search over
++    the outlives graph of its region parameters, taken in their order (see
++    {!RegionsHierarchy.compute_regions_hierarchy_for_sig}). The forward function
++    returns the backward functions in the order of the region groups, and the
++    record of the trait stores an implementation in the field of the trait
++    method, so that the calls through the trait use the order of the trait
++    method. An implementation may order the regions differently:
++    - its regions may instantiate those of the trait in another order, e.g. in
++      [impl<'a, 'b> Two<'b, 'a> for S];
++    - its instantiation of the type variables of the trait may contain regions
++      which outlive the regions of the method, and the search puts the region
++      groups they outlive first. For instance, for a closure capturing a
++      variable by shared reference:
++      {[
++        fn FnMut::call_mut::<..><'_0, '_1, T0, T1, T2>
++          (_1: &'_1 mut T0, _2: (&'_0 mut T1,)) -> T2
++        fn {impl FnMut::<..> for closure<'_0>}::call_mut<'_0, '_1, '_2>
++          (state_1: &'_2 mut closure<'_0>, args_2: (&'_1 mut u32,)) -> u32
++      ]}
++      the trait method gives back the argument, then the state, while in the
++      implementation ['_0 : '_2] puts the state first.
++    When the given back values have the same type, the other order silently
++    swaps them.
++
++    For every implementation that the record of its trait implementation stores
++    as it is (see {!ModelStateABI.record_stores_translated_method}) and whose
++    regions, grouped and ordered as in its signature, differ from the regions
++    which instantiate those of the trait method, grouped and ordered as in the
++    trait method, we put first the regions which instantiate those of the trait
++    method, in the order of the trait method's regions, then the other regions.
++    Every other function is left unchanged. [SymbolicToPure] then checks that
++    the backward functions of those implementations are those of their trait
++    method (see {!RegionsHierarchy.check_trait_impl_method_region_groups}). *)
++let order_impl_method_region_groups (crate : crate) : crate =
++  (* The trait method of an implementation stored as it is in its record *)
++  let trait_fun_decl (f : fun_decl) : fun_decl option =
++    match f.src with
++    | TraitImplItem (impl_ref, trait_ref, name, _) -> (
++        match
++          ( TraitImplId.Map.find_opt impl_ref.id crate.trait_impls,
++            TraitDeclId.Map.find_opt trait_ref.id crate.trait_decls )
++        with
++        | Some impl, Some decl
++          when ModelStateABI.record_stores_translated_method crate impl name
++                 f.def_id ->
++            Option.bind
++              (List.find_opt
++                 (fun (m : trait_method binder) -> m.binder_value.name = name)
++                 decl.methods)
++              (fun (m : trait_method binder) ->
++                FunDeclId.Map.find_opt m.binder_value.item.id crate.fun_decls)
++        | _ -> None)
++    | _ -> None
++  in
++  let orders : int list FunDeclId.Map.t =
++    FunDeclId.Map.filter_map
++      (fun _ (f : fun_decl) ->
++        match trait_fun_decl f with
++        | None -> None
++        | Some tf -> (
++            (* A mismatch of the signatures is reported by the check in
++               [SymbolicToPure] *)
++            match
++              RegionsHierarchy.trait_method_region_map tf.signature f.signature
++            with
++            | Error _ -> None
++            | Ok region_map ->
++                (* The regions of the implementation which instantiate those of
++                   the trait method, in the order of the trait method *)
++                let image (rid : RegionId.id) =
++                  match RegionId.Map.find_opt rid region_map with
++                  | Some (RVar (Free rid)) -> Some rid
++                  | _ -> None
++                in
++                let images =
++                  List.fold_left
++                    (fun images (r : region_param) ->
++                      match image r.index with
++                      | Some rid when not (List.mem rid images) ->
++                          images @ [ rid ]
++                      | _ -> images)
++                    [] tf.generics.regions
++                in
++                let groups (d : fun_decl) =
++                  RegionsHierarchy.compute_regions_hierarchy_for_sig
++                    (Some d.item_meta.span) crate
++                    (LlbcAstUtils.bound_fun_sig_of_decl d)
++                in
++                let layout (d : fun_decl) to_impl =
++                  List.filter_map
++                    (fun (g : region_var_group) ->
++                      match
++                        List.sort_uniq RegionId.compare_id
++                          (List.filter_map to_impl g.regions)
++                      with
++                      | [] -> None
++                      | l -> Some l)
++                    (groups d)
++                in
++                let in_images rid =
++                  if List.mem rid images then Some rid else None
++                in
++                if layout tf image = layout f in_images then None
++                else
++                  let others =
++                    List.filter
++                      (fun (r : region_param) -> not (List.mem r.index images))
++                      f.generics.regions
++                  in
++                  Some
++                    (List.map RegionId.to_int images
++                    @ List.map
++                        (fun (r : region_param) -> RegionId.to_int r.index)
++                        others)))
++      crate.fun_decls
++  in
++  reorder_fun_region_params crate orders
+ 
+ (** Some provided methods cannot occur in the model record because their bounds
+     depend on that record (Iterator.collect / FromIterator). The model must
+@@ -4047,6 +4175,9 @@ let apply_passes (crate : crate) : crate =
+      parameters in their original order *)
+   admit_modeled_fun_instances crate;
+   let crate = order_method_region_params crate in
++  (* After [order_method_region_params]: the region parameters of the trait
++     methods are in their final order *)
++  let crate = order_impl_method_region_groups crate in
+   let crate = resolve_default_only_dispatch crate in
+   let crate = update_array_default crate in
+   (* Passes that apply to individual function bodies *)
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index b433efc..d00e350 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -16,9 +16,7 @@ include ExtractTypes
+     signature would make the dictionary recursive). Such methods can still be
+     called directly, but cannot be projected through a trait reference. *)
+ let trait_method_is_field (decl : trait_decl) (name : string) : bool =
+-  match (backend (), decl.builtin_info) with
+-  | Lean, Some info -> List.mem_assoc name info.methods
+-  | _ -> true
++  ExtractBuiltin.trait_method_is_field decl.builtin_info name
+ 
+ let binop_to_string (ctx : extraction_ctx) =
+   PrintPure.binop_to_string (extraction_ctx_to_fmt_env ctx)
+@@ -3471,13 +3469,8 @@ let extract_trait_impl_method_items_aux (ctx : extraction_ctx)
+     (* Extract the function call *)
+     F.pp_print_space fmt ();
+     let contract =
+-      if backend () = Lean && trans.f.builtin_info = None then
+-        match ModelStateABI.for_trait ctx.trans_ctx trait_decl_id item_name with
+-        | Some
+-            ((ModelStateABI.State _ | ModelStateABI.IntoIterator) as contract)
+-          -> Some contract
+-        | _ -> None
+-      else None
++      ModelStateABI.dictionary_method_contract ctx.trans_ctx.crate trait_decl_id
++        item_name ~method_is_builtin:(trans.f.builtin_info <> None)
+     in
+     match contract with
+     | Some contract ->
+diff --git a/src/extract/ExtractBuiltin.ml b/src/extract/ExtractBuiltin.ml
+index 8d95d0d..1ddecc8 100644
+--- a/src/extract/ExtractBuiltin.ml
++++ b/src/extract/ExtractBuiltin.ml
+@@ -379,6 +379,15 @@ let find_trait_decl_info ctx name =
+       (builtin_trait_schemas ())
+   else NameMatcherMap.find_opt ctx name (builtin_trait_decls_map ())
+ 
++(** Whether the record of a trait has a field for the method [name], given the
++    model of the trait if there is one: the record of a model has a field for
++    the methods of the model only. *)
++let trait_method_is_field (info : Pure.builtin_trait_decl_info option)
++    (name : string) : bool =
++  match (backend (), info) with
++  | Lean, Some info -> List.mem_assoc name info.methods
++  | _ -> true
++
+ let builtin_trait_impls_info () : (pattern * Pure.builtin_trait_impl_info) list
+     =
+   let fmt (rust_name : string) ?(extract_name : string option = None)
+diff --git a/src/llbc/RegionsHierarchy.ml b/src/llbc/RegionsHierarchy.ml
+index 72cf8e3..5ddc874 100644
+--- a/src/llbc/RegionsHierarchy.ml
++++ b/src/llbc/RegionsHierarchy.ml
+@@ -285,3 +285,149 @@ let compute_regions_hierarchy_for_sig (span : Meta.span option) (crate : crate)
+       (* Put together *)
+       Some { id; regions; parents })
+     (SccId.Map.bindings sccs.sccs)
++
++(** {1 Trait-implementation methods}
++
++    A trait-implementation method is used as the method of its trait: the
++    trait's record stores it in the field of the trait method, and the calls
++    through the trait use the signature of the trait method. The region groups
++    of a function determine its backward functions and the order in which its
++    forward function returns them, so the region groups of an implementation
++    must lead to the backward functions of the trait method, in the same order.
++    The regions of the implementation are ordered independently of those of the
++    trait method: when two backward functions give back values of the same type,
++    a different order still type-checks. *)
++
++(** Map the free regions of a trait method's signature to the regions which
++    instantiate them in the signature of an implementation of this method, by
++    walking the two signatures together. The implementation instantiates the
++    type variables of the trait signature (e.g., [Self]): the regions they
++    contain have no counterpart in the trait signature. Returns an error if the
++    two signatures differ in structure, or if the implementation instantiates a
++    region of the trait signature by two different regions. *)
++let trait_method_region_map (trait_sg : fun_sig) (impl_sg : fun_sig) :
++    (region RegionId.Map.t, string) result =
++  let exception Mismatch of string in
++  let map = ref RegionId.Map.empty in
++  let mismatch () =
++    raise
++      (Mismatch
++         "The signature of the trait-impl method is not an instance of the \
++          signature of its trait method")
++  in
++  let pair (rt : region) (ri : region) =
++    match rt with
++    | RVar (Free rid) -> (
++        match RegionId.Map.find_opt rid !map with
++        | None -> map := RegionId.Map.add rid ri !map
++        | Some ri' ->
++            if ri' <> ri then
++              raise
++                (Mismatch
++                   "The trait-impl method instantiates a region of its trait \
++                    method by two different regions"))
++    | _ -> ()
++  in
++  let iter2 f l0 l1 =
++    if List.length l0 = List.length l1 then List.iter2 f l0 l1 else mismatch ()
++  in
++  let rec walk (tt : ty) (ti : ty) =
++    match (tt, ti) with
++    | (TVar _ | TTraitType _), _ -> ()
++    | TRef (rt, tt, kt), TRef (ri, ti, ki) ->
++        if kt <> ki then mismatch ();
++        pair rt ri;
++        walk tt ti
++    | TRawPtr (tt, kt), TRawPtr (ti, ki) ->
++        if kt <> ki then mismatch ();
++        walk tt ti
++    | TAdt at, TAdt ai ->
++        if at.id <> ai.id then mismatch ();
++        iter2 pair at.generics.regions ai.generics.regions;
++        iter2 walk at.generics.types ai.generics.types
++    | TArray (tt, _), TArray (ti, _) | TSlice tt, TSlice ti -> walk tt ti
++    | TLiteral lt, TLiteral li -> if lt <> li then mismatch ()
++    | TNever, TNever -> ()
++    | TFnPtr bt, TFnPtr bi ->
++        let st = bt.binder_value and si = bi.binder_value in
++        iter2 walk (st.output :: st.inputs) (si.output :: si.inputs)
++    | TFnDef _, TFnDef _ | TDynTrait _, TDynTrait _ -> ()
++    | _ -> mismatch ()
++  in
++  try
++    iter2 walk
++      (trait_sg.output :: trait_sg.inputs)
++      (impl_sg.output :: impl_sg.inputs);
++    Ok !map
++  with Mismatch msg -> Error msg
++
++(** Check that the backward functions of a trait-impl method are those of its
++    trait method, in the same order.
++
++    - [trait_groups], [impl_groups]: the region groups of the two signatures
++    - [region_map]: the regions of the trait method's signature and the regions
++      of the implementation's signature which instantiate them (see
++      {!trait_method_region_map})
++    - [trait_back], [impl_back]: whether a region group leads to a backward
++      function
++    - [impl_region_name]: the name of a region of the implementation, for the
++      error messages *)
++let check_trait_impl_method_region_groups (span : Meta.span) (name : string)
++    ~(trait_groups : region_var_groups) ~(impl_groups : region_var_groups)
++    ~(region_map : region RegionId.Map.t)
++    ~(trait_back : RegionGroupId.id -> bool)
++    ~(impl_back : RegionGroupId.id -> bool)
++    ~(impl_region_name : RegionId.id -> string) : unit =
++  let impl_group_of_region =
++    RegionId.Map.of_list
++      (List.concat_map
++         (fun (g : region_var_group) -> List.map (fun r -> (r, g.id)) g.regions)
++         impl_groups)
++  in
++  let group_to_string (gid : RegionGroupId.id) =
++    let g = RegionGroupId.nth impl_groups gid in
++    "{" ^ String.concat ", " (List.map impl_region_name g.regions) ^ "}"
++  in
++  let layout_to_string (l : RegionGroupId.id list) =
++    "[" ^ String.concat "; " (List.map group_to_string l) ^ "]"
++  in
++  (* The group of the implementation corresponding to every region group of the
++     trait method which leads to a backward function *)
++  let expected =
++    List.filter_map
++      (fun (g : region_var_group) ->
++        if not (trait_back g.id) then None
++        else
++          let images =
++            List.filter_map
++              (fun rid ->
++                match RegionId.Map.find_opt rid region_map with
++                | None -> (* Not in the signature *) None
++                | Some (RVar (Free rid)) ->
++                    Some (RegionId.Map.find_opt rid impl_group_of_region)
++                | Some _ -> Some None)
++              g.regions
++          in
++          match List.sort_uniq compare images with
++          | [ Some gid ] -> Some gid
++          | _ ->
++              [%craise] span
++                ("A backward function of the trait method of " ^ name
++               ^ " does not correspond to a single region group of the \
++                  implementation (implementation region groups: "
++                ^ layout_to_string
++                    (List.map (fun (g : region_var_group) -> g.id) impl_groups)
++                ^ ")"))
++      trait_groups
++  in
++  let actual =
++    List.filter_map
++      (fun (g : region_var_group) -> if impl_back g.id then Some g.id else None)
++      impl_groups
++  in
++  [%cassert] span (expected = actual)
++    ("The backward functions of the trait-impl method " ^ name
++   ^ " are not those of its trait method in the same order: the trait method \
++      gives back the region groups " ^ layout_to_string expected
++   ^ " in this order, the implementation gives back "
++    ^ layout_to_string actual)
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 41e3543..00d6040 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -99,6 +99,49 @@ let crate_for_trait crate id method_name =
+ let for_trait (ctx : Contexts.decls_ctx) id method_name =
+   crate_for_trait ctx.crate id method_name
+ 
++(** How the record of a trait receives an implementation of one of its methods:
++    [Some contract] when the record stores the implementation adapted to the
++    canonical state ABI of the trait's model (see {!adapt_dictionary_method}),
++    [None] when it stores the implementation as it is. *)
++let dictionary_method_contract (crate : A.crate) id method_name
++    ~(method_is_builtin : bool) =
++  if Config.backend () = Config.Lean && not method_is_builtin then
++    match crate_for_trait crate id method_name with
++    | Some ((State _ | IntoIterator) as contract) -> Some contract
++    | _ -> None
++  else None
++
++(** Whether the record of the trait implementation [impl] stores the
++    translation of its implementation [method_id] of the trait method [name] as
++    it is, so that the calls through the trait use the backward functions of the
++    implementation's signature. It does not when the implementation is modeled
++    (its record is part of the model), when the method is not a field of the
++    record of the trait's model, when the method is modeled (the record stores
++    the model's function, whose signature is the model's), or when the record
++    stores the method adapted to the canonical state ABI of the trait's model
++    (see {!adapt_dictionary_method}). *)
++let record_stores_translated_method (crate : A.crate) (impl : A.trait_impl)
++    (name : string) (method_id : A.FunDeclId.id) : bool =
++  let mctx = NameMatcher.ctx_from_crate crate in
++  let trait_decl = T.TraitDeclId.Map.find impl.impl_trait.id crate.trait_decls in
++  let method_is_builtin =
++    match A.FunDeclId.Map.find_opt method_id crate.fun_decls with
++    | Some decl ->
++        ExtractBuiltin.find_fun_info mctx decl.def_id decl.item_meta.name
++        <> None
++    | None -> false
++  in
++  ExtractBuiltin.find_trait_impl_info mctx trait_decl.item_meta.name
++    impl.impl_trait.generics
++  = None
++  && ExtractBuiltin.trait_method_is_field
++       (ExtractBuiltin.find_trait_decl_info mctx trait_decl.item_meta.name)
++       name
++  && (not method_is_builtin)
++  && dictionary_method_contract crate trait_decl.def_id name
++       ~method_is_builtin:false
++     = None
++
+ (** A field is true if any retained marker implementation's conjunction of
+     dictionary conditions holds. Empty conjunctions are unconditional evidence.
+ *)
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index 7004113..48c12be 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -296,12 +296,107 @@ let translate_trait_decl (ctx : Contexts.decls_ctx) (trait_decl : A.trait_decl)
+     methods;
+   }
+ 
++(** Check that the backward functions of the methods of a trait implementation
++    are those of their trait methods, in the same order (see
++    {!RegionsHierarchy.check_trait_impl_method_region_groups}), for the methods
++    whose translation the record of the implementation stores as it is (see
++    {!ModelStateABI.record_stores_translated_method}). *)
++let check_trait_impl_region_groups (ctx : Contexts.decls_ctx)
++    (trait_impl : A.trait_impl) : unit =
++  let span = trait_impl.item_meta.span in
++  let fmt_env = Print.Contexts.decls_ctx_to_fmt_env ctx in
++  let trait_decl =
++    [%silent_unwrap] span
++      (T.TraitDeclId.Map.find_opt trait_impl.impl_trait.id ctx.crate.trait_decls)
++  in
++  let lookup_fun_decl (id : A.FunDeclId.id) : A.fun_decl =
++    match A.FunDeclId.Map.find_opt id ctx.crate.fun_decls with
++    | Some d -> d
++    | None ->
++        [%craise] span
++          ("Missing the declaration of a method of the trait implementation "
++          ^ Print.name_to_string fmt_env trait_impl.item_meta.name
++          ^ ": cannot check that its backward functions are those of the \
++             trait method")
++  in
++  let groups (d : A.fun_decl) =
++    RegionsHierarchy.compute_regions_hierarchy_for_sig (Some d.item_meta.span)
++      ctx.crate
++      (LlbcAstUtils.bound_fun_sig_of_decl d)
++  in
++  let back (d : A.fun_decl) =
++    (* Whether a region group leads to a backward function does not depend on
++       the effects of the function: the functions which are not translated
++       (e.g., the methods of the models' traits) have no effect information,
++       give them some *)
++    let fun_infos = ctx.fun_ctx.fun_infos in
++    let fun_infos =
++      if A.FunDeclId.Map.mem d.def_id fun_infos then fun_infos
++      else
++        A.FunDeclId.Map.add d.def_id
++          {
++            FunsAnalysis.can_fail = true;
++            stateful = false;
++            can_diverge = false;
++            is_rec = false;
++          }
++          fun_infos
++    in
++    let ctx = { ctx with fun_ctx = { ctx.fun_ctx with fun_infos } } in
++    let dsg = translate_fun_sig_from_decl_to_decomposed ctx d in
++    fun gid -> not (T.RegionGroupId.Map.find gid dsg.fun_ty.back_sg).filter
++  in
++  let check_method ((name, m) : string * T.fun_decl_ref T.binder) =
++    if
++      ModelStateABI.record_stores_translated_method ctx.crate trait_impl name
++        m.binder_value.id
++    then begin
++      let impl_decl = lookup_fun_decl m.binder_value.id in
++      let trait_method =
++        match
++          List.find_opt
++            (fun (tm : A.trait_method T.binder) -> tm.binder_value.name = name)
++            trait_decl.methods
++        with
++        | Some tm -> tm.binder_value
++        | None ->
++            [%craise] span
++              ("The trait of the trait implementation "
++              ^ Print.name_to_string fmt_env trait_impl.item_meta.name
++              ^ " has no method " ^ name)
++      in
++      let trait_fun_decl = lookup_fun_decl trait_method.item.id in
++      let impl_span = impl_decl.item_meta.span in
++      let impl_name = Print.name_to_string fmt_env impl_decl.item_meta.name in
++      let region_map =
++        match
++          RegionsHierarchy.trait_method_region_map trait_fun_decl.signature
++            impl_decl.signature
++        with
++        | Ok region_map -> region_map
++        | Error msg -> [%craise] impl_span (msg ^ ": " ^ impl_name)
++      in
++      let impl_region_name (rid : T.RegionId.id) =
++        let r = T.RegionId.nth impl_decl.generics.regions rid in
++        match r.name with
++        | Some n -> n
++        | None -> "'_" ^ T.RegionId.to_string rid
++      in
++      RegionsHierarchy.check_trait_impl_method_region_groups impl_span impl_name
++        ~trait_groups:(groups trait_fun_decl) ~impl_groups:(groups impl_decl)
++        ~region_map ~trait_back:(back trait_fun_decl)
++        ~impl_back:(back impl_decl) ~impl_region_name
++    end
++  in
++  List.iter check_method trait_impl.methods
++
+ let translate_trait_impl (ctx : Contexts.decls_ctx) (trait_impl : A.trait_impl)
+     : trait_impl =
+   [%ltrace
+     let ctx = Print.Contexts.decls_ctx_to_fmt_env ctx in
+     "- trait impl: implemented trait: "
+     ^ Print.trait_decl_ref_to_string ctx trait_impl.impl_trait];
++  check_trait_impl_region_groups ctx trait_impl;
+   let {
+     A.def_id;
+     item_meta;
+diff --git a/tests/lean/TraitImplRegionOrder.lean b/tests/lean/TraitImplRegionOrder.lean
+new file mode 100644
+index 0000000..8428315
+--- /dev/null
++++ b/tests/lean/TraitImplRegionOrder.lean
+@@ -0,0 +1 @@
++import TraitImplRegionOrder.Checks
+diff --git a/tests/lean/TraitImplRegionOrder/Checks.lean b/tests/lean/TraitImplRegionOrder/Checks.lean
+new file mode 100644
+index 0000000..9e73b6e
+--- /dev/null
++++ b/tests/lean/TraitImplRegionOrder/Checks.lean
+@@ -0,0 +1,40 @@
++import TraitImplRegionOrder.TraitImplRegionOrder
++
++/-! Evaluate the model of `tests/src/trait-impl-region-order.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace trait_impl_region_order.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def val {α} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++def pair : Result (U32 × U32) → Option (Nat × Nat) :=
++  val fun (r, x) => (r.val, x.val)
++
++def triple : Result (U32 × U32 × U32) → Option (Nat × Nat × Nat) :=
++  val fun (r, a, b) => (r.val, a.val, b.val)
++
++def quad : Result (U32 × U32 × U32 × U32) → Option (Nat × Nat × Nat × Nat) :=
++  val fun (r, a, b, k) => (r.val, a.val, b.val, k.val)
++
++-- `FnMut` capturing by shared reference: the argument is given back, then the
++-- state (which has the type of the argument)
++#guard pair (shared_step (u 1) (u 5)) == some (17, 11)
++#guard pair (shared_step (u 0) (u 0)) == some (0, 0)
++#guard pair (shared_step (u 10) (u 1)) == some (23, 12)
++
++-- `FnOnce` capturing by shared reference
++#guard pair (shared_once (u 1) (u 5)) == some (12, 6)
++
++-- The implementation instantiates the regions of the trait in the other order
++#guard triple (use_two (u 1) (u 5)) == some (2, 2, 12)
++#guard triple (use_two (u 0) (u 0)) == some (1, 1, 7)
++
++-- A direct call of the implementation
++#guard quad (direct_two (u 1) (u 5)) == some (2, 2, 12, 107)
++
++end trait_impl_region_order.checks
+diff --git a/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean b/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean
+new file mode 100644
+index 0000000..323282b
+--- /dev/null
++++ b/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean
+@@ -0,0 +1,243 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [trait_impl_region_order]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace trait_impl_region_order
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
++
++/-- [trait_impl_region_order::bump_twice]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 24:0-28:1
++    Visibility: public -/
++def bump_twice
++  {T0 : Type}
++  (coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst
++  :
++  _root_.trait_impl_region_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, x1, f1) ←
++    coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
++      f x
++  let (b, x2, _) ←
++    coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
++      f1 x1
++  let i ← lift (core.num.U32.wrapping_add a b)
++  _root_.Aeneas.Std.Result.ok (i, x2)
++
++/-- [trait_impl_region_order::shared_step::closure]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 31:18-34:5 -/
++@[reducible]
++def shared_step.closure := _root_.Aeneas.Std.U32
++
++/-- [trait_impl_region_order::shared_step::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_step::closure<0>}::call_mut]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 31:18-34:5 -/
++def
++  shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++  (c : _root_.trait_impl_region_order.shared_step.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.trait_impl_region_order.shared_step.closure)
++  := do
++  let x ← lift (core.num.U32.wrapping_add tupled_args c)
++  _root_.Aeneas.Std.Result.ok (x, x, c)
++
++/-- [trait_impl_region_order::shared_step::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_step::closure<0>}::call_once]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 31:18-34:5 -/
++def
++  shared_step.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++  (c : _root_.trait_impl_region_order.shared_step.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i1, i2, _) ←
++    _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok (i1, i2)
++
++/-- Trait implementation: [trait_impl_region_order::shared_step::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_step::closure<0>}]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 31:18-34:5 -/
++@[reducible]
++def
++  shared_step.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
++  _root_.trait_impl_region_order.shared_step.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++}
++
++/-- Trait implementation: [trait_impl_region_order::shared_step::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_step::closure<0>}]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 31:18-34:5 -/
++@[reducible]
++def
++  shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
++  :
++  _root_.trait_impl_region_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  _root_.trait_impl_region_order.shared_step.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :=
++    _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  call_mut :=
++    _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++}
++
++/-- [trait_impl_region_order::shared_step]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 30:0-35:1
++    Visibility: public -/
++def shared_step
++  (x : _root_.Aeneas.Std.U32) (step : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.trait_impl_region_order.bump_twice
++    _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
++    x step
++
++/-- [trait_impl_region_order::once]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 37:0-39:1
++    Visibility: public -/
++def once
++  {T0 : Type}
++  (coreopsfunctionFnOnceT0TupleMut0U32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  coreopsfunctionFnOnceT0TupleMut0U32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst.call_once
++    f x
++
++/-- [trait_impl_region_order::shared_once::closure]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 44:12-47:5 -/
++@[reducible]
++def shared_once.closure := _root_.Aeneas.Std.U32
++
++/-- [trait_impl_region_order::shared_once::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_once::closure<0>}::call_once]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 44:12-47:5 -/
++def
++  shared_once.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++  (c : _root_.trait_impl_region_order.shared_once.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let x ← lift (core.num.U32.wrapping_add tupled_args c)
++  let i ← lift (core.num.U32.wrapping_mul x 2#u32)
++  _root_.Aeneas.Std.Result.ok (i, x)
++
++/-- Trait implementation: [trait_impl_region_order::shared_once::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for trait_impl_region_order::shared_once::closure<0>}]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 44:12-47:5 -/
++@[reducible]
++def
++  shared_once.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
++  _root_.trait_impl_region_order.shared_once.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.trait_impl_region_order.shared_once.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++}
++
++/-- [trait_impl_region_order::shared_once]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 43:0-48:1
++    Visibility: public -/
++def shared_once
++  (x : _root_.Aeneas.Std.U32) (step : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.trait_impl_region_order.once
++    _root_.trait_impl_region_order.shared_once.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++    x step
++
++/-- Trait declaration: [trait_impl_region_order::Two]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 50:0-52:1
++    Visibility: public -/
++structure Two (Self : Type) where
++  two : Self → _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × Self)
++
++/-- [trait_impl_region_order::S]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 54:0-56:1
++    Visibility: public -/
++structure S where
++  k : _root_.Aeneas.Std.U32
++
++/-- [trait_impl_region_order::{trait_impl_region_order::Two<'b, 'a> for trait_impl_region_order::S}::two]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 59:4-64:5
++    Visibility: public -/
++def S.Insts.Trait_impl_region_orderTwo.two
++  (self : _root_.trait_impl_region_order.S) (x : _root_.Aeneas.Std.U32)
++  (y : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.trait_impl_region_order.S)
++  := do
++  let x1 ← lift (core.num.U32.wrapping_add x 1#u32)
++  let y1 ← lift (core.num.U32.wrapping_add y self.k)
++  let i ← lift (core.num.U32.wrapping_add self.k 100#u32)
++  _root_.Aeneas.Std.Result.ok (x1, x1, y1, { k := i })
++
++/-- Trait implementation: [trait_impl_region_order::{trait_impl_region_order::Two<'b, 'a> for trait_impl_region_order::S}]
++    Source: 'tests/src/trait-impl-region-order.rs', lines 58:0-65:1 -/
++@[reducible]
++def S.Insts.Trait_impl_region_orderTwo : _root_.trait_impl_region_order.Two
++  _root_.trait_impl_region_order.S := {
++  two := _root_.trait_impl_region_order.S.Insts.Trait_impl_region_orderTwo.two
++}
++
++/-- [trait_impl_region_order::call_two]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 67:0-69:1
++    Visibility: public -/
++def call_two
++  {T : Type} (TwoInst : _root_.trait_impl_region_order.Two T) (t : T)
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × T)
++  := do
++  TwoInst.two t x y
++
++/-- [trait_impl_region_order::use_two]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 72:0-78:1
++    Visibility: public -/
++def use_two
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, a1, b1, _) ←
++    _root_.trait_impl_region_order.call_two
++      _root_.trait_impl_region_order.S.Insts.Trait_impl_region_orderTwo
++      { k := 7#u32 } a b
++  _root_.Aeneas.Std.Result.ok (r, a1, b1)
++
++/-- [trait_impl_region_order::direct_two]:
++    Source: 'tests/src/trait-impl-region-order.rs', lines 81:0-87:1
++    Visibility: public -/
++def direct_two
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, a1, b1, s) ←
++    _root_.trait_impl_region_order.S.Insts.Trait_impl_region_orderTwo.two
++      { k := 7#u32 } a b
++  _root_.Aeneas.Std.Result.ok (r, a1, b1, s.k)
++
++end trait_impl_region_order
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 0940f4f..24e507d 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -146,6 +146,7 @@ package «tests» {}
+ @[default_target] lean_lib StrSplit
+ @[default_target] lean_lib StringChars
+ @[default_target] lean_lib SwitchTest
++@[default_target] lean_lib TraitImplRegionOrder
+ @[default_target] lean_lib Traits
+ @[default_target] lean_lib Tutorial
+ @[default_target] lean_lib UnsizeSharedBorrows
+diff --git a/tests/src/trait-impl-region-order.rs b/tests/src/trait-impl-region-order.rs
+new file mode 100644
+index 0000000..8c2a008
+--- /dev/null
++++ b/tests/src/trait-impl-region-order.rs
+@@ -0,0 +1,119 @@
++//@ [!lean] skip
++//@ [lean] subdir=TraitImplRegionOrder
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The record of a trait stores an implementation of a method as the trait
++//! method: the backward functions of the implementation must be those of the
++//! trait method, in the same order. The region groups of a signature, which
++//! determine the backward functions and their order, are ordered by the
++//! outlives relations of its regions, taken in their order, and the
++//! implementation orders its regions independently of the trait method. When
++//! the given back values have the same type, another order still type-checks
++//! and silently swaps them:
++//! - `shared_step`: the closure captures `step` by shared reference. The trait
++//!   method `FnMut<(&'a mut u32,)>::call_mut` gives back the argument, then the
++//!   closure's state; in the implementation, the region of the captured
++//!   reference outlives the borrow of the state and puts the state first.
++//! - `use_two`: the implementation instantiates the regions of the trait in the
++//!   other order.
++//! The region parameters of the implementations are laid out so that their
++//! backward functions follow the trait method's order.
++//! `TraitImplRegionOrder/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub fn bump_twice(x: &mut u32, mut f: impl FnMut(&mut u32) -> u32) -> u32 {
++    let a = f(x);
++    let b = f(x);
++    a.wrapping_add(b)
++}
++
++pub fn shared_step(x: &mut u32, step: u32) -> u32 {
++    bump_twice(x, |x| {
++        *x = x.wrapping_add(step);
++        *x
++    })
++}
++
++pub fn once(x: &mut u32, f: impl FnOnce(&mut u32) -> u32) -> u32 {
++    f(x)
++}
++
++/// The implementation of `FnOnce::call_once` calls the implementation of
++/// `FnMut::call_mut` directly.
++pub fn shared_once(x: &mut u32, step: u32) -> u32 {
++    once(x, |x| {
++        *x = x.wrapping_add(step);
++        x.wrapping_mul(2)
++    })
++}
++
++pub trait Two<'a, 'b> {
++    fn two(&mut self, x: &'a mut u32, y: &'b mut u32) -> u32;
++}
++
++pub struct S {
++    pub k: u32,
++}
++
++impl<'a, 'b> Two<'b, 'a> for S {
++    fn two(&mut self, x: &'b mut u32, y: &'a mut u32) -> u32 {
++        *x = x.wrapping_add(1);
++        *y = y.wrapping_add(self.k);
++        self.k = self.k.wrapping_add(100);
++        *x
++    }
++}
++
++pub fn call_two<'a, 'b, T: Two<'a, 'b>>(t: &mut T, x: &'a mut u32, y: &'b mut u32) -> u32 {
++    t.two(x, y)
++}
++
++/// Through the trait.
++pub fn use_two(a: u32, b: u32) -> (u32, u32, u32) {
++    let mut s = S { k: 7 };
++    let mut a = a;
++    let mut b = b;
++    let r = call_two(&mut s, &mut a, &mut b);
++    (r, a, b)
++}
++
++/// A direct call of the implementation.
++pub fn direct_two(a: u32, b: u32) -> (u32, u32, u32, u32) {
++    let mut s = S { k: 7 };
++    let mut a = a;
++    let mut b = b;
++    let r = s.two(&mut a, &mut b);
++    (r, a, b, s.k)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn shared_step_native() {
++        for (x, step, r, x_after) in [(1u32, 5u32, 17u32, 11u32), (0, 0, 0, 0), (10, 1, 23, 12)] {
++            let mut x = x;
++            assert_eq!(shared_step(&mut x, step), r);
++            assert_eq!(x, x_after);
++        }
++    }
++
++    #[test]
++    fn shared_once_native() {
++        let mut x = 1u32;
++        assert_eq!(shared_once(&mut x, 5), 12);
++        assert_eq!(x, 6);
++    }
++
++    #[test]
++    fn use_two_native() {
++        assert_eq!(use_two(1, 5), (2, 2, 12));
++        assert_eq!(use_two(0, 0), (1, 1, 7));
++    }
++
++    #[test]
++    fn direct_two_native() {
++        assert_eq!(direct_two(1, 5), (2, 2, 12, 107));
++    }
++}

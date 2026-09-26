@@ -1,0 +1,636 @@
+# aeneas integration step 93 after cba11f3beb: commit abef3f16eca549cb87b47b21a698b4e7cf101f77
+# first parent d62f927b516d20e64339279cf538162c8e996fba, merged f4d500b5b49763f881a38cf24fe8a6bbe271342e
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (the loop state dropped after a loop staged at level 1 gives back its dropped twin; write-back #guards)
+
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index f489914..4270415 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -336,6 +336,7 @@ let abs_staged_cont (ctx : bs_ctx) (abs : V.abs) : staged_cont option =
+           pending_inputs;
+           num_inputs = List.length inputs;
+           stages_applied = 0;
++          dropped_twins = [];
+         }
+ 
+ (** The types of the inputs and of the outputs of a stage of a staged
+@@ -1444,6 +1445,7 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+                                     stages_applied;
+                                     pending_inputs;
+                                     num_inputs;
++                                    dropped_twins = _;
+                                   } ->
+                                   [%cassert] span
+                                     (stages_applied = List.length stages)
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index dec04f3..51652da 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -189,6 +189,16 @@ type staged_cont = {
+       (** The number of stages which were applied: the continuation registered
+           in [bs_ctx.abs_id_to_info] then receives the inputs of the next
+           stage. *)
++  dropped_twins : (int * fvar) list;
++      (** [StageLevel]: the loan projectors of the abstraction (by index in its
++          values) whose borrows were given back without inner borrows at the
++          level of the first stage, with the variables of the outputs of the
++          first stage for them. Where such a projected value was dropped
++          unchanged (e.g., the loop state after the loop), the values given
++          back to the inner borrows of its borrowed value are those given back
++          to the inner borrows of the value given back to its own borrow (the
++          dropped-twin rule): the last stage receives these outputs (see
++          [SymbolicToPureExpressions.translate_end_staged_cont]). *)
+ }
+ [@@deriving show]
+ 
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 1d44182..38d0b53 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -3499,8 +3499,11 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+       "Nested borrows: missing continuation of a join or loop abstraction \
+        with a staged continuation"
+   in
+-  (* The inputs of the first stage, and the patterns of its outputs *)
+-  let first_stage_inputs_outputs ctx : bs_ctx * texpr * tpat =
++  (* The inputs of the first stage, the patterns of its outputs (given the
++     variables which the rest of the translation uses) and the dropped twins
++     (see [staged_cont.dropped_twins]) *)
++  let first_stage_inputs_outputs ctx :
++      bs_ctx * texpr * (FVarId.Set.t -> tpat) * (int * fvar) list =
+     match stage with
+     | StagePending _ ->
+         (* The pending loans became loan projectors over the values given back
+@@ -3556,14 +3559,15 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+           "Nested borrows: the values given back at level 1 by a join or loop \
+            abstraction with pending loans disagree with the values given back \
+            to their parent borrows";
+-        (ctx, arg, out_pat)
++        (ctx, arg, (fun _ -> out_pat), [])
+     | StageLevel level ->
+         (* The borrow projectors of the abstraction consumed the inner borrows
+            of the values given back to their parent borrows, at this level;
+            its loan projectors give back those of the values given back to the
+            projected borrows. A loan projector whose borrow was not given back
+-           with inner borrows at this level holds none: no one receives its
+-           output, which we ignore. *)
++           with inner borrows at this level holds none: its output is a
++           dropped twin (see [staged_cont.dropped_twins]), ignored if the last
++           stage does not receive it. *)
+         [%cassert] span
+           (abs_consumed_available ctx abs level)
+           "Nested borrows: the first stage of the continuation of a loop \
+@@ -3588,17 +3592,34 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+               let ctx, pat =
+                 tavalue_to_given_back ~ectx owned level None av ctx
+               in
+-              ( ctx,
+-                match pat with
+-                | Some pat -> pat
+-                | None -> mk_ignored_pat (ctx_translate_fwd_ty ctx av.ty) ))
++              match pat with
++              | Some pat -> (ctx, (pat, None))
++              | None ->
++                  let ctx, var =
++                    fresh_var (Some "back") (ctx_translate_fwd_ty ctx av.ty) ctx
++                  in
++                  (ctx, (mk_tpat_from_fvar None var, Some (index, var))))
+             ctx output_indices
+         in
+-        (ctx, mk_simpl_tuple_texpr span inputs, mk_simpl_tuple_pat outputs)
++        let mk_out_pat used =
++          mk_simpl_tuple_pat
++            (List.map
++               (fun ((pat : tpat), twin) ->
++                 match twin with
++                 | Some (_, (var : fvar)) when not (FVarId.Set.mem var.id used)
++                   -> mk_ignored_pat pat.ty
++                 | _ -> pat)
++               outputs)
++        in
++        ( ctx,
++          mk_simpl_tuple_texpr span inputs,
++          mk_out_pat,
++          List.filter_map snd outputs )
+   in
+   let apply_first_stage ctx (next : bs_ctx -> texpr) : texpr =
+     let info = find_cont ctx in
+-    let ctx, arg, out_pat = first_stage_inputs_outputs ctx in
++    let ctx, arg, mk_out_pat, dropped_twins = first_stage_inputs_outputs ctx in
++    let out_ty' = (mk_out_pat FVarId.Set.empty).ty in
+     let arg_ty, ret_ty = dest_arrow_ty span info.fvar.ty in
+     let out_ty, later_ty =
+       match opt_destruct_tuple span ret_ty with
+@@ -3606,7 +3627,7 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+       | _ -> [%internal_error] span
+     in
+     [%cassert] span
+-      (arg.ty = arg_ty && out_pat.ty = out_ty)
++      (arg.ty = arg_ty && out_ty' = out_ty)
+       "Nested borrows: the values of a join or loop abstraction at the level of \
+        the first stage of its continuation disagree with the stage";
+     let ctx, later = fresh_var (Some "back") later_ty ctx in
+@@ -3619,11 +3640,12 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+             ctx.abs_id_to_info;
+         staged_conts =
+           V.AbsId.Map.add abs.abs_id
+-            { staged with stages_applied = 1 }
++            { staged with stages_applied = 1; dropped_twins }
+             ctx.staged_conts;
+       }
+     in
+     let next = next ctx in
++    let out_pat = mk_out_pat (texpr_get_fvars next) in
+     [%add_loc] mk_closed_checked_let ctx false
+       (mk_simpl_tuple_pat [ out_pat; mk_tpat_from_fvar None later ])
+       ([%add_loc] mk_app span info.fvar arg)
+@@ -3631,7 +3653,44 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+   in
+   let apply_second_stage ctx : texpr =
+     let info = find_cont ctx in
+-    let inputs = abs_to_consumed ~sides:(sides ~pending:false) ctx ectx abs 0 in
++    (* A loan projector of a loop abstraction staged at a level, whose borrow
++       was given back without inner borrows at that level and whose projected
++       value was then dropped unchanged: the values given back to the inner
++       borrows of its borrowed value are those given back to the inner borrows
++       of the value given back to its own borrow, which the first stage gave
++       back (see [staged_cont.dropped_twins]). Only positions under a mutable
++       borrow have such a twin. *)
++    let dropped_twins =
++      match V.AbsId.Map.find_opt abs.abs_id ctx.staged_conts with
++      | Some staged -> staged.dropped_twins
++      | None -> []
++    in
++    let inputs =
++      List.map
++        (fun (index, (value : texpr), _) ->
++          let av = List.nth abs.avalues index in
++          match (List.assoc_opt index dropped_twins, av.value) with
++          | ( Some (twin : fvar),
++              V.ASymbolic (_, V.AEndedProjLoans { consumed = []; borrows = []; _ })
++            ) ->
++              let paths =
++                SymbolicToPureTypes.back_ty_paths_for_regions ctx.decls_ctx
++                  (region_selected abs.regions.owned)
++                  av.ty
++              in
++              [%cassert] span
++                (List.for_all (fun path -> path <> []) paths)
++                "Nested borrows: the state of a loop abstraction staged at a \
++                 level, dropped unchanged, holds positions which are not under \
++                 a mutable borrow and positions which are";
++              [%cassert] span (twin.ty = value.ty)
++                "Nested borrows: the value given back by the first stage of a \
++                 loop abstraction for a loan projector dropped unchanged \
++                 disagrees with the value it consumes";
++              mk_texpr_from_fvar twin
++          | _ -> value)
++        (abs_to_consumed_dropped ~sides:(sides ~pending:false) ctx ectx abs 0)
++    in
+     let ctx, outputs =
+       abs_to_given_back ~ectx ~sides:(sides ~pending:false) None abs 0 ctx
+     in
+diff --git a/tests/lean/NestedBorrowsAsDerefMutArms/Checks.lean b/tests/lean/NestedBorrowsAsDerefMutArms/Checks.lean
+index 45b4a41..7862d22 100644
+--- a/tests/lean/NestedBorrowsAsDerefMutArms/Checks.lean
++++ b/tests/lean/NestedBorrowsAsDerefMutArms/Checks.lean
+@@ -38,6 +38,25 @@ def onNone (run : Option Frame → Result (U64 × Option Frame × (Option Frame
+   | ok (r, o, back) => some (r.val, o.isNone && (back none).isNone)
+   | _ => none
+ 
++/-- `run(Some(&mut frame))`; the caller writes `ctx + w` through the frame
++    given back, then gives it back -/
++def onSomeWrite (run : Option Frame → Result (U64 × Option Frame × (Option Frame → Option Frame)))
++    (count ctx w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (some (frame count ctx)) with
++  | ok (r, some f1, back) =>
++    match back (some { f1 with ctx := u (f1.ctx.val + w) }) with
++    | some f2 => some (r.val, f2.ctx.val, f1.count.val)
++    | none => none
++  | _ => none
++
++/-- `run(&mut frame)`; the caller writes `ctx + w` through the frame, then
++    gives it back -/
++def onFrameWrite (run : Frame → Result (U64 × Frame × (Frame → Frame)))
++    (count ctx w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (frame count ctx) with
++  | ok (r, f1, back) => some (r.val, (back { f1 with ctx := u (f1.ctx.val + w) }).ctx.val, f1.count.val)
++  | _ => none
++
+ -- plain_read_native
+ #guard onSome plain_read 5 10 == some (5, 10, 5)
+ #guard onNone plain_read == some (0, true)
+@@ -53,4 +72,12 @@ def onNone (run : Option Frame → Result (U64 × Option Frame × (Option Frame
+ #guard onNone ctx_write == some (0, true)
+ #guard onFrame run_ctx_write 9 1 == some (1, 7, 9)
+ 
++-- write_back_native
++#guard onSomeWrite plain_read 5 10 100 == some (5, 110, 5)
++#guard onFrameWrite run_plain_read 9 1 100 == some (9, 101, 9)
++#guard onSomeWrite plain_write 5 10 100 == some (1, 110, 3)
++#guard onFrameWrite run_plain_write 9 1 100 == some (1, 101, 3)
++#guard onSomeWrite ctx_write 5 10 100 == some (1, 107, 5)
++#guard onFrameWrite run_ctx_write 9 1 18446744073709551615 == some (1, 6, 9)
++
+ end nested_borrows_as_deref_mut_arms.checks
+diff --git a/tests/lean/NestedBorrowsLoopReborrow/Checks.lean b/tests/lean/NestedBorrowsLoopReborrow/Checks.lean
+index da33b3e..9bd8489 100644
+--- a/tests/lean/NestedBorrowsLoopReborrow/Checks.lean
++++ b/tests/lean/NestedBorrowsLoopReborrow/Checks.lean
+@@ -44,6 +44,25 @@ def onNone (run : Option Frame → U32 → Result (U32 × Option Frame × (Optio
+   | ok (r, o, back) => some (r.val, o.isNone && (back none).isNone)
+   | _ => none
+ 
++/-- `run(Some(&mut frame), n)`; the caller writes `ctx + w` through the frame
++    given back, then gives it back -/
++def onSomeWrite (run : Option Frame → U32 → Result (U32 × Option Frame × (Option Frame → Option Frame)))
++    (ctx pos n w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (some (frame ctx pos)) (u n) with
++  | ok (r, some f1, back) =>
++    match back (some { f1 with ctx := u (f1.ctx.val + w) }) with
++    | some f2 => some (r.val, f2.ctx.val, f1.pos.val)
++    | none => none
++  | _ => none
++
++/-- `run(&mut frame, n)`; the caller writes `ctx + w` through the frame, then
++    gives it back -/
++def onFrameWrite (run : Frame → U32 → Result (U32 × Frame × (Frame → Frame)))
++    (ctx pos n w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (frame ctx pos) (u n) with
++  | ok (r, f1, back) => some (r.val, (back { f1 with ctx := u (f1.ctx.val + w) }).ctx.val, f1.pos.val)
++  | _ => none
++
+ -- loop_reborrow_native
+ #guard onSome loop_reborrow 10 0 0 == some (0, 10, 0)
+ #guard onSome loop_reborrow 10 0 1 == some (3, 13, 1)
+@@ -58,4 +77,16 @@ def onNone (run : Option Frame → U32 → Result (U32 × Option Frame × (Optio
+ #guard onSome loop_is_some_reborrow (max - 4) 1 2 == some (14, 7, 3)
+ #guard onNone loop_is_some_reborrow 3 == some (3, true)
+ 
++-- loop_reborrow_write_back_native
++#guard onSomeWrite loop_reborrow 10 0 0 100 == some (0, 110, 0)
++#guard onSomeWrite loop_reborrow 10 0 1 100 == some (3, 113, 1)
++#guard onSomeWrite loop_reborrow 10 0 3 100 == some (15, 125, 3)
++#guard onSomeWrite loop_reborrow (max - 4) 1 2 3 == some (12, 10, 3)
++#guard onFrameWrite run_loop_reborrow 10 1 2 1000 == some (12, 1022, 3)
++
++-- loop_is_some_reborrow_write_back_native
++#guard onSomeWrite loop_is_some_reborrow 10 0 0 100 == some (0, 110, 0)
++#guard onSomeWrite loop_is_some_reborrow 10 0 3 100 == some (18, 125, 3)
++#guard onSomeWrite loop_is_some_reborrow (max - 4) 1 2 max == some (14, 6, 3)
++
+ end nested_borrows_loop_reborrow.checks
+diff --git a/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean b/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean
+index 04d3bd4..ba03b03 100644
+--- a/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean
++++ b/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean
+@@ -323,9 +323,8 @@ def loop_reborrow_loop.body
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U32) ((_root_.Option
+-    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+@@ -354,8 +353,8 @@ def loop_reborrow_loop.body
+              back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
+                                   back1 o3, execution1, acc1, i2))
+   else
+-    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
+-      acc, back1 execution, fun back2 => back back2))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (acc, back1
++      execution, fun back2 => back back2))
+ 
+ /-- [nested_borrows_loop_reborrow::loop_reborrow]: loop 0:
+     Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 43:4-46:5
+@@ -371,9 +370,8 @@ def loop_reborrow_loop
+   (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
+   (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
+   (i : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result ((_root_.Option
+-    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+@@ -399,13 +397,12 @@ def loop_reborrow_loop
+       _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+       _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+       _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-      _root_.Aeneas.Std.U32) ((_root_.Option
+-      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
+-      ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
+-      _root_.Option _root_.nested_borrows_loop_reborrow.Frame))))))
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))))))
+     (back, back1, execution, acc, i)
+ 
+ /-- [nested_borrows_loop_reborrow::loop_reborrow]:
+@@ -419,20 +416,20 @@ def loop_reborrow
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame))
+   := do
+-  let (execution1, acc, back, back1) ←
++  let (acc, back, back1) ←
+     _root_.nested_borrows_loop_reborrow.loop_reborrow_loop
+       (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
+   let back2 :=
+-    (fun execution2 =>
+-       let (_, back3) :=
++    (fun execution1 =>
++       let (back3, back4) :=
+          back1
+            (match back with
+             | none => none
+             | some f =>
+-              match execution2 with
++              match execution1 with
+               | some f1 => some { f with ctx := f1.ctx }
+               | _ => back)
+-       let o := back3 execution1
++       let o := back4 back3
+        match execution with
+        | none => none
+        | some f =>
+@@ -465,9 +462,8 @@ def loop_is_some_reborrow_loop.body
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U32) ((_root_.Option
+-    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+@@ -501,8 +497,8 @@ def loop_is_some_reborrow_loop.body
+              back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
+                                   back1 o3, execution1, acc2, i2))
+   else
+-    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
+-      acc, back1 execution, fun back2 => back back2))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (acc, back1
++      execution, fun back2 => back back2))
+ 
+ /-- [nested_borrows_loop_reborrow::loop_is_some_reborrow]: loop 0:
+     Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 54:4-60:5
+@@ -518,9 +514,8 @@ def loop_is_some_reborrow_loop
+   (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
+   (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
+   (i : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result ((_root_.Option
+-    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+@@ -546,13 +541,12 @@ def loop_is_some_reborrow_loop
+       _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+       _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
+       _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-      _root_.Aeneas.Std.U32) ((_root_.Option
+-      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
+-      ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
+-      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
+-      _root_.Option _root_.nested_borrows_loop_reborrow.Frame))))))
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))))))
+     (back, back1, execution, acc, i)
+ 
+ /-- [nested_borrows_loop_reborrow::loop_is_some_reborrow]:
+@@ -566,20 +560,20 @@ def loop_is_some_reborrow
+     _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
+     _root_.nested_borrows_loop_reborrow.Frame))
+   := do
+-  let (execution1, acc, back, back1) ←
++  let (acc, back, back1) ←
+     _root_.nested_borrows_loop_reborrow.loop_is_some_reborrow_loop
+       (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
+   let back2 :=
+-    (fun execution2 =>
+-       let (_, back3) :=
++    (fun execution1 =>
++       let (back3, back4) :=
+          back1
+            (match back with
+             | none => none
+             | some f =>
+-              match execution2 with
++              match execution1 with
+               | some f1 => some { f with ctx := f1.ctx }
+               | _ => back)
+-       let o := back3 execution1
++       let o := back4 back3
+        match execution with
+        | none => none
+        | some f =>
+diff --git a/tests/lean/NestedBorrowsReborrowJoin/Checks.lean b/tests/lean/NestedBorrowsReborrowJoin/Checks.lean
+index 9e1884a..7c2c025 100644
+--- a/tests/lean/NestedBorrowsReborrowJoin/Checks.lean
++++ b/tests/lean/NestedBorrowsReborrowJoin/Checks.lean
+@@ -44,6 +44,25 @@ def onNone (run : Option Frame → U32 → Result (U32 × Option Frame × (Optio
+   | ok (r, o, back) => some (r.val, o.isNone && (back none).isNone)
+   | _ => none
+ 
++/-- `run(Some(&mut frame), 100)`; the caller writes `ctx + w` through the
++    frame given back, then gives it back -/
++def onSomeWrite (run : Option Frame → U32 → Result (U32 × Option Frame × (Option Frame → Option Frame)))
++    (ctx pos w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (some (frame ctx pos)) (u 100) with
++  | ok (r, some f1, back) =>
++    match back (some { f1 with ctx := u (f1.ctx.val + w) }) with
++    | some f2 => some (r.val, f2.ctx.val, f1.pos.val)
++    | none => none
++  | _ => none
++
++/-- `run(&mut frame, 100)`; the caller writes `ctx + w` through the frame,
++    then gives it back -/
++def onFrameWrite (run : Frame → U32 → Result (U32 × Frame × (Frame → Frame)))
++    (ctx pos w : Nat) : Option (Nat × Nat × Nat) :=
++  match run (frame ctx pos) (u 100) with
++  | ok (r, f1, back) => some (r.val, (back { f1 with ctx := u (f1.ctx.val + w) }).ctx.val, f1.pos.val)
++  | _ => none
++
+ -- advance_is_some_native
+ #guard onSome advance_is_some 10 0 == some (4, 13, 1)
+ #guard onSome advance_is_some (max - 4) 1 == some (6, 0, 2)
+@@ -56,4 +75,10 @@ def onNone (run : Option Frame → U32 → Result (U32 × Option Frame × (Optio
+ #guard onNone advance_is_some_then == some (100, true)
+ #guard onFrame run_advance_is_some_then 10 1 == some (13, 22, 3)
+ 
++-- write_back_native
++#guard onSomeWrite advance_is_some 10 0 100 == some (4, 113, 1)
++#guard onFrameWrite run_advance_is_some 10 2 100 == some (8, 117, 3)
++#guard onSomeWrite advance_is_some_then 10 0 100 == some (9, 118, 2)
++#guard onFrameWrite run_advance_is_some_then 10 1 max == some (13, 21, 3)
++
+ end nested_borrows_reborrow_join.checks
+diff --git a/tests/src/nested-borrows-as-deref-mut-arms.rs b/tests/src/nested-borrows-as-deref-mut-arms.rs
+index 29786f0..8afbd5f 100644
+--- a/tests/src/nested-borrows-as-deref-mut-arms.rs
++++ b/tests/src/nested-borrows-as-deref-mut-arms.rs
+@@ -81,6 +81,27 @@ mod native {
+         (r, c, count)
+     }
+ 
++    /// `run(Some(&mut frame))`, then the caller writes `ctx + w` through the
++    /// frame given back
++    fn on_some_write(run: fn(Option<&mut Frame<'_>>) -> u64, count: u64, ctx: u64, w: u64) -> (u64, u64, u64) {
++        let mut c = ctx;
++        let mut f = Frame { count, ctx: &mut c };
++        let r = run(Some(&mut f));
++        *f.ctx = f.ctx.wrapping_add(w);
++        let count = f.count;
++        (r, c, count)
++    }
++
++    /// `run(&mut frame)`, then the caller writes `ctx + w` through the frame
++    fn on_frame_write(run: fn(&mut Frame<'_>) -> u64, count: u64, ctx: u64, w: u64) -> (u64, u64, u64) {
++        let mut c = ctx;
++        let mut f = Frame { count, ctx: &mut c };
++        let r = run(&mut f);
++        *f.ctx = f.ctx.wrapping_add(w);
++        let count = f.count;
++        (r, c, count)
++    }
++
+     #[test]
+     fn plain_read_native() {
+         assert_eq!(on_some(plain_read, 5, 10), (5, 10, 5));
+@@ -101,4 +122,14 @@ mod native {
+         assert_eq!(ctx_write(None), 0);
+         assert_eq!(on_frame(run_ctx_write, 9, 1), (1, 7, 9));
+     }
++
++    #[test]
++    fn write_back_native() {
++        assert_eq!(on_some_write(plain_read, 5, 10, 100), (5, 110, 5));
++        assert_eq!(on_frame_write(run_plain_read, 9, 1, 100), (9, 101, 9));
++        assert_eq!(on_some_write(plain_write, 5, 10, 100), (1, 110, 3));
++        assert_eq!(on_frame_write(run_plain_write, 9, 1, 100), (1, 101, 3));
++        assert_eq!(on_some_write(ctx_write, 5, 10, 100), (1, 107, 5));
++        assert_eq!(on_frame_write(run_ctx_write, 9, 1, u64::MAX), (1, 6, 9));
++    }
+ }
+diff --git a/tests/src/nested-borrows-loop-reborrow.rs b/tests/src/nested-borrows-loop-reborrow.rs
+index 0bc9920..c2a1175 100644
+--- a/tests/src/nested-borrows-loop-reborrow.rs
++++ b/tests/src/nested-borrows-loop-reborrow.rs
+@@ -89,6 +89,27 @@ mod native {
+         (r, c, pos)
+     }
+ 
++    /// `run(Some(&mut frame), n)`, then the caller writes `ctx + w` through
++    /// the frame given back
++    fn on_some_write(run: fn(Option<&mut Frame<'_>>, u32) -> u32, ctx: u32, pos: usize, n: u32, w: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(Some(&mut f), n);
++        *f.ctx = f.ctx.wrapping_add(w);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    /// `run(&mut frame, n)`, then the caller writes `ctx + w` through the frame
++    fn on_frame_write(run: fn(&mut Frame<'_>, u32) -> u32, ctx: u32, pos: usize, n: u32, w: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(&mut f, n);
++        *f.ctx = f.ctx.wrapping_add(w);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
+     #[test]
+     fn loop_reborrow_native() {
+         assert_eq!(on_some(loop_reborrow, 10, 0, 0), (0, 10, 0));
+@@ -106,4 +127,20 @@ mod native {
+         assert_eq!(on_some(loop_is_some_reborrow, u32::MAX - 4, 1, 2), (14, 7, 3));
+         assert_eq!(loop_is_some_reborrow(None, 3), 3);
+     }
++
++    #[test]
++    fn loop_reborrow_write_back_native() {
++        assert_eq!(on_some_write(loop_reborrow, 10, 0, 0, 100), (0, 110, 0));
++        assert_eq!(on_some_write(loop_reborrow, 10, 0, 1, 100), (3, 113, 1));
++        assert_eq!(on_some_write(loop_reborrow, 10, 0, 3, 100), (15, 125, 3));
++        assert_eq!(on_some_write(loop_reborrow, u32::MAX - 4, 1, 2, 3), (12, 10, 3));
++        assert_eq!(on_frame_write(run_loop_reborrow, 10, 1, 2, 1000), (12, 1022, 3));
++    }
++
++    #[test]
++    fn loop_is_some_reborrow_write_back_native() {
++        assert_eq!(on_some_write(loop_is_some_reborrow, 10, 0, 0, 100), (0, 110, 0));
++        assert_eq!(on_some_write(loop_is_some_reborrow, 10, 0, 3, 100), (18, 125, 3));
++        assert_eq!(on_some_write(loop_is_some_reborrow, u32::MAX - 4, 1, 2, u32::MAX), (14, 6, 3));
++    }
+ }
+diff --git a/tests/src/nested-borrows-reborrow-join.rs b/tests/src/nested-borrows-reborrow-join.rs
+index fd0b412..1d0b4ba 100644
+--- a/tests/src/nested-borrows-reborrow-join.rs
++++ b/tests/src/nested-borrows-reborrow-join.rs
+@@ -83,6 +83,27 @@ mod native {
+         (r, c, pos)
+     }
+ 
++    /// `run(Some(&mut frame))`, then the caller writes `ctx + w` through the
++    /// frame given back
++    fn on_some_write(run: fn(Option<&mut Frame<'_>>, u32) -> u32, ctx: u32, pos: usize, w: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(Some(&mut f), 100);
++        *f.ctx = f.ctx.wrapping_add(w);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    /// `run(&mut frame)`, then the caller writes `ctx + w` through the frame
++    fn on_frame_write(run: fn(&mut Frame<'_>, u32) -> u32, ctx: u32, pos: usize, w: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(&mut f, 100);
++        *f.ctx = f.ctx.wrapping_add(w);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
+     #[test]
+     fn advance_is_some_native() {
+         assert_eq!(on_some(advance_is_some, 10, 0), (4, 13, 1));
+@@ -98,4 +119,12 @@ mod native {
+         assert_eq!(advance_is_some_then(None, 100), 100);
+         assert_eq!(on_frame(run_advance_is_some_then, 10, 1), (13, 22, 3));
+     }
++
++    #[test]
++    fn write_back_native() {
++        assert_eq!(on_some_write(advance_is_some, 10, 0, 100), (4, 113, 1));
++        assert_eq!(on_frame_write(run_advance_is_some, 10, 2, 100), (8, 117, 3));
++        assert_eq!(on_some_write(advance_is_some_then, 10, 0, 100), (9, 118, 2));
++        assert_eq!(on_frame_write(run_advance_is_some_then, 10, 1, u32::MAX), (13, 21, 3));
++    }
+ }

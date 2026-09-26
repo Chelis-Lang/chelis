@@ -1,0 +1,687 @@
+# charon integration step 48 after 546078ea5d: commit 0c5f84430d9df46790daec9c555ad8fa4023d82f
+# first parent 5fd1554b3c352efc22e4d4c3eff0aa7c68ca9e01
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: partial monomorphization reuses the region parameters of lifted associated types
+#
+# A lifted associated type is determined by the other arguments of the item, so its regions are
+# regions of these arguments. The mutability shape gave each of its regions a fresh parameter:
+# Option::<&'a mut Frame<'b>>::as_deref_mut got four regions (its lifted Target = Frame<'b> had its
+# own) while its call sites pass 'b twice, and the specialized DerefMut had three regions while its
+# implementation instantiates it with two. A region of a lifted associated type now reuses the
+# parameter of the equal region of the other arguments when exactly one body or variable region of
+# these arguments is equal to it. expand_associated_types records the number of lifted type
+# parameters of each item in TransformCtx::lifted_assoc_type_params.
+#
+# The implied trait references of implementations have erased regions, which lose these equalities:
+# when the lifted associated types of a trait reference to an implementation have erased regions,
+# its trait is the one the implementation declares, applied to the arguments of the implementation,
+# so that both name the same specialization of the trait.
+
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index c6e59bd..aa652ea 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -1283,6 +1283,7 @@ pub fn translate<'tcx>(
+         errors: ctx.errors,
+         start_from_roots,
+         mono_templates: ctx.mono_templates,
++        lifted_assoc_type_params: Default::default(),
+     })
+ }
+ 
+diff --git a/src/export/multi_target.rs b/src/export/multi_target.rs
+index 65b99d5..7056f6a 100644
+--- a/src/export/multi_target.rs
++++ b/src/export/multi_target.rs
+@@ -32,6 +32,7 @@ pub fn merge(options: CliOpts, krates: Vec<CrateData>) -> CrateData {
+         // The merged crates were already filtered by their own roots.
+         start_from_roots: Vec::new(),
+         mono_templates: Default::default(),
++        lifted_assoc_type_params: Default::default(),
+     };
+     crate::transform::add_missing_info::reorder_decls::Transform.transform_ctx(&mut ctx);
+     merged.translated = ctx.translated;
+diff --git a/src/transform/ctx.rs b/src/transform/ctx.rs
+index 91d7e3b..b05d865 100644
+--- a/src/transform/ctx.rs
++++ b/src/transform/ctx.rs
+@@ -6,7 +6,7 @@ use crate::options::TranslateOptions;
+ use crate::pretty::FmtWithCtx;
+ use crate::ullbc_ast;
+ use std::cell::RefCell;
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::{fmt, mem};
+ 
+ /// Simpler context used for rustc-independent code transformation. This only depends on rustc for
+@@ -24,6 +24,10 @@ pub struct TransformCtx {
+     /// Opaque generic items whose contents were translated only so that partial
+     /// monomorphization can instantiate them; that pass makes them opaque again.
+     pub mono_templates: HashSet<ItemId>,
++    /// For each item to which `expand_associated_types` added type parameters standing for
++    /// associated types (see `--lift-associated-types`), how many: they are the last type
++    /// parameters of the item.
++    pub lifted_assoc_type_params: HashMap<ItemId, usize>,
+ }
+ 
+ /// The translated items a start-from selection (a `--start-from`/`--start-from-if-exists`
+diff --git a/src/transform/normalize/expand_associated_types.rs b/src/transform/normalize/expand_associated_types.rs
+index ec50829..e7592e3 100644
+--- a/src/transform/normalize/expand_associated_types.rs
++++ b/src/transform/normalize/expand_associated_types.rs
+@@ -1340,6 +1340,16 @@ impl TransformPass for Transform {
+             }
+             item_modifications
+         };
++        ctx.lifted_assoc_type_params = item_modifications
++            .iter()
++            .filter_map(|(source, modifications)| {
++                let GenericsSource::Item(id) = source else {
++                    return None;
++                };
++                let count = modifications.required_extra_params().count();
++                (count != 0).then_some((*id, count))
++            })
++            .collect();
+ 
+         // Apply the computed modifications to each item.
+         ctx.for_each_item_mut(|ctx, mut item| {
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index aa313cc..22d9b32 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -170,6 +170,11 @@ struct MutabilityShapeBuilder<'pm, 'ctx> {
+     extracted: GenericArgs,
+     /// Current depth under which we're visiting.
+     binder_depth: DeBruijnId,
++    /// Whether we're visiting the lifted associated types of the arguments (see `compute_shape`).
++    in_lifted_types: bool,
++    /// The body and variable regions extracted from the arguments that aren't lifted associated
++    /// types, with the parameter that replaced each, or `None` if several parameters replaced it.
++    extracted_regions: HashMap<Region, Option<RegionId>>,
+ }
+ 
+ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+@@ -199,6 +204,21 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+     /// position (e.g. the backward functions of Aeneas) then agree between the declaration of a
+     /// method in a specialized trait and its implementations.
+     ///
++    /// The last `lifted` type arguments are associated types that `expand_associated_types` made
++    /// into parameters. Such a type is determined by the other arguments: its regions are regions
++    /// of these arguments. When one of its regions is equal to exactly one region extracted from
++    /// the other arguments, it reuses the parameter of that region instead of taking a fresh one.
++    /// For example, with the lifted `Target` of `as_deref_mut<'a, T: DerefMut<Target = Target>,
++    /// Target>`, for input:
++    ///   <'a, &'b mut Frame<'c>, Frame<'c>>
++    /// we build:
++    ///   binder<'a, 'b, 'c> <'a, &'b mut Frame<'c>, Frame<'c>>
++    /// and not `binder<'a, 'b, 'c, 'd> <'a, &'b mut Frame<'c>, Frame<'d>>`, which would lose the
++    /// equality of the regions of `Target` and of `<&'b mut Frame<'c> as Deref>::Target`.
++    /// Only body and variable regions are reused: static and erased regions don't tell where they
++    /// come from. The lifted types of the parent (resp. own) arguments are visited after the other
++    /// parent (resp. parent and own) arguments, from which they derive.
++    ///
+     /// Note: the input arguments are assumed to have been already partially monomorphized, in the
+     /// sense that we won't recurse inside ADT args because we assume any ADT applied to infected
+     /// args to have been replaced with a fresh infected ADT.
+@@ -207,6 +227,7 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+         target_params: &GenericParams,
+         args: &GenericArgs,
+         parent: ParentParams,
++        lifted: usize,
+     ) -> (MutabilityShape, GenericArgs) {
+         // We start with the implicit parameters from the original item. We'll need to substitute
+         // them once we've figured out the mapping of explicit parameters, but we'll also be adding
+@@ -228,6 +249,8 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+                 trait_refs: mem::take(&mut shape_contents.trait_refs),
+             },
+             binder_depth: DeBruijnId::zero(),
++            in_lifted_types: false,
++            extracted_regions: HashMap::new(),
+         };
+ 
+         // Traverse the generics and replace any non-infected type, region or const generic with a
+@@ -235,16 +258,34 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+         // above).
+         let parent_regions = parent.regions.min(shape_contents.regions.len());
+         let parent_types = parent.types.min(shape_contents.types.len());
++        let lifted_start = shape_contents.types.len().saturating_sub(lifted);
+         let mut own_args = GenericArgs {
+             regions: shape_contents.regions.split_off(parent_regions),
+             types: shape_contents.types.split_off(parent_types),
+             const_generics: mem::take(&mut shape_contents.const_generics),
+             trait_refs: IndexVec::new(),
+         };
+-        let _ = VisitWithBinderDepth::new(&mut builder).visit(&mut shape_contents);
+-        let _ = VisitWithBinderDepth::new(&mut builder).visit(&mut own_args);
++        let mut parent_lifted = GenericArgs::empty();
++        parent_lifted.types = shape_contents
++            .types
++            .split_off(lifted_start.min(parent_types));
++        let mut own_lifted = GenericArgs::empty();
++        own_lifted.types = own_args
++            .types
++            .split_off(lifted_start.saturating_sub(parent_types));
++        for (args, in_lifted_types) in [
++            (&mut shape_contents, false),
++            (&mut parent_lifted, true),
++            (&mut own_args, false),
++            (&mut own_lifted, true),
++        ] {
++            builder.in_lifted_types = in_lifted_types;
++            let _ = VisitWithBinderDepth::new(&mut builder).visit(args);
++        }
++        shape_contents.types.extend(parent_lifted.types);
+         shape_contents.regions.extend(own_args.regions);
+         shape_contents.types.extend(own_args.types);
++        shape_contents.types.extend(own_lifted.types);
+         shape_contents.const_generics = own_args.const_generics;
+ 
+         let shape_params = {
+@@ -308,27 +349,28 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+         (shape, shape_args)
+     }
+ 
+-    /// Replace this value with a fresh variable, and record that we did so.
++    /// Replace this value with a fresh variable, and record that we did so. Returns the id of the
++    /// fresh variable.
+     fn replace_with_fresh_var<Id, Param, Arg>(
+         &mut self,
+         val: &mut Arg,
+         mk_param: impl FnOnce(Id) -> Param,
+         mk_value: impl FnOnce(DeBruijnVar<Id>) -> Arg,
+-    ) where
++    ) -> Option<Id>
++    where
+         Id: Idx + Display,
+         Arg: TyVisitable + Clone,
+         GenericParams: HasIdxVecOf<Id, Output = Param>,
+         GenericArgs: HasIdxVecOf<Id, Output = Arg>,
+     {
+-        let Some(shifted_val) = val.clone().move_from_under_binders(self.binder_depth) else {
+-            // Give up on this value.
+-            return;
+-        };
++        // Give up on a value bound by the binders we're under.
++        let shifted_val = val.clone().move_from_under_binders(self.binder_depth)?;
+         // Record the mapping in the output `GenericArgs`.
+         self.extracted.get_idx_vec_mut().push(shifted_val);
+         // Put a fresh param in place of `val`.
+         let id = self.params.get_idx_vec_mut().push_with(mk_param);
+         *val = mk_value(DeBruijnVar::bound(self.binder_depth, id));
++        Some(id)
+     }
+ }
+ 
+@@ -496,7 +538,25 @@ impl<'pm, 'ctx> VisitAstMut for MutabilityShapeBuilder<'pm, 'ctx> {
+         }
+     }
+     fn enter_region(&mut self, r: &mut Region) {
+-        self.replace_with_fresh_var(r, |id| RegionParam::new(id, None), |v| v.into());
++        let shifted = r.move_from_under_binders(self.binder_depth);
++        if self.in_lifted_types {
++            // A region of a lifted associated type that is a region of the other arguments.
++            if let Some(shifted) = shifted
++                && let Some(&Some(id)) = self.extracted_regions.get(&shifted)
++            {
++                *r = DeBruijnVar::bound(self.binder_depth, id).into();
++            } else {
++                self.replace_with_fresh_var(r, |id| RegionParam::new(id, None), |v| v.into());
++            }
++        } else if let Some(id) =
++            self.replace_with_fresh_var(r, |id| RegionParam::new(id, None), |v| v.into())
++            && let Some(shifted @ (Region::Var(_) | Region::Body(_))) = shifted
++        {
++            self.extracted_regions
++                .entry(shifted)
++                .and_modify(|param| *param = None)
++                .or_insert(Some(id));
++        }
+     }
+     // TODO: we're missing type info for this
+     // fn enter_const_generic(&mut self, cg: &mut ConstGeneric) {
+@@ -536,6 +596,8 @@ struct PartialMonomorphizer<'a> {
+     generic_params: HashMap<ItemId, GenericParams>,
+     /// The parameters that associated items take from their trait declaration or implementation.
+     parent_params: HashMap<ItemId, ParentParams>,
++    /// The trait each implementation implements, in terms of the implementation's parameters.
++    impl_traits: HashMap<TraitImplId, TraitDeclRef>,
+     /// Map of partial monomorphizations. The source item applied with the generic params gives the
+     /// target item. The resulting partially-monomorphized item will have the binder params as
+     /// generic params.
+@@ -572,6 +634,12 @@ impl<'a> PartialMonomorphizer<'a> {
+                     .map(|decl| (decl.def_id.into(), ParentParams::of_source(&decl.src))),
+             )
+             .collect();
++        let impl_traits: HashMap<TraitImplId, TraitDeclRef> = ctx
++            .translated
++            .trait_impls
++            .iter()
++            .map(|timpl| (timpl.def_id, timpl.impl_trait.clone()))
++            .collect();
+ 
+         // Enqueue all items to be processed.
+         let to_process = ctx.translated.all_ids().collect();
+@@ -583,6 +651,7 @@ impl<'a> PartialMonomorphizer<'a> {
+             runtime_type_shapes,
+             generic_params,
+             parent_params,
++            impl_traits,
+             to_process,
+             partial_mono_shapes: SeqHashMap::default(),
+             reverse_shape_map: Default::default(),
+@@ -663,8 +732,14 @@ impl<'a> PartialMonomorphizer<'a> {
+         // Split the args between the infected part and the non-infected part.
+         let item_params = self.generic_params.get(&id)?;
+         let parent = self.parent_params.get(&id).copied().unwrap_or_default();
++        let lifted = self
++            .ctx
++            .lifted_assoc_type_params
++            .get(&id)
++            .copied()
++            .unwrap_or_default();
+         let (shape, shape_args) =
+-            MutabilityShapeBuilder::compute_shape(self, item_params, generics, parent);
++            MutabilityShapeBuilder::compute_shape(self, item_params, generics, parent, lifted);
+ 
+         // Create a new type id.
+         let new_params = shape.params.clone();
+@@ -745,6 +820,31 @@ impl<'a> PartialMonomorphizer<'a> {
+         }
+     }
+ 
++    /// Whether the lifted associated types of this reference to a trait contain an erased region.
++    fn has_erased_lifted_regions(&self, tref: &TraitDeclRef) -> bool {
++        let Some(&lifted) = self.ctx.lifted_assoc_type_params.get(&tref.id.into()) else {
++            return false;
++        };
++        let mut erased = false;
++        for ty in tref.generics.types.iter().rev().take(lifted) {
++            ty.dyn_visit(|r: &Region| erased |= r.is_erased());
++        }
++        erased
++    }
++
++    /// The trait that this implementation implements, in terms of the implementation's
++    /// parameters.
++    fn declared_impl_trait(&self, id: TraitImplId) -> Option<TraitDeclRef> {
++        match self.reverse_shape_map.get(&id.into()) {
++            Some((base_id, shape)) => {
++                let base_id: TraitImplId = (*base_id).try_into().ok()?;
++                let impl_trait = self.impl_traits.get(&base_id)?.clone();
++                Some(impl_trait.substitute_with_self(&shape.skip_binder, &TraitRefKind::SelfId))
++            }
++            None => self.impl_traits.get(&id).cloned(),
++        }
++    }
++
+     /// Traverse the item, replacing any type instantiations we don't want with references to
+     /// soon-to-be-created partially-monomorphized types. This does not access the items in
+     /// `self.translated`, which may be missing since we took `item` out for processing.
+@@ -807,6 +907,29 @@ impl VisitAstMut for PartialMonomorphizer<'_> {
+             self.rebind_method_self_witnesses(&method.params, &mut method.skip_binder);
+         }
+     }
++    /// The trait reference of an implementation is the trait the implementation declares, applied
++    /// to the arguments of the implementation. We compute it that way when the lifted associated
++    /// types of the given trait reference have erased regions, as the implied trait references of
++    /// implementations do: erased regions lose the equalities of the regions of lifted associated
++    /// types with the regions of the other arguments (see `compute_shape`), which the declared
++    /// trait reference keeps, and both must name the same specialization of the trait.
++    fn visit_trait_ref_contents(&mut self, x: &mut TraitRefContents) -> ControlFlow<Self::Break> {
++        if matches!(x.kind, TraitRefKind::TraitImpl(_))
++            && x.trait_decl_ref.regions.is_empty()
++            && self.has_erased_lifted_regions(&x.trait_decl_ref.skip_binder)
++        {
++            self.visit(&mut x.kind)?;
++            if let TraitRefKind::TraitImpl(impl_ref) = &x.kind
++                && let Some(mut impl_trait) = self.declared_impl_trait(impl_ref.id)
++            {
++                self.visit(&mut impl_trait)?;
++                x.trait_decl_ref = RegionBinder::empty(impl_trait.substitute(&impl_ref.generics));
++                return ControlFlow::Continue(());
++            }
++            return self.visit(&mut x.trait_decl_ref);
++        }
++        self.visit_inner(x)
++    }
+     fn exit_type_decl_ref(&mut self, x: &mut TypeDeclRef) {
+         let TypeId::Adt(id) = x.id else {
+             return;
+diff --git a/tests/ui/monomorphize-mut-lifted-assoc-region-impl.out b/tests/ui/monomorphize-mut-lifted-assoc-region-impl.out
+new file mode 100644
+index 0000000..2e0ed3d
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-lifted-assoc-region-impl.out
+@@ -0,0 +1,159 @@
++# Final LLBC before serialization:
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T> {
++  None,
++  Some(T),
++}
++
++// Full name: core::slice::iter::IterMut
++pub opaque type IterMut<mut 'a, T>
++where
++    T : 'a,
++    T : 'a,
++
++// Full name: core::slice::iter::{impl core::iter::traits::iterator::Iterator::<IterMut<_, _>, &_ mut _><'a, T> for T}::next
++pub fn {impl core::iter::traits::iterator::Iterator::<IterMut<_, _>, &_ mut _><'a, T> for T}::next<'a, '_1, T>(_1: &'_1 mut IterMut<'a, T>) -> Option<&'a mut T>
++= <opaque>
++
++// Full name: core::slice::iter::{impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for [T]}::into_iter
++pub fn {impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for [T]}::into_iter<'a, T>(_1: &'a mut [T]) -> IterMut<'a, T>
++= <opaque>
++
++// Full name: alloc::alloc::Global
++#[lang_item("global_alloc_ty")]
++pub struct Global {}
++
++// Full name: alloc::vec::Vec
++#[lang_item("Vec")]
++pub opaque type Vec<T>
++
++// Full name: alloc::vec::{impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for Vec<T>}::into_iter
++pub fn {impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for Vec<T>}::into_iter<'a, T, A>(_1: &'a mut Vec<T>) -> IterMut<'a, T>
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::bump
++pub fn bump<'_0>(v_1: &'_0 mut [u32])
++{
++    let _0: (); // return
++    let v_1: &'1 mut [u32]; // arg #1
++    let _2: IterMut<'3, u32>; // anonymous local
++    let _3: &'4 mut [u32]; // anonymous local
++    let iter_4: IterMut<'5, u32>; // local
++    let _5: Option<&'8 mut u32>; // anonymous local
++    let _6: &'11 mut IterMut<'12, u32>; // anonymous local
++    let _7: &'13 mut IterMut<'14, u32>; // anonymous local
++    let x_8: &'15 mut u32; // local
++    let _9: u32; // anonymous local
++
++    storage_live(_9)
++    _0 = ()
++    storage_live(_2)
++    storage_live(_3)
++    _3 = move v_1
++    _2 = {impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for [T]}::into_iter<'16, u32>(move _3)
++    storage_dead(_3)
++    storage_live(iter_4)
++    iter_4 = move _2
++    loop {
++        storage_live(_5)
++        storage_live(_6)
++        storage_live(_7)
++        _7 = &mut iter_4
++        _6 = &two-phase-mut (*_7)
++        _5 = {impl core::iter::traits::iterator::Iterator::<IterMut<_, _>, &_ mut _><'a, T> for T}::next<'18, '20, u32>(move _6)
++        storage_dead(_6)
++        match _5 {
++            Option::None => {
++                break 0
++            },
++            Option::Some => {
++            },
++        }
++        storage_live(x_8)
++        x_8 = move (_5 as variant Option::Some).0
++        _9 = copy (*x_8) panic.+ const 1 : u32
++        (*x_8) = move _9
++        storage_dead(x_8)
++        storage_dead(_7)
++        storage_dead(_5)
++        continue 0
++    }
++    _0 = ()
++    storage_dead(_7)
++    storage_dead(_5)
++    storage_dead(iter_4)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::bump_vec
++pub fn bump_vec<'_0>(v_1: &'_0 mut Vec<u32>)
++{
++    let _0: (); // return
++    let v_1: &'1 mut Vec<u32>; // arg #1
++    let _2: IterMut<'3, u32>; // anonymous local
++    let _3: &'4 mut Vec<u32>; // anonymous local
++    let iter_4: IterMut<'5, u32>; // local
++    let _5: Option<&'8 mut u32>; // anonymous local
++    let _6: &'11 mut IterMut<'12, u32>; // anonymous local
++    let _7: &'13 mut IterMut<'14, u32>; // anonymous local
++    let x_8: &'15 mut u32; // local
++    let _9: u32; // anonymous local
++
++    storage_live(_9)
++    _0 = ()
++    storage_live(_2)
++    storage_live(_3)
++    _3 = move v_1
++    _2 = {impl core::iter::traits::collect::IntoIterator::<&_ mut _, &_ mut _, IterMut<_, _>><'a, T, T> for Vec<T>}::into_iter<'16, u32, Global>(move _3)
++    storage_dead(_3)
++    storage_live(iter_4)
++    iter_4 = move _2
++    loop {
++        storage_live(_5)
++        storage_live(_6)
++        storage_live(_7)
++        _7 = &mut iter_4
++        _6 = &two-phase-mut (*_7)
++        _5 = {impl core::iter::traits::iterator::Iterator::<IterMut<_, _>, &_ mut _><'a, T> for T}::next<'18, '20, u32>(move _6)
++        storage_dead(_6)
++        match _5 {
++            Option::None => {
++                break 0
++            },
++            Option::Some => {
++            },
++        }
++        storage_live(x_8)
++        x_8 = move (_5 as variant Option::Some).0
++        _9 = copy (*x_8) panic.+ const 1 : u32
++        (*x_8) = move _9
++        storage_dead(x_8)
++        storage_dead(_7)
++        storage_dead(_5)
++        continue 0
++    }
++    _0 = ()
++    storage_dead(_7)
++    storage_dead(_5)
++    storage_dead(iter_4)
++    storage_dead(_2)
++    return
++}
++
++
++
+diff --git a/tests/ui/monomorphize-mut-lifted-assoc-region-impl.rs b/tests/ui/monomorphize-mut-lifted-assoc-region-impl.rs
+new file mode 100644
+index 0000000..46568bd
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-lifted-assoc-region-impl.rs
+@@ -0,0 +1,20 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++// The implied trait references of implementations have erased regions: the implementation of
++// `IntoIterator` for `&'a mut [T]` proves `IterMut<'a, T>: Iterator<Item = &'a mut T>` with
++// `{impl Iterator for IterMut<'_, T>}<'_, T>`. Its trait reference is the one the `Iterator`
++// implementation declares, `Iterator<IterMut<'a, T>, &'a mut T>`, whose lifted `Item` reuses the
++// region of `IterMut` (see `monomorphize-mut-lifted-assoc-region.rs`), not a specialization of
++// `Iterator` with a region of its own for the erased region of `Item`: both must agree with the
++// clause of the specialized `IntoIterator`.
++pub fn bump(v: &mut [u32]) {
++    for x in v {
++        *x += 1;
++    }
++}
++
++pub fn bump_vec(v: &mut Vec<u32>) {
++    for x in v {
++        *x += 1;
++    }
++}
+diff --git a/tests/ui/monomorphize-mut-lifted-assoc-region.out b/tests/ui/monomorphize-mut-lifted-assoc-region.out
+new file mode 100644
+index 0000000..95ec14c
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-lifted-assoc-region.out
+@@ -0,0 +1,112 @@
++# Final LLBC before serialization:
++
++// Full name: test_crate::Frame
++pub struct Frame<mut 'a> {
++  ctx: &'a mut u32,
++}
++
++#[lang_item("deref")]
++pub trait core::ops::deref::Deref::<&_ mut Frame<_>, Frame<_>><'_0, '_1>
++{
++    fn deref<'_0_1> = core::ops::deref::Deref::deref::<_, &_ mut Frame<_>, Frame<_>><'_0, '_1, '_0_1>[Self]
++    vtable: core::ops::deref::Deref::{vtable}<Frame<'_1>>
++}
++
++#[lang_item("deref_method")]
++pub fn core::ops::deref::Deref::deref::<_, &_ mut Frame<_>, Frame<_>><'_0, '_1, '_2>(_1: &'_2 &'_0 mut Frame<'_1>) -> &'_2 Frame<'_1>
++where
++    [@TraitClause0]: core::ops::deref::Deref::<&_ mut Frame<_>, Frame<_>><'_0, '_1>,
++= <opaque>
++
++pub fn core::ops::deref::{impl core::ops::deref::Deref::<&_ mut _, _><'_0, T> for T}::deref::<_, _, Frame<_>><'_0, '_1, '_2>(_1: &'_2 &'_0 mut Frame<'_1>) -> &'_2 Frame<'_1>
++= <opaque>
++
++// Full name: core::ops::deref::{impl core::ops::deref::Deref::<&_ mut _, _><'_0, T> for T}::<_, Frame<_>>
++impl<'_0, '_1> core::ops::deref::Deref::<&_ mut Frame<_>, Frame<_>><'_0, '_1> {
++    fn deref<'_0_1> = core::ops::deref::{impl core::ops::deref::Deref::<&_ mut _, _><'_0, T> for T}::deref::<_, _, Frame<_>><'_0, '_1, '_0_1>
++    vtable: {impl core::ops::deref::Deref::<&_ mut _, _><'_0, T> for T}::{vtable}<'_0, Frame<'_1>>
++}
++
++#[lang_item("deref_mut")]
++pub trait core::ops::deref::DerefMut::<&_ mut Frame<_>, Frame<_>><'_0, '_1>
++{
++    parent_clause0 : [@TraitClause0]: core::ops::deref::Deref::<&_ mut Frame<_>, Frame<_>><'_0, '_1>
++    fn deref_mut<'_0_1> = core::ops::deref::DerefMut::deref_mut::<_, &_ mut Frame<_>, Frame<_>><'_0, '_1, '_0_1>[Self]
++    vtable: core::ops::deref::DerefMut::{vtable}<Frame<'_1>>
++}
++
++#[lang_item("deref_mut_method")]
++pub fn core::ops::deref::DerefMut::deref_mut::<_, &_ mut Frame<_>, Frame<_>><'_0, '_1, '_2>(_1: &'_2 mut &'_0 mut Frame<'_1>) -> &'_2 mut Frame<'_1>
++where
++    [@TraitClause0]: core::ops::deref::DerefMut::<&_ mut Frame<_>, Frame<_>><'_0, '_1>,
++= <opaque>
++
++pub fn core::ops::deref::{impl core::ops::deref::DerefMut::<&_ mut _, _><'_0, T> for T}::deref_mut::<_, _, Frame<_>><'_0, '_1, '_2>(_1: &'_2 mut &'_0 mut Frame<'_1>) -> &'_2 mut Frame<'_1>
++= <opaque>
++
++// Full name: core::ops::deref::{impl core::ops::deref::DerefMut::<&_ mut _, _><'_0, T> for T}::<_, Frame<_>>
++impl<'_0, '_1> core::ops::deref::DerefMut::<&_ mut Frame<_>, Frame<_>><'_0, '_1> {
++    parent_clause0 = core::ops::deref::{impl core::ops::deref::Deref::<&_ mut _, _><'_0, T> for T}::<_, Frame<_>><'_, '_1>
++    fn deref_mut<'_0_1> = core::ops::deref::{impl core::ops::deref::DerefMut::<&_ mut _, _><'_0, T> for T}::deref_mut::<_, _, Frame<_>><'_0, '_1, '_0_1>
++    vtable: {impl core::ops::deref::DerefMut::<&_ mut _, _><'_0, T> for T}::{vtable}<'_0, Frame<'_1>>
++}
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T> {
++  None,
++  Some(T),
++}
++
++pub fn core::option::{Option<T>}::as_deref_mut::<_, &_ mut Frame<_>, Frame<_>><'_0, '_1, '_2>(_1: &'_0 mut Option<&'_1 mut Frame<'_2>>) -> Option<&'_0 mut Frame<'_2>>
++where
++    [@TraitClause0]: core::ops::deref::DerefMut::<&_ mut Frame<_>, Frame<_>><'_1, '_2>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::advance
++pub fn advance<'_0, '_1>(execution_1: Option<&'_0 mut Frame<'_1>>) -> u32
++{
++    let _0: u32; // return
++    let execution_1: Option<&'5 mut Frame<'6>>; // arg #1
++    let _2: Option<&'7 mut Frame<'8>>; // anonymous local
++    let _3: &'12 mut Option<&'13 mut Frame<'14>>; // anonymous local
++    let f_4: &'15 mut Frame<'16>; // local
++    let _5: u32; // anonymous local
++
++    storage_live(_5)
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &two-phase-mut execution_1
++    _2 = core::option::{Option<T>}::as_deref_mut::<_, &_ mut Frame<_>, Frame<_>><'27, '17, '18>[core::ops::deref::{impl core::ops::deref::DerefMut::<&_ mut _, _><'_0, T> for T}::<_, Frame<_>><'17, '18>](move _3)
++    storage_dead(_3)
++    match _2 {
++        Option::None => {
++            _0 = const 0 : u32
++        },
++        Option::Some => {
++            storage_live(f_4)
++            f_4 = move (_2 as variant Option::Some).0
++            _5 = copy (*((*f_4)).ctx) panic.+ const 1 : u32
++            (*((*f_4)).ctx) = move _5
++            _0 = copy (*((*f_4)).ctx)
++            storage_dead(f_4)
++        },
++    }
++    storage_dead(_2)
++    return
++}
++
++
++
+diff --git a/tests/ui/monomorphize-mut-lifted-assoc-region.rs b/tests/ui/monomorphize-mut-lifted-assoc-region.rs
+new file mode 100644
+index 0000000..47aa9ff
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-lifted-assoc-region.rs
+@@ -0,0 +1,21 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++// A lifted associated type is determined by the other arguments, so its regions are the regions of
++// these arguments: `as_deref_mut` on `Option<&'a mut Frame<'b>>` takes the lifted
++// `<&'a mut Frame<'b> as Deref>::Target = Frame<'b>`. Partial monomorphization reuses the parameter
++// of `'b` for the region of the lifted `Frame<'b>` instead of giving it a region of its own: the
++// specializations of `as_deref_mut` and of `DerefMut` have one region parameter for `'b`, as
++// the call site and the specialized `DerefMut` implementation (whose `Target` is `Frame<'b>`).
++pub struct Frame<'a> {
++    ctx: &'a mut u32,
++}
++
++pub fn advance(mut execution: Option<&mut Frame<'_>>) -> u32 {
++    match execution.as_deref_mut() {
++        Some(f) => {
++            *f.ctx += 1;
++            *f.ctx
++        }
++        None => 0,
++    }
++}

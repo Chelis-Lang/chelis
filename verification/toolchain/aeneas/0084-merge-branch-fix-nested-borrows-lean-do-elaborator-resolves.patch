@@ -1,0 +1,432 @@
+# aeneas integration step 84 after cba11f3beb: commit 19f5b77f236aa89bc216202f812f6016dbf51468
+# first parent 2734961a7eb7414dd6a75be9aa617ec1205148ef, merged 583dabeab9a9bba51e39e4cc9959dbacb1257945
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (Lean do elaborator resolves postponed elaboration before let patterns; simplify_let_branching handles whole tuple values)
+
+diff --git a/backends/lean/Aeneas/Do/Elab.lean b/backends/lean/Aeneas/Do/Elab.lean
+index 479ca7c..ae18a2b 100644
+--- a/backends/lean/Aeneas/Do/Elab.lean
++++ b/backends/lean/Aeneas/Do/Elab.lean
+@@ -395,10 +395,13 @@ partial def elabDoLetArrowPat (pat : Term) (rhs : DoElem) (rest : List DoElem) :
+       if let some a := eType.getAppArgs[0]? then
+         discard <| isDefEq α a
+       pure e
++  -- The pattern is analyzed against the value's type: resolve the postponed
++  -- elaboration problems first (a `match` bound by an earlier `let x := match …`
++  -- is postponed until its type is known, and `x` may be this value).
++  synthesizeSyntheticMVarsNoPostponing
+   let α ← instantiateMVars α
+   let shape ← analyzePat pat α
+   let k ← mkPatContinuation shape α fun _ => suspendDoSeq rest
+-  synthesizeSyntheticMVarsNoPostponing
+   ElabM.mkBind e k
+ 
+ /-- Elaborate `let x := e`. -/
+@@ -419,10 +422,11 @@ partial def elabDoLetPat (pat : Term) (rhs : Term)
+     (rest : List DoElem) : ElabM Expr := do
+   let α ← mkFreshTypeMVar
+   let val ← elabTermEnsuringType rhs α
++  -- See `elabDoLetArrowPat`: the pattern needs the resolved type of the value.
++  synthesizeSyntheticMVarsNoPostponing
+   let α ← instantiateMVars α
+   let shape ← analyzePat pat α
+   let k ← mkPatContinuation shape α fun _ => suspendDoSeq rest
+-  synthesizeSyntheticMVarsNoPostponing
+   -- For `.ctor`, `k` is `fun _x => T.casesOn _x …`; headBeta gives `T.casesOn val …`.
+   -- For `.prod` the head is `Function.uncurry`, so `headBeta` is a no-op.
+   return (mkApp k val).headBeta
+diff --git a/backends/lean/Aeneas/Do/Tests.lean b/backends/lean/Aeneas/Do/Tests.lean
+index a839b01..c9db376 100644
+--- a/backends/lean/Aeneas/Do/Tests.lean
++++ b/backends/lean/Aeneas/Do/Tests.lean
+@@ -665,6 +665,29 @@ def deferred_rhs_inference (choose : Bool) : Result Nat := do
+ #guard deferred_rhs_inference true == ok 75
+ #guard deferred_rhs_inference false == ok 36
+ 
++-- `let x := match …` postpones the `match` until its type is known; a later
++-- pattern `let` on `x` (`:=` or `←`, tuple or constructor) needs that type.
++def let_match_then_pattern (o : Option (Nat × Nat)) (w : Option Wrap) : Result Nat := do
++  let p :=
++    match o with
++    | some p1 => p1
++    | none => (1, 2)
++  let (a, b) := p
++  let q :=
++    match o with
++    | some q1 => q1
++    | none => (3, 4)
++  let (c, d) ← ok q
++  let v :=
++    match w with
++    | some v1 => v1
++    | none => Wrap.mk 5
++  let ⟨ n ⟩ := v
++  ok (n * 10000 + a * 1000 + b * 100 + c * 10 + d)
++
++#guard let_match_then_pattern (some (6, 7)) (some (Wrap.mk 8)) == ok 86767
++#guard let_match_then_pattern none none == ok 51234
++
+ end Tests
+ 
+ /- ## Regression tests for `elabDoMatch` with unresolved discriminant type metavars.
+diff --git a/src/pure/PureMicroPassesGeneral.ml b/src/pure/PureMicroPassesGeneral.ml
+index f443511..965b7a9 100644
+--- a/src/pure/PureMicroPassesGeneral.ml
++++ b/src/pure/PureMicroPassesGeneral.ml
+@@ -1382,8 +1382,12 @@ let simplify_let_branching (ctx : ctx) (def : fun_decl) =
+     let rec explore (branchings : fvar_id list TExprMap.t) (e : texpr) : unit =
+       match e.e with
+       | FVar _ | CVar _ | Const _ | StructUpdate _ | Qualif _ | Lambda _ ->
+-          [%sanity_check] span (num_outs = 1);
+-          push_to_outs 0 (e :: get_equal_values branchings e)
++          if num_outs = 1 then
++            push_to_outs 0 (e :: get_equal_values branchings e)
++          else
++            (* A whole value of the tuple type (e.g. the variable bound by the
++               pattern of a match arm): its components are not known *)
++            push_empty_possibilities ()
+       | BVar _ -> [%internal_error] span
+       | App _ ->
+           (* *)
+diff --git a/tests/lean/LetBranchingTupleValue.lean b/tests/lean/LetBranchingTupleValue.lean
+new file mode 100644
+index 0000000..b441171
+--- /dev/null
++++ b/tests/lean/LetBranchingTupleValue.lean
+@@ -0,0 +1,2 @@
++import LetBranchingTupleValue.Checks
++import LetBranchingTupleValue.LetBranchingTupleValue
+diff --git a/tests/lean/LetBranchingTupleValue/Checks.lean b/tests/lean/LetBranchingTupleValue/Checks.lean
+new file mode 100644
+index 0000000..e443e79
+--- /dev/null
++++ b/tests/lean/LetBranchingTupleValue/Checks.lean
+@@ -0,0 +1,31 @@
++import LetBranchingTupleValue.LetBranchingTupleValue
++
++/-! Evaluate the model of `tests/src/let-branching-tuple-value.rs` on the inputs
++    of its `native` test module and compare with the native results. -/
++
++namespace let_branching_tuple_value.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def flatR (s : Option (Nat × Nat)) (lo : Nat) : Option Nat :=
++  match flat (s.map fun (a, b) => (u a, u b)) (u lo) with
++  | ok r => some r.val
++  | _ => none
++
++def nestedR (s : Option (Nat × Nat × Nat)) (lo : Nat) : Option Nat :=
++  match nested (s.map fun (a, b, c) => (u a, u b, u c)) (u lo) with
++  | ok r => some r.val
++  | _ => none
++
++-- flat_native
++#guard flatR (some (9, 2)) 0 == some 7
++#guard flatR (some (2, 9)) 0 == some 4294967289
++#guard flatR none 5 == some 4
++
++-- nested_native
++#guard nestedR (some (9, 2, 3)) 0 == some 10
++#guard nestedR (some (2, 9, 0)) 0 == some 4294967289
++#guard nestedR none 5 == some 1
++
++end let_branching_tuple_value.checks
+diff --git a/tests/lean/LetBranchingTupleValue/LetBranchingTupleValue.lean b/tests/lean/LetBranchingTupleValue/LetBranchingTupleValue.lean
+new file mode 100644
+index 0000000..f64bf76
+--- /dev/null
++++ b/tests/lean/LetBranchingTupleValue/LetBranchingTupleValue.lean
+@@ -0,0 +1,44 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [let_branching_tuple_value]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace let_branching_tuple_value
++
++/-- [let_branching_tuple_value::flat]:
++    Source: 'tests/src/let-branching-tuple-value.rs', lines 11:0-18:1
++    Visibility: public -/
++def flat
++  (s : _root_.Option (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  (lo : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (a, b) ←
++    match s with
++    | none => _root_.Aeneas.Std.Result.ok (lo, 1#u32)
++    | some p => _root_.Aeneas.Std.Result.ok p
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_sub a b)
++
++/-- [let_branching_tuple_value::nested]:
++    Source: 'tests/src/let-branching-tuple-value.rs', lines 20:0-27:1
++    Visibility: public -/
++def nested
++  (s : _root_.Option (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))) (lo : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (a, p) ←
++    match s with
++    | none => _root_.Aeneas.Std.Result.ok (lo, (lo, 1#u32))
++    | some p1 => _root_.Aeneas.Std.Result.ok p1
++  let (b, c) := p
++  let i ← lift (core.num.U32.wrapping_sub a b)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i c)
++
++end let_branching_tuple_value
+diff --git a/tests/lean/LetMatchPattern.lean b/tests/lean/LetMatchPattern.lean
+new file mode 100644
+index 0000000..7acbdf3
+--- /dev/null
++++ b/tests/lean/LetMatchPattern.lean
+@@ -0,0 +1,2 @@
++import LetMatchPattern.Checks
++import LetMatchPattern.LetMatchPattern
+diff --git a/tests/lean/LetMatchPattern/Checks.lean b/tests/lean/LetMatchPattern/Checks.lean
+new file mode 100644
+index 0000000..215872a
+--- /dev/null
++++ b/tests/lean/LetMatchPattern/Checks.lean
+@@ -0,0 +1,31 @@
++import LetMatchPattern.LetMatchPattern
++
++/-! Evaluate the model of `tests/src/let-match-pattern.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace let_match_pattern.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def sumR (x : Nat) : Option Nat :=
++  match sum_observed (u x) with
++  | ok r => some r.val
++  | _ => none
++
++def spreadR (x : Nat) : Option Nat :=
++  match spread_observed (u x) with
++  | ok r => some r.val
++  | _ => none
++
++-- sum_observed_native
++#guard sumR 3 == some 34
++#guard sumR 0 == some 1
++#guard sumR 4294967295 == some 4294967286
++
++-- spread_observed_native
++#guard spreadR 5 == some 15
++#guard spreadR 0 == some 0
++#guard spreadR 4294967295 == some 4294967293
++
++end let_match_pattern.checks
+diff --git a/tests/lean/LetMatchPattern/LetMatchPattern.lean b/tests/lean/LetMatchPattern/LetMatchPattern.lean
+new file mode 100644
+index 0000000..d4a3ced
+--- /dev/null
++++ b/tests/lean/LetMatchPattern/LetMatchPattern.lean
+@@ -0,0 +1,67 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [let_match_pattern]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace let_match_pattern
++
++/-- [let_match_pattern::observe]:
++    Source: 'tests/src/let-match-pattern.rs', lines 15:0-17:1 -/
++def observe
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.core.convert.Infallible)
++  := do
++  let i ← lift (core.num.U32.wrapping_add x 1#u32)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (x, i))
++
++/-- [let_match_pattern::sum_observed]:
++    Source: 'tests/src/let-match-pattern.rs', lines 19:0-26:1
++    Visibility: public -/
++def sum_observed
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let observed ← _root_.let_match_pattern.observe x
++  let p :=
++    match observed with
++    | _root_.Aeneas.Std.core.result.Result.Ok p1 => p1
++  let (a, b) := p
++  let i ← lift (core.num.U32.wrapping_mul a 10#u32)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i b)
++
++/-- [let_match_pattern::observe_nested]:
++    Source: 'tests/src/let-match-pattern.rs', lines 28:0-30:1 -/
++def observe_nested
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++    _root_.Aeneas.Std.core.convert.Infallible)
++  := do
++  let i ← lift (core.num.U32.wrapping_mul x 2#u32)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (x, (i,
++    3#u32)))
++
++/-- [let_match_pattern::spread_observed]:
++    Source: 'tests/src/let-match-pattern.rs', lines 32:0-38:1
++    Visibility: public -/
++def spread_observed
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let r ← _root_.let_match_pattern.observe_nested x
++  let p := match r with
++           | _root_.Aeneas.Std.core.result.Result.Ok p1 => p1
++  let (a, p1) := p
++  let (b, c) := p1
++  let i ← lift (core.num.U32.wrapping_sub b a)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_mul i c)
++
++end let_match_pattern
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 0d11214..d51963d 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -44,6 +44,8 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsSharedCapture
+ @[default_target] lean_lib NestedBorrowsAsDerefMut
+ @[default_target] lean_lib NestedBorrowsUntouchedJoin
++@[default_target] lean_lib LetMatchPattern
++@[default_target] lean_lib LetBranchingTupleValue
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectDispatch
+diff --git a/tests/src/let-branching-tuple-value.rs b/tests/src/let-branching-tuple-value.rs
+new file mode 100644
+index 0000000..d5fe876
+--- /dev/null
++++ b/tests/src/let-branching-tuple-value.rs
+@@ -0,0 +1,46 @@
++//@ [!lean] skip
++//@ [lean] subdir=LetBranchingTupleValue
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A tuple destructured from a `match` one of whose arms gives a whole tuple
++//! value (the variable bound by `Some(p)`), the other a tuple expression.
++//! `simplify_let_branching` looks for components which are the same in every
++//! arm: a whole value has no known components, so nothing is simplified
++//! (flat pattern in `flat`, nested in `nested`).
++
++pub fn flat(s: Option<(u32, u32)>, lo: u32) -> u32 {
++    let p = match s {
++        Some(p) => p,
++        None => (lo, 1),
++    };
++    let (a, b) = p;
++    a.wrapping_sub(b)
++}
++
++pub fn nested(s: Option<(u32, (u32, u32))>, lo: u32) -> u32 {
++    let p = match s {
++        Some(p) => p,
++        None => (lo, (lo, 1)),
++    };
++    let (a, (b, c)) = p;
++    a.wrapping_sub(b).wrapping_add(c)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn flat_native() {
++        assert_eq!(flat(Some((9, 2)), 0), 7);
++        assert_eq!(flat(Some((2, 9)), 0), 4294967289);
++        assert_eq!(flat(None, 5), 4);
++    }
++
++    #[test]
++    fn nested_native() {
++        assert_eq!(nested(Some((9, (2, 3))), 0), 10);
++        assert_eq!(nested(Some((2, (9, 0))), 0), 4294967289);
++        assert_eq!(nested(None, 5), 1);
++    }
++}
+diff --git a/tests/src/let-match-pattern.rs b/tests/src/let-match-pattern.rs
+new file mode 100644
+index 0000000..f672836
+--- /dev/null
++++ b/tests/src/let-match-pattern.rs
+@@ -0,0 +1,57 @@
++//@ [!lean] skip
++//@ [lean] subdir=LetMatchPattern
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A value bound to a `match` and destructured by a later `let`. The model
++//! binds `let p := match observed with | Ok p1 => p1` and then
++//! `let (a, b) := p`: Lean postpones the `match` until its type is known, and
++//! the `do` elaborator must resolve it before it analyzes the tuple pattern of
++//! the next `let` (flat in `sum_observed`, nested in `spread_observed`). The
++//! one-armed match on `Result<_, Infallible>` is the shape of the observers of
++//! chelis-ir's dag.rs.
++
++use std::convert::Infallible;
++
++fn observe(x: u32) -> Result<(u32, u32), Infallible> {
++    Ok((x, x.wrapping_add(1)))
++}
++
++pub fn sum_observed(x: u32) -> u32 {
++    let observed = observe(x);
++    let p = match observed {
++        Ok(p) => p,
++    };
++    let (a, b) = p;
++    a.wrapping_mul(10).wrapping_add(b)
++}
++
++fn observe_nested(x: u32) -> Result<(u32, (u32, u32)), Infallible> {
++    Ok((x, (x.wrapping_mul(2), 3)))
++}
++
++pub fn spread_observed(x: u32) -> u32 {
++    let p = match observe_nested(x) {
++        Ok(p) => p,
++    };
++    let (a, (b, c)) = p;
++    b.wrapping_sub(a).wrapping_mul(c)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn sum_observed_native() {
++        assert_eq!(sum_observed(3), 34);
++        assert_eq!(sum_observed(0), 1);
++        assert_eq!(sum_observed(u32::MAX), 4294967286);
++    }
++
++    #[test]
++    fn spread_observed_native() {
++        assert_eq!(spread_observed(5), 15);
++        assert_eq!(spread_observed(0), 0);
++        assert_eq!(spread_observed(u32::MAX), 4294967293);
++    }
++}

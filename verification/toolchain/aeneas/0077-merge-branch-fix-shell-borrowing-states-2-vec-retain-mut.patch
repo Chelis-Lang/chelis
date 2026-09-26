@@ -1,0 +1,2998 @@
+# aeneas integration step 77 after cba11f3beb: commit d340e7fc781c8e6c7c1fe4b28758f0032dbcfc97
+# first parent 001522562ed420f2dc2a8ed63d807721ddea8291, merged 6cda4dcee5c39338dd2dabcad72cf5c768a8b86f
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/shell-borrowing-states-2' (Vec::retain_mut incl. closures capturing mutable borrows; function pointer types in PhantomData type arguments)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Ops.lean b/backends/lean/Aeneas/Std/Core/Ops.lean
+index 052e5d4..e4965a4 100644
+--- a/backends/lean/Aeneas/Std/Core/Ops.lean
++++ b/backends/lean/Aeneas/Std/Core/Ops.lean
+@@ -98,6 +98,20 @@ structure core.ops.function.FnMutSharedMutArg (Self : Type u) (T : Type v)
+   FnOnceInst : core.ops.function.FnOnceSharedMutArg Self T Output
+   call_mut : Self → T → Result (Output × Self)
+ 
++/-- The specialization `FnMut<(&'a mut T,)>` that Charon's `--monomorphize-mut`
++    creates for a closure taking one mutable borrow (e.g. the predicate of
++    `Vec::retain_mut`), when the closure type is a parameter: the call returns
++    the output, the borrowed argument and the closure state (the argument's
++    region is a parameter of the trait, the region of `&mut self` one of the
++    method). (For a closure capturing mutable borrows the specialization is
++    specific to the closure; such a bound is not this schema, see
++    `ModelStateABI.closure_state_instance`.) -/
++@[rust_trait "core::ops::function::FnMut<@Self, (&'a mut @T), @Output>"
++  (parentClauses := ["FnOnceInst"])]
++structure core.ops.function.FnMutMutArg (Self : Type u) (T : Type v) (Output : Type w) where
++  FnOnceInst : core.ops.function.FnOnceMutArg Self T Output
++  call_mut : Self → T → Result (Output × T × Self)
++
+ /-! ### Closure specializations at borrowing states
+ 
+ A partial-monomorphization instance of a modeled function which threads a state
+diff --git a/backends/lean/Aeneas/Std/Vec.lean b/backends/lean/Aeneas/Std/Vec.lean
+index b3036d0..ef03272 100644
+--- a/backends/lean/Aeneas/Std/Vec.lean
++++ b/backends/lean/Aeneas/Std/Vec.lean
+@@ -475,6 +475,40 @@ def alloc.vec.Vec.append {T : Type} (v other : alloc.vec.Vec T) :
+     ok (⟨ v.val ++ other.val, by scalar_tac ⟩, ⟨ [], by simp ⟩)
+   else fail .panic
+ 
++/-- The elements kept by `Vec::retain_mut` and the final closure state: `call` is
++    called once on every element, in order, with the element, and the (possibly
++    updated) elements for which it returns `true` are kept, in order. The
++    closure state is threaded through the calls and returned. -/
++def alloc.vec.Vec.retainMutList {T F : Type} (call : F → T → Result (Bool × F × T)) :
++    (xs : List T) → F → Result ({ys : List T // ys.length ≤ xs.length} × F)
++  | [], f => ok (⟨[], by simp⟩, f)
++  | x :: xs, f => do
++    let (keep, f, x) ← call f x
++    let (rest, f) ← alloc.vec.Vec.retainMutList call xs f
++    if keep then ok (⟨x :: rest.val, by have := rest.property; simp; omega⟩, f)
++    else ok (⟨rest.val, by have := rest.property; simp; omega⟩, f)
++
++/-- `Vec::retain_mut` (alloc/src/vec/mod.rs) given the call of its closure: the
++    output, the vector and the final closure state. A partial-monomorphization
++    instance at a closure capturing mutable borrows is this model applied to the
++    closure's call recovered from its region-indexed `call_mut`, the final state
++    giving back the captured borrows (`ModelStateABI.closure_state_fun_body`). -/
++def alloc.vec.Vec.retain_mut_with {T F : Type} (call : F → T → Result (Bool × F × T))
++    (v : alloc.vec.Vec T) (f : F) : Result (Unit × alloc.vec.Vec T × F) := do
++  let (ys, f) ← alloc.vec.Vec.retainMutList call v.val f
++  ok ((), ⟨ys.val, Nat.le_trans ys.property v.property⟩, f)
++
++/-- `Vec::retain_mut` (alloc/src/vec/mod.rs): see `retain_mut_with`. Only
++    `call_mut` is called. -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::retain_mut" (keepParams := [true, false, true])]
++def alloc.vec.Vec.retain_mut {T F : Type} (fnInst : core.ops.function.FnMutMutArg F T Bool)
++    (v : alloc.vec.Vec T) (f : F) : Result (Unit × alloc.vec.Vec T × F) :=
++  alloc.vec.Vec.retain_mut_with
++    (fun f x => do
++      let (keep, x, f) ← fnInst.call_mut f x
++      ok (keep, f, x))
++    v f
++
+ @[rust_fun "alloc::vec::{core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>}::deref"
+            -canFail -lift (keepParams := [true, false])]
+ def alloc.vec.Vec.deref {T : Type} (v : alloc.vec.Vec T) : Slice T :=
+diff --git a/src/Main.ml b/src/Main.ml
+index 9f11076..d2d5290 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -652,13 +652,16 @@ let () =
+                       (Charon.NameMatcher.ctx_from_crate m)
+                       d.def_id d.item_meta.name)
+               (* We also ignore the trait method declarations, and the
+-                 instances of modeled functions at borrowing states, which are
+-                 translated to their model *)
++                 instances of modeled functions at borrowing states or at
++                 closures capturing mutable borrows, which are translated to
++                 their model *)
+               && (match d.src with
+                  | TraitDeclItem _ -> false
+                  | _ -> true)
+               && Option.is_none
+-                   (Aeneas.ModelStateABI.threaded_instance_of_decl m d))
++                   (Aeneas.ModelStateABI.threaded_instance_of_decl m d)
++              && Option.is_none
++                   (Aeneas.ModelStateABI.closure_state_instance_of_decl m d))
+             fun_decls
+         in
+         let global_decls =
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 8a6cc61..40d60c9 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -4168,6 +4168,7 @@ let add_closure_implied_outlives (crate : crate) : crate =
+   { crate with type_decls }
+ 
+ let apply_passes (crate : crate) : crate =
++  TypesUtils.register_phantom_data_decls crate.type_decls;
+   (* Passes that apply to the whole crate *)
+   let crate = add_closure_implied_outlives crate in
+   let crate = normalize_modeled_trait_specializations crate in
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index ed1c517..08a5333 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -126,7 +126,7 @@ let lean_builtin_types = [
+   mk_type "core::num::niche_types::NonZeroUsizeInner" "_root_.Aeneas.Std.core.num.niche_types.NonZeroUsizeInner";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 14 *)
+   mk_type "core::num::nonzero::NonZero" "_root_.Aeneas.Std.core.num.nonzero.NonZero" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 221 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 235 *)
+   mk_type "core::ops::control_flow::ControlFlow" "_root_.Aeneas.Std.core.ops.control_flow.ControlFlow" ~kind:(KEnum [("Continue", Some "Continue"); ("Break", Some "Break")]);
+   (* file: "Aeneas/Std/Range.lean", line: 14 *)
+   mk_type "core::ops::range::Range" "_root_.Aeneas.Std.core.ops.range.Range" ~kind:(KStruct [("start", Some "start"); ("end", Some "«end»")]);
+@@ -238,7 +238,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::iter::{core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.boxed.IntoIteratorBoxSlice.into_iter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 122 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<@T>>}::clone" "_root_.Aeneas.Std.core.alloc.boxed.CloneBox.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 597 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 631 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<[@T]>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 196 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<str>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxStr.clone";
+@@ -466,13 +466,13 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::take" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.take" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 86 *)
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::try_fold" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.try_fold" ~keep_params:(Some [true; false; true; true; true; true]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 610 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 644 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::eq" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq" ~keep_params:(Some [true; true; false; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 620 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 654 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::ne" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.ne" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 471 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::append" "_root_.Aeneas.Std.alloc.vec.Vec.append" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 483 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 517 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::as_slice" "_root_.Aeneas.Std.alloc.vec.Vec.as_slice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 52 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::clear" "_root_.Aeneas.Std.alloc.vec.Vec.clear" ~keep_params:(Some [true; false]) ~can_fail:false;
+@@ -496,19 +496,21 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::push" "_root_.Aeneas.Std.alloc.vec.Vec.push" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 56 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::remove" "_root_.Aeneas.Std.alloc.vec.Vec.remove" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 505 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 539 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::resize" "_root_.Aeneas.Std.alloc.vec.Vec.resize" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/Vec.lean", line: 503 *)
++  mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::retain_mut" "_root_.Aeneas.Std.alloc.vec.Vec.retain_mut" ~keep_params:(Some [true; false; true]);
+   (* file: "Aeneas/Std/Vec.lean", line: 454 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::with_capacity" "_root_.Aeneas.Std.alloc.vec.Vec.with_capacity" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 582 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 616 *)
+   mk_fun "alloc::vec::{core::clone::Clone<alloc::vec::Vec<@T>>}::clone" "_root_.Aeneas.Std.alloc.vec.CloneVec.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 545 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 579 *)
+   mk_fun "alloc::vec::{core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>}::from" "_root_.Aeneas.Std.alloc.vec.FromBoxSliceVec.from" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 531 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 565 *)
+   mk_fun "alloc::vec::{core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>}::from" "_root_.Aeneas.Std.alloc.vec.FromVecArray.from";
+   (* file: "Aeneas/Std/Vec.lean", line: 67 *)
+   mk_fun "alloc::vec::{core::default::Default<alloc::vec::Vec<@T>>}::default" "_root_.Aeneas.Std.alloc.vec.DefaultVec.default";
+-  (* file: "Aeneas/Std/Vec.lean", line: 641 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 675 *)
+   mk_fun "alloc::vec::{core::fmt::Debug<alloc::vec::Vec<@T>>}::fmt" "_root_.Aeneas.Std.alloc.vec.DebugVec.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 89 *)
+   mk_fun "alloc::vec::{core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>}::extend" "_root_.Aeneas.Std.alloc.vec.ExtendVec.extend" ~keep_params:(Some [true; false; true; true]);
+@@ -520,9 +522,9 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{core::iter::traits::collect::IntoIterator<&'a mut alloc::vec::Vec<@T>, &'a mut @T, core::slice::iter::IterMut<'a, @T>>}::into_iter" "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 118 *)
+   mk_fun "alloc::vec::{core::iter::traits::collect::IntoIterator<alloc::vec::Vec<@T>, @T, alloc::vec::into_iter::IntoIter<@T, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 478 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 512 *)
+   mk_fun "alloc::vec::{core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>}::deref" "_root_.Aeneas.Std.alloc.vec.Vec.deref" ~keep_params:(Some [true; false]) ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 492 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 526 *)
+   mk_fun "alloc::vec::{core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>}::deref_mut" "_root_.Aeneas.Std.alloc.vec.Vec.deref_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Vec.lean", line: 300 *)
+   mk_fun "alloc::vec::{core::ops::index::Index<alloc::vec::Vec<@T>, @I, @O>}::index" "_root_.Aeneas.Std.alloc.vec.Vec.index" ~keep_params:(Some [true; true; false; true]);
+@@ -866,7 +868,7 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Debug<()>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugUnit.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 157 *)
+   mk_fun "core::fmt::{core::fmt::Debug<(@A, @B)>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugPair.fmt";
+-  (* file: "Aeneas/Std/Vec.lean", line: 651 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 685 *)
+   mk_fun "core::fmt::{core::fmt::Debug<[@T]>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugSlice.fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 302 *)
+   mk_fun "core::fmt::{core::fmt::Debug<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBool.fmt";
+@@ -1362,9 +1364,9 @@ let lean_builtin_funs = [
+   mk_fun "core::ops::arith::{core::ops::arith::MulAssign<usize, &'a usize>}::mul_assign" "_root_.Aeneas.Std.core.ops.arith.MulAssignUsizeShared.mul_assign";
+   (* file: "Aeneas/Std/Scalar/Ops/Sub.lean", line: 21 *)
+   mk_fun "core::ops::arith::{core::ops::arith::Sub<usize, &'a usize, usize>}::sub" "_root_.Aeneas.Std.core.ops.arith.SubUsizeSharedUsize.sub";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 205 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 219 *)
+   mk_fun "core::ops::function::impls::{core::ops::function::FnMut<&'0 mut @F, @A, @Clause0_Clause0_Output>}::call_mut" "_root_.Aeneas.Std.core.ops.function.FnMutMutRef.call_mut";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 193 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 207 *)
+   mk_fun "core::ops::function::impls::{core::ops::function::FnOnce<&'0 mut @F, @A, @Clause0_Clause0_Output>}::call_once" "_root_.Aeneas.Std.core.ops.function.FnOnceMutRef.call_once";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 13 *)
+   mk_fun "core::ops::range::{core::ops::range::Range<@Idx>}::contains" "_root_.Aeneas.Std.core.ops.range.Range.contains";
+@@ -1977,12 +1979,14 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::deref::Deref" "_root_.Aeneas.Std.core.ops.deref.Deref" ~methods:[("deref", "deref")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 23 *)
+   mk_trait_decl "core::ops::deref::DerefMut" "_root_.Aeneas.Std.core.ops.deref.DerefMut" ~parent_clauses:["derefInst"] ~methods:[("deref_mut", "deref_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 163 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 177 *)
+   mk_trait_decl "core::ops::function::Fn" "_root_.Aeneas.Std.core.ops.function.Fn" ~parent_clauses:["FnMutInst"] ~methods:[("call", "call")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 158 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 172 *)
+   mk_trait_decl "core::ops::function::FnMut" "_root_.Aeneas.Std.core.ops.function.FnMut" ~parent_clauses:["FnOnceInst"] ~methods:[("call_mut", "call_mut")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 94 *)
+   mk_trait_decl "core::ops::function::FnMut<@Self, (&'a &'b mut @T), @Output>" "_root_.Aeneas.Std.core.ops.function.FnMutSharedMutArg" ~parent_clauses:["FnOnceInst"] ~methods:[("call_mut", "call_mut")];
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 109 *)
++  mk_trait_decl "core::ops::function::FnMut<@Self, (&'a mut @T), @Output>" "_root_.Aeneas.Std.core.ops.function.FnMutMutArg" ~parent_clauses:["FnOnceInst"] ~methods:[("call_mut", "call_mut")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 51 *)
+   mk_trait_decl "core::ops::function::FnOnce" "_root_.Aeneas.Std.core.ops.function.FnOnce" ~methods:[("call_once", "call_once")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 87 *)
+@@ -1997,11 +2001,11 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::index::Index" "_root_.Aeneas.Std.core.ops.index.Index" ~methods:[("index", "index")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 14 *)
+   mk_trait_decl "core::ops::index::IndexMut" "_root_.Aeneas.Std.core.ops.index.IndexMut" ~parent_clauses:["indexInst"] ~methods:[("index_mut", "index_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 217 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 231 *)
+   mk_trait_decl "core::ops::try_trait::FromResidual" "_root_.Aeneas.Std.core.ops.try_trait.FromResidual" ~methods:[("from_residual", "from_residual")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 232 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 246 *)
+   mk_trait_decl "core::ops::try_trait::Residual" "_root_.Aeneas.Std.core.ops.try_trait.Residual" ~parent_clauses:["TryInst"];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 226 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 240 *)
+   mk_trait_decl "core::ops::try_trait::Try" "_root_.Aeneas.Std.core.ops.try_trait.Try" ~parent_clauses:["FromResidualInst"] ~methods:[("from_output", "from_output"); ("branch", "branch")];
+   (* file: "Aeneas/Std/Slice.lean", line: 298 *)
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+@@ -2034,7 +2038,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::borrow::Borrow<alloc::string::String, str>" "_root_.Aeneas.Std.core.borrow.BorrowString";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 127 *)
+   mk_trait_impl "core::clone::Clone<Box<@T>>" "_root_.Aeneas.Std.core.core.clone.CloneBox" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 603 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 637 *)
+   mk_trait_impl "core::clone::Clone<Box<[@T]>>" "_root_.Aeneas.Std.core.clone.CloneBoxSlice" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 199 *)
+   mk_trait_impl "core::clone::Clone<Box<str>>" "_root_.Aeneas.Std.core.clone.CloneBoxStr";
+@@ -2048,7 +2052,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<alloc::string::String>" "_root_.Aeneas.Std.core.clone.CloneString";
+   (* file: "Aeneas/Std/Sync.lean", line: 46 *)
+   mk_trait_impl "core::clone::Clone<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.clone.CloneArc" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 588 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 622 *)
+   mk_trait_impl "core::clone::Clone<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.clone.CloneallocvecVec" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 116 *)
+   mk_trait_impl "core::clone::Clone<bool>" "_root_.Aeneas.Std.core.clone.CloneBool";
+@@ -2138,7 +2142,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialEqString";
+   (* file: "Aeneas/Std/String.lean", line: 81 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStringStr";
+-  (* file: "Aeneas/Std/Vec.lean", line: 631 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 665 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>" "_root_.Aeneas.Std.core.cmp.PartialEqVec" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 210 *)
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+@@ -2186,13 +2190,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<@Self, @Self>" "_root_.Aeneas.Std.core.convert.FromSame";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 60 *)
+   mk_trait_impl "core::convert::From<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.FromBox";
+-  (* file: "Aeneas/Std/Vec.lean", line: 553 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 587 *)
+   mk_trait_impl "core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.FromBoxSliceVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 434 *)
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+   (* file: "Aeneas/Std/String.lean", line: 423 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+-  (* file: "Aeneas/Std/Vec.lean", line: 537 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 571 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
+   (* file: "Aeneas/Std/Float.lean", line: 601 *)
+   mk_trait_impl "core::convert::From<f64, f32>" "_root_.Aeneas.Std.core.convert.num.FromF64F32";
+@@ -2250,7 +2254,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<()>" "_root_.Aeneas.Std.core.fmt.DebugUnit";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 160 *)
+   mk_trait_impl "core::fmt::Debug<(@A, @B)>" "_root_.Aeneas.Std.core.fmt.DebugPair";
+-  (* file: "Aeneas/Std/Vec.lean", line: 657 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 691 *)
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 72 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
+@@ -2260,7 +2264,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+   (* file: "Aeneas/Std/Sync.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.fmt.DebugArc" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 664 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 698 *)
+   mk_trait_impl "core::fmt::Debug<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.fmt.DebugVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 306 *)
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
+@@ -2600,15 +2604,15 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::deref::Deref<alloc::rc::Rc<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefRc" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 67 *)
+   mk_trait_impl "core::ops::deref::Deref<alloc::sync::Arc<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefArc" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 487 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 521 *)
+   mk_trait_impl "core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.ops.deref.DerefVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 36 *)
+   mk_trait_impl "core::ops::deref::DerefMut<Box<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefMutBoxInst" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 498 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 532 *)
+   mk_trait_impl "core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.ops.deref.DerefMutVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 210 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 224 *)
+   mk_trait_impl "core::ops::function::FnMut<&'0 mut @F, @A, @Clause0_Clause0_Output>" "_root_.Aeneas.Std.core.ops.function.FnMutMutRef";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 198 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 212 *)
+   mk_trait_impl "core::ops::function::FnOnce<&'0 mut @F, @A, @Clause0_Clause0_Output>" "_root_.Aeneas.Std.core.ops.function.FnOnceMutRef";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 100 *)
+   mk_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexArray";
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index ab2f11a..6fccdc8 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -369,6 +369,11 @@ let rec match_types (span : Meta.span) ~(recover : bool) (ctx0 : eval_ctx)
+         (ty_erase_regions ty0 = ty_erase_regions ty1)
+         "Not the same function item types";
+       ty0
++  | TFnPtr _, TFnPtr _ when ty0 = ty1 ->
++      (* A function pointer holds no borrow: the same types match (e.g., in
++         the type argument of a [PhantomData]; see
++         [TypesUtils.phantom_data_decls]) *)
++      ty0
+   | TDynTrait _, TDynTrait _ | TFnPtr _, TFnPtr _ ->
+       [%craise_recover] recover span "Not implemented yet"
+   | TPtrMetadata ty0, TPtrMetadata ty1 ->
+diff --git a/src/llbc/TypesUtils.ml b/src/llbc/TypesUtils.ml
+index fbea82e..318ed54 100644
+--- a/src/llbc/TypesUtils.ml
++++ b/src/llbc/TypesUtils.ml
+@@ -100,6 +100,34 @@ let ty_has_erased_regions (ty : ty) : bool =
+ 
+ let expect_free_var = Substitute.expect_free_var
+ 
++(** The declarations of [core::marker::PhantomData] in the crate being
++    translated (see {!register_phantom_data_decls}). A [PhantomData<T>] holds
++    no value of type [T]: its type arguments, and every type below them, are
++    phantom positions. There a function pointer type is translated as a
++    function type (see [SymbolicToPureTypes.translate_fwd_ty]), since no value
++    of it exists; a value of function pointer type anywhere else stays
++    rejected. *)
++let phantom_data_decls : TypeDeclId.Set.t ref = ref TypeDeclId.Set.empty
++
++(** Register the declarations of [core::marker::PhantomData]: the structs
++    without fields that are the lang item [phantom_data]. *)
++let register_phantom_data_decls (type_decls : type_decl TypeDeclId.Map.t) :
++    unit =
++  phantom_data_decls :=
++    TypeDeclId.Map.fold
++      (fun id (d : type_decl) ids ->
++        match (d.item_meta.lang_item, d.kind) with
++        | Some "phantom_data", Struct [] -> TypeDeclId.Set.add id ids
++        | _ -> ids)
++      type_decls TypeDeclId.Set.empty
++
++(** Whether the type arguments of the type [id] are phantom positions (see
++    {!phantom_data_decls}). *)
++let type_id_is_phantom_data (id : type_id) : bool =
++  match id with
++  | TAdtId id -> TypeDeclId.Set.mem id !phantom_data_decls
++  | TTuple | TBuiltin _ -> false
++
+ (** Retuns true if the type contains borrows.
+ 
+     Note that we can't simply explore the type and look for regions: sometimes
+diff --git a/src/pure/Pure.ml b/src/pure/Pure.ml
+index c7b1534..1a6b116 100644
+--- a/src/pure/Pure.ml
++++ b/src/pure/Pure.ml
+@@ -159,9 +159,11 @@ type pure_builtin_fun_id =
+           and update values; private, non-borrowed model state remains
+           authoritative in the original value. *)
+   | ThreadedModel of threaded_model
+-      (** A call to a model at a borrowing state: extracted as the model
+-          applied to its trait arguments, the threaded ones wrapped by their
+-          helper (see [threaded_model]), then to the arguments. *)
++      (** A call to a Lean model by name, from the body synthesized for a
++          partial-monomorphization instance (a model at a borrowing state, or
++          the variant of a model taking a closure's call): extracted as the
++          model applied to its trait arguments, the threaded ones wrapped by
++          their helper (see [threaded_model]), then to the arguments. *)
+   | ResultUnwrapMut
+       (** Temporary fix: the
+           [core::result::{core::result::Result<@T, @E>}::unwrap] instantiated
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index fb87b73..5504643 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -370,7 +370,8 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+   | "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ->
+       Some (BorrowedStorage 0)
+   | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key"
+-  | "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by" ->
++  | "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by"
++  | "_root_.Aeneas.Std.alloc.vec.Vec.retain_mut" ->
+       Some (Canonical (State [ 0; 1 ]))
+   | "_root_.Aeneas.Std.core.hint.must_use"
+   | "_root_.Aeneas.Std.core.convert.FromSame.from_"
+@@ -387,6 +388,17 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+       in
+       Option.map (fun contract -> Canonical contract) contract
+ 
++(** Models consuming a closure through a [FnMut<F, (&mut T,), O>] bound (the
++    schema [FnMutMutArg]) whose partial-monomorphization instances at a closure
++    capturing mutable borrows are synthesized (see [closure_state_instance]):
++    the model, its variant taking the closure's call instead of its dictionary,
++    and the index of the closure input. *)
++let closure_state_models =
++  [
++    ( "_root_.Aeneas.Std.alloc.vec.Vec.retain_mut",
++      ("_root_.Aeneas.Std.alloc.vec.Vec.retain_mut_with", 1) );
++  ]
++
+ (** Whether a partial-monomorphization instance of a modeled function (its
+     [shape] instantiates the generic function's parameters) has the ABI of the
+     generic model. A canonical model ABI adapts the instance's region-indexed
+@@ -398,10 +410,19 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+     read-only: they add no backward function nor state output, and erasing them
+     gives the model's forward types at the erased shape. For instance
+     [Option::is_some] on an [Option<&mut T>] is neutral, [core::mem::swap] on
+-    two [&mut T] is not. *)
++    two [&mut T] is not. The instances of a model consuming a closure (see
++    [closure_state_models]) are admitted only if their bounds are modeled
++    traits (schemas): a bound specific to a closure capturing mutable borrows
++    has the closure's region-indexed ABI (see [closure_state_instance]). *)
+ let fun_instance_is_compatible (crate : A.crate) (decl : A.fun_decl)
+     (info : builtin_fun_info) (shape : T.generic_args T.binder) =
+-  Option.is_some (modeled_fun_abi crate decl info)
++  (Option.is_some (modeled_fun_abi crate decl info)
++  && ((not (List.mem_assoc info.extract_name closure_state_models))
++     || List.for_all
++          (fun (c : T.trait_param) ->
++            Option.is_some
++              (crate_trait_model_name crate c.trait.binder_value.id))
++          decl.generics.trait_clauses))
+   ||
+   let params = shape.binder_params in
+   let args = shape.binder_value in
+@@ -1579,9 +1600,17 @@ let rec expand_back span ctx get_group gid ty (original : texpr)
+ (** Normalize a concrete dictionary method. Execute every region component and
+     recombine only its authoritative fields into each canonical input state.
+     Consuming conversions delay this recovery until the returned iterator is
+-    supplied to their restoration lens. *)
+-let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+-    (signature : fun_sig) (generics : generic_args) contract =
++    supplied to their restoration lens.
++
++    With [through = (trait_decl_id, dictionary)], [decl] is the method of a trait
++    declaration and the normalized method calls it through [dictionary] (e.g. a
++    trait clause of the caller). With [give_back_args], the result also holds,
++    after the states, the values given back to the mutable borrows of the other
++    arguments (e.g. the [&mut T] argument of a closure taking one), which must
++    be available at the forward return. *)
++let adapt_dictionary_method ?through ?(give_back_args = false) span
++    (ctx : Contexts.decls_ctx) (decl : A.fun_decl) (signature : fun_sig)
++    (generics : generic_args) contract =
+   let state_indices =
+     match contract with
+     | State indices -> indices
+@@ -1644,13 +1673,41 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+     @ List.filter_map Fun.id back_vars
+   in
+   let raw_fun =
++    let id, fun_generics =
++      match through with
++      | None ->
++          ( FromLlbc (FunId (FRegular decl.def_id), None),
++            generic_args_of_params signature.generics )
++      | Some (trait_decl_id, _) ->
++          let method_name =
++            match decl.src with
++            | T.TraitDeclItem (_, name, _) -> name
++            | _ ->
++                [%craise] span
++                  "Dictionary adaptation through a trait clause requires a \
++                   trait method declaration"
++          in
++          (* The trait's own generics: the method's, without the clause of
++             the trait itself ([Self]) *)
++          let params = generic_args_of_params signature.generics in
++          let trait_refs =
++            List.filter_map
++              (fun ((c : trait_param), r) ->
++                if c.trait_id = trait_decl_id then None else Some r)
++              (List.combine signature.generics.trait_clauses params.trait_refs)
++          in
++          let self_ref =
++            {
++              trait_id = Self;
++              trait_decl_ref =
++                { trait_decl_id; decl_generics = { params with trait_refs } };
++            }
++          in
++          ( FromLlbc (TraitMethod (self_ref, method_name, decl.def_id), None),
++            { types = []; const_generics = []; trait_refs = [] } )
++    in
+     {
+-      e =
+-        Qualif
+-          {
+-            id = FunOrOp (Fun (FromLlbc (FunId (FRegular decl.def_id), None)));
+-            generics = generic_args_of_params signature.generics;
+-          };
++      e = Qualif { id = FunOrOp (Fun id); generics = fun_generics };
+       ty = mk_arrows signature.inputs signature.output;
+     }
+   in
+@@ -1911,6 +1968,48 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+           base updates)
+       state_indices
+   in
++  (* The values given back to the mutable borrows of the other arguments: each
++     from a region group of its own, available at the forward return *)
++  let arg_backs =
++    if not give_back_args then []
++    else
++      let state_regions =
++        List.map
++          (fun index -> without_outer_ref (List.nth sg.inputs index))
++          state_indices
++      in
++      List.concat_map
++        (fun (index, ty) ->
++          if index = 0 || List.mem index state_indices then []
++          else
++            List.filter_map
++              (fun ((gid, (back : back_sg_info)), var) ->
++                let regions =
++                  T.RegionId.Set.of_list
++                    (List.find
++                       (fun (g : T.region_var_group) -> g.id = gid)
++                       regions_hierarchy)
++                      .regions
++                in
++                let mentions ty =
++                  TypesUtils.ty_has_mut_borrow_for_region_in_set
++                    ctx.type_ctx.type_infos regions ty
++                in
++                if not (mentions ty) then None
++                else
++                  match var with
++                  | Some var
++                    when back.inputs = [] && back.early = []
++                         && (not (nested gid))
++                         && not (List.exists mentions state_regions) ->
++                      Some (select_output gid index (mk_texpr_from_fvar var))
++                  | _ ->
++                      [%craise] span
++                        "Dictionary adaptation gives back a mutable argument \
++                         only from its own region group, at the forward return")
++              groups)
++        indexed_inputs
++  in
+   let result =
+     if dsg.fwd_info.ignore_output then mk_unit_texpr
+     else mk_texpr_from_fvar output
+@@ -1919,7 +2018,8 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+     match returned_state with
+     | None ->
+         let body =
+-          mk_result_ok_texpr span (mk_simpl_tuple_texpr span (result :: states))
++          mk_result_ok_texpr span
++            (mk_simpl_tuple_texpr span ((result :: states) @ arg_backs))
+         in
+         mk_closed_lets span false (List.rev !state_bindings) body
+     | Some returned_state ->
+@@ -1939,10 +2039,326 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+   let wrapper =
+     mk_closed_lambdas span (List.map (mk_tpat_from_fvar None) inputs) body
+   in
+-  let subst = make_subst_from_generics signature.generics generics in
++  let subst =
++    match through with
++    | None -> make_subst_from_generics signature.generics generics
++    | Some (_, dictionary) ->
++        make_subst_from_generics_for_trait signature.generics dictionary generics
++  in
+   let visitor =
+     object
+       inherit [_] subst_visitor
+     end
+   in
+   visitor#visit_texpr subst wrapper
++
++(** {1 Modeled functions consuming a closure-specific specialization}
++
++    Charon's [--monomorphize-mut] specializes the bound [F: FnMut(&mut T) -> O]
++    of a modeled function such as [Vec::retain_mut] at a closure [F] capturing
++    mutable borrows as a trait specific to the closure (e.g.
++    [FnMut::<closure<'1, '2>, (&'3 mut T,), O>]), whose [call_mut] has the
++    closure's region-indexed ABI: the closure state, a backward function per
++    captured region, the argument. The model's schema ([FnMutMutArg]) cannot
++    type this dictionary, so the partial-monomorphization instance at such a
++    closure is translated as a Lean def (see [closure_state_fun_body]): the
++    model's variant taking the closure's call ([closure_state_models]), applied
++    to the canonical call recovered from the dictionary's region-indexed
++    [call_mut] ([adapt_dictionary_method] through the bound: the state
++    recombines the values given back to the captured borrows, the argument is
++    the value given back to its borrow), and each region group of the instance
++    gives back the final state of the input holding its borrows, as for the
++    state inputs of a canonical model ([adapt_canonical_call]).
++
++    This relies on the model calling the closure only through [call_mut], which
++    threads the state: the call of a closure consuming it ([call_once]) is never
++    used. The instance's signature is checked: the closure type is the only
++    shape argument with regions, its regions occur only in the closure input
++    and in the one [FnMut<F, (&mut T,), O>] bound; the layouts of the recovered
++    call and of the instance's results are checked in [closure_state_fun_body].
++    Every other instance stays an unknown external. *)
++type closure_state_instance = {
++  cs_model : string;  (** The Lean model taking the closure's call *)
++  cs_closure : int;  (** The index of the closure input *)
++  cs_clause : T.trait_clause_id;  (** Its [FnMut] bound *)
++  cs_method : A.FunDeclId.id;  (** The bound's [call_mut] *)
++}
++
++let closure_state_fun_instance (crate : A.crate) (decl : A.fun_decl)
++    (info : builtin_fun_info) (shape : T.generic_args T.binder) :
++    closure_state_instance option =
++  match List.assoc_opt info.extract_name closure_state_models with
++  | None -> None
++  | Some (model, closure) -> (
++      let span = Some decl.item_meta.span in
++      let has_body =
++        match decl.body with
++        | A.StructuredBody _ -> true
++        | _ -> false
++      in
++      let args =
++        Substitute.apply_args_to_binder
++          (Charon.TypesUtils.generic_args_of_params span decl.generics)
++          Substitute.generic_args_substitute shape
++      in
++      let borrowing =
++        List.filter
++          (fun ty -> not (T.RegionId.Set.is_empty (ty_free_regions ty)))
++          args.types
++      in
++      match (borrowing, List.nth_opt decl.signature.inputs closure) with
++      | [ f ], Some f'
++        when f = f' && (not has_body)
++             && List.length shape.binder_params.regions
++                = List.length decl.generics.regions
++             && List.length shape.binder_params.types
++                = List.length decl.generics.types -> (
++          let inner = ty_free_regions f in
++          let mentions ty =
++            not (T.RegionId.Set.disjoint inner (ty_free_regions ty))
++          in
++          let others =
++            (not (mentions decl.signature.output))
++            && List.for_all
++                 (fun (i, ty) -> i = closure || not (mentions ty))
++                 (List.mapi (fun i ty -> (i, ty)) decl.signature.inputs)
++          in
++          let call_mut (c : T.trait_param) =
++            let tr = c.trait.binder_value in
++            let tdecl = T.TraitDeclId.Map.find tr.id crate.trait_decls in
++            let name, targs =
++              NameMatcher.instantiate_name_generics tdecl.item_meta.name
++                tr.generics
++            in
++            let path =
++              List.map
++                (function
++                  | T.PeIdent (id, _) -> Some id
++                  | _ -> None)
++                name
++            in
++            match (path, List.rev tdecl.item_meta.name, targs.types) with
++            | ( [ Some "core"; Some "ops"; Some "function"; Some "FnMut" ],
++                T.PeInstantiated _ :: _,
++                [
++                  self;
++                  T.TAdt
++                    {
++                      id = T.TTuple;
++                      generics = { types = [ T.TRef (_, t, T.RMut) ]; _ };
++                    };
++                  output;
++                ] )
++              when self = f && (not (mentions t)) && not (mentions output) ->
++                List.find_map
++                  (fun (m : A.trait_method T.binder) ->
++                    if m.binder_value.name = "call_mut" then
++                      Some m.binder_value.item.id
++                    else None)
++                  tdecl.methods
++            | _ -> None
++          in
++          match
++            List.filter
++              (fun c ->
++                not (T.RegionId.Set.disjoint inner (trait_param_free_regions c)))
++              decl.generics.trait_clauses
++          with
++          | [ c ] when others ->
++              Option.map
++                (fun cs_method ->
++                  {
++                    cs_model = model;
++                    cs_closure = closure;
++                    cs_clause = c.clause_id;
++                    cs_method;
++                  })
++                (call_mut c)
++          | _ -> None)
++      | _ -> None)
++
++(** The partial-monomorphization instance of a model consuming a closure at a
++    closure capturing mutable borrows that a declaration is, if it is one (see
++    [closure_state_instance]). *)
++let closure_state_instance_of_decl (crate : A.crate) (decl : A.fun_decl) =
++  if Config.backend () <> Config.Lean then None
++  else
++    match List.rev decl.item_meta.name with
++    | T.PeInstantiated shape :: _
++      when not
++             (A.FunDeclId.Set.mem decl.def_id
++                !ExtractBuiltin.admitted_fun_instances) -> (
++        match
++          ExtractBuiltin.find_generic_fun_info
++            (NameMatcher.ctx_from_crate crate)
++            decl.item_meta.name
++        with
++        | Some info -> closure_state_fun_instance crate decl info shape
++        | None -> None)
++    | _ -> None
++
++(** The body of a partial-monomorphization instance of a model consuming a
++    closure capturing mutable borrows (see [closure_state_instance]): the
++    model's variant applied to the closure's canonical call and to the inputs;
++    it returns the output and the final state of every input, and each region
++    group of the instance gives back the final state of the one input holding
++    its borrows. Raises if a layout differs: the instance then stays an unknown
++    external. *)
++let closure_state_fun_body (span : Meta.span) (ctx : Contexts.decls_ctx)
++    (fresh : string option -> ty -> fvar) (decl : A.fun_decl)
++    (dsg : decomposed_fun_sig) (inst : closure_state_instance) : fun_body =
++  let fun_ty = dsg.fun_ty in
++  [%cassert] span
++    (fun_ty.state_outputs = []
++    && fun_ty.fwd_info.effect_info.can_fail
++    && List.length fun_ty.fwd_inputs = List.length decl.signature.inputs)
++    "Model consuming a closure: unsupported forward signature";
++  let inputs =
++    List.mapi
++      (fun i ty ->
++        fresh (Some (if i = inst.cs_closure then "f" else "input")) ty)
++      fun_ty.fwd_inputs
++  in
++  (* The canonical call of the closure, through its bound *)
++  let c =
++    List.find
++      (fun (c : T.trait_param) -> c.clause_id = inst.cs_clause)
++      decl.generics.trait_clauses
++  in
++  let tr =
++    translate_fwd_trait_ref (Some span) ctx
++      { kind = T.Clause (T.Free inst.cs_clause); trait_decl_ref = c.trait }
++  in
++  let method_decl = A.FunDeclId.Map.find inst.cs_method ctx.fun_ctx.fun_decls in
++  let method_sig =
++    translate_fun_sig_from_decomposed
++      (translate_fun_sig_from_decl_to_decomposed ctx method_decl)
++  in
++  (* The instantiation of the trait method declaration by the bound: its trait
++     clauses are those of the trait, in order, and the clause of the trait
++     itself ([Self]), which is the bound *)
++  let decl_generics = tr.trait_decl_ref.decl_generics in
++  let refs = ref decl_generics.trait_refs in
++  let trait_refs =
++    List.map
++      (fun (c : trait_param) ->
++        if c.trait_id = tr.trait_decl_ref.trait_decl_id then tr
++        else
++          match !refs with
++          | r :: rs ->
++              refs := rs;
++              r
++          | [] ->
++              [%craise] span
++                "Model consuming a closure: the bound's call_mut has trait \
++                 clauses of its own")
++      method_sig.generics.trait_clauses
++  in
++  let generics = { decl_generics with trait_refs } in
++  [%cassert] span
++    (List.length method_sig.generics.types = List.length generics.types
++    && List.length method_sig.generics.const_generics
++       = List.length generics.const_generics
++    && !refs = [])
++    ("Model consuming a closure: the bound's call_mut has parameters of its \
++      own (types "
++    ^ string_of_int (List.length method_sig.generics.types)
++    ^ "/"
++    ^ string_of_int (List.length generics.types)
++    ^ ", clauses "
++    ^ string_of_int (List.length method_sig.generics.trait_clauses)
++    ^ "/"
++    ^ string_of_int (List.length decl_generics.trait_refs)
++    ^ ")");
++  let call =
++    adapt_dictionary_method
++      ~through:(tr.trait_decl_ref.trait_decl_id, tr.trait_id)
++      ~give_back_args:true span ctx method_decl method_sig generics (State [ 0 ])
++  in
++  let closure_ty = List.nth fun_ty.fwd_inputs inst.cs_closure in
++  (match call.ty with
++  | TArrow
++      ( f,
++        TArrow
++          ( _,
++            TAdt
++              ( TBuiltin TResult,
++                { types = [ TAdt (TTuple, { types = [ _; f'; _ ]; _ }) ]; _ } )
++          ) )
++    when f = closure_ty && f' = closure_ty -> ()
++  | _ ->
++      [%craise] span
++        "Model consuming a closure: the closure's call does not return its \
++         state and its argument");
++  (* The model: the output and the final state of every input *)
++  let raw_tys = fun_ty.fwd_output :: fun_ty.fwd_inputs in
++  let vars = List.map (fresh (Some "model_state")) raw_tys in
++  let finals = List.tl vars in
++  let func =
++    {
++      e =
++        Qualif
++          {
++            id =
++              FunOrOp
++                (Fun
++                   (Pure
++                      (ThreadedModel { model = inst.cs_model; dictionaries = [] })));
++            generics = { types = []; const_generics = []; trait_refs = [] };
++          };
++      ty =
++        mk_arrows (call.ty :: fun_ty.fwd_inputs)
++          (mk_result_ty (mk_simpl_tuple_ty raw_tys));
++    }
++  in
++  let raw_call =
++    [%add_loc] mk_apps span func (call :: List.map mk_texpr_from_fvar inputs)
++  in
++  (* The results of the instance *)
++  let groups =
++    RegionsHierarchy.compute_regions_hierarchy_for_sig (Some span) ctx.crate
++      { item_binder_params = decl.generics; item_binder_value = decl.signature }
++  in
++  let given_back =
++    List.filter_map
++      (fun (((gid, (back : back_sg_info)), ty) :
++             (T.region_group_id * back_sg_info) * (_ * ty) option) ->
++        match ty with
++        | None -> None
++        | Some (_, ty) -> (
++            let g =
++              List.find (fun (g : T.region_var_group) -> g.id = gid) groups
++            in
++            let regions = T.RegionId.Set.of_list g.regions in
++            let holders =
++              List.filter
++                (fun (_, input) ->
++                  TypesUtils.ty_has_mut_borrow_for_region_in_set
++                    ctx.type_ctx.type_infos regions input)
++                (List.mapi (fun i ty -> (i, ty)) decl.signature.inputs)
++            in
++            match holders with
++            | [ (i, _) ]
++              when back.inputs = [] && back.early = []
++                   && ty = (List.nth finals i).ty ->
++                Some (mk_texpr_from_fvar (List.nth finals i))
++            | _ ->
++                [%craise] span
++                  "Model consuming a closure: a region group does not give \
++                   back the final state of one input"))
++      (List.combine
++         (T.RegionGroupId.Map.bindings fun_ty.back_sg)
++         (compute_back_tys_with_info fun_ty))
++  in
++  let outputs =
++    (if fun_ty.fwd_info.ignore_output then []
++     else [ mk_texpr_from_fvar (List.hd vars) ])
++    @ given_back
++  in
++  let body =
++    mk_closed_let span true
++      (mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) vars))
++      raw_call
++      (mk_result_ok_texpr span (mk_simpl_tuple_texpr span outputs))
++  in
++  mk_closed_fun_body span (List.map (mk_tpat_from_fvar None) inputs) body
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index 48c12be..9ab9116 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -87,23 +87,36 @@ let translate_fun_decl (ctx : bs_ctx) (body : S.expr option) : fun_decl =
+   let signature = translate_fun_sig_from_decomposed ctx.sg in
+   (* Translate the body, if there is. A partial-monomorphization instance of a
+      modeled function at a borrowing state is the model at an extended state
+-     (see [ModelStateABI.threaded_fun_body]). *)
++     (see [ModelStateABI.threaded_fun_body]); one of a model consuming a closure
++     capturing mutable borrows is the model applied to the closure's call (see
++     [ModelStateABI.closure_state_fun_body]). *)
+   let body =
+     match body with
+     | None -> (
++        let fresh basename ty : fvar =
++          { id = ctx.fresh_fvar_id (); basename; ty }
++        in
+         match
+           ModelStateABI.threaded_instance_of_decl ctx.decls_ctx.crate def
+         with
+-        | None -> None
+         | Some instance -> (
+-            let fresh basename ty : fvar =
+-              { id = ctx.fresh_fvar_id (); basename; ty }
+-            in
+             try
+               Some
+                 (ModelStateABI.threaded_fun_body def.item_meta.span
+                    ctx.decls_ctx fresh def ctx.sg signature instance)
+-            with CFailure _ -> None))
++            with CFailure _ -> None)
++        | None -> (
++            match
++              ModelStateABI.closure_state_instance_of_decl ctx.decls_ctx.crate
++                def
++            with
++            | None -> None
++            | Some instance -> (
++                try
++                  Some
++                    (ModelStateABI.closure_state_fun_body def.item_meta.span
++                       ctx.decls_ctx fresh def ctx.sg instance)
++                with CFailure _ -> None)))
+     | Some body -> (
+         try Some (translate_fun_decl_body ctx signature body)
+         with CFailure _ ->
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index 151b472..ec683b6 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -127,13 +127,36 @@ and translate_trait_ref_kind (span : Meta.span option)
+   | Dyn -> [%craise_opt_span] span "Dynamic trait types are not supported yet"
+   | UnknownTrait s -> [%craise_opt_span] span ("Unknown trait found: " ^ s)
+ 
++(** The type of a function pointer type in a phantom position (see
++    {!TypesUtils.phantom_data_decls}), given its translated inputs and output:
++    as for a function item (see [translate_fwd_ty]), a function from the tuple
++    of the inputs to the result. The regions of the signature (including its
++    bound regions) are erased: no value of this type exists. *)
++let mk_phantom_fn_ptr_ty (inputs : ty list) (output : ty) : ty =
++  mk_arrow (mk_simpl_tuple_ty inputs) (mk_result_ty output)
++
++(** The error for a function pointer type anywhere else than in a phantom
++    position: a value of function pointer type is not supported. *)
++let fn_ptr_value_unsupported =
++  "Function pointer types are supported only in the type arguments of \
++   PhantomData: values of function pointer type are not supported"
++
+ (** Translate a signature type - TODO: factor out the different translation
+-    functions *)
+-let rec translate_sty (span : Meta.span option) (ty : T.ty) : ty =
+-  let translate = translate_sty in
++    functions.
++
++    With [phantom], the type is in a phantom position (see
++    {!TypesUtils.phantom_data_decls}): a function pointer type is translated as
++    a function type. *)
++let rec translate_sty ?(phantom = false) (span : Meta.span option) (ty : T.ty) :
++    ty =
++  let translate = translate_sty ~phantom in
+   match ty with
+   | T.TAdt { id; generics } -> (
+-      let generics = translate_sgeneric_args span generics in
++      let generics =
++        translate_sgeneric_args
++          ~phantom:(phantom || TypesUtils.type_id_is_phantom_data id)
++          span generics
++      in
+       match id with
+       | T.TAdtId adt_id -> TAdt (TAdtId adt_id, generics)
+       | T.TTuple ->
+@@ -178,17 +201,20 @@ let rec translate_sty (span : Meta.span option) (ty : T.ty) : ty =
+   | TTraitType (trait_ref, type_name) ->
+       let trait_ref = translate_strait_ref span trait_ref in
+       TTraitType (trait_ref, type_name)
+-  | TFnDef _ | TFnPtr _ ->
+-      [%craise_opt_span] span "Arrow types are not supported yet"
++  | TFnPtr sg when phantom ->
++      let inputs = List.map (translate span) sg.binder_value.inputs in
++      mk_phantom_fn_ptr_ty inputs (translate span sg.binder_value.output)
++  | TFnPtr _ -> [%craise_opt_span] span fn_ptr_value_unsupported
++  | TFnDef _ -> [%craise_opt_span] span "Arrow types are not supported yet"
+   | TDynTrait _ ->
+       [%craise_opt_span] span "Dynamic trait types are not supported yet"
+   | TPtrMetadata _ -> [%craise_opt_span] span "unsupported: PtrMetadata"
+   | TError _ ->
+       [%craise_opt_span] span "Found type error in the output of charon"
+ 
+-and translate_sgeneric_args (span : Meta.span option)
++and translate_sgeneric_args ?(phantom = false) (span : Meta.span option)
+     (generics : T.generic_args) : generic_args =
+-  translate_generic_args span (translate_sty span) generics
++  translate_generic_args span (translate_sty ~phantom span) generics
+ 
+ and translate_strait_ref (span : Meta.span option) (tr : T.trait_ref) :
+     trait_ref =
+@@ -335,13 +361,19 @@ let translate_type_id (span : Meta.span option) (id : T.type_id) : type_id =
+     Remark: it doesn't matter whether the types has regions or erased regions
+     (both cases happen, actually).
+ 
++    With [phantom], the type is in a phantom position (see
++    {!TypesUtils.phantom_data_decls}): a function pointer type is translated as
++    a function type.
++
+     TODO: factor out the various translation functions. *)
+-let rec translate_fwd_ty (span : Meta.span option) (decls_ctx : C.decls_ctx)
+-    (ty : T.ty) : ty =
+-  let translate = translate_fwd_ty span decls_ctx in
++let rec translate_fwd_ty ?(phantom = false) (span : Meta.span option)
++    (decls_ctx : C.decls_ctx) (ty : T.ty) : ty =
++  let translate = translate_fwd_ty ~phantom span decls_ctx in
+   match ty with
+   | T.TAdt { id; generics } -> (
+-      let t_generics = translate_fwd_generic_args span decls_ctx generics in
++      let t_generics =
++        translate_fwd_adt_generic_args ~phantom span decls_ctx id generics
++      in
+       (* Eliminate boxes and simplify tuples *)
+       match id with
+       | TAdtId _ | TBuiltin TStr ->
+@@ -389,7 +421,10 @@ let rec translate_fwd_ty (span : Meta.span option) (decls_ctx : C.decls_ctx)
+   | TFnDef { binder_value; _ } ->
+       let inputs, output = translate_fn_item_sig span decls_ctx binder_value in
+       mk_arrow (mk_simpl_tuple_ty inputs) output
+-  | TFnPtr _ -> [%craise_opt_span] span "Arrow types are not supported yet"
++  | TFnPtr sg when phantom ->
++      let inputs = List.map translate sg.binder_value.inputs in
++      mk_phantom_fn_ptr_ty inputs (translate sg.binder_value.output)
++  | TFnPtr _ -> [%craise_opt_span] span fn_ptr_value_unsupported
+   | TDynTrait { binder } ->
+       let params, _predicates =
+         translate_generic_params span binder.binder_params
+@@ -447,6 +482,15 @@ and translate_fwd_generic_args (span : Meta.span option)
+     (decls_ctx : C.decls_ctx) (generics : T.generic_args) : generic_args =
+   translate_generic_args span (translate_fwd_ty span decls_ctx) generics
+ 
++(** Translate the generic arguments of the type [id]: those of
++    [core::marker::PhantomData], and every argument in a phantom position, are
++    in phantom positions (see {!TypesUtils.phantom_data_decls}). *)
++and translate_fwd_adt_generic_args ?(phantom = false) (span : Meta.span option)
++    (decls_ctx : C.decls_ctx) (id : T.type_id) (generics : T.generic_args) :
++    generic_args =
++  let phantom = phantom || TypesUtils.type_id_is_phantom_data id in
++  translate_generic_args span (translate_fwd_ty ~phantom span decls_ctx) generics
++
+ and translate_fwd_trait_ref (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (tr : T.trait_ref) : trait_ref =
+   translate_trait_ref span (translate_fwd_ty span decls_ctx) tr
+@@ -548,7 +592,7 @@ and compute_back_ty_num_levels (span : Meta.span option)
+           (TypesUtils.trait_ref_kind_is_local_clause_or_builtin trait_ref.kind);
+         save_count outer_regions
+     | TFnDef _ -> save_count outer_regions
+-    | TFnPtr _ -> [%craise_opt_span] span "Arrow types are not supported yet"
++    | TFnPtr _ -> [%craise_opt_span] span fn_ptr_value_unsupported
+     | TDynTrait _ ->
+         [%craise_opt_span] span "Dynamic trait types are not supported yet"
+     | TPtrMetadata _ -> [%craise_opt_span] span "unsupported: PtrMetadata"
+@@ -621,7 +665,9 @@ and translate_back_ty_aux (span : Meta.span option) (decls_ctx : C.decls_ctx)
+             (* The type should contain a mutable reference for the proper
+              level: translate it as a forward type *)
+             let type_id = translate_type_id span id in
+-            let generics = translate_fwd_generic_args span decls_ctx generics in
++            let generics =
++              translate_fwd_adt_generic_args span decls_ctx id generics
++            in
+             Some (TAdt (type_id, generics))
+         | TBuiltin TStr -> stop outer_regions ty
+         | TBuiltin TBox -> (
+@@ -680,7 +726,7 @@ and translate_back_ty_aux (span : Meta.span option) (decls_ctx : C.decls_ctx)
+           (TypesUtils.trait_ref_kind_is_local_clause_or_builtin trait_ref.kind);
+         stop outer_regions ty
+     | TFnDef _ -> stop outer_regions ty
+-    | TFnPtr _ -> [%craise_opt_span] span "Arrow types are not supported yet"
++    | TFnPtr _ -> [%craise_opt_span] span fn_ptr_value_unsupported
+     | TDynTrait _ ->
+         [%craise_opt_span] span "Dynamic trait types are not supported yet"
+     | TPtrMetadata _ -> [%craise_opt_span] span "unsupported: PtrMetadata"
+diff --git a/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean b/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean
+index 5627664..30919be 100644
+--- a/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean
++++ b/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean
+@@ -112,19 +112,6 @@ structure
+     × (_root_.closure_mut_arg_order.bumped.closure →
+     _root_.closure_mut_arg_order.bumped.closure) × T0)
+ 
+-/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
+-    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
+-    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
+-    Visibility: public -/
+-@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
+-  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
+-structure
+-  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  (T0 : Type) (T1 : Type) (T2 : Type) where
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+-    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+-
+ /-- [closure_mut_arg_order::once::closure]
+     Source: 'tests/src/closure-mut-arg-order.rs', lines 58:29-62:5 -/
+ @[reducible]
+@@ -524,10 +511,8 @@ def once
+ def bump_twice
+   {T0 : Type}
+   (coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst
+-  :
+-  _root_.closure_mut_arg_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
+-  (f : T0) :
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg T0 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) (f : T0) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+   let (a, x1, f1) ←
+@@ -684,11 +669,10 @@ def
+ @[reducible]
+ def
+   stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
+-  :
+-  _root_.closure_mut_arg_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg
+   _root_.closure_mut_arg_order.stepped.closure _root_.Aeneas.Std.U32
+   _root_.Aeneas.Std.U32 := {
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :=
++  FnOnceInst :=
+     _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+   call_mut :=
+     _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
+diff --git a/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+index 8b3cd4e..b252911 100644
+--- a/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
++++ b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+@@ -46,19 +46,6 @@ structure
+     × (_root_.loop_join_borrows.bump_many.closure →
+     _root_.loop_join_borrows.bump_many.closure) × T0)
+ 
+-/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
+-    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
+-    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
+-    Visibility: public -/
+-@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
+-  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
+-structure
+-  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  (T0 : Type) (T1 : Type) (T2 : Type) where
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+-    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+-
+ /-- [loop_join_borrows::slice_of_refs]: loop body 0:
+     Source: 'tests/src/loop-join-borrows.rs', lines 18:4-23:5
+     Visibility: public -/
+@@ -478,10 +465,9 @@ def Counter.bump
+ def apply_loop.body
+   {T : Type} {F : Type}
+   (coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst
+-  :
+-  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  F T _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) (x : T) (f : F)
+-  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg F T _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (x : T) (f : F) (last : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (T × F ×
+     _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
+     T))
+@@ -504,10 +490,9 @@ def apply_loop.body
+ def apply_loop
+   {T : Type} {F : Type}
+   (coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst
+-  :
+-  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  F T _root_.Aeneas.Std.U32) (x : T) (n : _root_.Aeneas.Std.U32) (f : F)
+-  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg F T _root_.Aeneas.Std.U32)
++  (x : T) (n : _root_.Aeneas.Std.U32) (f : F) (last : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T)
+   := do
+   loop
+@@ -526,9 +511,8 @@ def apply_loop
+ def apply
+   {T : Type} {F : Type}
+   (coreopsfunctionFnMutFTupleMut0TU32_specialized_943e173885df97b2ecc8767154e6953dInst
+-  :
+-  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  F T _root_.Aeneas.Std.U32) (x : T) (n : _root_.Aeneas.Std.U32) (f : F) :
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg F T _root_.Aeneas.Std.U32)
++  (x : T) (n : _root_.Aeneas.Std.U32) (f : F) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T)
+   := do
+   _root_.loop_join_borrows.apply_loop
+diff --git a/tests/lean/PhantomFnTypes.lean b/tests/lean/PhantomFnTypes.lean
+new file mode 100644
+index 0000000..c080d3a
+--- /dev/null
++++ b/tests/lean/PhantomFnTypes.lean
+@@ -0,0 +1 @@
++import PhantomFnTypes.Checks
+diff --git a/tests/lean/PhantomFnTypes/Checks.lean b/tests/lean/PhantomFnTypes/Checks.lean
+new file mode 100644
+index 0000000..fba07b3
+--- /dev/null
++++ b/tests/lean/PhantomFnTypes/Checks.lean
+@@ -0,0 +1,56 @@
++import PhantomFnTypes.PhantomFnTypes
++
++/-! Evaluate the model of `tests/src/phantom-fn-types.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace phantom_fn_types.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++/-- `MapVisitor<u32, bool>` (a `PhantomData<fn() -> (K, V)>`) through the
++    generic `Deserialize` of `Pairs`: the pairs, or the rejected key word. -/
++def pairsR (xs : List Nat) : Option (Sum (List (Nat × Bool)) Nat) :=
++  match deserialize_pairs (vec (xs.map u)) with
++  | ok (core.result.Result.Ok v) => some (.inl (v.val.map fun (k, b) => (k.val, b)))
++  | ok (core.result.Result.Err e) => some (.inr e.val)
++  | _ => none
++
++#guard pairsR [1, 3, 2, 4] == some (.inl [(1, true), (2, false)])
++#guard pairsR [] == some (.inl [])
++#guard pairsR [1, 3, 1, 4] == some (.inr 1)
++#guard pairsR [5, 3, 7] == some (.inr 7)
++
++/-- `SetVisitor<u32>` (a `PhantomData<fn() -> T>`). -/
++def setR (xs : List Nat) : Option (Sum (List Nat) Nat) :=
++  match deserialize_set (vec (xs.map u)) with
++  | ok (core.result.Result.Ok v) => some (.inl (v.val.map (·.val)))
++  | ok (core.result.Result.Err e) => some (.inr e.val)
++  | _ => none
++
++#guard setR [3, 1, 2] == some (.inl [3, 1, 2])
++#guard setR [3, 1, 3] == some (.inr 3)
++
++/-- `Tagged<Vec<u32>>`: its markers (`PhantomData<fn(T) -> T>`,
++    `PhantomData<fn(&T) -> bool>`) are live across the loop. -/
++def bumpedR (n : Nat) : Option Nat :=
++  match bumped (u n) with
++  | ok c => some c.val
++  | _ => none
++
++#guard bumpedR 0 == some 0
++#guard bumpedR 5 == some 10
++
++/-- `Sink<u32>` (a `PhantomData<fn(&mut T)>`), updated through a mutable
++    borrow twice. -/
++def bumpedTwiceR (n : Nat) : Option Nat :=
++  match bumped_twice (u n) with
++  | ok c => some c.val
++  | _ => none
++
++#guard bumpedTwiceR 7 == some 16
++
++end phantom_fn_types.checks
+diff --git a/tests/lean/PhantomFnTypes/PhantomFnTypes.lean b/tests/lean/PhantomFnTypes/PhantomFnTypes.lean
+new file mode 100644
+index 0000000..3cc821a
+--- /dev/null
++++ b/tests/lean/PhantomFnTypes/PhantomFnTypes.lean
+@@ -0,0 +1,651 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [phantom_fn_types]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace phantom_fn_types
++
++/-- [core::marker::PhantomData]
++    Source: '/rustc/library/core/src/marker.rs', lines 814:0-814:39
++    Name pattern: [core::marker::PhantomData]
++    Visibility: public -/
++@[reducible, rust_type "core::marker::PhantomData"]
++def core.marker.PhantomData (T : Type) := _root_.Unit
++
++/-- Trait declaration: [phantom_fn_types::SeqAccess]
++    Source: 'tests/src/phantom-fn-types.rs', lines 18:0-20:1
++    Visibility: public -/
++structure SeqAccess (Self : Type) where
++  next_element : Self → _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.Aeneas.Std.U32) × Self)
++
++/-- Trait declaration: [phantom_fn_types::Visitor]
++    Source: 'tests/src/phantom-fn-types.rs', lines 23:0-26:1
++    Visibility: public -/
++structure Visitor (Self : Type) (Self_Value : Type) where
++  visit_seq : forall {A : Type} (SeqAccessInst :
++    _root_.phantom_fn_types.SeqAccess A), Self → A →
++    _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Self_Value
++    _root_.Aeneas.Std.U32)
++
++/-- Trait declaration: [phantom_fn_types::Deserializer]
++    Source: 'tests/src/phantom-fn-types.rs', lines 29:0-31:1
++    Visibility: public -/
++structure Deserializer (Self : Type) where
++  deserialize_seq : forall {V : Type} {Clause0_Value : Type} (VisitorInst :
++    _root_.phantom_fn_types.Visitor V Clause0_Value), Self → V →
++    _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    Clause0_Value _root_.Aeneas.Std.U32)
++
++/-- Trait declaration: [phantom_fn_types::Deserialize]
++    Source: 'tests/src/phantom-fn-types.rs', lines 34:0-36:1
++    Visibility: public -/
++structure Deserialize (Self : Type) where
++  deserialize : forall {D : Type} (DeserializerInst :
++    _root_.phantom_fn_types.Deserializer D), D → _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.core.result.Result Self _root_.Aeneas.Std.U32)
++
++/-- Trait declaration: [phantom_fn_types::FromWord]
++    Source: 'tests/src/phantom-fn-types.rs', lines 38:0-40:1
++    Visibility: public -/
++structure FromWord (Self : Type) where
++  from_word : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result Self
++
++/-- [phantom_fn_types::{phantom_fn_types::FromWord for u32}::from_word]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 43:4-45:5
++    Visibility: public -/
++def U32.Insts.Phantom_fn_typesFromWord.from_word
++  (word : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok word
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::FromWord for u32}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 42:0-46:1 -/
++@[reducible]
++def U32.Insts.Phantom_fn_typesFromWord : _root_.phantom_fn_types.FromWord
++  _root_.Aeneas.Std.U32 := {
++  from_word :=
++    _root_.phantom_fn_types.U32.Insts.Phantom_fn_typesFromWord.from_word
++}
++
++/-- [phantom_fn_types::{phantom_fn_types::FromWord for bool}::from_word]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 49:4-51:5
++    Visibility: public -/
++def Bool.Insts.Phantom_fn_typesFromWord.from_word
++  (word : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.Bool := do
++  let i ← word % 2#u32
++  _root_.Aeneas.Std.Result.ok (i = 1#u32)
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::FromWord for bool}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 48:0-52:1 -/
++@[reducible]
++def Bool.Insts.Phantom_fn_typesFromWord : _root_.phantom_fn_types.FromWord
++  _root_.Bool := {
++  from_word :=
++    _root_.phantom_fn_types.Bool.Insts.Phantom_fn_typesFromWord.from_word
++}
++
++/-- [phantom_fn_types::Words]
++    Source: 'tests/src/phantom-fn-types.rs', lines 55:0-58:1
++    Visibility: public -/
++structure Words where
++  words : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  position : _root_.Aeneas.Std.Usize
++
++/-- [phantom_fn_types::{phantom_fn_types::SeqAccess for phantom_fn_types::Words}::next_element]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 61:4-69:5
++    Visibility: public -/
++def Words.Insts.Phantom_fn_typesSeqAccess.next_element
++  (self : _root_.phantom_fn_types.Words) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.phantom_fn_types.Words)
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len self.words
++  if self.position < i
++  then
++    let word ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) self.words self.position
++    let i1 ← self.position + 1#usize
++    _root_.Aeneas.Std.Result.ok (some word, { self with position := i1 })
++  else _root_.Aeneas.Std.Result.ok (none, self)
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::SeqAccess for phantom_fn_types::Words}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 60:0-70:1 -/
++@[reducible]
++def Words.Insts.Phantom_fn_typesSeqAccess : _root_.phantom_fn_types.SeqAccess
++  _root_.phantom_fn_types.Words := {
++  next_element :=
++    _root_.phantom_fn_types.Words.Insts.Phantom_fn_typesSeqAccess.next_element
++}
++
++/-- [phantom_fn_types::WordDeserializer]
++    Source: 'tests/src/phantom-fn-types.rs', lines 72:0-72:42
++    Visibility: public -/
++@[reducible]
++def WordDeserializer := _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [phantom_fn_types::{phantom_fn_types::Deserializer for phantom_fn_types::WordDeserializer}::deserialize_seq]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 75:4-77:5
++    Visibility: public -/
++def WordDeserializer.Insts.Phantom_fn_typesDeserializer.deserialize_seq
++  {V : Type} {Clause0_Value : Type} (VisitorInst :
++  _root_.phantom_fn_types.Visitor V Clause0_Value)
++  (self : _root_.phantom_fn_types.WordDeserializer) (visitor : V) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Clause0_Value
++    _root_.Aeneas.Std.U32)
++  := do
++  VisitorInst.visit_seq
++    _root_.phantom_fn_types.Words.Insts.Phantom_fn_typesSeqAccess visitor
++    { words := self, position := 0#usize }
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::Deserializer for phantom_fn_types::WordDeserializer}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 74:0-78:1 -/
++@[reducible]
++def WordDeserializer.Insts.Phantom_fn_typesDeserializer :
++  _root_.phantom_fn_types.Deserializer _root_.phantom_fn_types.WordDeserializer
++  := {
++  deserialize_seq := fun {V : Type} {Clause0_Value : Type} (VisitorInst :
++    _root_.phantom_fn_types.Visitor V Clause0_Value) =>
++    _root_.phantom_fn_types.WordDeserializer.Insts.Phantom_fn_typesDeserializer.deserialize_seq
++    VisitorInst
++}
++
++/-- [phantom_fn_types::contains_key]: loop body 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 82:4-89:1 -/
++@[rust_loop_body]
++def contains_key_loop.body
++  {K : Type} {V : Type} (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K)
++  (pairs : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) (key : K)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Bool)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len pairs
++  if i < i1
++  then
++    let p ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice (K × V))
++        pairs i
++    let (t, _) := p
++    let b ← corecmpPartialEqInst.eq t key
++    if b
++    then _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++    else
++      let i2 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i2)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done false)
++
++/-- [phantom_fn_types::contains_key]: loop 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 82:4-89:1 -/
++@[rust_loop]
++def contains_key_loop
++  {K : Type} {V : Type} (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K)
++  (pairs : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) (key : K)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun i1 => _root_.phantom_fn_types.contains_key_loop.body
++       corecmpPartialEqInst pairs key i1 : _root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      _root_.Aeneas.Std.Usize _root_.Bool))
++    i
++
++/-- [phantom_fn_types::contains_key]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 80:0-89:1 -/
++@[reducible]
++def contains_key
++  {K : Type} {V : Type} (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K)
++  (pairs : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) (key : K) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.phantom_fn_types.contains_key_loop corecmpPartialEqInst pairs key
++    0#usize
++
++/-- [phantom_fn_types::contains]: loop body 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 93:4-100:1 -/
++@[rust_loop_body]
++def contains_loop.body
++  {T : Type} (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (elements : _root_.Aeneas.Std.alloc.vec.Vec T) (element : T)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Bool)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len elements
++  if i < i1
++  then
++    let t ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice T) elements i
++    let b ← corecmpPartialEqInst.eq t element
++    if b
++    then _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++    else
++      let i2 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i2)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done false)
++
++/-- [phantom_fn_types::contains]: loop 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 93:4-100:1 -/
++@[rust_loop]
++def contains_loop
++  {T : Type} (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (elements : _root_.Aeneas.Std.alloc.vec.Vec T) (element : T)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun i1 => _root_.phantom_fn_types.contains_loop.body corecmpPartialEqInst
++       elements element i1 : _root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      _root_.Aeneas.Std.Usize _root_.Bool))
++    i
++
++/-- [phantom_fn_types::contains]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 91:0-100:1 -/
++@[reducible]
++def contains
++  {T : Type} (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (elements : _root_.Aeneas.Std.alloc.vec.Vec T) (element : T) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.phantom_fn_types.contains_loop corecmpPartialEqInst elements element
++    0#usize
++
++/-- [phantom_fn_types::MapVisitor]
++    Source: 'tests/src/phantom-fn-types.rs', lines 104:0-104:57
++    Visibility: public -/
++@[reducible]
++def MapVisitor (K : Type) (V : Type) :=
++  _root_.phantom_fn_types.core.marker.PhantomData (_root_.Unit →
++  _root_.Aeneas.Std.Result (K × V))
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<(K, V)>> for phantom_fn_types::MapVisitor<K, V>}::visit_seq]: loop body 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 1:0-123:5
++    Visibility: public -/
++@[rust_loop_body]
++def MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq_loop.body
++  {K : Type} {V : Type} {A : Type} (FromWordInst :
++  _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) (SeqAccessInst :
++  _root_.phantom_fn_types.SeqAccess A) (sequence : A)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (K × V)))
++    (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec (K
++    × V)) _root_.Aeneas.Std.U32))
++  := do
++  let (o, sequence1) ← SeqAccessInst.next_element sequence
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok result))
++  | some key_word =>
++    let (o1, sequence2) ← SeqAccessInst.next_element sequence1
++    match o1 with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err key_word))
++    | some word =>
++      let key ← FromWordInst.from_word key_word
++      let b ←
++        _root_.phantom_fn_types.contains_key corecmpPartialEqInst result key
++      if b
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Aeneas.Std.core.result.Result.Err key_word))
++      else
++        let t ← FromWordInst1.from_word word
++        let result1 ← _root_.Aeneas.Std.alloc.vec.Vec.push result (key, t)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (sequence2, result1))
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<(K, V)>> for phantom_fn_types::MapVisitor<K, V>}::visit_seq]: loop 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 1:0-123:5
++    Visibility: public -/
++@[rust_loop]
++def MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq_loop
++  {K : Type} {V : Type} {A : Type} (FromWordInst :
++  _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) (SeqAccessInst :
++  _root_.phantom_fn_types.SeqAccess A) (sequence : A)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec (K × V)) _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (sequence1, result1) =>
++       _root_.phantom_fn_types.MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq_loop.body
++       FromWordInst corecmpPartialEqInst FromWordInst1 SeqAccessInst sequence1
++       result1 : (A × (_root_.Aeneas.Std.alloc.vec.Vec (K × V))) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (K × V)))
++      (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec (K
++      × V)) _root_.Aeneas.Std.U32)))
++    (sequence, result)
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<(K, V)>> for phantom_fn_types::MapVisitor<K, V>}::visit_seq]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 109:4-123:5
++    Visibility: public -/
++@[reducible]
++def MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq
++  {K : Type} {V : Type} {A : Type} (FromWordInst :
++  _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) (SeqAccessInst :
++  _root_.phantom_fn_types.SeqAccess A)
++  (self : _root_.phantom_fn_types.MapVisitor K V) (sequence : A) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec (K × V)) _root_.Aeneas.Std.U32)
++  := do
++  _root_.phantom_fn_types.MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq_loop
++    FromWordInst corecmpPartialEqInst FromWordInst1 SeqAccessInst sequence
++    (_root_.Aeneas.Std.alloc.vec.Vec.new (K × V))
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<(K, V)>> for phantom_fn_types::MapVisitor<K, V>}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 106:0-124:1 -/
++@[reducible]
++def MapVisitor.Insts.Phantom_fn_typesVisitorVecPair {K : Type} {V : Type}
++  (FromWordInst : _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) : _root_.phantom_fn_types.Visitor
++  (_root_.phantom_fn_types.MapVisitor K V) (_root_.Aeneas.Std.alloc.vec.Vec (K
++  × V)) := {
++  visit_seq := fun {A : Type} (SeqAccessInst :
++    _root_.phantom_fn_types.SeqAccess A) =>
++    _root_.phantom_fn_types.MapVisitor.Insts.Phantom_fn_typesVisitorVecPair.visit_seq
++    FromWordInst corecmpPartialEqInst FromWordInst1 SeqAccessInst
++}
++
++/-- [phantom_fn_types::SetVisitor]
++    Source: 'tests/src/phantom-fn-types.rs', lines 127:0-127:49
++    Visibility: public -/
++@[reducible]
++def SetVisitor (T : Type) :=
++  _root_.phantom_fn_types.core.marker.PhantomData (_root_.Unit →
++  _root_.Aeneas.Std.Result T)
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<T>> for phantom_fn_types::SetVisitor<T>}::visit_seq]: loop body 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 134:8-142:5
++    Visibility: public -/
++@[rust_loop_body]
++def SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq_loop.body
++  {T : Type} {A : Type} (FromWordInst : _root_.phantom_fn_types.FromWord T)
++  (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (SeqAccessInst : _root_.phantom_fn_types.SeqAccess A) (sequence : A)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A ×
++    (_root_.Aeneas.Std.alloc.vec.Vec T)) (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec T) _root_.Aeneas.Std.U32))
++  := do
++  let (o, sequence1) ← SeqAccessInst.next_element sequence
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok result))
++  | some word =>
++    let element ← FromWordInst.from_word word
++    let b ←
++      _root_.phantom_fn_types.contains corecmpPartialEqInst result element
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err word))
++    else
++      let result1 ← _root_.Aeneas.Std.alloc.vec.Vec.push result element
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (sequence1, result1))
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<T>> for phantom_fn_types::SetVisitor<T>}::visit_seq]: loop 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 134:8-142:5
++    Visibility: public -/
++@[rust_loop]
++def SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq_loop
++  {T : Type} {A : Type} (FromWordInst : _root_.phantom_fn_types.FromWord T)
++  (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (SeqAccessInst : _root_.phantom_fn_types.SeqAccess A) (sequence : A)
++  (result : _root_.Aeneas.Std.alloc.vec.Vec T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec T) _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (sequence1, result1) =>
++       _root_.phantom_fn_types.SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq_loop.body
++       FromWordInst corecmpPartialEqInst SeqAccessInst sequence1 result1 : (A
++      × (_root_.Aeneas.Std.alloc.vec.Vec T)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (A × (_root_.Aeneas.Std.alloc.vec.Vec T))
++      (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec T)
++      _root_.Aeneas.Std.U32)))
++    (sequence, result)
++
++/-- [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<T>> for phantom_fn_types::SetVisitor<T>}::visit_seq]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 132:4-142:5
++    Visibility: public -/
++@[reducible]
++def SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq
++  {T : Type} {A : Type} (FromWordInst : _root_.phantom_fn_types.FromWord T)
++  (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (SeqAccessInst : _root_.phantom_fn_types.SeqAccess A)
++  (self : _root_.phantom_fn_types.SetVisitor T) (sequence : A) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec T) _root_.Aeneas.Std.U32)
++  := do
++  _root_.phantom_fn_types.SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq_loop
++    FromWordInst corecmpPartialEqInst SeqAccessInst sequence
++    (_root_.Aeneas.Std.alloc.vec.Vec.new T)
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::Visitor<alloc::vec::Vec<T>> for phantom_fn_types::SetVisitor<T>}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 129:0-143:1 -/
++@[reducible]
++def SetVisitor.Insts.Phantom_fn_typesVisitorVec {T : Type} (FromWordInst :
++  _root_.phantom_fn_types.FromWord T) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq T T) : _root_.phantom_fn_types.Visitor
++  (_root_.phantom_fn_types.SetVisitor T) (_root_.Aeneas.Std.alloc.vec.Vec T)
++  := {
++  visit_seq := fun {A : Type} (SeqAccessInst :
++    _root_.phantom_fn_types.SeqAccess A) =>
++    _root_.phantom_fn_types.SetVisitor.Insts.Phantom_fn_typesVisitorVec.visit_seq
++    FromWordInst corecmpPartialEqInst SeqAccessInst
++}
++
++/-- [phantom_fn_types::Pairs]
++    Source: 'tests/src/phantom-fn-types.rs', lines 146:0-146:40
++    Visibility: public -/
++@[reducible]
++def Pairs (K : Type) (V : Type) := _root_.Aeneas.Std.alloc.vec.Vec (K × V)
++
++/-- [phantom_fn_types::{phantom_fn_types::Deserialize for phantom_fn_types::Pairs<K, V>}::deserialize]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 149:4-154:5
++    Visibility: public -/
++def Pairs.Insts.Phantom_fn_typesDeserialize.deserialize
++  {K : Type} {V : Type} {D : Type} (FromWordInst :
++  _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) (DeserializerInst :
++  _root_.phantom_fn_types.Deserializer D) (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.phantom_fn_types.Pairs K V) _root_.Aeneas.Std.U32)
++  := do
++  let r ←
++    DeserializerInst.deserialize_seq
++      (_root_.phantom_fn_types.MapVisitor.Insts.Phantom_fn_typesVisitorVecPair
++      FromWordInst corecmpPartialEqInst FromWordInst1) deserializer ()
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok pairs =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok pairs)
++  | _root_.Aeneas.Std.core.result.Result.Err word =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err word)
++
++/-- Trait implementation: [phantom_fn_types::{phantom_fn_types::Deserialize for phantom_fn_types::Pairs<K, V>}]
++    Source: 'tests/src/phantom-fn-types.rs', lines 148:0-155:1 -/
++@[reducible]
++def Pairs.Insts.Phantom_fn_typesDeserialize {K : Type} {V : Type} (FromWordInst
++  : _root_.phantom_fn_types.FromWord K) (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq K K) (FromWordInst1 :
++  _root_.phantom_fn_types.FromWord V) : _root_.phantom_fn_types.Deserialize
++  (_root_.phantom_fn_types.Pairs K V) := {
++  deserialize := fun {D : Type} (DeserializerInst :
++    _root_.phantom_fn_types.Deserializer D) =>
++    _root_.phantom_fn_types.Pairs.Insts.Phantom_fn_typesDeserialize.deserialize
++    FromWordInst corecmpPartialEqInst FromWordInst1 DeserializerInst
++}
++
++/-- [phantom_fn_types::deserialize_pairs]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 157:0-162:1
++    Visibility: public -/
++def deserialize_pairs
++  (words : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 × _root_.Bool))
++    _root_.Aeneas.Std.U32)
++  := do
++  let r ←
++    _root_.phantom_fn_types.Pairs.Insts.Phantom_fn_typesDeserialize.deserialize
++      _root_.phantom_fn_types.U32.Insts.Phantom_fn_typesFromWord
++      core.cmp.PartialEqU32
++      _root_.phantom_fn_types.Bool.Insts.Phantom_fn_typesFromWord
++      _root_.phantom_fn_types.WordDeserializer.Insts.Phantom_fn_typesDeserializer
++      words
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok p =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok p)
++  | _root_.Aeneas.Std.core.result.Result.Err word =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err word)
++
++/-- [phantom_fn_types::deserialize_set]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 164:0-166:1
++    Visibility: public -/
++def deserialize_set
++  (words : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.phantom_fn_types.WordDeserializer.Insts.Phantom_fn_typesDeserializer.deserialize_seq
++    (_root_.phantom_fn_types.SetVisitor.Insts.Phantom_fn_typesVisitorVec
++    _root_.phantom_fn_types.U32.Insts.Phantom_fn_typesFromWord
++    core.cmp.PartialEqU32) words ()
++
++/-- [phantom_fn_types::Tagged]
++    Source: 'tests/src/phantom-fn-types.rs', lines 170:0-174:1
++    Visibility: public -/
++structure Tagged (T : Type) where
++  count : _root_.Aeneas.Std.U32
++  marker : _root_.phantom_fn_types.core.marker.PhantomData (T →
++    _root_.Aeneas.Std.Result T)
++  by_ref : _root_.phantom_fn_types.core.marker.PhantomData (T →
++    _root_.Aeneas.Std.Result _root_.Bool)
++
++/-- [phantom_fn_types::marker]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 177:0-179:1
++    Visibility: public -/
++def marker
++  (T : Type) :
++  _root_.Aeneas.Std.Result (_root_.phantom_fn_types.core.marker.PhantomData (T
++    → _root_.Aeneas.Std.Result T))
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- [phantom_fn_types::bump_tagged]: loop body 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 185:4-188:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_tagged_loop.body
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  if i1 < n
++  then
++    let i2 ← i + 2#u32
++    let i3 ← i1 + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (i2, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done i)
++
++/-- [phantom_fn_types::bump_tagged]: loop 0:
++    Source: 'tests/src/phantom-fn-types.rs', lines 185:4-188:5
++    Visibility: public -/
++@[rust_loop]
++def bump_tagged_loop
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (i2, i3) => _root_.phantom_fn_types.bump_tagged_loop.body n i2 i3 :
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (i, i1)
++
++/-- [phantom_fn_types::bump_tagged]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 182:0-190:1
++    Visibility: public -/
++def bump_tagged
++  (T : Type) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.phantom_fn_types.Tagged T)
++  := do
++  let pd ← _root_.phantom_fn_types.marker T
++  let i ← _root_.phantom_fn_types.bump_tagged_loop n 0#u32 0#u32
++  _root_.Aeneas.Std.Result.ok { count := i, marker := pd, by_ref := () }
++
++/-- [phantom_fn_types::bumped]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 192:0-194:1
++    Visibility: public -/
++def bumped
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let t ←
++    _root_.phantom_fn_types.bump_tagged (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) n
++  _root_.Aeneas.Std.Result.ok t.count
++
++/-- [phantom_fn_types::Sink]
++    Source: 'tests/src/phantom-fn-types.rs', lines 198:0-202:1
++    Visibility: public -/
++structure Sink (T : Type) where
++  count : _root_.Aeneas.Std.U32
++  last : T
++  feed : _root_.phantom_fn_types.core.marker.PhantomData (T →
++    _root_.Aeneas.Std.Result _root_.Unit)
++
++/-- [phantom_fn_types::bump]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 204:0-206:1
++    Visibility: public -/
++def bump
++  {T : Type} (sink : _root_.phantom_fn_types.Sink T) :
++  _root_.Aeneas.Std.Result (_root_.phantom_fn_types.Sink T)
++  := do
++  let i ← sink.count + 1#u32
++  _root_.Aeneas.Std.Result.ok { sink with count := i, feed := () }
++
++/-- [phantom_fn_types::bumped_twice]:
++    Source: 'tests/src/phantom-fn-types.rs', lines 208:0-213:1
++    Visibility: public -/
++def bumped_twice
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let s ← _root_.phantom_fn_types.bump { count := n, last := n, feed := () }
++  let s1 ← _root_.phantom_fn_types.bump { s with feed := () }
++  s1.count + s1.last
++
++end phantom_fn_types
+diff --git a/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+index 8c7560c..2f77b68 100644
+--- a/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
++++ b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+@@ -121,19 +121,6 @@ structure
+     FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst → T3
+     → _root_.Aeneas.Std.Result (T4 × T3)
+ 
+-/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
+-    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
+-    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
+-    Visibility: public -/
+-@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
+-  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
+-structure
+-  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  (T0 : Type) (T1 : Type) (T2 : Type) where
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+-    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+-
+ /-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1)), T2>]
+     Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
+     Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1), @T2>]
+@@ -144,8 +131,7 @@ structure
+   core.ops.function.FnT0TupleMut0T1T2_specialized_376f35bc3609dcb1a6c11d6093e4cc92
+   (T0 : Type) (T1 : Type) (T2 : Type) where
+   FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953dInst :
+-    _root_.specialized_closure_clauses.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-    T0 T1 T2
++    _root_.Aeneas.Std.core.ops.function.FnMutMutArg T0 T1 T2
+   call : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1)
+ 
+ /-- [specialized_closure_clauses::apply]:
+diff --git a/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean b/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean
+index 323282b..dff124d 100644
+--- a/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean
++++ b/tests/lean/TraitImplRegionOrder/TraitImplRegionOrder.lean
+@@ -11,29 +11,14 @@ set_option maxHeartbeats 1000000
+ 
+ namespace trait_impl_region_order
+ 
+-/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
+-    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
+-    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
+-    Visibility: public -/
+-@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
+-  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
+-structure
+-  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  (T0 : Type) (T1 : Type) (T2 : Type) where
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+-    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+-
+ /-- [trait_impl_region_order::bump_twice]:
+     Source: 'tests/src/trait-impl-region-order.rs', lines 24:0-28:1
+     Visibility: public -/
+ def bump_twice
+   {T0 : Type}
+   (coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst
+-  :
+-  _root_.trait_impl_region_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
+-  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
+-  (f : T0) :
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg T0 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) (f : T0) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+   let (a, x1, f1) ←
+@@ -92,11 +77,10 @@ def
+ @[reducible]
+ def
+   shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
+-  :
+-  _root_.trait_impl_region_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg
+   _root_.trait_impl_region_order.shared_step.closure _root_.Aeneas.Std.U32
+   _root_.Aeneas.Std.U32 := {
+-  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :=
++  FnOnceInst :=
+     _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+   call_mut :=
+     _root_.trait_impl_region_order.shared_step.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
+diff --git a/tests/lean/VecRetainMut.lean b/tests/lean/VecRetainMut.lean
+new file mode 100644
+index 0000000..9809d8b
+--- /dev/null
++++ b/tests/lean/VecRetainMut.lean
+@@ -0,0 +1 @@
++import VecRetainMut.Checks
+diff --git a/tests/lean/VecRetainMut/Checks.lean b/tests/lean/VecRetainMut/Checks.lean
+new file mode 100644
+index 0000000..ee29cfd
+--- /dev/null
++++ b/tests/lean/VecRetainMut/Checks.lean
+@@ -0,0 +1,54 @@
++import VecRetainMut.VecRetainMut
++
++/-! Evaluate the model of `tests/src/vec-retain-mut.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace vec_retain_mut.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def w (n : Nat) : U64 := ⟨BitVec.ofNat _ n⟩
++
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def buckets (xs : List (Nat × List Nat)) : alloc.vec.Vec (U64 × alloc.vec.Vec U32) :=
++  vec (xs.map fun (m, b) => (w m, vec (b.map u)))
++
++def bucketsR (v : alloc.vec.Vec (U64 × alloc.vec.Vec U32)) : List (Nat × List Nat) :=
++  v.val.map fun (m, b) => (m.val, nats b)
++
++/-- The closure captures the merged mask and the merged bucket mutably; both are
++    read after `retain_mut` (the pushed bucket). -/
++def mergeR : Option (List (Nat × List Nat) × List (Nat × List Nat)) :=
++  match merge (buckets [(3, [1, 2]), (4, [3]), (8, [4])]) (w 9) (u 9) with
++  | ok b =>
++    match merge b (w 16) (u 5) with
++    | ok b' => some (bucketsR b, bucketsR b')
++    | _ => none
++  | _ => none
++
++#guard mergeR == some ([(4, [3]), (11, [1, 2, 4, 9])],
++  [(4, [3]), (11, [1, 2, 4, 9]), (16, [5])])
++
++/-- The closure captures two counters mutably; both are read after
++    `retain_mut`. -/
++def doubleEvensR (xs : List Nat) : Option ((Nat × Nat) × List Nat) :=
++  match double_evens (vec (xs.map u)) with
++  | ok ((calls, dropped), v) => some ((calls.val, dropped.val), nats v)
++  | _ => none
++
++#guard doubleEvensR [1, 2, 3, 4, 6] == some ((5, 2), [4, 8, 12])
++#guard doubleEvensR [] == some ((0, 0), [])
++
++/-- A closure capturing nothing mutable (the `FnMutMutArg` schema). -/
++def clampBelowR (xs : List Nat) (limit : Nat) : Option (List Nat) :=
++  match clamp_below (vec (xs.map u)) (u limit) with
++  | ok v => some (nats v)
++  | _ => none
++
++#guard clampBelowR [0, 5, 12, 0, 7] 6 == some [5, 6, 6]
++
++end vec_retain_mut.checks
+diff --git a/tests/lean/VecRetainMut/VecRetainMut.lean b/tests/lean/VecRetainMut/VecRetainMut.lean
+new file mode 100644
+index 0000000..eecd024
+--- /dev/null
++++ b/tests/lean/VecRetainMut/VecRetainMut.lean
+@@ -0,0 +1,444 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [vec_retain_mut]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++/- You can remove the following line by using the CLI option `-all-computable`: -/
++noncomputable section
++
++namespace vec_retain_mut
++
++/-- [vec_retain_mut::merge::closure]
++    Source: 'tests/src/vec-retain-mut.rs', lines 22:23-30:5 -/
++def merge.closure :=
++  _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<vec_retain_mut::merge::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<vec_retain_mut::merge::closure<'0, '1>, (&'2 mut @T0), @T1>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4b
++  (T0 : Type) (T1 : Type) where
++  call_once : _root_.vec_retain_mut.merge.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.vec_retain_mut.merge.closure ×
++    _root_.vec_retain_mut.merge.closure × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<vec_retain_mut::merge::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<vec_retain_mut::merge::closure<'0, '1>, (&'2 mut @T0), @T1>"
++  (parentClauses := ["FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4bInst"])]
++structure
++  core.ops.function.FnMutclosureTupleMut2T0T1_specialized_d0f43bed562c09c79e4684f55c61f36e
++  (T0 : Type) (T1 : Type) where
++  FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4bInst :
++    _root_.vec_retain_mut.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4b
++    T0 T1
++  call_mut : _root_.vec_retain_mut.merge.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.vec_retain_mut.merge.closure ×
++    (_root_.vec_retain_mut.merge.closure →
++    _root_.vec_retain_mut.merge.closure) ×
++    (_root_.vec_retain_mut.merge.closure →
++    _root_.vec_retain_mut.merge.closure) × T0)
++
++/-- [vec_retain_mut::double_evens::closure]
++    Source: 'tests/src/vec-retain-mut.rs', lines 40:22-49:5 -/
++def double_evens.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<vec_retain_mut::double_evens::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<vec_retain_mut::double_evens::closure<'0, '1>, (&'2 mut @T0), @T1>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8
++  (T0 : Type) (T1 : Type) where
++  call_once : _root_.vec_retain_mut.double_evens.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.vec_retain_mut.double_evens.closure
++    × _root_.vec_retain_mut.double_evens.closure × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<vec_retain_mut::double_evens::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<vec_retain_mut::double_evens::closure<'0, '1>, (&'2 mut @T0), @T1>"
++  (parentClauses := ["FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8Inst"])]
++structure
++  core.ops.function.FnMutclosureTupleMut2T0T1_specialized_513c60ae388716f433c24449f260d642
++  (T0 : Type) (T1 : Type) where
++  FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8Inst :
++    _root_.vec_retain_mut.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8
++    T0 T1
++  call_mut : _root_.vec_retain_mut.double_evens.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.vec_retain_mut.double_evens.closure
++    × (_root_.vec_retain_mut.double_evens.closure →
++    _root_.vec_retain_mut.double_evens.closure) ×
++    (_root_.vec_retain_mut.double_evens.closure →
++    _root_.vec_retain_mut.double_evens.closure) × T0)
++
++/-- [alloc::vec::{alloc::vec::Vec<T>}::retain_mut::<0, T0, T1, vec_retain_mut::merge::closure<1, 2>>]:
++    Source: '/rustc/library/alloc/src/vec/mod.rs', lines 2386:4-2388:33
++    Name pattern: [alloc::vec::{alloc::vec::Vec<@T>}::retain_mut<'0, @T0, @T1, vec_retain_mut::merge::closure<'1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "alloc::vec::{alloc::vec::Vec<@T>}::retain_mut<'0, @T0, @T1, vec_retain_mut::merge::closure<'1, '2>>"]
++def
++  alloc.vec.Vec.retain_mut0T0T1closure_specialized_d670353d8bdd2474887e0bb3b66e9d86
++  {T0 : Type} (T1 : Type)
++  (coreopsfunctionFnMutclosureTupleMut0T0Bool_specialized_d0f43bed562c09c79e4684f55c61f36eInst
++  :
++  _root_.vec_retain_mut.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_d0f43bed562c09c79e4684f55c61f36e
++  T0 _root_.Bool) (input : _root_.Aeneas.Std.alloc.vec.Vec T0)
++  (f : _root_.vec_retain_mut.merge.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec T0) ×
++    _root_.vec_retain_mut.merge.closure × _root_.vec_retain_mut.merge.closure)
++  := do
++  let (_, model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.retain_mut_with
++      (fun arg arg1 =>
++        do
++        let (output, captured, captured1, captured2, captured3) ←
++          coreopsfunctionFnMutclosureTupleMut0T0Bool_specialized_d0f43bed562c09c79e4684f55c61f36eInst.call_mut
++            arg arg1
++        let capture_state := captured1 captured
++        let capture_state1 := captured2 captured
++        _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++          capture_state1.#1), captured3)) input f
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, model_state1)
++
++/-- [alloc::vec::{alloc::vec::Vec<T>}::retain_mut::<0, T0, T1, vec_retain_mut::double_evens::closure<1, 2>>]:
++    Source: '/rustc/library/alloc/src/vec/mod.rs', lines 2386:4-2388:33
++    Name pattern: [alloc::vec::{alloc::vec::Vec<@T>}::retain_mut<'0, @T0, @T1, vec_retain_mut::double_evens::closure<'1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "alloc::vec::{alloc::vec::Vec<@T>}::retain_mut<'0, @T0, @T1, vec_retain_mut::double_evens::closure<'1, '2>>"]
++def
++  alloc.vec.Vec.retain_mut0T0T1closure_specialized_4bb304ecb246ddade47cc06b1c017e14
++  {T0 : Type} (T1 : Type)
++  (coreopsfunctionFnMutclosureTupleMut0T0Bool_specialized_513c60ae388716f433c24449f260d642Inst
++  :
++  _root_.vec_retain_mut.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_513c60ae388716f433c24449f260d642
++  T0 _root_.Bool) (input : _root_.Aeneas.Std.alloc.vec.Vec T0)
++  (f : _root_.vec_retain_mut.double_evens.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec T0) ×
++    _root_.vec_retain_mut.double_evens.closure ×
++    _root_.vec_retain_mut.double_evens.closure)
++  := do
++  let (_, model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.retain_mut_with
++      (fun arg arg1 =>
++        do
++        let (output, captured, captured1, captured2, captured3) ←
++          coreopsfunctionFnMutclosureTupleMut0T0Bool_specialized_513c60ae388716f433c24449f260d642Inst.call_mut
++            arg arg1
++        let capture_state := captured1 captured
++        let capture_state1 := captured2 captured
++        _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++          capture_state1.#1), captured3)) input f
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, model_state1)
++
++/-- [vec_retain_mut::merge::{core::ops::function::FnMut::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for (u64, alloc::vec::Vec<u32>)}::call_mut]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 22:23-30:5 -/
++def
++  merge.closure.Insts.CoreOpsFunctionFnMutTupleMutPairU64VecU32Bool_specialized_d0f43bed562c09c79e4684f55c61f36e.call_mut
++  (c : _root_.vec_retain_mut.merge.closure)
++  (tupled_args : (_root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.vec_retain_mut.merge.closure
++    × (_root_.vec_retain_mut.merge.closure →
++    _root_.vec_retain_mut.merge.closure) ×
++    (_root_.vec_retain_mut.merge.closure →
++    _root_.vec_retain_mut.merge.closure) × (_root_.Aeneas.Std.U64 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (i, v) := c
++  let (bucket_mask, bucket) := tupled_args
++  let i1 ← lift (bucket_mask &&& i)
++  if i1 != 0#u64
++  then
++    let i2 ← lift (i ||| bucket_mask)
++    let (v1, bucket1) ← _root_.Aeneas.Std.alloc.vec.Vec.append v bucket
++    let back :=
++      (fun c1 => let (i3, _) := c1
++                 (i3, v) : _root_.vec_retain_mut.merge.closure →
++        _root_.vec_retain_mut.merge.closure)
++    let back1 :=
++      (fun c1 => let (_, v2) := c1
++                 (i, v2) : _root_.vec_retain_mut.merge.closure →
++        _root_.vec_retain_mut.merge.closure)
++    _root_.Aeneas.Std.Result.ok (false, (i2, v1), back, back1, (bucket_mask,
++      bucket1))
++  else
++    let back :=
++      (fun c1 => let (i2, _) := c1
++                 (i2, v) : _root_.vec_retain_mut.merge.closure →
++        _root_.vec_retain_mut.merge.closure)
++    let back1 :=
++      (fun c1 => let (_, v1) := c1
++                 (i, v1) : _root_.vec_retain_mut.merge.closure →
++        _root_.vec_retain_mut.merge.closure)
++    _root_.Aeneas.Std.Result.ok (true, c, back, back1, tupled_args)
++
++/-- [vec_retain_mut::merge::{core::ops::function::FnOnce::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for (u64, alloc::vec::Vec<u32>)}::call_once]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 22:23-30:5 -/
++def
++  merge.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairU64VecU32Bool_specialized_0d1602de1492403a6d92e0a6a6679c4b.call_once
++  (c : _root_.vec_retain_mut.merge.closure)
++  (p : (_root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.vec_retain_mut.merge.closure
++    × _root_.vec_retain_mut.merge.closure × (_root_.Aeneas.Std.U64 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (i, v) := c
++  let (b, c1, call_mut_back, call_mut_back1, p1) ←
++    _root_.vec_retain_mut.merge.closure.Insts.CoreOpsFunctionFnMutTupleMutPairU64VecU32Bool_specialized_d0f43bed562c09c79e4684f55c61f36e.call_mut
++      c p
++  let c2 := call_mut_back c1
++  let (i1, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, v1) := c3
++  _root_.Aeneas.Std.Result.ok (b, (i1, v), (i, v1), p1)
++
++/-- Trait implementation: [vec_retain_mut::merge::{core::ops::function::FnOnce::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for (u64, alloc::vec::Vec<u32>)}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 22:23-30:5 -/
++@[reducible]
++def
++  merge.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairU64VecU32Bool_specialized_0d1602de1492403a6d92e0a6a6679c4b
++  :
++  _root_.vec_retain_mut.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4b
++  (_root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) _root_.Bool := {
++  call_once :=
++    _root_.vec_retain_mut.merge.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairU64VecU32Bool_specialized_0d1602de1492403a6d92e0a6a6679c4b.call_once
++}
++
++/-- Trait implementation: [vec_retain_mut::merge::{core::ops::function::FnMut::<vec_retain_mut::merge::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for (u64, alloc::vec::Vec<u32>)}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 22:23-30:5 -/
++@[reducible]
++def
++  merge.closure.Insts.CoreOpsFunctionFnMutTupleMutPairU64VecU32Bool_specialized_d0f43bed562c09c79e4684f55c61f36e
++  :
++  _root_.vec_retain_mut.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_d0f43bed562c09c79e4684f55c61f36e
++  (_root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) _root_.Bool := {
++  FnOnceclosureTupleMut2T0T1_specialized_0d1602de1492403a6d92e0a6a6679c4bInst
++    :=
++    _root_.vec_retain_mut.merge.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairU64VecU32Bool_specialized_0d1602de1492403a6d92e0a6a6679c4b
++  call_mut :=
++    _root_.vec_retain_mut.merge.closure.Insts.CoreOpsFunctionFnMutTupleMutPairU64VecU32Bool_specialized_d0f43bed562c09c79e4684f55c61f36e.call_mut
++}
++
++/-- [vec_retain_mut::merge]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 19:0-33:1
++    Visibility: public -/
++def merge
++  (buckets : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U64 ×
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  (mask : _root_.Aeneas.Std.U64) (entry : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)))
++  := do
++  let (buckets1, c, c1) ←
++    _root_.vec_retain_mut.alloc.vec.Vec.retain_mut0T0T1closure_specialized_d670353d8bdd2474887e0bb3b66e9d86
++      _root_.Aeneas.Std.Global
++      _root_.vec_retain_mut.merge.closure.Insts.CoreOpsFunctionFnMutTupleMutPairU64VecU32Bool_specialized_d0f43bed562c09c79e4684f55c61f36e
++      buckets (mask, _root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++  let (merged_mask, _) := c
++  let (_, merged) := c1
++  let merged1 ← _root_.Aeneas.Std.alloc.vec.Vec.push merged entry
++  _root_.Aeneas.Std.alloc.vec.Vec.push buckets1 (merged_mask, merged1)
++
++/-- [vec_retain_mut::double_evens::{core::ops::function::FnMut::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for u32}::call_mut]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 40:22-49:5 -/
++def
++  double_evens.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_513c60ae388716f433c24449f260d642.call_mut
++  (c : _root_.vec_retain_mut.double_evens.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.vec_retain_mut.double_evens.closure ×
++    (_root_.vec_retain_mut.double_evens.closure →
++    _root_.vec_retain_mut.double_evens.closure) ×
++    (_root_.vec_retain_mut.double_evens.closure →
++    _root_.vec_retain_mut.double_evens.closure) × _root_.Aeneas.Std.U32)
++  := do
++  let (i, i1) := c
++  let i2 ← i + 1#u32
++  let i3 ← tupled_args % 2#u32
++  if i3 = 0#u32
++  then
++    let x ← tupled_args * 2#u32
++    let back :=
++      (fun c1 => let (i4, _) := c1
++                 (i4, i1) : _root_.vec_retain_mut.double_evens.closure →
++        _root_.vec_retain_mut.double_evens.closure)
++    let back1 :=
++      (fun c1 => let (_, i4) := c1
++                 (i, i4) : _root_.vec_retain_mut.double_evens.closure →
++        _root_.vec_retain_mut.double_evens.closure)
++    _root_.Aeneas.Std.Result.ok (true, (i2, i1), back, back1, x)
++  else
++    let i4 ← i1 + 1#u32
++    let back :=
++      (fun c1 => let (i5, _) := c1
++                 (i5, i1) : _root_.vec_retain_mut.double_evens.closure →
++        _root_.vec_retain_mut.double_evens.closure)
++    let back1 :=
++      (fun c1 => let (_, i5) := c1
++                 (i, i5) : _root_.vec_retain_mut.double_evens.closure →
++        _root_.vec_retain_mut.double_evens.closure)
++    _root_.Aeneas.Std.Result.ok (false, (i2, i4), back, back1, tupled_args)
++
++/-- [vec_retain_mut::double_evens::{core::ops::function::FnOnce::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for u32}::call_once]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 40:22-49:5 -/
++def
++  double_evens.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_9607234173e000d1629b96661f0235c8.call_once
++  (c : _root_.vec_retain_mut.double_evens.closure) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.vec_retain_mut.double_evens.closure ×
++    _root_.vec_retain_mut.double_evens.closure × _root_.Aeneas.Std.U32)
++  := do
++  let (i1, i2) := c
++  let (b, c1, call_mut_back, call_mut_back1, i3) ←
++    _root_.vec_retain_mut.double_evens.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_513c60ae388716f433c24449f260d642.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (i4, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, i5) := c3
++  _root_.Aeneas.Std.Result.ok (b, (i4, i2), (i1, i5), i3)
++
++/-- Trait implementation: [vec_retain_mut::double_evens::{core::ops::function::FnOnce::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for u32}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 40:22-49:5 -/
++@[reducible]
++def
++  double_evens.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_9607234173e000d1629b96661f0235c8
++  :
++  _root_.vec_retain_mut.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8
++  _root_.Aeneas.Std.U32 _root_.Bool := {
++  call_once :=
++    _root_.vec_retain_mut.double_evens.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_9607234173e000d1629b96661f0235c8.call_once
++}
++
++/-- Trait implementation: [vec_retain_mut::double_evens::{core::ops::function::FnMut::<vec_retain_mut::double_evens::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, bool> for u32}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 40:22-49:5 -/
++@[reducible]
++def
++  double_evens.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_513c60ae388716f433c24449f260d642
++  :
++  _root_.vec_retain_mut.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_513c60ae388716f433c24449f260d642
++  _root_.Aeneas.Std.U32 _root_.Bool := {
++  FnOnceclosureTupleMut2T0T1_specialized_9607234173e000d1629b96661f0235c8Inst
++    :=
++    _root_.vec_retain_mut.double_evens.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_9607234173e000d1629b96661f0235c8
++  call_mut :=
++    _root_.vec_retain_mut.double_evens.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_513c60ae388716f433c24449f260d642.call_mut
++}
++
++/-- [vec_retain_mut::double_evens]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 37:0-51:1
++    Visibility: public -/
++def double_evens
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (values1, c, c1) ←
++    _root_.vec_retain_mut.alloc.vec.Vec.retain_mut0T0T1closure_specialized_4bb304ecb246ddade47cc06b1c017e14
++      _root_.Aeneas.Std.Global
++      _root_.vec_retain_mut.double_evens.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_513c60ae388716f433c24449f260d642
++      values (0#u32, 0#u32)
++  let (calls, _) := c
++  let (_, dropped) := c1
++  _root_.Aeneas.Std.Result.ok ((calls, dropped), values1)
++
++/-- [vec_retain_mut::clamp_below::closure]
++    Source: 'tests/src/vec-retain-mut.rs', lines 55:22-60:5 -/
++@[reducible]
++def clamp_below.closure := _root_.Aeneas.Std.U32
++
++/-- [vec_retain_mut::clamp_below::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, bool> for vec_retain_mut::clamp_below::closure<0>}::call_mut]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 55:22-60:5 -/
++def
++  clamp_below.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++  (c : _root_.vec_retain_mut.clamp_below.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32 ×
++    _root_.vec_retain_mut.clamp_below.closure)
++  := do
++  let x ←
++    if tupled_args > c
++    then _root_.Aeneas.Std.Result.ok c
++    else _root_.Aeneas.Std.Result.ok tupled_args
++  _root_.Aeneas.Std.Result.ok (x != 0#u32, x, c)
++
++/-- [vec_retain_mut::clamp_below::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, bool> for vec_retain_mut::clamp_below::closure<0>}::call_once]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 55:22-60:5 -/
++def
++  clamp_below.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++  (c : _root_.vec_retain_mut.clamp_below.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32)
++  := do
++  let (b, i1, _) ←
++    _root_.vec_retain_mut.clamp_below.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok (b, i1)
++
++/-- Trait implementation: [vec_retain_mut::clamp_below::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, bool> for vec_retain_mut::clamp_below::closure<0>}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 55:22-60:5 -/
++@[reducible]
++def
++  clamp_below.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
++  _root_.vec_retain_mut.clamp_below.closure _root_.Aeneas.Std.U32 _root_.Bool
++  := {
++  call_once :=
++    _root_.vec_retain_mut.clamp_below.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++}
++
++/-- Trait implementation: [vec_retain_mut::clamp_below::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, bool> for vec_retain_mut::clamp_below::closure<0>}]
++    Source: 'tests/src/vec-retain-mut.rs', lines 55:22-60:5 -/
++@[reducible]
++def
++  clamp_below.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_943e173885df97b2ecc8767154e6953d
++  : _root_.Aeneas.Std.core.ops.function.FnMutMutArg
++  _root_.vec_retain_mut.clamp_below.closure _root_.Aeneas.Std.U32 _root_.Bool
++  := {
++  FnOnceInst :=
++    _root_.vec_retain_mut.clamp_below.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32Bool_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  call_mut :=
++    _root_.vec_retain_mut.clamp_below.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++}
++
++/-- [vec_retain_mut::clamp_below]:
++    Source: 'tests/src/vec-retain-mut.rs', lines 54:0-61:1
++    Visibility: public -/
++def clamp_below
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (_, model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.retain_mut
++      _root_.vec_retain_mut.clamp_below.closure.Insts.CoreOpsFunctionFnMutTupleMutU32Bool_specialized_943e173885df97b2ecc8767154e6953d
++      values limit
++  _root_.Aeneas.Std.Result.ok model_state
++
++end vec_retain_mut
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 1183506..1fe09ff 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -154,3 +154,5 @@ package «tests» {}
+ @[default_target] lean_lib Tutorial
+ @[default_target] lean_lib UnsizeSharedBorrows
+ @[default_target] lean_lib Vec
++@[default_target] lean_lib VecRetainMut
++@[default_target] lean_lib PhantomFnTypes
+diff --git a/tests/src/diagnostic-recovery.lean.out b/tests/src/diagnostic-recovery.lean.out
+index a7870d7..d4dffaf 100644
+--- a/tests/src/diagnostic-recovery.lean.out
++++ b/tests/src/diagnostic-recovery.lean.out
+@@ -1,19 +1,19 @@
+ [[92mInfo[39m ] Imported: tests/llbc/diagnostic_recovery.llbc
+-[[91mError[39m] Arrow types are not supported yet
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery.rs', lines 15:0-17:1
+-Compiler source: symbolic/SymbolicToPureTypes.ml, line 182
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
+ [[91mError[39m] Could not translate type decl 'diagnostic_recovery::Callback because of previous error
+ Name pattern: 'diagnostic_recovery::Callback'
+ Source: 'tests/src/diagnostic-recovery.rs', lines 15:0-17:1
+-Compiler source: symbolic/SymbolicToPure.ml, line 160
+-[[91mError[39m] Arrow types are not supported yet
++Compiler source: symbolic/SymbolicToPure.ml, line 188
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: symbolic/SymbolicToPureTypes.ml, line 392
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ [[91mError[39m] Could not translate the function signature of 'diagnostic_recovery::apply because of previous error
+ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: Translate.ml, line 395
++Compiler source: Translate.ml, line 398
+ [[91mError[39m] Function pointers are not supported yet
+ Source: 'tests/src/diagnostic-recovery.rs', lines 21:4-21:8
+ Compiler source: interp/InterpStatements.ml, line 1553
+@@ -22,13 +22,13 @@ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Source: 'tests/src/diagnostic-recovery.rs', lines 21:4-21:8
+ Compiler source: interp/Interp.ml, line 630
+-[[91mError[39m] Arrow types are not supported yet
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: symbolic/SymbolicToPureTypes.ml, line 392
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
+ [[91mError[39m] Could not translate the function 'diagnostic_recovery::apply because of previous error.
+ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+-Compiler source: Translate.ml, line 292
++Compiler source: Translate.ml, line 295
+ [[92mInfo[39m ] Generated the partial file (because of 8 errors, including 7 unique errors): tests/lean/DiagnosticRecovery/DiagnosticRecovery.lean
+-[[92mInfo[39m ] Total execution time: 0.137303 seconds
++[[92mInfo[39m ] Total execution time: 0.210352 seconds
+diff --git a/tests/src/fn-pointer-value.lean.out b/tests/src/fn-pointer-value.lean.out
+new file mode 100644
+index 0000000..c59ad12
+--- /dev/null
++++ b/tests/src/fn-pointer-value.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/fn_pointer_value.llbc
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/fn-pointer-value.rs', lines 20:30-20:66
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
++
+diff --git a/tests/src/fn-pointer-value.rs b/tests/src/fn-pointer-value.rs
+new file mode 100644
+index 0000000..25d8137
+--- /dev/null
++++ b/tests/src/fn-pointer-value.rs
+@@ -0,0 +1,25 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A value of function pointer type stays rejected: only the type arguments of
++//! a `PhantomData`, which hold no value, translate function pointer types (see
++//! `phantom-fn-types.rs`). The shape of `chelis_ir::host::definitions_owning`:
++//! a closure capturing a function pointer passed as an argument.
++
++pub struct Named {
++    pub name: u32,
++    pub alias: u32,
++}
++
++fn name_of(named: &Named) -> u32 {
++    named.name
++}
++
++pub fn count_owning(definitions: &[Named], name: u32, key: fn(&Named) -> u32) -> usize {
++    definitions.iter().filter(|definition| key(definition) == name).count()
++}
++
++pub fn count_named(definitions: &[Named], name: u32) -> usize {
++    count_owning(definitions, name, name_of)
++}
+diff --git a/tests/src/phantom-fn-types.rs b/tests/src/phantom-fn-types.rs
+new file mode 100644
+index 0000000..96ba5fb
+--- /dev/null
++++ b/tests/src/phantom-fn-types.rs
+@@ -0,0 +1,243 @@
++//@ [!lean] skip
++//@ [lean] subdir=PhantomFnTypes
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Function pointer types under `PhantomData`, as in the serde visitors of
++//! `chelis_unord` (`struct MapVisitor<K, V>(PhantomData<fn() -> (K, V)>)`).
++//! A `PhantomData<T>` holds no value of type `T`, so a function pointer type in
++//! its type argument is translated as a Lean function type; values of function
++//! pointer type stay rejected (see `fn-pointer-value.rs`). Function pointer
++//! types with bound regions (`fn(&T) -> bool`, `fn(&mut T)`) occur in fields;
++//! the markers are live across a loop (their types are matched at the join).
++//! `PhantomFnTypes/Checks.lean` evaluates the models on the inputs of the
++//! `native` test module below and compares with the native results.
++
++use std::marker::PhantomData;
++
++/// A sequence of words (`serde::de::SeqAccess`).
++pub trait SeqAccess {
++    fn next_element(&mut self) -> Option<u32>;
++}
++
++/// `serde::de::Visitor`: consumes the visitor, builds its value.
++pub trait Visitor: Sized {
++    type Value;
++    fn visit_seq<A: SeqAccess>(self, sequence: A) -> Result<Self::Value, u32>;
++}
++
++/// `serde::Deserializer`: drives a visitor.
++pub trait Deserializer: Sized {
++    fn deserialize_seq<V: Visitor>(self, visitor: V) -> Result<V::Value, u32>;
++}
++
++/// `serde::Deserialize`.
++pub trait Deserialize: Sized {
++    fn deserialize<D: Deserializer>(deserializer: D) -> Result<Self, u32>;
++}
++
++pub trait FromWord: Sized {
++    fn from_word(word: u32) -> Self;
++}
++
++impl FromWord for u32 {
++    fn from_word(word: u32) -> u32 {
++        word
++    }
++}
++
++impl FromWord for bool {
++    fn from_word(word: u32) -> bool {
++        word % 2 == 1
++    }
++}
++
++/// The words of a vector, in order.
++pub struct Words {
++    words: Vec<u32>,
++    position: usize,
++}
++
++impl SeqAccess for Words {
++    fn next_element(&mut self) -> Option<u32> {
++        if self.position < self.words.len() {
++            let word = self.words[self.position];
++            self.position += 1;
++            Some(word)
++        } else {
++            None
++        }
++    }
++}
++
++pub struct WordDeserializer(pub Vec<u32>);
++
++impl Deserializer for WordDeserializer {
++    fn deserialize_seq<V: Visitor>(self, visitor: V) -> Result<V::Value, u32> {
++        visitor.visit_seq(Words { words: self.0, position: 0 })
++    }
++}
++
++fn contains_key<K: PartialEq, V>(pairs: &Vec<(K, V)>, key: &K) -> bool {
++    let mut i = 0;
++    while i < pairs.len() {
++        if pairs[i].0 == *key {
++            return true;
++        }
++        i += 1;
++    }
++    false
++}
++
++fn contains<T: PartialEq>(elements: &Vec<T>, element: &T) -> bool {
++    let mut i = 0;
++    while i < elements.len() {
++        if elements[i] == *element {
++            return true;
++        }
++        i += 1;
++    }
++    false
++}
++
++/// Key-value pairs: a repeated key, or a key without value, is rejected with
++/// that key's word.
++pub struct MapVisitor<K, V>(PhantomData<fn() -> (K, V)>);
++
++impl<K: FromWord + PartialEq, V: FromWord> Visitor for MapVisitor<K, V> {
++    type Value = Vec<(K, V)>;
++
++    fn visit_seq<A: SeqAccess>(self, mut sequence: A) -> Result<Vec<(K, V)>, u32> {
++        let mut result: Vec<(K, V)> = Vec::new();
++        while let Some(key_word) = sequence.next_element() {
++            let value_word = match sequence.next_element() {
++                Some(word) => word,
++                None => return Err(key_word),
++            };
++            let key = K::from_word(key_word);
++            if contains_key(&result, &key) {
++                return Err(key_word);
++            }
++            result.push((key, V::from_word(value_word)));
++        }
++        Ok(result)
++    }
++}
++
++/// Elements: a repeated element is rejected with its word.
++pub struct SetVisitor<T>(PhantomData<fn() -> T>);
++
++impl<T: FromWord + PartialEq> Visitor for SetVisitor<T> {
++    type Value = Vec<T>;
++
++    fn visit_seq<A: SeqAccess>(self, mut sequence: A) -> Result<Vec<T>, u32> {
++        let mut result: Vec<T> = Vec::new();
++        while let Some(word) = sequence.next_element() {
++            let element = T::from_word(word);
++            if contains(&result, &element) {
++                return Err(word);
++            }
++            result.push(element);
++        }
++        Ok(result)
++    }
++}
++
++/// A map deserialized through its visitor, as `UnordMap`'s `Deserialize`.
++pub struct Pairs<K, V>(pub Vec<(K, V)>);
++
++impl<K: FromWord + PartialEq, V: FromWord> Deserialize for Pairs<K, V> {
++    fn deserialize<D: Deserializer>(deserializer: D) -> Result<Self, u32> {
++        match deserializer.deserialize_seq(MapVisitor(PhantomData)) {
++            Ok(pairs) => Ok(Pairs(pairs)),
++            Err(word) => Err(word),
++        }
++    }
++}
++
++pub fn deserialize_pairs(words: Vec<u32>) -> Result<Vec<(u32, bool)>, u32> {
++    match Pairs::<u32, bool>::deserialize(WordDeserializer(words)) {
++        Ok(Pairs(pairs)) => Ok(pairs),
++        Err(word) => Err(word),
++    }
++}
++
++pub fn deserialize_set(words: Vec<u32>) -> Result<Vec<u32>, u32> {
++    WordDeserializer(words).deserialize_seq(SetVisitor::<u32>(PhantomData))
++}
++
++/// A counter tagged with an invariant marker: a function type taking and
++/// returning `T`, and a function type with a higher-ranked region.
++pub struct Tagged<T> {
++    pub count: u32,
++    marker: PhantomData<fn(T) -> T>,
++    by_ref: PhantomData<fn(&T) -> bool>,
++}
++
++/// A function type in a signature.
++pub fn marker<T>() -> PhantomData<fn(T) -> T> {
++    PhantomData
++}
++
++/// The markers are live across the loop.
++pub fn bump_tagged<T>(n: u32) -> Tagged<T> {
++    let mut tagged: Tagged<T> = Tagged { count: 0, marker: marker(), by_ref: PhantomData };
++    let mut i = 0;
++    while i < n {
++        tagged.count += 2;
++        i += 1;
++    }
++    tagged
++}
++
++pub fn bumped(n: u32) -> u32 {
++    bump_tagged::<Vec<u32>>(n).count
++}
++
++/// A counter tagged with a function type taking a mutable borrow (a bound
++/// region), updated through a mutable borrow.
++pub struct Sink<T> {
++    pub count: u32,
++    pub last: T,
++    feed: PhantomData<fn(&mut T)>,
++}
++
++pub fn bump<T>(sink: &mut Sink<T>) {
++    sink.count += 1;
++}
++
++pub fn bumped_twice(n: u32) -> u32 {
++    let mut sink: Sink<u32> = Sink { count: n, last: n, feed: PhantomData };
++    bump(&mut sink);
++    bump(&mut sink);
++    sink.count + sink.last
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn pairs() {
++        assert_eq!(deserialize_pairs(vec![1, 3, 2, 4]), Ok(vec![(1, true), (2, false)]));
++        assert_eq!(deserialize_pairs(vec![]), Ok(vec![]));
++        assert_eq!(deserialize_pairs(vec![1, 3, 1, 4]), Err(1));
++        assert_eq!(deserialize_pairs(vec![5, 3, 7]), Err(7));
++    }
++
++    #[test]
++    fn set() {
++        assert_eq!(deserialize_set(vec![3, 1, 2]), Ok(vec![3, 1, 2]));
++        assert_eq!(deserialize_set(vec![3, 1, 3]), Err(3));
++    }
++
++    #[test]
++    fn tagged() {
++        assert_eq!(bumped(0), 0);
++        assert_eq!(bumped(5), 10);
++    }
++
++    #[test]
++    fn sink() {
++        assert_eq!(bumped_twice(7), 16);
++    }
++}
+diff --git a/tests/src/vec-retain-mut.rs b/tests/src/vec-retain-mut.rs
+new file mode 100644
+index 0000000..a4cb16f
+--- /dev/null
++++ b/tests/src/vec-retain-mut.rs
+@@ -0,0 +1,95 @@
++//@ [!lean] skip
++//@ [lean] subdir=VecRetainMut
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Vec::retain_mut`. Charon's `--monomorphize-mut` specializes its bound
++//! `F: FnMut(&mut T) -> bool` to `FnMut<F, (&mut T,), bool>`, modeled by the
++//! schema `core.ops.function.FnMutMutArg`, whose `call_mut` returns the closure
++//! state and the element. A closure capturing mutable borrows is adapted to it
++//! (the returned state recombines the values given back to the captured
++//! borrows), and the `retain_mut` model threads this state through the calls,
++//! so the caller reads the final values of the captured borrows. The first
++//! shape is that of `chelis_ir::axis_sources` (merge the buckets intersecting a
++//! mask, then push the merged bucket).
++//! `VecRetainMut/Checks.lean` evaluates the models on the inputs of the
++//! `native` test module below and compares with the native results.
++
++/// Merges every bucket intersecting `mask` into one bucket holding `entry`
++/// last; the closure captures two mutable borrows, read after `retain_mut`.
++pub fn merge(buckets: &mut Vec<(u64, Vec<u32>)>, mask: u64, entry: u32) {
++    let mut merged: Vec<u32> = Vec::new();
++    let mut merged_mask = mask;
++    buckets.retain_mut(|(bucket_mask, bucket)| {
++        if *bucket_mask & merged_mask != 0 {
++            merged_mask |= *bucket_mask;
++            merged.append(bucket);
++            false
++        } else {
++            true
++        }
++    });
++    merged.push(entry);
++    buckets.push((merged_mask, merged));
++}
++
++/// Doubles the kept elements, drops the odd ones, and counts the calls and the
++/// dropped elements (two captured mutable borrows).
++pub fn double_evens(values: &mut Vec<u32>) -> (u32, u32) {
++    let mut calls = 0u32;
++    let mut dropped = 0u32;
++    values.retain_mut(|x| {
++        calls += 1;
++        if *x % 2 == 0 {
++            *x *= 2;
++            true
++        } else {
++            dropped += 1;
++            false
++        }
++    });
++    (calls, dropped)
++}
++
++/// A closure capturing nothing mutable.
++pub fn clamp_below(values: &mut Vec<u32>, limit: u32) {
++    values.retain_mut(|x| {
++        if *x > limit {
++            *x = limit;
++        }
++        *x != 0
++    });
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn merge_absorbs_intersecting_buckets() {
++        let mut buckets = vec![(0b0011, vec![1, 2]), (0b0100, vec![3]), (0b1000, vec![4])];
++        merge(&mut buckets, 0b1001, 9);
++        assert_eq!(buckets, vec![(0b0100, vec![3]), (0b1011, vec![1, 2, 4, 9])]);
++        merge(&mut buckets, 0b10000, 5);
++        assert_eq!(
++            buckets,
++            vec![(0b0100, vec![3]), (0b1011, vec![1, 2, 4, 9]), (0b10000, vec![5])]
++        );
++    }
++
++    #[test]
++    fn double_evens_counts() {
++        let mut values = vec![1, 2, 3, 4, 6];
++        assert_eq!(double_evens(&mut values), (5, 2));
++        assert_eq!(values, vec![4, 8, 12]);
++        let mut values = vec![];
++        assert_eq!(double_evens(&mut values), (0, 0));
++        assert_eq!(values, Vec::<u32>::new());
++    }
++
++    #[test]
++    fn clamp_below_limits() {
++        let mut values = vec![0, 5, 12, 0, 7];
++        clamp_below(&mut values, 6);
++        assert_eq!(values, vec![5, 6, 6]);
++    }
++}

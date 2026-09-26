@@ -1,0 +1,732 @@
+# aeneas integration step 71 after cba11f3beb: commit 97920b1e5a23d29b74b24a2b44dbba75bc83b8fd
+# first parent 33bd1e3a2b6aac08f35b175dc25192003622b66f, merged 06519d63e854f30e6071c9c9a1ddca191c35c260
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (stages select the projections of a symbolic value by path)
+
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index cbb5415..151b472 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -769,27 +769,38 @@ and back_ty_paths (_ : Meta.span option) (decls_ctx : C.decls_ctx)
+     [keep_region]. *)
+ and back_ty_paths_for_regions (decls_ctx : C.decls_ctx)
+     (keep_region : T.region -> bool) (ty : T.ty) : bool list list =
++  let rec sides (route : T.region list) : bool list list =
++    match route with
++    | [] -> [ [] ]
++    | _ :: route ->
++        let rest = sides route in
++        List.map (fun p -> false :: p) rest @ List.map (fun p -> true :: p) rest
++  in
++  List.sort_uniq compare
++    (List.concat_map sides
++       (back_ty_routes_for_regions decls_ctx keep_region ty))
++
++(** Nested borrows: the regions of the ignored mutable borrows (outermost
++    first) on the way from a type to its mutable borrows whose region satisfies
++    [keep_region]; every side of these borrows gives a path (see
++    [back_ty_paths]). *)
++and back_ty_routes_for_regions (decls_ctx : C.decls_ctx)
++    (keep_region : T.region -> bool) (ty : T.ty) : T.region list list =
+   let type_infos = decls_ctx.type_ctx.type_infos in
+   let has_mut ty =
+     TypesUtils.ty_has_mut_borrow_for_region_in_pred type_infos keep_region ty
+   in
+   let union l = List.sort_uniq compare (List.concat l) in
+-  let rec paths (visited : T.ty list) (ty : T.ty) : bool list list =
++  let rec routes (visited : T.ty list) (ty : T.ty) : T.region list list =
+     if not (has_mut ty) then []
+     else
+       match ty with
+       | T.TRef (r, rty, RMut) ->
+           if keep_region r then [ [] ]
+-          else
+-            let inner = paths visited rty in
+-            union
+-              [
+-                List.map (fun p -> false :: p) inner;
+-                List.map (fun p -> true :: p) inner;
+-              ]
++          else List.map (fun p -> r :: p) (routes visited rty)
+       | T.TRef (_, _, RShared) -> []
+       | T.TAdt { id = TTuple | TBuiltin _; generics } ->
+-          union (List.map (paths visited) generics.types)
++          union (List.map (routes visited) generics.types)
+       | T.TAdt { id = TAdtId adt_id; generics } ->
+           if List.mem ty visited then []
+           else (
+@@ -801,18 +812,18 @@ and back_ty_paths_for_regions (decls_ctx : C.decls_ctx)
+                    (unlike [back_ty_levels], which is an over-approximation) *)
+                 union
+                   (List.map
+-                     (paths (ty :: visited))
++                     (routes (ty :: visited))
+                      (List.concat_map snd
+                         (Substitute
+                          .type_decl_get_instantiated_variants_fields_types def
+                            generics)))
+             | _ ->
+                 (* The region may be used directly by an opaque type *)
+-                union ([ [] ] :: List.map (paths visited) generics.types))
+-      | T.TArray (ty, _) | T.TSlice ty -> paths visited ty
++                union ([ [] ] :: List.map (routes visited) generics.types))
++      | T.TArray (ty, _) | T.TSlice ty -> routes visited ty
+       | _ -> []
+   in
+-  paths [] ty
++  routes [] ty
+ 
+ (** Staged backward functions: the stage of a position, before merging (see
+     [back_sig_stage_map]), and whether the backward function receives it
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 640b712..68cfb34 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -1809,6 +1809,145 @@ type dropped_consumed = {
+       (** The consumed positions, relative to the value *)
+ }
+ 
++(** Nested borrows: select the projections of a symbolic value of type [ty] at
++    the relative level [depth] (the children of its projector at this depth)
++    which give back the values of the [selected] positions (paths, see
++    [SymbolicToPureTypes.back_ty_paths]) of this level.
++
++    A child created when the regions R ended (the [proj_regions] of its
++    meta-value, regions of the type of the given-back value, which is [ty] up
++    to a renaming of its regions) projects the value given back to the ignored
++    borrows of R, and its own children continue from there: the positions of a
++    projection are those whose path takes the given-back side exactly at the
++    ignored borrows of the regions which ended on the way to it. E.g., for
++    [O<'a, 'b, 'c> { w : &'a mut W<'b, 'c> }], [W<'b, 'c> { c : &'b mut C<'c> }]
++    and the region ['c] at relative level 1: the child created when ['a] ended
++    holds the path [g.c], the one created when ['b] ended the path [c.g]. We
++    keep the projections whose positions are all selected and replace those
++    whose positions are not selected with [AEmpty] (they are not translated at
++    this level).
++
++    [None] (unsupported) if a projection holds both kinds of positions or
++    positions which cannot be identified (no position of the level, a
++    projection under a value consumed by a loan projector), or if the kept
++    projection is not the single view of the selected positions (see
++    [SymbolicToPureTypes.back_adt_view_keys]) of an ADT: the type of the
++    selection is then one value of the ADT, which the kept projection gives. *)
++let select_symbolic_projections (decls_ctx : C.decls_ctx)
++    (keep_region : T.region -> bool) (selected : bool list list) (depth : int)
++    (ty : T.ty) (aproj : V.aproj) : V.aproj option =
++  let routes =
++    SymbolicToPureTypes.back_ty_routes_for_regions decls_ctx keep_region ty
++  in
++  let positions (ended : T.RegionId.Set.t) : bool list list =
++    List.sort_uniq compare
++      (List.filter_map
++         (fun route ->
++           let path =
++             List.map
++               (fun (r : T.region) ->
++                 match r with
++                 | RVar (Free rid) -> T.RegionId.Set.mem rid ended
++                 | _ -> false)
++               route
++           in
++           if SymbolicToPureTypes.back_path_level path = depth then Some path
++           else None)
++         routes)
++  in
++  let failed = ref false in
++  let kept = ref [] in
++  (* The regions of a type, in the order of a visit *)
++  let regions_of (ty : T.ty) : T.region list =
++    let regions = ref [] in
++    let visitor =
++      object
++        inherit [_] T.iter_ty
++        method! visit_region _ r = regions := r :: !regions
++      end
++    in
++    visitor#visit_ty () ty;
++    List.rev !regions
++  in
++  let ty_regions = regions_of ty in
++  (* The regions of [ty] which a meta-value's [proj_regions] denote: they are
++     regions of the type of the given-back value ([proj_ty]), which is [ty] up
++     to a renaming of its regions (the value's own regions, or those of the
++     abstraction which ended) *)
++  let ended_regions (meta : V.mconsumed_symb) : T.RegionId.Set.t =
++    let value_regions = regions_of meta.proj_ty in
++    if List.length value_regions <> List.length ty_regions then (
++      failed := true;
++      T.RegionId.Set.empty)
++    else
++      List.fold_left2
++        (fun ended (r : T.region) (vr : T.region) ->
++          match (r, vr) with
++          | RVar (Free rid), RVar (Free vrid)
++            when T.RegionId.Set.mem vrid meta.proj_regions ->
++              T.RegionId.Set.add rid ended
++          | _ -> ended)
++        T.RegionId.Set.empty ty_regions value_regions
++  in
++  let rec visit (d : int) (ended : T.RegionId.Set.t) (aproj : V.aproj) :
++      V.aproj =
++    if d = depth then
++      match aproj with
++      | V.AEmpty -> aproj
++      | _ -> (
++          match positions ended with
++          | [] ->
++              failed := true;
++              aproj
++          | paths ->
++              let is_selected path = List.mem path selected in
++              if List.for_all is_selected paths then (
++                kept := paths :: !kept;
++                aproj)
++              else if List.exists is_selected paths then (
++                failed := true;
++                aproj)
++              else V.AEmpty)
++    else
++      let children (l : (V.mconsumed_symb * V.aproj) list) =
++        List.map
++          (fun ((meta : V.mconsumed_symb), child) ->
++            ( meta,
++              visit (d + 1)
++                (T.RegionId.Set.union ended (ended_regions meta))
++                child
++            ))
++          l
++      in
++      let consumed (l : (V.mconsumed_symb * V.aproj) list) =
++        if List.exists (fun (_, child) -> child <> V.AEmpty) l then
++          failed := true;
++        l
++      in
++      match aproj with
++      | V.AProjLoans p ->
++          let consumed = consumed p.consumed in
++          V.AProjLoans { p with consumed; borrows = children p.borrows }
++      | V.AEndedProjLoans p ->
++          let consumed = consumed p.consumed in
++          V.AEndedProjLoans { p with consumed; borrows = children p.borrows }
++      | V.AProjBorrows p -> V.AProjBorrows { p with loans = children p.loans }
++      | V.AEndedProjBorrows p ->
++          V.AEndedProjBorrows { p with loans = children p.loans }
++      | V.APendingLoans _ | V.AEmpty -> aproj
++  in
++  let aproj = visit 0 T.RegionId.Set.empty aproj in
++  let keys paths =
++    List.sort_uniq compare
++      (List.map SymbolicToPureTypes.back_path_view_key paths)
++  in
++  match (ty, !kept) with
++  | T.TAdt { id = TAdtId _; _ }, [ paths ]
++    when (not !failed) && keys paths = keys selected
++         && List.length (keys selected) = 1 ->
++      Some aproj
++  | _ -> None
++
+ (** Nested borrows: select the positions of an abstraction value whose path
+     through the ignored mutable borrows and loans is selected (see
+     [SymbolicToPureCore.back_side]), for the translation of the values of the
+@@ -1822,8 +1961,10 @@ type dropped_consumed = {
+       one copy per view: in the copy of a view, the positions of the other
+       views are placeholders, and so are all the positions on the side of an
+       ignored borrow inside the ADT which the view does not follow;
+-    - a symbolic value is kept or replaced as a whole: its projectors do not
+-      distinguish the paths of its values of the same level;
++    - a symbolic value is kept or replaced as a whole when all or none of its
++      positions of this level are selected; otherwise we keep the projections
++      of its projector which give back the selected positions (see
++      [select_symbolic_projections]);
+     - with a staged selection, a value given back to the caller which it
+       dropped unchanged (an ended loan projector without children at a lower
+       level) supplies its unchanged value to the selected loans of the deeper
+@@ -2082,7 +2223,7 @@ let select_back_side ?(dropped : dropped_consumed list ref option)
+               { proj; consumed = [ (meta, unchanged (n - 1)) ]; borrows = [] }
+         in
+         { av with value = ASymbolic (pm, unchanged (abs_level - level)) }
+-    | ASymbolic (_, aproj) ->
++    | ASymbolic (pm, aproj) ->
+         let level_paths =
+           List.filter
+             (fun path ->
+@@ -2116,13 +2257,19 @@ let select_back_side ?(dropped : dropped_consumed list ref option)
+           | _ -> ());
+           av)
+         else if selected = [] then placeholder av
+-        else
+-          [%craise] span
+-            ("Nested borrows: a stage of a staged backward function needs a \
+-              part of the values of level " ^ string_of_int abs_level
+-           ^ " of a symbolic value of type " ^ ty_to_string ctx av.ty
+-           ^ ", whose projectors do not distinguish the paths of the values \
+-              of a level (unsupported)")
++        else (
++          match
++            select_symbolic_projections ctx.decls_ctx keep_region selected
++              (abs_level - level) av.ty aproj
++          with
++          | Some aproj -> { av with value = ASymbolic (pm, aproj) }
++          | None ->
++              [%craise] span
++                ("Nested borrows: a stage of a staged backward function needs \
++                  a part of the values of level " ^ string_of_int abs_level
++               ^ " of a symbolic value of type " ^ ty_to_string ctx av.ty
++               ^ ", whose projectors do not distinguish the paths of the \
++                  values of a level (unsupported)"))
+     | ALoan (AMutLoan _ | AEndedMutLoan _)
+     | ABorrow (AMutBorrow _ | AEndedMutBorrow _) ->
+         if level = abs_level && (off || not (select (List.rev rev_path))) then
+diff --git a/tests/lean/NestedBorrowsSymbolicPaths.lean b/tests/lean/NestedBorrowsSymbolicPaths.lean
+new file mode 100644
+index 0000000..2d0c69f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSymbolicPaths.lean
+@@ -0,0 +1 @@
++import NestedBorrowsSymbolicPaths.Checks
+diff --git a/tests/lean/NestedBorrowsSymbolicPaths/Checks.lean b/tests/lean/NestedBorrowsSymbolicPaths/Checks.lean
+new file mode 100644
+index 0000000..983b829
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSymbolicPaths/Checks.lean
+@@ -0,0 +1,37 @@
++import NestedBorrowsSymbolicPaths.NestedBorrowsSymbolicPaths
++
++/-! Evaluate the model of `tests/src/nested-borrows-symbolic-paths.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_symbolic_paths.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def addTwice (n v d : Nat) : Option (Nat × Nat × Nat) :=
++  match run_add_twice (u n) (u v) (u d) with
++  | ok (a, b, n') => some (a.val, b.val, n'.val)
++  | _ => none
++
++def addTwiceThen (n v d : Nat) : Option (Nat × Nat × Nat × Nat) :=
++  match run_add_twice_then (u n) (u v) (u d) with
++  | ok (a, b, r, n') => some (a.val, b.val, r.val, n'.val)
++  | _ => none
++
++def addThrice (n v : Nat) : Option (Nat × Nat) :=
++  match run_add_thrice (u n) (u v) with
++  | ok (r, n') => some (r.val, n'.val)
++  | _ => none
++
++#guard addTwice 1 2 3 == some (3, 6, 6)
++#guard addTwice max 1 5 == some (0, 5, 5)
++
++#guard addTwiceThen 1 2 3 == some (3, 6, 6, 18)
++#guard addTwiceThen max 1 5 == some (0, 5, 5, 15)
++
++#guard addThrice 1 2 == some (13, 13)
++#guard addThrice max max == some (4294967288, 4294967288)
++
++end nested_borrows_symbolic_paths.checks
+diff --git a/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean b/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean
+new file mode 100644
+index 0000000..6a349e1
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean
+@@ -0,0 +1,284 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_symbolic_paths]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_symbolic_paths
++
++/-- [nested_borrows_symbolic_paths::C]
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 14:0-16:1
++    Visibility: public -/
++structure C where
++  r : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_symbolic_paths::W]
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 18:0-20:1
++    Visibility: public -/
++structure W where
++  c : _root_.nested_borrows_symbolic_paths.C
++
++/-- [nested_borrows_symbolic_paths::O]
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 22:0-24:1
++    Visibility: public -/
++structure O where
++  w : _root_.nested_borrows_symbolic_paths.W
++
++/-- [nested_borrows_symbolic_paths::add]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 26:0-29:1
++    Visibility: public -/
++def add
++  (o : _root_.nested_borrows_symbolic_paths.O) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))))))))
++  := do
++  let i ← lift (core.num.U32.wrapping_add o.w.c.r v)
++  let back :=
++    (fun o1 => (o1, fun o2 => o2) : _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))
++  let back1 :=
++    (fun o1 => (o1, fun o2 => (o2, fun o3 => (o3, fun o4 => o4))) :
++      _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))))))
++  _root_.Aeneas.Std.Result.ok (i, { w := { c := { r := i } } }, fun o1 => o1,
++    back, back1)
++
++/-- [nested_borrows_symbolic_paths::add_twice]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 31:0-35:1
++    Visibility: public -/
++def add_twice
++  (o : _root_.nested_borrows_symbolic_paths.O) (v : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))))))))
++  := do
++  let (a, o1, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_symbolic_paths.add o v
++  let (b, o2, add_back3, add_back4, add_back5) ←
++    _root_.nested_borrows_symbolic_paths.add o1 d
++  let back :=
++    (fun o3 => let o4 := add_back3 o3
++               add_back o4 : _root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)
++  let back1 :=
++    (fun o3 =>
++       let (o4, back2) := add_back1 o3
++       let (o5, _) := add_back4 o4
++       (o5,
++         fun o6 => let (_, back3) := add_back4 o4
++                   let o7 := back3 o6
++                   back2 o7) : _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))
++  let back2 :=
++    (fun o3 =>
++       let (o4, back3) := add_back2 o3
++       let (o5, _) := add_back5 o4
++       (o5,
++         fun o6 =>
++           let (_, back4) := add_back5 o4
++           let (o7, _) := back4 o6
++           let (o8, _) := back3 o7
++           (o8,
++             fun o9 =>
++               let (_, back5) := add_back5 o4
++               let (o10, back6) := back5 o6
++               let (_, back7) := back3 o10
++               let (o11, _) := back7 o9
++               let (o12, _) := back6 o11
++               (o12,
++                 fun o13 =>
++                   let (_, back8) := add_back5 o4
++                   let (o14, back9) := back8 o6
++                   let (_, back10) := back3 o14
++                   let (o15, back11) := back10 o9
++                   let (_, back12) := back9 o15
++                   let o16 := back12 o13
++                   back11 o16))) : _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))))))
++  _root_.Aeneas.Std.Result.ok ((a, b), o2, back, back1, back2)
++
++/-- [nested_borrows_symbolic_paths::add_thrice]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 37:0-41:1
++    Visibility: public -/
++def add_thrice
++  (o : _root_.nested_borrows_symbolic_paths.O) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))) ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    (_root_.nested_borrows_symbolic_paths.O ×
++    (_root_.nested_borrows_symbolic_paths.O →
++    _root_.nested_borrows_symbolic_paths.O))))))))
++  := do
++  let (p, o1, add_twice_back, add_twice_back1, add_twice_back2) ←
++    _root_.nested_borrows_symbolic_paths.add_twice o v v
++  let (a, b) := p
++  let i ← lift (core.num.U32.wrapping_add a b)
++  let (c, o2, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_symbolic_paths.add o1 i
++  let back :=
++    (fun o3 => let o4 := add_back o3
++               add_twice_back o4 : _root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)
++  let back1 :=
++    (fun o3 =>
++       let (o4, back2) := add_twice_back1 o3
++       let (o5, _) := add_back1 o4
++       (o5,
++         fun o6 => let (_, back3) := add_back1 o4
++                   let o7 := back3 o6
++                   back2 o7) : _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))
++  let back2 :=
++    (fun o3 =>
++       let (o4, back3) := add_twice_back2 o3
++       let (o5, _) := add_back2 o4
++       (o5,
++         fun o6 =>
++           let (_, back4) := add_back2 o4
++           let (o7, _) := back4 o6
++           let (o8, _) := back3 o7
++           (o8,
++             fun o9 =>
++               let (_, back5) := add_back2 o4
++               let (o10, back6) := back5 o6
++               let (_, back7) := back3 o10
++               let (o11, _) := back7 o9
++               let (o12, _) := back6 o11
++               (o12,
++                 fun o13 =>
++                   let (_, back8) := add_back2 o4
++                   let (o14, back9) := back8 o6
++                   let (_, back10) := back3 o14
++                   let (o15, back11) := back10 o9
++                   let (_, back12) := back9 o15
++                   let o16 := back12 o13
++                   back11 o16))) : _root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      (_root_.nested_borrows_symbolic_paths.O ×
++      (_root_.nested_borrows_symbolic_paths.O →
++      _root_.nested_borrows_symbolic_paths.O)))))))
++  _root_.Aeneas.Std.Result.ok (c, o2, back, back1, back2)
++
++/-- [nested_borrows_symbolic_paths::run_add_twice]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 43:0-50:1
++    Visibility: public -/
++def run_add_twice
++  (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (p, o, add_twice_back, _, add_twice_back1) ←
++    _root_.nested_borrows_symbolic_paths.add_twice { w := { c := { r := n } } }
++      v d
++  let (a, b) := p
++  let o1 := add_twice_back o
++  let (o2, back) := add_twice_back1 o1
++  let (o3, back1) := back o2
++  let (o4, back2) := back1 o3
++  let o5 := back2 o4
++  _root_.Aeneas.Std.Result.ok (a, b, o5.w.c.r)
++
++/-- [nested_borrows_symbolic_paths::run_add_twice_then]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 53:0-62:1
++    Visibility: public -/
++def run_add_twice_then
++  (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (p, o, add_twice_back, _, add_twice_back1) ←
++    _root_.nested_borrows_symbolic_paths.add_twice { w := { c := { r := n } } }
++      v d
++  let (a, b) := p
++  let i ← lift (core.num.U32.wrapping_mul o.w.c.r 3#u32)
++  let o1 := add_twice_back { w := { c := { r := i } } }
++  let (o2, back) := add_twice_back1 o1
++  let (o3, back1) := back o2
++  let (o4, back2) := back1 o3
++  let o5 := back2 o4
++  _root_.Aeneas.Std.Result.ok (a, b, o.w.c.r, o5.w.c.r)
++
++/-- [nested_borrows_symbolic_paths::run_add_thrice]:
++    Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 64:0-71:1
++    Visibility: public -/
++def run_add_thrice
++  (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, o, add_thrice_back, _, add_thrice_back1) ←
++    _root_.nested_borrows_symbolic_paths.add_thrice
++      { w := { c := { r := n } } } v
++  let o1 := add_thrice_back o
++  let (o2, back) := add_thrice_back1 o1
++  let (o3, back1) := back o2
++  let (o4, back2) := back1 o3
++  let o5 := back2 o4
++  _root_.Aeneas.Std.Result.ok (r, o5.w.c.r)
++
++end nested_borrows_symbolic_paths
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index d1c5bad..0940f4f 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -40,6 +40,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsTuple
+ @[default_target] lean_lib NestedBorrowsSameRegion
+ @[default_target] lean_lib NestedBorrowsClosureState
++@[default_target] lean_lib NestedBorrowsSymbolicPaths
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectFlatten
+diff --git a/tests/src/nested-borrows-symbolic-paths.rs b/tests/src/nested-borrows-symbolic-paths.rs
+new file mode 100644
+index 0000000..4242beb
+--- /dev/null
++++ b/tests/src/nested-borrows-symbolic-paths.rs
+@@ -0,0 +1,94 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsSymbolicPaths
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Four levels of nested mutable borrows through structures, with a structure
++//! which the caller does not read: `add_twice` passes the structure `O` it
++//! receives to `add` twice, so the second call consumes the (symbolic)
++//! structure given back by the first one. At a level of the backward function
++//! of the innermost region, the positions of that structure are split between
++//! stages by path (the `C` given back to `W::c` inside the borrowed `W`, and
++//! the `C` inside the `W` given back to `O::w`): the projector of the symbolic
++//! value holds one projection per path (the values given back when the region
++//! of `O::w`, resp. `W::c`, ended), and each stage takes its own.
++
++pub struct C<'a> {
++    pub r: &'a mut u32,
++}
++
++pub struct W<'a, 'b> {
++    pub c: &'a mut C<'b>,
++}
++
++pub struct O<'a, 'b, 'c> {
++    pub w: &'a mut W<'b, 'c>,
++}
++
++pub fn add(o: &mut O<'_, '_, '_>, v: u32) -> u32 {
++    *o.w.c.r = (*o.w.c.r).wrapping_add(v);
++    *o.w.c.r
++}
++
++pub fn add_twice(o: &mut O<'_, '_, '_>, v: u32, d: u32) -> (u32, u32) {
++    let a = add(o, v);
++    let b = add(o, d);
++    (a, b)
++}
++
++pub fn add_thrice(o: &mut O<'_, '_, '_>, v: u32) -> u32 {
++    let (a, b) = add_twice(o, v, v);
++    let c = add(o, a.wrapping_add(b));
++    c
++}
++
++pub fn run_add_twice(n: u32, v: u32, d: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let (a, b) = add_twice(&mut o, v, d);
++    (a, b, n)
++}
++
++/// The caller reads and writes through the structures after the calls.
++pub fn run_add_twice_then(n: u32, v: u32, d: u32) -> (u32, u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let (a, b) = add_twice(&mut o, v, d);
++    let r = *o.w.c.r;
++    *o.w.c.r = r.wrapping_mul(3);
++    (a, b, r, n)
++}
++
++pub fn run_add_thrice(n: u32, v: u32) -> (u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let r = add_thrice(&mut o, v);
++    (r, n)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn run_add_twice_native() {
++        assert_eq!(run_add_twice(1, 2, 3), (3, 6, 6));
++        assert_eq!(run_add_twice(u32::MAX, 1, 5), (0, 5, 5));
++    }
++
++    #[test]
++    fn run_add_twice_then_native() {
++        assert_eq!(run_add_twice_then(1, 2, 3), (3, 6, 6, 18));
++        assert_eq!(run_add_twice_then(u32::MAX, 1, 5), (0, 5, 5, 15));
++    }
++
++    #[test]
++    fn run_add_thrice_native() {
++        assert_eq!(run_add_thrice(1, 2), (13, 13));
++        assert_eq!(run_add_thrice(u32::MAX, u32::MAX), (4294967288, 4294967288));
++    }
++}

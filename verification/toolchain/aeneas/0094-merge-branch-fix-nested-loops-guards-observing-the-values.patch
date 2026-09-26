@@ -1,0 +1,257 @@
+# aeneas integration step 94 after cba11f3beb: commit ebf73f56e0940266f1dd8a754182486325f02c5b
+# first parent abef3f16eca549cb87b47b21a698b4e7cf101f77, merged 3bbcc584c56f463575b4620f9b4428873dfcc622
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (#guards observing the values given back after joins and loops)
+
+diff --git a/tests/lean/JoinSharedBorrowField/Checks.lean b/tests/lean/JoinSharedBorrowField/Checks.lean
+index d7ea3f1..3d573d6 100644
+--- a/tests/lean/JoinSharedBorrowField/Checks.lean
++++ b/tests/lean/JoinSharedBorrowField/Checks.lean
+@@ -42,5 +42,7 @@ def triple (r : U32 × U32 × Bool) : Nat × Nat × Bool := (r.1.val, r.2.1.val,
+ #guard onFrame triple (run_try_plain · true (u max)) (max - 1) 2 == some ((7, max, true), 5, 3)
+ #guard onFrame triple (run_try_plain · false (u max)) 10 1 == some ((0, 0, true), 10, 1)
+ #guard onFrame triple (run_try_plain · false (u 4)) 10 1 (set := some 99) == some ((5, 5, true), 99, 1)
++#guard onFrame triple (run_try_plain · true (u 4)) 10 1 (set := some 99) == some ((5, 4, true), 99, 2)
++#guard onFrame triple (run_try_plain · true (u 4)) 10 3 (set := some 7) == some ((3, 4, false), 7, 3)
+ 
+ end join_shared_borrow_field.checks
+diff --git a/tests/lean/LoopNestedJoin/Checks.lean b/tests/lean/LoopNestedJoin/Checks.lean
+index 9bbe948..078a04d 100644
+--- a/tests/lean/LoopNestedJoin/Checks.lean
++++ b/tests/lean/LoopNestedJoin/Checks.lean
+@@ -19,4 +19,16 @@ def val3 (r : Result (U32 × U32 × U32)) : Option (Nat × Nat × Nat) :=
+ #guard val3 (drive_even 1#u32) == some (11, 11, 3)
+ #guard val3 (drive_even 6#u32) == some (36, 13, 9)
+ 
++-- native::drives, the caller writes through the counter after the loop
++#guard val3 (drive_odd_write 0#u32) == some (0, 52, 21)
++#guard val3 (drive_odd_write 1#u32) == some (0, 52, 21)
++#guard val3 (drive_odd_write 2#u32) == some (3, 53, 24)
++#guard val3 (drive_odd_write 5#u32) == some (7, 54, 33)
++#guard val3 (drive_odd_write 6#u32) == some (12, 55, 48)
++#guard val3 (drive_even_write 0#u32) == some (0, 20, 1003)
++#guard val3 (drive_even_write 1#u32) == some (11, 22, 1003)
++#guard val3 (drive_even_write 2#u32) == some (11, 22, 1003)
++#guard val3 (drive_even_write 5#u32) == some (36, 26, 1009)
++#guard val3 (drive_even_write 6#u32) == some (36, 26, 1009)
++
+ end loop_nested_join.checks
+diff --git a/tests/lean/LoopNestedJoin/LoopNestedJoin.lean b/tests/lean/LoopNestedJoin/LoopNestedJoin.lean
+index 8b8610a..49239c9 100644
+--- a/tests/lean/LoopNestedJoin/LoopNestedJoin.lean
++++ b/tests/lean/LoopNestedJoin/LoopNestedJoin.lean
+@@ -297,4 +297,34 @@ def drive_even
+   let c1 := bump_even_back c
+   _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
+ 
++/-- [loop_nested_join::drive_odd_write]:
++    Source: 'tests/src/loop-nested-join.rs', lines 70:0-78:1
++    Visibility: public -/
++def drive_odd_write
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_odd_back) ←
++    _root_.loop_nested_join.bump_odd { total := 7#u32, calls := 2#u32 } n
++  let i ← lift (core.num.U32.wrapping_mul c.total 3#u32)
++  let calls ← lift (core.num.U32.wrapping_add c.calls 50#u32)
++  let c1 := bump_odd_back { c with total := i }
++  _root_.Aeneas.Std.Result.ok (r, calls, c1.total)
++
++/-- [loop_nested_join::drive_even_write]:
++    Source: 'tests/src/loop-nested-join.rs', lines 80:0-88:1
++    Visibility: public -/
++def drive_even_write
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_even_back) ←
++    _root_.loop_nested_join.bump_even { total := 3#u32, calls := 10#u32 } n
++  let i ← lift (core.num.U32.wrapping_add c.total 1000#u32)
++  let calls ← lift (core.num.U32.wrapping_mul c.calls 2#u32)
++  let c1 := bump_even_back { c with total := i }
++  _root_.Aeneas.Std.Result.ok (r, calls, c1.total)
++
+ end loop_nested_join
+diff --git a/tests/lean/LoopNestedStaged/Checks.lean b/tests/lean/LoopNestedStaged/Checks.lean
+index d47b738..60e3597 100644
+--- a/tests/lean/LoopNestedStaged/Checks.lean
++++ b/tests/lean/LoopNestedStaged/Checks.lean
+@@ -18,4 +18,10 @@ def val3 (r : Result (U32 × U32 × U32)) : Option (Nat × Nat × Nat) :=
+ #guard val3 (drive_n_then_write 0#u32) == some (0, 1, 15)
+ #guard val3 (drive_n_then_write 3#u32) == some (9, 4, 24)
+ 
++-- the caller writes through both the inner borrow and the counter after the loop
++#guard val3 (drive_n_write_both 0#u32) == some (0, 7, 105)
++#guard val3 (drive_n_write_both 1#u32) == some (2, 14, 105)
++#guard val3 (drive_n_write_both 2#u32) == some (5, 21, 106)
++#guard val3 (drive_n_write_both 4#u32) == some (14, 35, 111)
++
+ end loop_nested_staged.checks
+diff --git a/tests/lean/LoopNestedStaged/LoopNestedStaged.lean b/tests/lean/LoopNestedStaged/LoopNestedStaged.lean
+index e6b93ab..fa2d317 100644
+--- a/tests/lean/LoopNestedStaged/LoopNestedStaged.lean
++++ b/tests/lean/LoopNestedStaged/LoopNestedStaged.lean
+@@ -164,4 +164,19 @@ def drive_n_then_write
+   let c1 := bump_n_back { c with total := i }
+   _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
+ 
++/-- [loop_nested_staged::drive_n_write_both]:
++    Source: 'tests/src/loop-nested-staged.rs', lines 58:0-66:1
++    Visibility: public -/
++def drive_n_write_both
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_n_back) ←
++    _root_.loop_nested_staged.bump_n { total := 5#u32, calls := 1#u32 } n
++  let i ← lift (core.num.U32.wrapping_add c.total 100#u32)
++  let calls ← lift (core.num.U32.wrapping_mul c.calls 7#u32)
++  let c1 := bump_n_back { c with total := i }
++  _root_.Aeneas.Std.Result.ok (r, calls, c1.total)
++
+ end loop_nested_staged
+diff --git a/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean b/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean
+index 598b2d6..85e43f5 100644
+--- a/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean
++++ b/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean
+@@ -52,5 +52,7 @@ def one (r : U32) : Nat := r.val
+ -- pos_reread_native
+ #guard onFrame one (run_pos_reread · true (u 9)) 10 2 == some (2, 10, 2)
+ #guard onFrame one (run_pos_reread · false (u 9)) 10 2 == some (0, 10, 2)
++#guard onFrame one (run_pos_reread · true (u 9)) 10 2 (set := some 99) == some (2, 99, 2)
++#guard onFrame one (run_pos_reread · false (u 9)) 10 2 (set := some 42) == some (0, 42, 2)
+ 
+ end nested_borrows_as_deref_mut_join.checks
+diff --git a/tests/src/join-shared-borrow-field.rs b/tests/src/join-shared-borrow-field.rs
+index 40c9606..08dcd4f 100644
+--- a/tests/src/join-shared-borrow-field.rs
++++ b/tests/src/join-shared-borrow-field.rs
+@@ -90,5 +90,21 @@ mod native {
+             }),
+             ((5, 5, true), 99, 1)
+         );
++        assert_eq!(
++            on_frame(10, 1, |f| {
++                let r = run_try_plain(&mut *f, true, 4);
++                *f.ctx = 99;
++                r
++            }),
++            ((5, 4, true), 99, 2)
++        );
++        assert_eq!(
++            on_frame(10, 3, |f| {
++                let r = run_try_plain(&mut *f, true, 4);
++                *f.ctx = 7;
++                r
++            }),
++            ((3, 4, false), 7, 3)
++        );
+     }
+ }
+diff --git a/tests/src/loop-nested-join.rs b/tests/src/loop-nested-join.rs
+index f610ded..2938471 100644
+--- a/tests/src/loop-nested-join.rs
++++ b/tests/src/loop-nested-join.rs
+@@ -65,6 +65,28 @@ pub fn drive_even(n: u32) -> (u32, u32, u32) {
+     (r, calls, t)
+ }
+ 
++/// The caller writes through both the inner borrow and the counter after the
++/// loop (the values given back by the loop are observed)
++pub fn drive_odd_write(n: u32) -> (u32, u32, u32) {
++    let mut t = 7u32;
++    let mut c = Counter { total: &mut t, calls: 2 };
++    let r = bump_odd(&mut c, n);
++    *c.total = (*c.total).wrapping_mul(3);
++    c.calls = c.calls.wrapping_add(50);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
++pub fn drive_even_write(n: u32) -> (u32, u32, u32) {
++    let mut t = 3u32;
++    let mut c = Counter { total: &mut t, calls: 10 };
++    let r = bump_even(&mut c, n);
++    *c.total = (*c.total).wrapping_add(1000);
++    c.calls = c.calls.wrapping_mul(2);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -77,5 +99,9 @@ mod native {
+         println!("{:?}", drive_even(0));
+         println!("{:?}", drive_even(1));
+         println!("{:?}", drive_even(6));
++        for n in [0u32, 1, 2, 5, 6] {
++            println!("odd_write {} {:?}", n, drive_odd_write(n));
++            println!("even_write {} {:?}", n, drive_even_write(n));
++        }
+     }
+ }
+diff --git a/tests/src/loop-nested-staged.rs b/tests/src/loop-nested-staged.rs
+index 22fdcbe..d4c2a6e 100644
+--- a/tests/src/loop-nested-staged.rs
++++ b/tests/src/loop-nested-staged.rs
+@@ -53,6 +53,18 @@ pub fn drive_n_then_write(n: u32) -> (u32, u32, u32) {
+     (r, calls, t)
+ }
+ 
++/// The caller writes through both the inner borrow and the counter after the
++/// loop (the values given back by the loop are observed)
++pub fn drive_n_write_both(n: u32) -> (u32, u32, u32) {
++    let mut t = 5u32;
++    let mut c = Counter { total: &mut t, calls: 1 };
++    let r = bump_n(&mut c, n);
++    *c.total = (*c.total).wrapping_add(100);
++    c.calls = c.calls.wrapping_mul(7);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -64,5 +76,8 @@ mod native {
+         println!("{:?}", drive_n(4));
+         println!("{:?}", drive_n_then_write(0));
+         println!("{:?}", drive_n_then_write(3));
++        for n in [0u32, 1, 2, 4] {
++            println!("write_both {} {:?}", n, drive_n_write_both(n));
++        }
+     }
+ }
+diff --git a/tests/src/nested-borrows-as-deref-mut-join.rs b/tests/src/nested-borrows-as-deref-mut-join.rs
+index 83bcdcd..2e814a7 100644
+--- a/tests/src/nested-borrows-as-deref-mut-join.rs
++++ b/tests/src/nested-borrows-as-deref-mut-join.rs
+@@ -162,5 +162,22 @@ mod native {
+     fn pos_reread_native() {
+         assert_eq!(on_frame(10, 2, |f| run_pos_reread(f, true, 9)), (2, 10, 2));
+         assert_eq!(on_frame(10, 2, |f| run_pos_reread(f, false, 9)), (0, 10, 2));
++        // The caller writes through the frame after the call
++        assert_eq!(
++            on_frame(10, 2, |f| {
++                let r = run_pos_reread(&mut *f, true, 9);
++                *f.ctx = 99;
++                r
++            }),
++            (2, 99, 2)
++        );
++        assert_eq!(
++            on_frame(10, 2, |f| {
++                let r = run_pos_reread(&mut *f, false, 9);
++                *f.ctx = 42;
++                r
++            }),
++            (0, 42, 2)
++        );
+     }
+ }

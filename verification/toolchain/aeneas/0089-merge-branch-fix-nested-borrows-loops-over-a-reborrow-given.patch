@@ -1,0 +1,2737 @@
+# aeneas integration step 89 after cba11f3beb: commit 26b1765b012e3f784e1962b91eb1c5e3d7cdbf31
+# first parent c0c7c336fa52246c452c087123b5168b2ab8b5ba, merged f5a6a9b9501a6d174b5759443714412bd9da485f
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (loops over a reborrow given to a staged call: staged loop continuations at level 1)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index b7525d4..3d7b25d 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -213,6 +213,7 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       abs_id_to_info = AbsId.Map.empty;
+       fun_call_stages = AbsId.Map.empty;
+       staged_conts = AbsId.Map.empty;
++      level1_staged_abs = AbsId.Set.empty;
+       promised_fvars = Pure.FVarId.Set.empty;
+       deferred_lets = [];
+       unavailable_svs = SymbolicValueId.Map.empty;
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index 9adc14e..71ce890 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -892,6 +892,45 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+     | ASymbolic (pm, AProjBorrows { proj; loans }) when has_proj_loan pm proj ->
+         let norm_proj_ty = normalize_proj_ty abs1.regions.owned proj.proj_ty in
+         let matched = ref false in
++        (* Nested borrows: the borrows of the left loan projector (the inner
++           borrows of the values given back for the projected value, which the
++           left abstraction owns: level-1 outputs of a call, see
++           [abs_call_level_output_svs]) and the loans of the right borrow
++           projector over the same values (the right abstraction lends these
++           inner borrows) cancel out: the merged abstraction borrows and lends
++           them (its continuation passes one to the other, see
++           [merge_abs_conts_aux]). *)
++        let loans = ref loans in
++        let cancel_nested_borrows borrows =
++          List.filter
++            (fun ((_, borrow) : mconsumed_symb * aproj) ->
++              match borrow with
++              | AProjBorrows { proj = bproj; loans = [] } ->
++                  let bnorm =
++                    normalize_proj_ty abs0.regions.owned bproj.proj_ty
++                  in
++                  let rec remove = function
++                    | [] -> None
++                    | ((_, (loan : aproj)) as x) :: rest -> (
++                        match loan with
++                        | AProjLoans
++                            { proj = lproj; consumed = []; borrows = [] }
++                          when lproj.sv_id = bproj.sv_id
++                               && normalize_proj_ty abs1.regions.owned
++                                    lproj.proj_ty
++                                  = bnorm -> Some rest
++                        | _ -> Option.map (fun rest -> x :: rest) (remove rest))
++                  in
++                  begin
++                    match remove !loans with
++                    | Some rest ->
++                        loans := rest;
++                        false
++                    | None -> true
++                  end
++              | _ -> true)
++            borrows
++        in
+         map_left (fun left ->
+             match left.value with
+             | ASymbolic (pm', AProjLoans loan)
+@@ -906,7 +945,7 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+                     {
+                       proj = loan.proj.sv_id;
+                       consumed = loan.consumed;
+-                      borrows = loan.borrows;
++                      borrows = cancel_nested_borrows loan.borrows;
+                     }
+                 in
+                 if proj_has_ownership ended then
+@@ -914,6 +953,7 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+                 else mk_aignored span left.ty None
+             | _ -> left);
+         [%sanity_check] span !matched;
++        let loans = !loans in
+         (* Shared backward outputs may be absent from the lender's
+            continuation. Record the actual ownership discharge so composition
+            can retire the borrower's output without inventing an input or
+@@ -2596,6 +2636,155 @@ let merge_abs_conts_generate_input (span : Meta.span) (ctx : eval_ctx)
+   let input = mk_etuple ~borrow_proj:false (List.rev !inputs) in
+   (pat, input)
+ 
++(** Nested borrows: the level-1 outputs of a function-call abstraction held
++    inside the arguments of its continuation.
++
++    When an ancestor region of the call ends, the value it gives back for a
++    borrow projector of the call's output holds inner borrows of the region of
++    the abstraction: the loan projector of that output in the abstraction then
++    records them as [borrows] (see {!InterpBorrows.end_proj_loans_symbolic}).
++    The abstraction owns these borrows: they are outputs of its backward
++    function at level 1 (e.g., [Option::as_deref_mut] gives back, for the frame
++    given back through the returned reference, the inner borrows the caller
++    lent to it: [⌊s@40, borrows=[(s@46)]⌋]), while the loan projector itself is
++    an input at level 0. We return the symbolic values of these borrows, as the
++    level-0 arguments of the continuation hold them (the borrows under a shared
++    borrow are not given back: their loan projectors are ignored there). *)
++let abs_call_level_output_svs (abs : abs) : SymbolicValueId.Set.t =
++  match abs.cont with
++  | Some { input = Some { value = EApp (EFunCall _, (_ :: _ as args)); _ }; _ }
++    ->
++      let svs = ref SymbolicValueId.Set.empty in
++      let visitor =
++        object
++          inherit [_] iter_tevalue as super
++
++          method! visit_ESymbolic env pm proj =
++            (match proj with
++            | EProjLoans { borrows; _ } ->
++                List.iter
++                  (fun (_, (borrow : eproj)) ->
++                    match borrow with
++                    | EProjBorrows { proj; _ } ->
++                        svs := SymbolicValueId.Set.add proj.sv_id !svs
++                    | _ -> ())
++                  borrows
++            | _ -> ());
++            super#visit_ESymbolic env pm proj
++        end
++      in
++      (* The arguments of level 0 come last (see [split_call_cont_level_outputs]) *)
++      List.iter (visitor#visit_tevalue ()) (List.nth args (List.length args - 1));
++      !svs
++  | _ -> SymbolicValueId.Set.empty
++
++(** Does an abstraction hold (possibly nested) loan projectors over one of the
++    symbolic values [svs]? *)
++let abs_lends_symbolic (abs : abs) (svs : SymbolicValueId.Set.t) : bool =
++  let visitor =
++    object
++      inherit [_] iter_abs as super
++
++      method! visit_AProjLoans env loans =
++        if SymbolicValueId.Set.mem loans.proj.sv_id svs then raise Utils.Found;
++        super#visit_AProjLoans env loans
++    end
++  in
++  try
++    List.iter (visitor#visit_tavalue ()) abs.avalues;
++    false
++  with Utils.Found -> true
++
++(** Nested borrows: split the (destructured) continuation of a function-call
++    abstraction whose loan projectors hold level-1 outputs of the call (see
++    {!abs_call_level_output_svs}) into:
++    - the application which computes these outputs from the inputs of level 1
++      and above ([EFunCallOutputs], see {!abs_fun}); the returned output is the
++      tuple of their borrow projectors;
++    - the application which receives the inputs of level 0 (the loan projectors
++      without their borrows) and computes the outputs of level 0.
++
++    The composed continuation can then consume the level-1 outputs before it
++    computes the level-0 inputs. *)
++let split_call_cont_level_outputs (span : Meta.span) (ctx : eval_ctx)
++    (output : tevalue) (input : tevalue) :
++    (tevalue * tevalue) * (tevalue * tevalue) =
++  match input.value with
++  | EApp (EFunCall abs_id, args) -> (
++      match List.rev args with
++      | [] -> [%craise] span "Unreachable"
++      | args0 :: rev_args_above ->
++          let args_above = List.rev rev_args_above in
++          let borrows = ref [] in
++          let strip =
++            object
++              inherit [_] map_tevalue as super
++
++              method! visit_ESymbolic env pm proj =
++                match proj with
++                | EProjLoans { proj; consumed; borrows = level_outputs }
++                  when level_outputs <> [] ->
++                    [%cassert] span (consumed = [])
++                      "Nested borrows: a loan projector in the continuation of \
++                       a function call consumed values and holds level-1 \
++                       outputs of the call";
++                    List.iter
++                      (fun (_, (level_output : eproj)) ->
++                        match level_output with
++                        | EProjBorrows { proj; loans = [] } ->
++                            borrows := (pm, proj) :: !borrows
++                        | _ ->
++                            [%craise] span
++                              "Nested borrows: a level-1 output of a function \
++                               call holds nested loans")
++                      level_outputs;
++                    ESymbolic (pm, EProjLoans { proj; consumed; borrows = [] })
++                | _ -> super#visit_ESymbolic env pm proj
++            end
++          in
++          let args0 = List.map (strip#visit_tevalue ()) args0 in
++          let level_outputs = List.rev !borrows in
++          [%cassert] span (level_outputs <> []) "Unreachable";
++          (* Only the level-1 outputs are supported *)
++          let above = !borrows in
++          List.iter
++            (List.iter (fun v -> ignore (strip#visit_tevalue () v)))
++            args_above;
++          [%cassert] span
++            (!borrows == above)
++            "Nested borrows: a function call gives back values at level 2 \
++             through the loan projectors of its continuation";
++          let outputs1 =
++            mk_simpl_etuple ~borrow_proj:true
++              (List.map
++                 (fun (pm, (proj : esymbolic_proj)) : tevalue ->
++                   {
++                     value = ESymbolic (pm, EProjBorrows { proj; loans = [] });
++                     ty = proj.proj_ty;
++                   })
++                 level_outputs)
++          in
++          let input1 : tevalue =
++            {
++              value = EApp (EFunCallOutputs (abs_id, 1), args_above);
++              ty = outputs1.ty;
++            }
++          in
++          let input0 =
++            {
++              input with
++              value =
++                EApp
++                  (EFunCall abs_id, List.map (fun _ -> []) args_above @ [ args0 ]);
++            }
++          in
++          ((outputs1, input1), (output, input0)))
++  | _ ->
++      [%craise] span
++        ("Nested borrows: the continuation which holds level-1 outputs of a \
++          function call is not the application of its backward function:\n"
++        ^ tevalue_to_string ctx input)
++
+ (** Merge two abstraction continuations.
+ 
+     We merge from the right to the left, i.e.: we merge the (input) loans from
+@@ -2688,35 +2877,72 @@ let merge_abs_conts_aux (span : Meta.span) (ctx : eval_ctx) (abs0 : abs)
+       ^ "\n- cont1:\n"
+       ^ abs_cont_to_string span ctx ~indent:"  " cont1);
+ 
+-  (* Introduce binders for all the inputs of the second continuation *)
+-
+-  (* Bind all the outputs of the second continuation *)
+-  let pat1, inputs1 =
+-    abs_cont_bind_outputs span ctx abs1.regions.owned bound cont1
+-  in
+-  let bindings1 = !bound.all_bindings in
+-  let input_bindings1 = !bound.all_input_bindings in
+-  [%ltrace
+-    "- pat1: " ^ tepat_to_string ctx pat1 ^ "\n- inputs1: "
+-    ^ tevalue_to_string ctx inputs1
+-    ^ "\n- bound_inputs_outputs:\n"
+-    ^ bound_inputs_outputs_to_string ctx !bound];
+-
+-  (* For the final order to be correct, because we bind the second continuation
+-     then the first, we need to reset the [all_bindings] field *)
+-  bound := { !bound with all_bindings = []; all_input_bindings = [] };
+-
+-  (* Next, bind the outputs of the first continuation, while updating its inputs *)
+-  let pat0, inputs0 =
+-    abs_cont_bind_outputs span ctx abs0.regions.owned bound cont0
++  (* The continuations whose outputs we bind, in order: the second
++     continuation, then the first one, while updating its inputs (the loans
++     whose borrows are outputs of the second continuation become the variables
++     bound to these outputs).
++
++     Nested borrows: when one of the two continuations applies the backward
++     function of a call whose level-1 outputs (see
++     [abs_call_level_output_svs]) the other abstraction consumes, the other
++     abstraction may give back inputs of that call at level 0 (e.g., the call
++     which received the reborrow of a frame returned by [Option::as_deref_mut]
++     consumes the inner borrows of the frame it gave back, which
++     [as_deref_mut] gives back at level 1, and gives back the frame it
++     received, an input of [as_deref_mut] at level 0). We then bind the
++     level-1 outputs of the call first, then the other continuation, then the
++     level-0 outputs of the call (see [split_call_cont_level_outputs]). *)
++  let split_level_outputs (abs : abs) (other : abs) =
++    let svs = abs_call_level_output_svs abs in
++    (not (SymbolicValueId.Set.is_empty svs)) && abs_lends_symbolic other svs
++  in
++  let steps =
++    let destructured (abs : abs) (cont : abs_cont) =
++      match (cont.output, cont.input) with
++      | Some output, Some input ->
++          abs_cont_destructure_input_output_levels span ctx abs.regions.owned
++            output input
++      | _ -> [%craise] span "Unreachable"
++    in
++    let step (abs : abs) cont =
++      let output, input = destructured abs cont in
++      (abs.regions.owned, output, input)
++    in
++    let split (abs : abs) cont other other_cont =
++      let output, input = destructured abs cont in
++      let (outputs1, input1), (output0, input0) =
++        split_call_cont_level_outputs span ctx output input
++      in
++      [
++        (abs.regions.owned, outputs1, input1);
++        step other other_cont;
++        (abs.regions.owned, output0, input0);
++      ]
++    in
++    if split_level_outputs abs0 abs1 then split abs0 cont0 abs1 cont1
++    else if split_level_outputs abs1 abs0 then split abs1 cont1 abs0 cont0
++    else [ step abs1 cont1; step abs0 cont0 ]
++  in
++  let steps =
++    List.rev
++      (List.fold_left
++         (fun steps (regions, output, input) ->
++           (* For the final order to be correct, because we bind the
++              continuations in order, we need to reset the [all_bindings]
++              field *)
++           bound := { !bound with all_bindings = []; all_input_bindings = [] };
++           let pat, inputs =
++             bind_outputs_from_output_input span ctx regions bound output input
++           in
++           [%ltrace
++             "- pat: " ^ tepat_to_string ctx pat ^ "\n- inputs: "
++             ^ tevalue_to_string ctx inputs
++             ^ "\n- bound_inputs_outputs:\n"
++             ^ bound_inputs_outputs_to_string ctx !bound];
++           (regions, pat, inputs, !bound.all_bindings, !bound.all_input_bindings)
++           :: steps)
++         [] steps)
+   in
+-  let bindings0 = !bound.all_bindings in
+-  let input_bindings0 = !bound.all_input_bindings in
+-  [%ltrace
+-    "- pat0: " ^ tepat_to_string ctx pat0 ^ "\n- inputs0: "
+-    ^ tevalue_to_string ctx inputs0
+-    ^ "\n- bound_inputs_outputs:\n"
+-    ^ bound_inputs_outputs_to_string ctx !bound];
+ 
+   (* Nested borrows: the pending loans of an abstraction (the loans of the
+      value given back through a parent borrow, see
+@@ -2764,20 +2990,28 @@ let merge_abs_conts_aux (span : Meta.span) (ctx : eval_ctx) (abs0 : abs)
+   *)
+   let output, output_input_expr =
+     merge_abs_conts_generate_output span ctx
+-      (List.rev (bindings1 @ bindings0))
++      (List.rev
++         (List.concat_map (fun (_, _, _, bindings, _) -> bindings) steps))
+       !bound
+   in
+ 
+   (* Create the input expression and pattern *)
+   let input_pat, input_input =
+     merge_abs_conts_generate_input span ctx
+-      (List.rev (input_bindings1 @ input_bindings0))
++      (List.rev
++         (List.concat_map
++            (fun (_, _, _, _, input_bindings) -> input_bindings)
++            steps))
+       !bound
+   in
+ 
+   (* Create the let-bindings (this is the input expression) *)
+-  let input = mk_let span abs0.regions.owned pat0 inputs0 output_input_expr in
+-  let input = mk_let span abs1.regions.owned pat1 inputs1 input in
++  let input =
++    List.fold_right
++      (fun (regions, pat, inputs, _, _) input ->
++        mk_let span regions pat inputs input)
++      steps output_input_expr
++  in
+   let all_regions = RegionId.Set.union abs0.regions.owned abs1.regions.owned in
+   let input = mk_let span all_regions input_pat input_input input in
+ 
+diff --git a/src/interp/InterpAbs.mli b/src/interp/InterpAbs.mli
+index 24421ec..9d41dd8 100644
+--- a/src/interp/InterpAbs.mli
++++ b/src/interp/InterpAbs.mli
+@@ -183,6 +183,15 @@ val merge_abstractions_merge_markers :
+   tavalue list ->
+   tavalue list
+ 
++(** Nested borrows: the symbolic values of the level-1 outputs of a
++    function-call abstraction which its loan projectors hold as [borrows] (the
++    inner borrows of values given back when an ancestor region ended). *)
++val abs_call_level_output_svs : abs -> SymbolicValueId.Set.t
++
++(** Whether an abstraction holds (possibly nested) loan projectors over one of
++    the given symbolic values. *)
++val abs_lends_symbolic : abs -> SymbolicValueId.Set.t -> bool
++
+ (** Merge an abstraction into another abstraction.
+ 
+     We insert the result of the merge in place of the first abstraction (and in
+diff --git a/src/interp/InterpReduceCollapse.ml b/src/interp/InterpReduceCollapse.ml
+index a3a7de6..19ec881 100644
+--- a/src/interp/InterpReduceCollapse.ml
++++ b/src/interp/InterpReduceCollapse.ml
+@@ -1201,6 +1201,30 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+       with Found -> true
+   in
+ 
++  (* Nested borrows: a function-call abstraction whose loan projectors hold
++     level-1 outputs of the call (see [InterpAbs.abs_call_level_output_svs]) is
++     first merged with the abstraction which lends them. That abstraction can
++     consume them and give back inputs of the same call at level 0 (e.g., the
++     call receiving the reborrow returned by [Option::as_deref_mut] at the
++     continue of a loop): a cycle through the two calls which only their
++     levels order, and which the composition of their continuations can only
++     express while the call's continuation is a single application (see
++     [InterpAbs.merge_abs_conts_aux]). *)
++  let defers_level_outputs (ctx : eval_ctx) abs_id0 abs_id1 =
++    with_abs_conts
++    &&
++    let svs = abs_call_level_output_svs (ctx_lookup_abs ctx abs_id1) in
++    (not (SymbolicValueId.Set.is_empty svs))
++    && (not (abs_lends_symbolic (ctx_lookup_abs ctx abs_id0) svs))
++    && List.exists
++         (function
++           | EAbs abs ->
++               abs.abs_id <> abs_id0 && abs.abs_id <> abs_id1
++               && abs_lends_symbolic abs svs
++           | EBinding _ | EFrame -> false)
++         ctx.env
++  in
++
+   (*
+    * Merge all the mergeable abs.
+    *)
+@@ -1255,7 +1279,8 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+                 aid <> abs_id0
+                 && Marked.can_reduce_borrow ctx.ctx aid loan
+                 && (not (would_capture_payload_lifetime ctx abs_id0 aid))
+-                && not (would_capture_payload_lifetime ctx aid abs_id0))
++                && (not (would_capture_payload_lifetime ctx aid abs_id0))
++                && not (defers_level_outputs ctx.ctx abs_id0 aid))
+               abs_ids1
+           in
+           match AbsId.Set.min_elt_opt candidates with
+diff --git a/src/llbc/PrintBase.ml b/src/llbc/PrintBase.ml
+index 0edfad0..178a451 100644
+--- a/src/llbc/PrintBase.ml
++++ b/src/llbc/PrintBase.ml
+@@ -568,6 +568,9 @@ module Values = struct
+     | EOutputAbs rg_id -> "OutputAbs@" ^ RegionGroupId.to_string rg_id
+     | EInputAbs rg_id -> "InputAbs@" ^ RegionGroupId.to_string rg_id
+     | EFunCall aid -> "FunCall(abs_id@" ^ AbsId.to_string aid ^ ")"
++    | EFunCallOutputs (aid, level) ->
++        "FunCallOutputs(abs_id@" ^ AbsId.to_string aid ^ ",level@"
++        ^ string_of_int level ^ ")"
+     | ELoop (abs_id, lp_id) ->
+         "Loop(abs_id@" ^ AbsId.to_string abs_id ^ ",loop_id@"
+         ^ LoopId.to_string lp_id ^ ")"
+diff --git a/src/llbc/Values.ml b/src/llbc/Values.ml
+index 3ec2aa6..7ec8006 100644
+--- a/src/llbc/Values.ml
++++ b/src/llbc/Values.ml
+@@ -1095,6 +1095,20 @@ and abs_fun =
+ 
+           We remember the id of the corresponding region abstraction (we use
+           this in the translation). *)
++  | EFunCallOutputs of abs_id * int
++      (** Nested borrows: the outputs at the given level (> 0) of the backward
++          function of a regular function, computed from its inputs at this
++          level and the levels above (the argument groups, highest level
++          first). The application [EApp (EFunCall abs_id, args)] which follows
++          in the same continuation then receives the inputs of the levels below
++          only (its groups of the levels above are empty).
++
++          The inner borrows of a value given back when an ancestor region of
++          the call ended can be outputs of the call at level 1 (see
++          {!InterpAbs.abs_call_level_output_svs}): when another abstraction
++          consumes them and gives back inputs of the call at level 0, the
++          composed continuation applies the call in two parts, around that
++          abstraction. *)
+   | ELoop of abs_id * loop_id
+       (** The expression is the result of calling the backward function of a
+           loop.
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 8e4648c..f489914 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -254,6 +254,127 @@ let abs_pending_indices (ctx : bs_ctx) (abs : V.abs) : int list =
+       | _ -> None)
+     (List.mapi (fun index av -> (index, av)) abs.avalues)
+ 
++(** Nested borrows: whether a projection type holds a region of [owned] under a
++    mutable borrow of a region which is not in [owned] (e.g., ['3] in
++    [Option<&'2 mut Frame<'3>>] for the abstraction of ['3]): the projector then
++    has positions at level 1. *)
++let ty_has_level1_positions (ctx : bs_ctx) (owned : T.RegionId.Set.t)
++    (ty : T.ty) : bool =
++  let visitor =
++    object
++      inherit [_] T.iter_ty as super
++
++      method! visit_TRef env r ty' kind =
++        (match (r, kind) with
++        | T.RVar (Free rid), T.RMut
++          when (not (T.RegionId.Set.mem rid owned))
++               && TypesUtils.ty_has_mut_borrow_for_region_in_set
++                    ctx.type_ctx.type_infos owned ty' -> raise Utils.Found
++        | _ -> ());
++        super#visit_TRef env r ty' kind
++    end
++  in
++  try
++    visitor#visit_ty () ty;
++    false
++  with Utils.Found -> true
++
++(** Nested borrows: the level-1 positions of a loop abstraction staged at level
++    1 (see [staged_cont_stage.StageLevel]): the indices of its borrow projectors
++    (the stage receives the inner borrows of the values given back to their
++    parent borrows) and of its loan projectors (it gives back those of the
++    values given back to the projected borrows). *)
++let abs_level1_positions (ctx : bs_ctx) (abs : V.abs) : int list * int list =
++  let owned = abs.regions.owned in
++  List.fold_right
++    (fun (index, (av : V.tavalue)) (inputs, outputs) ->
++      if not (ty_has_level1_positions ctx owned av.ty) then (inputs, outputs)
++      else
++        match av.value with
++        | V.ASymbolic (_, (V.AProjBorrows _ | V.AEndedProjBorrows _)) ->
++            (index :: inputs, outputs)
++        | V.ASymbolic (_, (V.AProjLoans _ | V.AEndedProjLoans _)) ->
++            (inputs, index :: outputs)
++        | _ -> (inputs, outputs))
++    (List.mapi (fun index av -> (index, av)) abs.avalues)
++    ([], [])
++
++(** The staged continuation of an abstraction, if it has pending loans or is a
++    loop abstraction staged at level 1 (see [staged_cont]). *)
++let abs_staged_cont (ctx : bs_ctx) (abs : V.abs) : staged_cont option =
++  let pending_indices = abs_pending_indices ctx abs in
++  let level1 = V.AbsId.Set.mem abs.abs_id ctx.level1_staged_abs in
++  let stages =
++    (if pending_indices = [] then [] else [ StagePending pending_indices ])
++    @ if level1 then [ StageLevel 1 ] else []
++  in
++  match stages with
++  | [] -> None
++  | _ :: _ :: _ ->
++      [%craise] ctx.span
++        "Nested borrows: a loop abstraction with pending loans is staged at \
++         level 1"
++  | [ _ ] ->
++      let inputs =
++        List.filter_map
++          (fun (index, av) ->
++            Option.map
++              (fun _ -> index)
++              (tavalue_to_consumed_ty ~whole_ignored_loans:(pending_indices <> [])
++                 ctx abs.regions.owned 0 av))
++          (List.mapi (fun index av -> (index, av)) abs.avalues)
++      in
++      let pending_inputs =
++        List.filter_map
++          (fun (position, index) ->
++            if List.mem index pending_indices then Some position else None)
++          (List.mapi (fun position index -> (position, index)) inputs)
++      in
++      Some
++        {
++          stages;
++          pending_inputs;
++          num_inputs = List.length inputs;
++          stages_applied = 0;
++        }
++
++(** The types of the inputs and of the outputs of a stage of a staged
++    continuation (before the last one): the stage has type
++    [inputs -> (outputs * later)]. *)
++let staged_cont_stage_tys (ctx : bs_ctx) (abs : V.abs)
++    (stage : staged_cont_stage) : ty * ty =
++  match stage with
++  | StagePending pending ->
++      (* The first stage routes the values given back to the parent borrows of
++         the pending loans to the value given back to the joined borrow: its
++         outputs have the type of its inputs *)
++      let pending_tys =
++        List.filter_map
++          (fun (index, av) ->
++            if List.mem index pending then
++              tavalue_to_consumed_ty ~whole_ignored_loans:true ctx
++                abs.regions.owned 0 av
++            else None)
++          (List.mapi (fun index av -> (index, av)) abs.avalues)
++      in
++      let ty = mk_simpl_tuple_ty pending_tys in
++      (ty, ty)
++  | StageLevel level ->
++      [%cassert] ctx.span (level = 1) "Unimplemented";
++      let inputs, outputs = abs_level1_positions ctx abs in
++      let tys indices =
++        mk_simpl_tuple_ty
++          (List.map
++             (fun index ->
++               ctx_translate_fwd_ty ctx (List.nth abs.avalues index).ty)
++             indices)
++      in
++      [%cassert] ctx.span
++        (inputs <> [] && outputs <> [])
++        "Nested borrows: a loop abstraction staged at level 1 has no positions \
++         at level 1";
++      (tys inputs, tys outputs)
++
+ (** Compute the type of a region abstraction, seen as a continuation.
+ 
+     The result is [None] if the type is actually [unit].
+@@ -262,67 +383,51 @@ let abs_pending_indices (ctx : bs_ctx) (abs : V.abs) : int list =
+     that we flatten the values.
+ 
+     TODO: the result is incorrect if the loans have been partially ended (in
+-    particular, inside ADTs). With pending loans, the continuation is staged
+-    (see [staged_cont]). *)
++    particular, inside ADTs). A staged continuation (see [staged_cont]) has
++    type [in_1 -> (out_1 * (in_2 -> ... (inputs -> outputs)))]. *)
+ let abs_to_ty (ctx : bs_ctx) (abs : V.abs) : ty option =
+-  match abs_pending_indices ctx abs with
+-  | [] ->
++  match abs_staged_cont ctx abs with
++  | None ->
+       let inputs, outputs = abs_to_input_output_tys ctx abs in
+       if inputs = [] && outputs = [] then None
+       else Some (mk_arrows inputs (mk_simpl_tuple_ty outputs))
+-  | pending ->
+-      (* Staged continuation (see [staged_cont]):
+-         [pending -> (pending * (inputs -> outputs))] *)
++  | Some staged ->
+       let abs_level = 0 in
+-      let pending_tys, inputs =
+-        List.partition_map
++      let is_pending index =
++        List.exists
++          (function
++            | StagePending pending -> List.mem index pending
++            | StageLevel _ -> false)
++          staged.stages
++      in
++      let whole_ignored_loans =
++        List.exists
++          (function StagePending _ -> true | StageLevel _ -> false)
++          staged.stages
++      in
++      let inputs =
++        List.filter_map
+           (fun (index, av) ->
+             match
+-              tavalue_to_consumed_ty ~whole_ignored_loans:true ctx
+-                abs.regions.owned abs_level av
++              tavalue_to_consumed_ty ~whole_ignored_loans ctx abs.regions.owned
++                abs_level av
+             with
+-            | None -> Right None
+-            | Some ty -> if List.mem index pending then Left ty else Right (Some ty))
++            | None -> None
++            | Some ty -> if is_pending index then None else Some ty)
+           (List.mapi (fun index av -> (index, av)) abs.avalues)
+       in
+-      let inputs = List.filter_map Fun.id inputs in
+       let outputs =
+         List.filter_map
+           (tavalue_to_given_back_ty ctx abs.regions.owned abs_level)
+           abs.avalues
+       in
+-      let stage1 = mk_simpl_tuple_ty pending_tys in
+-      let stage2 = mk_arrows inputs (mk_simpl_tuple_ty outputs) in
+-      Some (mk_arrows [ stage1 ] (mk_simpl_tuple_ty [ stage1; stage2 ]))
+-
+-(** The staged continuation of an abstraction, if it has pending loans (see
+-    [staged_cont]). *)
+-let abs_staged_cont (ctx : bs_ctx) (abs : V.abs) : staged_cont option =
+-  match abs_pending_indices ctx abs with
+-  | [] -> None
+-  | pending_indices ->
+-      let inputs =
+-        List.filter_map
+-          (fun (index, av) ->
+-            Option.map
+-              (fun _ -> index)
+-              (tavalue_to_consumed_ty ~whole_ignored_loans:true ctx
+-                 abs.regions.owned 0 av))
+-          (List.mapi (fun index av -> (index, av)) abs.avalues)
+-      in
+-      let pending_inputs =
+-        List.filter_map
+-          (fun (position, index) ->
+-            if List.mem index pending_indices then Some position else None)
+-          (List.mapi (fun position index -> (position, index)) inputs)
+-      in
++      let last = mk_arrows inputs (mk_simpl_tuple_ty outputs) in
+       Some
+-        {
+-          pending_indices;
+-          pending_inputs;
+-          num_inputs = List.length inputs;
+-          stage_applied = false;
+-        }
++        (List.fold_right
++           (fun stage later ->
++             let in_ty, out_ty = staged_cont_stage_tys ctx abs stage in
++             mk_arrows [ in_ty ] (mk_simpl_tuple_ty [ out_ty; later ]))
++           staged.stages last)
+ 
+ (** Register the staged continuations of join or loop abstractions which were
+     just bound to variables (see [staged_cont]). *)
+@@ -906,6 +1011,140 @@ let retain_reconstructed_carriers (pat : V.tepat) (next : V.tevalue) =
+     in
+     (next, carriers)
+ 
++(** Nested borrows: the outputs at [level] of the staged backward function of
++    the call [aid], in a continuation (see [V.EFunCallOutputs]). We apply the
++    stages which were not applied yet, up to the last one which gives back
++    values at [level], to the inputs [args] (the translated argument groups of
++    the levels [level] and above, highest level first), in order. The
++    application of the call which follows in the continuation (see
++    [einput_to_texpr]) then applies the next stages.
++
++    Returns the let-bindings of the stages (their outputs per level and their
++    next stage, which becomes the backward function of the call) and the
++    outputs at [level]. *)
++let apply_call_level_outputs (ctx : bs_ctx) (aid : V.AbsId.id) (level : int)
++    (args : texpr list list) : bs_ctx * (tpat * texpr) list * texpr =
++  let span = ctx.span in
++  let stage =
++    [%unwrap_with_span] span
++      (V.AbsId.Map.find_opt aid ctx.fun_call_stages)
++      "Nested borrows: a continuation applies the outputs of a level of a \
++       function call whose backward function is not staged"
++  in
++  let early = stage.signature.early in
++  let applied = List.length stage.early_outputs in
++  let last =
++    List.fold_left
++      (fun last (index, (early : back_early_sg)) ->
++        if index >= applied && List.mem_assoc level early.early_outputs then
++          Some index
++        else last)
++      None
++      (List.mapi (fun index early -> (index, early)) early)
++  in
++  let last =
++    [%unwrap_with_span] span last
++      ("Nested borrows: a continuation applies the outputs of level "
++     ^ string_of_int level
++     ^ " of a function call, which no stage of its staged backward function \
++        still to apply gives back")
++  in
++  let max_level = level + List.length args - 1 in
++  let queues = ref (List.mapi (fun i group -> (max_level - i, group)) args) in
++  let take level' (tys : (string option * ty) list) =
++    let values = Option.value (List.assoc_opt level' !queues) ~default:[] in
++    let n = List.length tys in
++    [%cassert] span
++      (List.length values >= n)
++      ("Nested borrows: a continuation does not give the inputs of level "
++     ^ string_of_int level'
++     ^ " of a stage of a staged backward function");
++    let taken = List.filteri (fun i _ -> i < n) values in
++    queues :=
++      (level', List.filteri (fun i _ -> i >= n) values)
++      :: List.remove_assoc level' !queues;
++    [%cassert] span
++      (List.map (fun (v : texpr) -> v.ty) taken = List.map snd tys)
++      ("Nested borrows: the inputs of level " ^ string_of_int level'
++     ^ " which a continuation gives to a stage of a staged backward function \
++        disagree with the stage");
++    mk_simpl_tuple_texpr span taken
++  in
++  let rec apply ctx index lets outputs =
++    if index > last then (ctx, List.rev lets, outputs)
++    else
++      let stage = V.AbsId.Map.find aid ctx.fun_call_stages in
++      let info = V.AbsId.Map.find aid ctx.abs_id_to_info in
++      [%cassert] span
++        (not (info.can_fail || stage.signature.effect_info.can_fail))
++        "Nested borrows: a continuation applies a stage of a staged backward \
++         function which can fail";
++      let early = List.nth stage.signature.early index in
++      let inputs =
++        List.map (fun (level', tys) -> take level' tys) early.early_inputs
++      in
++      let call =
++        [%add_loc] mk_app span info.fvar (mk_simpl_tuple_texpr span inputs)
++      in
++      let later_ty =
++        match opt_destruct_tuple span call.ty with
++        | Some [ _; later_ty ] -> later_ty
++        | _ -> [%internal_error] span
++      in
++      let ctx, stage_outputs =
++        List.fold_left_map
++          (fun ctx (level', tys) ->
++            let ctx, vars = fresh_vars tys ctx in
++            (ctx, (level', vars)))
++          ctx early.early_outputs
++      in
++      [%cassert] span
++        (List.for_all (fun (level', _) -> level' = level) stage_outputs)
++        ("Nested borrows: a stage of a staged backward function applied for \
++          its outputs of level " ^ string_of_int level
++       ^ " in a continuation gives back values at another level");
++      let ctx, later = fresh_var (Some "back") later_ty ctx in
++      let pat =
++        mk_simpl_tuple_pat
++          [
++            mk_simpl_tuple_pat
++              (List.map
++                 (fun (_, vars) ->
++                   mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) vars))
++                 stage_outputs);
++            mk_tpat_from_fvar None later;
++          ]
++      in
++      let ctx =
++        {
++          ctx with
++          abs_id_to_info =
++            V.AbsId.Map.add aid
++              { fvar = mk_texpr_from_fvar later; can_fail = false }
++              ctx.abs_id_to_info;
++          fun_call_stages =
++            V.AbsId.Map.add aid
++              {
++                stage with
++                early_outputs = stage.early_outputs @ [ stage_outputs ];
++              }
++              ctx.fun_call_stages;
++        }
++      in
++      let outputs =
++        outputs
++        @ Option.value (List.assoc_opt level stage_outputs) ~default:[]
++      in
++      apply ctx (index + 1) ((pat, call) :: lets) outputs
++  in
++  let ctx, lets, outputs = apply ctx applied [] [] in
++  [%cassert] span
++    (List.for_all (fun (_, values) -> values = []) !queues)
++    ("Nested borrows: a continuation gives more inputs to the stages of a \
++      staged backward function which give back its outputs of level "
++    ^ string_of_int level ^ " than they receive");
++  (ctx, lets, mk_simpl_tuple_texpr span (List.map mk_texpr_from_fvar outputs))
++
+ (** The boolean is [can_fail] (i.e., does the expression live in the error
+     monad?).
+ 
+@@ -955,8 +1194,36 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+             when T.RegionId.Set.mem rid rids' -> false
+           | _ -> filter
+         in
+-        let ctx, bound_can_fail, bound =
+-          to_texpr ~filter:bound_filter rids' ctx bound
++        let ctx, bound_can_fail, bound, stage_lets =
++          match bound.value with
++          | V.EApp (V.EFunCallOutputs (aid, level), args) ->
++              (* The outputs of a level of a staged backward function (see
++                 [apply_call_level_outputs]) *)
++              let ctx, args =
++                List.fold_left_map
++                  (fun ctx group ->
++                    let ctx, group =
++                      List.fold_left_map
++                        (fun ctx arg ->
++                          let ctx, can_fail, arg =
++                            to_texpr ~filter:bound_filter rids' ctx arg
++                          in
++                          [%sanity_check] span (not can_fail);
++                          (ctx, arg))
++                        ctx group
++                    in
++                    (ctx, List.filter_map Fun.id group))
++                  ctx args
++              in
++              let ctx, lets, outputs =
++                apply_call_level_outputs ctx aid level args
++              in
++              (ctx, false, Some outputs, lets)
++          | _ ->
++              let ctx, can_fail, bound =
++                to_texpr ~filter:bound_filter rids' ctx bound
++              in
++              (ctx, can_fail, bound, [])
+         in
+         let next, carriers = retain_reconstructed_carriers pat next in
+         let llbc_pat = pat in
+@@ -992,6 +1259,12 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+             carrier_bindings next
+         in
+         let e = [%add_loc] mk_closed_checked_let ctx false pat bound next in
++        let e =
++          List.fold_right
++            (fun (pat, call) e ->
++              [%add_loc] mk_closed_checked_let ctx false pat call e)
++            stage_lets e
++        in
+         let can_fail = bound_can_fail || next_can_fail in
+         (ctx, can_fail, Some e)
+     | V.EJoinMarkers _ | V.EBVar _ ->
+@@ -1121,6 +1394,11 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+           | V.EOutputAbs _ | V.EInputAbs _ ->
+               (* Those shouln't get merged *)
+               [%internal_error] span
++          | V.EFunCallOutputs _ ->
++              (* See the case [ELet] *)
++              [%craise] span
++                "Nested borrows: the outputs of a level of a function call are \
++                 not bound by a let-binding of the continuation"
+           | V.EFunCall abs_id | V.ELoop (abs_id, _) | V.EJoin abs_id ->
+               (* Lookup the variable introduced for the backward function *)
+               let ctx, e, can_fail =
+@@ -1154,19 +1432,24 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+                         let args =
+                           match (f, args) with
+                           | (V.ELoop (aid, _) | V.EJoin aid), [ args ] -> (
+-                              (* A staged continuation whose first stage was
+-                                 applied receives the inputs of its second
+-                                 stage only (see [staged_cont]) *)
++                              (* A staged continuation whose early stages were
++                                 applied receives the inputs of its last stage
++                                 only (see [staged_cont]) *)
+                               match
+                                 V.AbsId.Map.find_opt aid ctx.staged_conts
+                               with
+                               | Some
+                                   {
+-                                    stage_applied = true;
++                                    stages;
++                                    stages_applied;
+                                     pending_inputs;
+                                     num_inputs;
+-                                    _;
+                                   } ->
++                                  [%cassert] span
++                                    (stages_applied = List.length stages)
++                                    "Nested borrows: the application of a \
++                                     staged continuation precedes its early \
++                                     stages";
+                                   [%cassert] span
+                                     (List.length args = num_inputs)
+                                     "Nested borrows: the application of a \
+@@ -1175,7 +1458,7 @@ let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
+                                   List.filteri
+                                     (fun i _ -> not (List.mem i pending_inputs))
+                                     args
+-                              | _ -> args)
++                              | None -> args)
+                           | V.EFunCall _, _ ->
+                               List.filter_map
+                                 (function
+@@ -1670,34 +1953,144 @@ let register_outputs (ctx : bs_ctx) (bound_outputs : bound_borrows_loans)
+   List.iter register avl;
+   List.rev !outputs
+ 
+-(** Staged continuations (see [staged_cont]): the first stage of the
+-    continuation of a join or loop abstraction is the routing of the value
+-    given back to the parent borrows of its pending loans to the value given
+-    back to the joined borrow, at level 1. Where the joined value is the
+-    borrowed value (the continuation involves no call), it is the identity.
+-    Where the joined value was given back by a call whose region group of the
+-    abstraction has a staged backward function (its first stage is exactly
+-    this routing, see [Pure.back_sg_info.early]), it is the first stage of
+-    that function, and the continuation calls the second one. Where the
+-    continuation applies the (staged) continuation of a join or loop
+-    abstraction to the pending loans (the continuation of a loop abstraction
+-    at a [continue] or a [break] applies the continuation of the loop
+-    abstraction of the next iteration), the first stage of that one comes
+-    first: the routing from the parent borrows to the value it joined, then
+-    through the call.
+-
+-    Returns the chain of first stages (the function, the pattern and the
+-    expression of its outputs, and the variable for its second stage), with
+-    the context in which the continuation calls the second stages. The first
+-    stage of the call is then applied in that context (see
+-    [fun_call_stage.early_outputs]): its outputs are bound to variables per
+-    level, as for a stage applied when a sub-abstraction of the call ends (see
++(** Nested borrows: the number of values which the applications of the
++    backward function of the call [aid] in a continuation give at each level
++    (see [V.EFunCallOutputs]). *)
++let call_app_inputs_per_level (aid : V.AbsId.id) (input : V.tevalue) :
++    (abs_level * int) list =
++  let counts = ref [] in
++  let add level (args : V.tevalue list) =
++    let n =
++      List.length
++        (List.filter
++           (fun (v : V.tevalue) -> not (ValuesUtils.is_eignored v.value))
++           args)
++    in
++    let previous = Option.value (List.assoc_opt level !counts) ~default:0 in
++    counts := (level, previous + n) :: List.remove_assoc level !counts
++  in
++  let visitor =
++    object
++      inherit [_] V.iter_tevalue as super
++
++      method! visit_EApp env f args =
++        (match f with
++        | V.EFunCall aid' when aid' = aid ->
++            let max_level = List.length args - 1 in
++            List.iteri (fun i group -> add (max_level - i) group) args
++        | V.EFunCallOutputs (aid', level) when aid' = aid ->
++            let max_level = level + List.length args - 1 in
++            List.iteri (fun i group -> add (max_level - i) group) args
++        | _ -> ());
++        super#visit_EApp env f args
++    end
++  in
++  visitor#visit_tevalue () input;
++  !counts
++
++(** Nested borrows: the stages of the staged backward function of a call, among
++    those not applied yet, whose inputs the applications of the call in a
++    continuation do not give (see [call_app_inputs_per_level]). They are the
++    leading ones: the stages of the call which exchange the values at level 1
++    of a loop abstraction staged at level 1 (see
++    [staged_cont_stage.StageLevel]), e.g., the first stage of
++    [Option::as_deref_mut] on the reborrow of the loop state, which receives
++    the inner borrows of the value given back to the state's own borrow. *)
++let call_absent_early_stages (span : Meta.span) (stage : fun_call_stage)
++    (present : (abs_level * int) list) : int =
++  let applied = List.length stage.early_outputs in
++  let unapplied = List.filteri (fun i _ -> i >= applied) stage.signature.early in
++  let absent = Hashtbl.create 4 in
++  let add_total inputs =
++    List.iter
++      (fun (level, tys) ->
++        let previous = Option.value (Hashtbl.find_opt absent level) ~default:0 in
++        Hashtbl.replace absent level (previous + List.length tys))
++      inputs
++  in
++  List.iter (fun (early : back_early_sg) -> add_total early.early_inputs) unapplied;
++  add_total stage.signature.inputs;
++  List.iter
++    (fun (level, n) ->
++      let total = Option.value (Hashtbl.find_opt absent level) ~default:0 in
++      [%cassert] span (n <= total)
++        "Nested borrows: a continuation gives more inputs to a staged backward \
++         function than its stages receive";
++      Hashtbl.replace absent level (total - n))
++    present;
++  let rec count n = function
++    | [] -> n
++    | (early : back_early_sg) :: rest ->
++        if
++          List.for_all
++            (fun (level, tys) ->
++              List.length tys
++              <= Option.value (Hashtbl.find_opt absent level) ~default:0)
++            early.early_inputs
++        then (
++          List.iter
++            (fun (level, tys) ->
++              Hashtbl.replace absent level
++                (Hashtbl.find absent level - List.length tys))
++            early.early_inputs;
++          count (n + 1) rest)
++        else n
++  in
++  let n = count 0 unapplied in
++  [%cassert] span
++    (Hashtbl.fold (fun _ absent ok -> ok && absent = 0) absent true)
++    "Nested borrows: a continuation does not give the inputs of a stage of a \
++     staged backward function which follows the stages it gives the inputs of";
++  n
++
++(** Staged continuations (see [staged_cont]): the early stages of the
++    continuation of a join or loop abstraction.
++
++    [StagePending]: the first stage is the routing of the value given back to
++    the parent borrows of its pending loans to the value given back to the
++    joined borrow, at level 1. Where the joined value is the borrowed value
++    (the continuation involves no call), it is the identity. Where the joined
++    value was given back by a call whose region group of the abstraction has a
++    staged backward function (its first stage is exactly this routing, see
++    [Pure.back_sg_info.early]), it is the first stage of that function, and the
++    continuation calls the second one.
++
++    [StageLevel 1]: the stage exchanges the values at level 1 of the loop
++    abstraction: the stages of the calls which the continuation does not give
++    the inputs of (see [call_absent_early_stages]) come in this stage, chained
++    (e.g., at the [continue] of a loop over [f(execution.as_deref_mut())], the
++    first stage of [as_deref_mut] receives the inner borrows of the value given
++    back to the loop state's own borrow, which the loop abstraction receives at
++    level 1, and gives back those of the value given back to the next state's
++    borrow).
++
++    Where the continuation applies the (staged) continuation of a join or loop
++    abstraction (the continuation of a loop abstraction at a [continue] or a
++    [break] applies the continuation of the loop abstraction of the next
++    iteration), the stage of that one comes first: the routing from the parent
++    borrows to the value it joined, then through the call.
++
++    Returns the chain of each stage (the function, the pattern and the
++    expression of its outputs, and the variable for its next stage), with the
++    context in which the continuation calls the last stages. The stages of the
++    calls are then applied in that context (see [fun_call_stage.early_outputs]):
++    their outputs are bound to variables per level, as for a stage applied when
++    a sub-abstraction of the call ends (see
+     [SymbolicToPureExpressions.translate_apply_early_stage]), and the
+-    application of the call in the continuation receives the inputs of the
+-    second stage. *)
+-let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+-    : bs_ctx * (texpr * tpat * texpr * fvar) list =
++    applications of the calls in the continuation receive the inputs of their
++    next stages. Only one stage before the last one is supported. *)
++let staged_cont_early_stages (ctx : bs_ctx) (stages : staged_cont_stage list)
++    (stage_tys : ty list) (input : V.tevalue) :
++    bs_ctx * (texpr * tpat * texpr * fvar) list =
+   let span = ctx.span in
++  let stage, stage1_ty =
++    match (stages, stage_tys) with
++    | [ stage ], [ ty ] -> (stage, ty)
++    | _ ->
++        [%craise] span
++          "Nested borrows: the continuation of a join or loop abstraction has \
++           several stages before the last one"
++  in
+   let apps = ref [] in
+   let visitor =
+     object
+@@ -1716,10 +2109,18 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+         | _ -> false)
+       (List.rev !apps)
+   in
+-  (* The first stage of a staged function [f : stage1_ty -> (stage1_ty *
+-     later)], whose second stage the continuation calls; [outputs]: the
+-     variables for the outputs of the stage, per level (a single variable by
+-     default) *)
++  let calls =
++    List.fold_left
++      (fun calls f ->
++        match f with
++        | V.EFunCall aid | V.EFunCallOutputs (aid, _) ->
++            if List.mem aid calls then calls else calls @ [ aid ]
++        | _ -> calls)
++      [] calls
++  in
++  (* A stage of a staged function [f : stage1_ty -> (stage1_ty * later)],
++     whose next stage the continuation calls; [outputs]: the variables for the
++     outputs of the stage, per level (a single variable by default) *)
+   let first_stage ?outputs ctx (info : back_fun_info) =
+     let arg_ty, ret_ty = dest_arrow_ty span info.fvar.ty in
+     let out_ty, later_ty =
+@@ -1729,9 +2130,9 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+     in
+     [%cassert] span
+       (arg_ty = stage1_ty && out_ty = stage1_ty)
+-      "Nested borrows: the first stage of a staged function applied by the \
+-       continuation of a join or loop abstraction with pending loans does not \
+-       route the values given back to them";
++      "Nested borrows: a stage of a staged function applied by the \
++       continuation of a join or loop abstraction with a staged continuation \
++       does not route the values of the stage of the continuation";
+     let ctx, out_pat, out_e =
+       match outputs with
+       | None ->
+@@ -1767,6 +2168,12 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+           ctx.abs_id_to_info;
+     }
+   in
++  let same_kind (stage' : staged_cont_stage) =
++    match (stage, stage') with
++    | StagePending _, StagePending _ -> true
++    | StageLevel level, StageLevel level' -> level = level'
++    | _ -> false
++  in
+   let ctx, cont_chain =
+     match conts with
+     | [] -> (ctx, [])
+@@ -1775,7 +2182,9 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+           ( V.AbsId.Map.find_opt aid ctx.staged_conts,
+             V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
+         with
+-        | Some ({ stage_applied = false; _ } as staged), Some info ->
++        | ( Some ({ stages_applied = 0; stages = [ stage' ]; _ } as staged),
++            Some info )
++          when same_kind stage' ->
+             let ctx, ((_, _, _, later) as stage) = first_stage ctx info in
+             let ctx = set_info ctx aid later in
+             let ctx =
+@@ -1783,67 +2192,108 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+                 ctx with
+                 staged_conts =
+                   V.AbsId.Map.add aid
+-                    { staged with stage_applied = true }
++                    { staged with stages_applied = 1 }
+                     ctx.staged_conts;
+               }
+             in
+             (ctx, [ stage ])
+         | _ ->
+             [%craise] span
+-              "Nested borrows: the continuation of a join or loop abstraction \
+-               with pending loans applies the continuation of a join or loop \
+-               abstraction which is not staged, or whose first stage was \
+-               applied")
++              "Nested borrows: the staged continuation of a join or loop \
++               abstraction applies the continuation of a join or loop \
++               abstraction which is not staged in the same way, or whose first \
++               stage was applied")
+     | _ ->
+         [%craise] span
+-          "Nested borrows: the continuation of a join or loop abstraction with \
+-           pending loans applies several continuations of join or loop \
++          "Nested borrows: the staged continuation of a join or loop \
++           abstraction applies several continuations of join or loop \
+            abstractions"
+   in
++  (* The stages of the calls which come in this stage of the continuation *)
++  let call_stages =
++    match stage with
++    | StagePending _ -> (
++        (* The first stage of the call is the routing of the pending loans *)
++        match calls with
++        | [] -> []
++        | [ aid ] -> (
++            match V.AbsId.Map.find_opt aid ctx.fun_call_stages with
++            | Some { signature; early_outputs = []; _ }
++              when List.length signature.early = 1 ->
++                [ (aid, 1) ]
++            | _ ->
++                [%craise] span
++                  "Nested borrows: the continuation of a join or loop \
++                   abstraction with pending loans calls a function whose \
++                   backward function is not staged in two stages, or whose \
++                   first stage was applied")
++        | _ ->
++            [%craise] span
++              "Nested borrows: the continuation of a join or loop abstraction \
++               with pending loans composes several function calls")
++    | StageLevel _ ->
++        (* The calls without staged backward function (or all of whose inputs
++           the continuation gives) are applied by the last stage *)
++        List.filter_map
++          (fun aid ->
++            match V.AbsId.Map.find_opt aid ctx.fun_call_stages with
++            | Some ({ signature = { early = _ :: _; _ }; _ } as call_stage) -> (
++                match
++                  call_absent_early_stages span call_stage
++                    (call_app_inputs_per_level aid input)
++                with
++                | 0 -> None
++                | n -> Some (aid, n))
++            | _ -> None)
++          calls
++  in
+   let ctx, call_chain =
+-    match calls with
++    match call_stages with
+     | [] -> (ctx, [])
+-    | [ V.EFunCall aid ] -> (
+-        match
+-          ( V.AbsId.Map.find_opt aid ctx.fun_call_stages,
+-            V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
+-        with
+-        | Some ({ signature; early_outputs = []; _ } as call_stage), Some info
+-          when List.length signature.early = 1 ->
++    | [ (aid, n) ] ->
++        let call_stage = V.AbsId.Map.find aid ctx.fun_call_stages in
++        let applied = List.length call_stage.early_outputs in
++        let rec apply ctx call_stage j =
++          if j = n then (ctx, [])
++          else
++            let info = V.AbsId.Map.find aid ctx.abs_id_to_info in
+             [%cassert] span
+-              (not (info.can_fail || signature.effect_info.can_fail))
+-              "Nested borrows: the continuation of a join or loop abstraction \
+-               with pending loans calls a staged backward function which can \
+-               fail";
++              (not (info.can_fail || call_stage.signature.effect_info.can_fail))
++              "Nested borrows: the staged continuation of a join or loop \
++               abstraction calls a staged backward function which can fail";
++            let early = List.nth call_stage.signature.early (applied + j) in
+             let ctx, outputs =
+               List.fold_left_map
+                 (fun ctx (level, tys) ->
+                   let ctx, vars = fresh_vars tys ctx in
+                   (ctx, (level, vars)))
+-                ctx (List.hd signature.early).early_outputs
++                ctx early.early_outputs
+             in
+-            let ctx, ((_, _, _, later) as stage) =
++            let ctx, ((_, _, _, later) as chain_stage) =
+               first_stage ~outputs ctx info
+             in
++            let call_stage =
++              {
++                call_stage with
++                early_outputs = call_stage.early_outputs @ [ outputs ];
++              }
++            in
+             let ctx =
+               {
+                 (set_info ctx aid later) with
+                 fun_call_stages =
+-                  V.AbsId.Map.add aid
+-                    { call_stage with early_outputs = [ outputs ] }
+-                    ctx.fun_call_stages;
++                  V.AbsId.Map.add aid call_stage ctx.fun_call_stages;
+               }
+             in
+-            (ctx, [ stage ])
+-        | _ ->
+-            [%craise] span
+-              "Nested borrows: the continuation of a join or loop abstraction \
+-               with pending loans calls a function whose backward function is \
+-               not staged in two stages, or whose first stage was applied")
++            let ctx, chain = apply ctx call_stage (j + 1) in
++            (ctx, chain_stage :: chain)
++        in
++        apply ctx call_stage 0
+     | _ ->
+         [%craise] span
+-          "Nested borrows: the continuation of a join or loop abstraction with \
+-           pending loans composes several function calls"
++          "Nested borrows: the staged continuation of a join or loop \
++           abstraction composes several function calls with staged backward \
++           functions"
+   in
+   (ctx, cont_chain @ call_chain)
+ 
+@@ -1857,27 +2307,50 @@ let abs_cont_to_texpr_aux ?(snapshot : bool ref option) (ctx : bs_ctx)
+      we need to do this to fix the order of the *inputs* (the order given
+      by the abstraction expression itself is arbitrary)
+   *)
++  let staged_cont = abs_staged_cont ctx abs in
++  let pending_kind =
++    match staged_cont with
++    | Some { stages; _ } ->
++        List.exists
++          (function StagePending _ -> true | StageLevel _ -> false)
++          stages
++    | None -> false
++  in
+   let bound_inputs, inputs =
+-    register_inputs ~whole_ignored_loans:(abs_pending_indices ctx abs <> [])
+-      ctx abs.regions.owned abs.avalues
++    register_inputs ~whole_ignored_loans:pending_kind ctx abs.regions.owned
++      abs.avalues
+   in
+   (* Staged continuation (see [staged_cont]): the pending loans are the inputs
+-     of the first stage *)
+-  let staged = abs_pending_indices ctx abs <> [] in
+-  let pending_inputs, inputs =
+-    if staged then
+-      let pending = PendingProjMap.values bound_inputs.pending in
+-      List.partition
+-        (fun (v : fvar) -> List.mem (mk_texpr_from_fvar v) pending)
+-        inputs
+-    else ([], inputs)
+-  in
+-  let stage1_pat =
+-    mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) pending_inputs)
++     of the first stage; a loop abstraction staged at level 1 receives the
++     values of level 1 of its borrow projectors *)
++  let staged = Option.is_some staged_cont in
++  let ctx, stage1_pat, inputs =
++    match staged_cont with
++    | None -> (ctx, mk_simpl_tuple_pat [], inputs)
++    | Some { stages = [ StagePending _ ]; _ } ->
++        let pending = PendingProjMap.values bound_inputs.pending in
++        let pending_inputs, inputs =
++          List.partition
++            (fun (v : fvar) -> List.mem (mk_texpr_from_fvar v) pending)
++            inputs
++        in
++        ( ctx,
++          mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) pending_inputs),
++          inputs )
++    | Some { stages = [ (StageLevel _ as stage) ]; _ } ->
++        let in_ty, _ = staged_cont_stage_tys ctx abs stage in
++        let ctx, var = fresh_var (Some "back") in_ty ctx in
++        (ctx, mk_tpat_from_fvar None var, inputs)
++    | Some _ ->
++        [%craise] span
++          "Nested borrows: the continuation of a join or loop abstraction has \
++           several stages before the last one"
+   in
+   let ctx, stage1 =
+-    if staged then staged_cont_first_stage ctx stage1_pat.ty input
+-    else (ctx, [])
++    match staged_cont with
++    | Some { stages; _ } ->
++        staged_cont_early_stages ctx stages [ stage1_pat.ty ] input
++    | None -> (ctx, [])
+   in
+ 
+   (* Translate the abstraction expression *)
+@@ -1912,7 +2385,9 @@ let abs_cont_to_texpr_aux ?(snapshot : bool ref option) (ctx : bs_ctx)
+       (* [fun pending => let (o1, k1) := f1 pending in ... (on, fun inputs =>
+          outputs)] *)
+       let pending_e =
+-        mk_simpl_tuple_texpr span (List.map mk_texpr_from_fvar pending_inputs)
++        [%unwrap_with_span] span
++          (tpat_to_texpr span stage1_pat)
++          "Unreachable"
+       in
+       let rec chain (arg : texpr) = function
+         | [] -> mk_simpl_tuple_texpr span [ arg; e ]
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index cca75b4..dec04f3 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -142,24 +142,42 @@ type loop_info = {
+ 
+ type back_fun_info = { fvar : texpr; can_fail : bool } [@@deriving show]
+ 
+-(** Nested borrows: a join or loop abstraction which holds pending loans (the
+-    loans of the value given back when a parent borrow ends, see
+-    [InterpBorrows.destructure_abs]) has a staged continuation. For the region
+-    of the inner borrows of a joined [&'a mut C<'b>], it is the region group
+-    ['b] of an identity function on [&'a mut C<'b>]: its first stage receives
+-    the value given back to the parent borrow (its pending loans, at level 1)
+-    and gives back the inner borrows of the value given back to the joined
+-    borrow (level 1); its second stage receives the current inner borrows of
+-    the joined value (level 0) and gives back the values of its borrows (level
+-    0). Its continuation has type
+-    [pending -> (pending * (inputs -> outputs))], where [inputs -> outputs] is
+-    the type of the continuation without the pending loans (see
+-    [SymbolicToPureAbs.abs_to_ty]). *)
++(** Nested borrows: a stage of a staged continuation of a join or loop
++    abstraction, before the last one (see [staged_cont]). *)
++type staged_cont_stage =
++  | StagePending of int list
++      (** The abstraction holds pending loans (the loans of the value given back
++          when a parent borrow ends, see [InterpBorrows.destructure_abs]), at
++          these positions in its values (they become loan projectors once their
++          parent borrow ended). For the region of the inner borrows of a joined
++          [&'a mut C<'b>], the continuation is the region group ['b] of an
++          identity function on [&'a mut C<'b>]: this stage receives the value
++          given back to the parent borrow (the pending loans, at level 1) and
++          gives back the inner borrows of the value given back to the joined
++          borrow (level 1). *)
++  | StageLevel of abs_level
++      (** A loop abstraction whose continuations at the [continue]s apply a
++          function call with a staged backward function (see
++          [SymbolicToPureExpressions.translate_loop]): the values of the loop
++          abstraction hold positions at this level (the regions of the
++          abstraction under a mutable borrow of a region it does not own, e.g.
++          ['3] in [Option<&'2 mut Frame<'3>>]), which the stages of the call
++          before the last ones exchange. This stage receives the values of its
++          borrow projectors at this level (the inner borrows of the values given
++          back to their parent borrows) and gives back those of its loan
++          projectors. A flattened (level-0) continuation would assume this
++          stage is the identity, which it is not once the call's early stages
++          consume these values (see [SymbolicToPureAbs.staged_cont_early_stages]).
++      *)
++[@@deriving show]
++
++(** Nested borrows: a join or loop abstraction with a staged continuation (see
++    [staged_cont_stage]). Its continuation has type
++    [in_1 -> (out_1 * (in_2 -> ... (inputs -> outputs)))], where
++    [inputs -> outputs] is the type of the continuation without the values its
++    early stages consume (see [SymbolicToPureAbs.abs_to_ty]). *)
+ type staged_cont = {
+-  pending_indices : int list;
+-      (** The positions of the pending loans in the values of the
+-          abstraction (they become loan projectors once their parent borrow
+-          ended). *)
++  stages : staged_cont_stage list;  (** The stages before the last one *)
+   pending_inputs : int list;
+       (** The positions of the pending loans among the inputs of the
+           continuation (the values of the abstraction which consume values),
+@@ -167,9 +185,10 @@ type staged_cont = {
+           the continuation of a join or loop abstraction in another
+           continuation lists all its inputs). *)
+   num_inputs : int;  (** The number of inputs of the continuation *)
+-  stage_applied : bool;
+-      (** Whether the first stage was applied: the continuation registered
+-          in [bs_ctx.abs_id_to_info] is then the second stage. *)
++  stages_applied : int;
++      (** The number of stages which were applied: the continuation registered
++          in [bs_ctx.abs_id_to_info] then receives the inputs of the next
++          stage. *)
+ }
+ [@@deriving show]
+ 
+@@ -491,6 +510,10 @@ type bs_ctx = {
+   staged_conts : staged_cont V.AbsId.Map.t;
+       (** The join and loop abstractions whose continuation is staged (see
+           [staged_cont]). *)
++  level1_staged_abs : V.AbsId.Set.t;
++      (** The loop abstractions (at the loop entry, in the fixed point, at the
++          [continue]s and [break]s, and at the exits) whose continuation is
++          staged at level 1 (see [staged_cont_stage.StageLevel]). *)
+   promised_fvars : FVarId.Set.t;
+       (** Staged backward functions of function calls: the variables of values
+           given back by a sub-abstraction which ended before the stage which
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index c67d97b..1d44182 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -836,6 +836,142 @@ let mk_staged_backward_function (ctx : bs_ctx) (gid : T.RegionGroupId.id)
+   in
+   build (num_stages - 2) last
+ 
++(** Nested borrows: the loop abstractions whose continuation is staged at level
++    1 (see [staged_cont_stage.StageLevel]).
++
++    The continuation of a loop abstraction is flattened at level 0: it assumes
++    that the values of level 1 of the abstraction (e.g., the inner borrows ['3]
++    of the value given back to the loop state [Option<&'2 mut Frame<'3>>]
++    through its own borrow ['2]) are routed unchanged from the input of the loop
++    to its state. When a [continue] composes a call whose staged backward
++    function has stages which receive such values (e.g., the first stage of
++    [Option::as_deref_mut] on a reborrow of the loop state, see
++    [SymbolicToPureAbs.call_absent_early_stages]), the routing is those stages,
++    and the continuation of the loop abstraction is staged: its first stage
++    routes the values of level 1, its second stage computes the values of
++    level 0 as before.
++
++    We stage the loop abstraction at every position of its continuation: at
++    the loop entry, in the fixed point, at the [continue]s, the [break]s and
++    the exits, and in the joins of the loop body which join it (the branches
++    of a join which reaches a [continue] hold the calls, and the
++    continuations at the [continue] apply the continuation of the join). The
++    loop abstractions and the abstractions which join them keep the regions of
++    the loop abstraction: we identify them by their regions. *)
++let loop_level1_staged_abs (ctx : bs_ctx) (loop : S.loop) : V.AbsId.Set.t =
++  let calls = ref V.AbsId.Map.empty in
++  (* The abstractions at the [continue]s, the [break]s and the joins *)
++  let body_abs = ref [] in
++  let visitor =
++    object
++      inherit [_] S.iter_expr as super
++      method! visit_ty _ _ = ()
++      method! visit_tvalue _ _ = ()
++      method! visit_symbolic_value _ _ = ()
++      method! visit_abs _ _ = ()
++
++      method! visit_FunCall env call e =
++        List.iter
++          (fun aid -> calls := V.AbsId.Map.add aid call !calls)
++          call.abstractions;
++        super#visit_FunCall env call e
++
++      (* The abstractions of a call can be renamed (see
++         [translate_substitute_abs_ids]) *)
++      method! visit_SubstituteAbsIds env eid aids e =
++        V.AbsId.Map.iter
++          (fun aid aid' ->
++            match V.AbsId.Map.find_opt aid !calls with
++            | Some call -> calls := V.AbsId.Map.add aid' call !calls
++            | None -> ())
++          aids;
++        super#visit_SubstituteAbsIds env eid aids e
++
++      method! visit_LoopContinue _ _ loop_id _ input_abs =
++        if loop_id = loop.loop_id then body_abs := input_abs @ !body_abs
++
++      method! visit_LoopBreak _ _ loop_id _ _ input_abs =
++        if loop_id = loop.loop_id then body_abs := input_abs @ !body_abs
++
++      method! visit_Let env lete =
++        body_abs := lete.out_abs @ !body_abs;
++        super#visit_Let env lete
++
++      method! visit_Join _ _ _ _ input_abs = body_abs := input_abs @ !body_abs
++    end
++  in
++  visitor#visit_expr () loop.loop_expr;
++  let span = ctx.span in
++  let staged_call (aid : V.AbsId.id) : bool =
++    match V.AbsId.Map.find_opt aid !calls with
++    | Some ({ call_id = S.Fun (fid, _); _ } as call) ->
++        let sg = Option.get call.sg in
++        let inst_sg = Option.get call.inst_sg in
++        let dsg =
++          translate_inst_fun_sig_to_decomposed_fun_type (Some span)
++            ctx.decls_ctx fid inst_sg
++            (List.map (fun _ -> None) sg.inputs)
++        in
++        List.exists2
++          (fun aid' (_, (signature : back_sg_info)) ->
++            aid' = aid && signature.early <> [])
++          call.abstractions
++          (RegionGroupId.Map.bindings dsg.back_sg)
++    | _ -> false
++  in
++  let holds_staged_call (abs : V.abs) : bool =
++    let found = ref false in
++    let visitor =
++      object
++        inherit [_] V.iter_tevalue as super
++
++        method! visit_EApp env f args =
++          (match f with
++          | V.EFunCall aid | V.EFunCallOutputs (aid, _) ->
++              if staged_call aid then found := true
++          | _ -> ());
++          super#visit_EApp env f args
++      end
++    in
++    Option.iter
++      (fun (cont : V.abs_cont) -> Option.iter (visitor#visit_tevalue ()) cont.input)
++      abs.cont;
++    !found
++  in
++  (* The regions of the loop abstractions to stage: some abstraction of the
++     loop body with these regions holds a staged call *)
++  let staged_regions =
++    List.filter_map
++      (fun (abs : V.abs) ->
++        (* A loop abstraction with pending loans is staged through them (see
++           [staged_cont_stage.StagePending]) *)
++        if
++          SymbolicToPureAbs.abs_pending_indices ctx abs = []
++          && List.exists
++               (fun (abs' : V.abs) ->
++                 T.RegionId.Set.equal abs'.regions.owned abs.regions.owned
++                 && holds_staged_call abs')
++               !body_abs
++        then Some abs.regions.owned
++        else None)
++      loop.input_abs
++  in
++  if staged_regions = [] then ctx.level1_staged_abs
++  else
++    let staged (abs : V.abs) =
++      List.exists (T.RegionId.Set.equal abs.regions.owned) staged_regions
++    in
++    let all_abs =
++      loop.input_abs
++      @ V.AbsId.Map.values loop.input_abs_to_abs
++      @ !body_abs
++      @ List.concat_map (fun (exit : S.loop_exit) -> exit.exit_abs) loop.exits
++    in
++    List.fold_left
++      (fun ids (abs : V.abs) ->
++        if staged abs then V.AbsId.Set.add abs.abs_id ids else ids)
++      ctx.level1_staged_abs all_abs
++
+ let rec translate_expr (e : S.expr) (ctx : bs_ctx) : texpr =
+   [%ldebug "e:\n" ^ bs_ctx_expr_to_string ctx e];
+   match e with
+@@ -3324,80 +3460,155 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+   (* See [join_snapshots] *)
+   ctx.join_snapshots.unreconciled <-
+     V.AbsId.Set.add abs.abs_id ctx.join_snapshots.unreconciled;
++  let stage =
++    match staged.stages with
++    | [ stage ] -> stage
++    | _ ->
++        [%craise] span
++          "Nested borrows: the continuation of a join or loop abstraction has \
++           several stages before the last one"
++  in
++  let pending_indices =
++    match stage with
++    | StagePending pending -> pending
++    | StageLevel _ -> []
++  in
+   let sides ~(pending : bool) =
+     List.mapi
+       (fun index _ ->
+-        if List.mem index staged.pending_indices = pending then Some BothSides
++        if List.mem index pending_indices = pending then Some BothSides
+         else None)
+       abs.avalues
+   in
++  (* The nested loans of a loop abstraction staged at a level are the inputs of
++     its stage of that level (the inner borrows of the values given back to the
++     parent borrows of its borrow projectors); any other nested loan would be
++     lost by the stages *)
+   [%cassert] span
+-    (abs_nested_loan_updates ctx abs = [])
+-    "Nested borrows: a join or loop abstraction with pending loans holds \
+-     nested loans";
++    (List.for_all
++       (fun (level, _) ->
++         match stage with
++         | StageLevel level' -> level = level'
++         | StagePending _ -> false)
++       (abs_nested_loan_updates ctx abs))
++    "Nested borrows: a join or loop abstraction with a staged continuation \
++     holds nested loans";
+   let find_cont ctx =
+     [%unwrap_with_span] span
+       (V.AbsId.Map.find_opt abs.abs_id ctx.abs_id_to_info)
+       "Nested borrows: missing continuation of a join or loop abstraction \
+-       with pending loans"
++       with a staged continuation"
++  in
++  (* The inputs of the first stage, and the patterns of its outputs *)
++  let first_stage_inputs_outputs ctx : bs_ctx * texpr * tpat =
++    match stage with
++    | StagePending _ ->
++        (* The pending loans became loan projectors over the values given back
++           to their parent borrows: they end with the level 0 of the
++           abstraction, but once the borrow projectors over these values have
++           all ended (given back by the owner of the parent borrow at its own
++           level 1), the values they consumed are final, which is what the
++           first stage receives. *)
++        let first_stage_abs =
++          let view index (av : V.tavalue) : V.tavalue =
++            match av.value with
++            | V.ASymbolic (pm, V.AProjLoans { proj; consumed; borrows })
++              when List.mem index pending_indices
++                   && consumed <> []
++                   && InterpBorrows.loan_proj_is_endable span ectx
++                        ~lookup_shared:true abs.regions.owned proj ->
++                {
++                  av with
++                  value =
++                    V.ASymbolic
++                      ( pm,
++                        V.AEndedProjLoans
++                          { proj = proj.sv_id; consumed; borrows } );
++                }
++            | _ -> av
++          in
++          { abs with avalues = List.mapi view abs.avalues }
++        in
++        [%cassert] span
++          (abs_consumed_available ~sides:(sides ~pending:true) ctx
++             first_stage_abs 0)
++          "Nested borrows: the first stage of the continuation of a join or \
++           loop abstraction with pending loans needs the values given back to \
++           their parent borrows, which are not available yet";
++        let inputs =
++          abs_to_consumed ~sides:(sides ~pending:true) ctx ectx first_stage_abs
++            0
++        in
++        [%cassert] span
++          (List.length inputs = List.length pending_indices)
++          "Nested borrows: a pending loan of a join or loop abstraction \
++           consumed no value";
++        let arg = mk_simpl_tuple_texpr span inputs in
++        let ctx, given_back =
++          abs_to_given_back ~ectx ~sides:(sides ~pending:false) None abs 1 ctx
++        in
++        let out_pat =
++          match given_back with
++          | [] -> mk_ignored_pat arg.ty
++          | _ -> mk_simpl_tuple_pat given_back
++        in
++        [%cassert] span (out_pat.ty = arg.ty)
++          "Nested borrows: the values given back at level 1 by a join or loop \
++           abstraction with pending loans disagree with the values given back \
++           to their parent borrows";
++        (ctx, arg, out_pat)
++    | StageLevel level ->
++        (* The borrow projectors of the abstraction consumed the inner borrows
++           of the values given back to their parent borrows, at this level;
++           its loan projectors give back those of the values given back to the
++           projected borrows. A loan projector whose borrow was not given back
++           with inner borrows at this level holds none: no one receives its
++           output, which we ignore. *)
++        [%cassert] span
++          (abs_consumed_available ctx abs level)
++          "Nested borrows: the first stage of the continuation of a loop \
++           abstraction staged at level 1 needs the values given back to the \
++           parent borrows of its values, which are not available yet";
++        let input_indices, output_indices = abs_level1_positions ctx abs in
++        let owned = abs.regions.owned in
++        let inputs =
++          List.map
++            (fun index ->
++              [%unwrap_with_span] span
++                (tavalue_to_consumed ctx ectx owned level
++                   (List.nth abs.avalues index))
++                "Nested borrows: a borrow projector of a loop abstraction \
++                 staged at level 1 consumed no value at that level")
++            input_indices
++        in
++        let ctx, outputs =
++          List.fold_left_map
++            (fun ctx index ->
++              let av = List.nth abs.avalues index in
++              let ctx, pat =
++                tavalue_to_given_back ~ectx owned level None av ctx
++              in
++              ( ctx,
++                match pat with
++                | Some pat -> pat
++                | None -> mk_ignored_pat (ctx_translate_fwd_ty ctx av.ty) ))
++            ctx output_indices
++        in
++        (ctx, mk_simpl_tuple_texpr span inputs, mk_simpl_tuple_pat outputs)
+   in
+   let apply_first_stage ctx (next : bs_ctx -> texpr) : texpr =
+     let info = find_cont ctx in
+-    (* The pending loans became loan projectors over the values given back to
+-       their parent borrows: they end with the level 0 of the abstraction, but
+-       once the borrow projectors over these values have all ended (given
+-       back by the owner of the parent borrow at its own level 1), the values
+-       they consumed are final, which is what the first stage receives. *)
+-    let first_stage_abs =
+-      let view index (av : V.tavalue) : V.tavalue =
+-        match av.value with
+-        | V.ASymbolic (pm, V.AProjLoans { proj; consumed; borrows })
+-          when List.mem index staged.pending_indices
+-               && consumed <> []
+-               && InterpBorrows.loan_proj_is_endable span ectx
+-                    ~lookup_shared:true abs.regions.owned proj ->
+-            {
+-              av with
+-              value =
+-                V.ASymbolic
+-                  (pm, V.AEndedProjLoans { proj = proj.sv_id; consumed; borrows });
+-            }
+-        | _ -> av
+-      in
+-      { abs with avalues = List.mapi view abs.avalues }
+-    in
+-    [%cassert] span
+-      (abs_consumed_available ~sides:(sides ~pending:true) ctx
+-         first_stage_abs 0)
+-      "Nested borrows: the first stage of the continuation of a join or loop \
+-       abstraction with pending loans needs the values given back to their \
+-       parent borrows, which are not available yet";
+-    let inputs =
+-      abs_to_consumed ~sides:(sides ~pending:true) ctx ectx first_stage_abs 0
+-    in
+-    [%cassert] span
+-      (List.length inputs = List.length staged.pending_indices)
+-      "Nested borrows: a pending loan of a join or loop abstraction consumed \
+-       no value";
+-    let arg = mk_simpl_tuple_texpr span inputs in
+-    let ctx, given_back =
+-      abs_to_given_back ~ectx ~sides:(sides ~pending:false) None abs 1 ctx
+-    in
+-    let out_pat =
+-      match given_back with
+-      | [] -> mk_ignored_pat arg.ty
+-      | _ -> mk_simpl_tuple_pat given_back
+-    in
+-    [%cassert] span (out_pat.ty = arg.ty)
+-      "Nested borrows: the values given back at level 1 by a join or loop \
+-       abstraction with pending loans disagree with the values given back to \
+-       their parent borrows";
+-    let _, ret_ty = dest_arrow_ty span info.fvar.ty in
+-    let later_ty =
++    let ctx, arg, out_pat = first_stage_inputs_outputs ctx in
++    let arg_ty, ret_ty = dest_arrow_ty span info.fvar.ty in
++    let out_ty, later_ty =
+       match opt_destruct_tuple span ret_ty with
+-      | Some [ _; later_ty ] -> later_ty
++      | Some [ out_ty; later_ty ] -> (out_ty, later_ty)
+       | _ -> [%internal_error] span
+     in
++    [%cassert] span
++      (arg.ty = arg_ty && out_pat.ty = out_ty)
++      "Nested borrows: the values of a join or loop abstraction at the level of \
++       the first stage of its continuation disagree with the stage";
+     let ctx, later = fresh_var (Some "back") later_ty ctx in
+     let ctx =
+       {
+@@ -3408,7 +3619,7 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+             ctx.abs_id_to_info;
+         staged_conts =
+           V.AbsId.Map.add abs.abs_id
+-            { staged with stage_applied = true }
++            { staged with stages_applied = 1 }
+             ctx.staged_conts;
+       }
+     in
+@@ -3430,17 +3641,22 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+     let next_e = translate_expr e ctx in
+     [%add_loc] mk_closed_checked_let ctx false output call next_e
+   in
++  let first_level =
++    match stage with
++    | StagePending _ -> 1
++    | StageLevel level -> level
++  in
+   match abs_level with
+   | 0 ->
+-      if staged.stage_applied then apply_second_stage ctx
++      if staged.stages_applied = 1 then apply_second_stage ctx
+       else apply_first_stage ctx apply_second_stage
+-  | 1 when not staged.stage_applied ->
++  | level when level = first_level && staged.stages_applied = 0 ->
+       apply_first_stage ctx (translate_expr e)
+   | _ ->
+       [%cassert] span
+         (abs_ended_borrows_at_level ctx abs abs_level = [])
+-        ("Nested borrows: a join or loop abstraction with pending loans gives \
+-          back values at level " ^ string_of_int abs_level);
++        ("Nested borrows: a join or loop abstraction with a staged \
++          continuation gives back values at level " ^ string_of_int abs_level);
+       translate_expr e ctx
+ 
+ and translate_global_eval (gid : A.GlobalDeclId.id) (generics : T.generic_args)
+@@ -4205,6 +4421,11 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+ 
+   let outer = ctx0 in
+   let ctx0 = forget_scoped_owned_state ctx0 in
++  (* Nested borrows: the loop abstractions whose continuation is staged at
++     level 1 (see [loop_level1_staged_abs]) *)
++  let ctx0 =
++    { ctx0 with level1_staged_abs = loop_level1_staged_abs ctx0 loop }
++  in
+   let ctx = ctx0 in
+   let loop_id = V.LoopId.Map.find loop.loop_id ctx.loop_ids_map in
+ 
+@@ -5041,6 +5262,7 @@ and translate_substitute_abs_ids (ctx : bs_ctx) (eid : S.symbolic_expr_id)
+       abs_id_to_info = abs_id_to_info';
+       fun_call_stages;
+       staged_conts;
++      level1_staged_abs = V.AbsId.Set.map update ctx.level1_staged_abs;
+       ignored_abs_ids = ignored_abs_ids';
+     }
+   in
+diff --git a/tests/lean/NestedBorrowsLoopReborrow.lean b/tests/lean/NestedBorrowsLoopReborrow.lean
+new file mode 100644
+index 0000000..9f51fe1
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopReborrow.lean
+@@ -0,0 +1,2 @@
++import NestedBorrowsLoopReborrow.Checks
++import NestedBorrowsLoopReborrow.NestedBorrowsLoopReborrow
+diff --git a/tests/lean/NestedBorrowsLoopReborrow/Checks.lean b/tests/lean/NestedBorrowsLoopReborrow/Checks.lean
+new file mode 100644
+index 0000000..da33b3e
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopReborrow/Checks.lean
+@@ -0,0 +1,61 @@
++import NestedBorrowsLoopReborrow.NestedBorrowsLoopReborrow
++
++/-! Evaluate the model of `tests/src/nested-borrows-loop-reborrow.rs` on the
++    inputs of its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame
++    back. -/
++
++namespace nested_borrows_loop_reborrow.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7, 11], ctx := u ctx, pos := us pos }
++
++/-- `run(Some(&mut frame), n)`; the caller gives the frame back -/
++def onSome (run : Option Frame → U32 → Result (U32 × Option Frame × (Option Frame → Option Frame)))
++    (ctx pos n : Nat) : Option (Nat × Nat × Nat) :=
++  match run (some (frame ctx pos)) (u n) with
++  | ok (r, some f1, back) =>
++    match back (some f1) with
++    | some f2 => some (r.val, f2.ctx.val, f1.pos.val)
++    | none => none
++  | _ => none
++
++/-- `run(&mut frame, n)`; the caller gives the frame back -/
++def onFrame (run : Frame → U32 → Result (U32 × Frame × (Frame → Frame)))
++    (ctx pos n : Nat) : Option (Nat × Nat × Nat) :=
++  match run (frame ctx pos) (u n) with
++  | ok (r, f1, back) => some (r.val, (back f1).ctx.val, f1.pos.val)
++  | _ => none
++
++/-- `run(None, n)`: the result, and whether `None` is given back -/
++def onNone (run : Option Frame → U32 → Result (U32 × Option Frame × (Option Frame → Option Frame)))
++    (n : Nat) : Option (Nat × Bool) :=
++  match run none (u n) with
++  | ok (r, o, back) => some (r.val, o.isNone && (back none).isNone)
++  | _ => none
++
++-- loop_reborrow_native
++#guard onSome loop_reborrow 10 0 0 == some (0, 10, 0)
++#guard onSome loop_reborrow 10 0 1 == some (3, 13, 1)
++#guard onSome loop_reborrow 10 0 3 == some (15, 25, 3)
++#guard onSome loop_reborrow (max - 4) 1 2 == some (12, 7, 3)
++#guard onNone loop_reborrow 3 == some (3, true)
++#guard onFrame run_loop_reborrow 10 1 2 == some (12, 22, 3)
++
++-- loop_is_some_reborrow_native
++#guard onSome loop_is_some_reborrow 10 0 0 == some (0, 10, 0)
++#guard onSome loop_is_some_reborrow 10 0 3 == some (18, 25, 3)
++#guard onSome loop_is_some_reborrow (max - 4) 1 2 == some (14, 7, 3)
++#guard onNone loop_is_some_reborrow 3 == some (3, true)
++
++end nested_borrows_loop_reborrow.checks
+diff --git a/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean b/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean
+new file mode 100644
+index 0000000..04d3bd4
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopReborrow/NestedBorrowsLoopReborrow.lean
+@@ -0,0 +1,622 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_loop_reborrow]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_loop_reborrow
++
++/-- [nested_borrows_loop_reborrow::Frame]
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 17:0-21:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- Trait declaration: [core::ops::deref::Deref::<&0 mut (nested_borrows_loop_reborrow::Frame<1>), nested_borrows_loop_reborrow::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 139:0-139:35
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::Deref<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>"]
++structure
++  core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  where
++  deref : _root_.nested_borrows_loop_reborrow.Frame →
++    _root_.Aeneas.Std.Result _root_.nested_borrows_loop_reborrow.Frame
++
++/-- [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::deref::<0, 2, nested_borrows_loop_reborrow::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 172:4-172:25
++    Name pattern: [core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_loop_reborrow::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_loop_reborrow::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++  (self : _root_.nested_borrows_loop_reborrow.Frame) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_loop_reborrow.Frame
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_loop_reborrow::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 169:0-169:38
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::Deref<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  :
++  _root_.nested_borrows_loop_reborrow.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  := {
++  deref :=
++    _root_.nested_borrows_loop_reborrow.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++}
++
++/-- Trait declaration: [core::ops::deref::DerefMut::<&0 mut (nested_borrows_loop_reborrow::Frame<1>), nested_borrows_loop_reborrow::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 270:0-270:54
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>"
++  (parentClauses := ["DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst"])]
++structure
++  core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  where
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :
++    _root_.nested_borrows_loop_reborrow.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  deref_mut : _root_.nested_borrows_loop_reborrow.Frame →
++    _root_.Aeneas.Std.Result (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame) ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame) ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame))))))
++
++/-- [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::deref_mut::<0, 2, nested_borrows_loop_reborrow::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 280:4-280:37
++    Name pattern: [core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_loop_reborrow::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_loop_reborrow::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++  (self : _root_.nested_borrows_loop_reborrow.Frame) :
++  _root_.Aeneas.Std.Result (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame) ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame) ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    (_root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame))))))
++  := do
++  let back :=
++    (fun self1 => (self1,
++       fun self2 => ({ self with ctx := self2.ctx },
++         fun f => { self with ctx := f.ctx })) :
++      _root_.nested_borrows_loop_reborrow.Frame →
++      (_root_.nested_borrows_loop_reborrow.Frame ×
++      (_root_.nested_borrows_loop_reborrow.Frame →
++      (_root_.nested_borrows_loop_reborrow.Frame ×
++      (_root_.nested_borrows_loop_reborrow.Frame →
++      _root_.nested_borrows_loop_reborrow.Frame)))))
++  _root_.Aeneas.Std.Result.ok (self, fun self1 => self1, fun self1 => self1,
++    back)
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_loop_reborrow::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 279:0-279:41
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_reborrow::Frame<'1>, nested_borrows_loop_reborrow::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++  :
++  _root_.nested_borrows_loop_reborrow.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  := {
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :=
++    _root_.nested_borrows_loop_reborrow.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  deref_mut :=
++    _root_.nested_borrows_loop_reborrow.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++}
++
++/-- [core::option::{core::option::Option<T>}::as_deref_mut::<0, &1 mut (nested_borrows_loop_reborrow::Frame<2>), nested_borrows_loop_reborrow::Frame<2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1414:4-1416:28
++    Name pattern: [core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_loop_reborrow::Frame<'2>, nested_borrows_loop_reborrow::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_loop_reborrow::Frame<'2>, nested_borrows_loop_reborrow::Frame<'2>>"]
++def
++  core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++  (opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst
++  :
++  _root_.nested_borrows_loop_reborrow.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5)
++  (self : _root_.Option _root_.nested_borrows_loop_reborrow.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => none : _root_.Option _root_.nested_borrows_loop_reborrow.Frame
++        → _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++    let back1 :=
++      (fun self1 => none : _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame)
++    let back2 :=
++      (fun self1 => (none,
++         fun self2 => (none,
++           fun o => match self with
++                    | none => none
++                    | some f => some f)) : _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame)))))
++    _root_.Aeneas.Std.Result.ok (none, back, back1, back2)
++  | some f =>
++    let (f1, deref_mut_back, deref_mut_back1, deref_mut_back2) ←
++      opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst.deref_mut
++        f
++    let back :=
++      (fun o =>
++         let f2 := match o with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back f2
++         some f3 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++        _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++    let back1 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back1 f2
++         some f3 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++        _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++    let back2 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f
++         let (f3, _) := deref_mut_back2 f2
++         (some f3,
++           fun self2 =>
++             let f4 := deref_mut_back f1
++             let f5 := match self2 with
++                       | some f6 => f6
++                       | _ => f4
++             let f6 := match self1 with
++                       | some f7 => f7
++                       | _ => f
++             let (_, back3) := deref_mut_back2 f6
++             let (f7, _) := back3 { f4 with ctx := f5.ctx }
++             (some { f1 with ctx := f7.ctx },
++               fun o =>
++                 let f8 := match self2 with
++                           | some f9 => f9
++                           | _ => f1
++                 let f9 := match self1 with
++                           | some f10 => f10
++                           | _ => f
++                 let (_, back4) := deref_mut_back2 f9
++                 let (_, back5) := back4 { f4 with ctx := f8.ctx }
++                 let i :=
++                   match o with
++                   | some (_root_.nested_borrows_loop_reborrow.Frame.mk _ i1 _)
++                     =>
++                     i1
++                   | _ => f1.ctx
++                 let f10 := back5 { f1 with ctx := i }
++                 match self with
++                 | none => none
++                 | some f11 => some { f11 with ctx := f10.ctx })) :
++        _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++        ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++        (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++        ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++        (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++        _root_.Option _root_.nested_borrows_loop_reborrow.Frame)))))
++    _root_.Aeneas.Std.Result.ok (some f1, back, back1, back2)
++
++/-- [nested_borrows_loop_reborrow::{nested_borrows_loop_reborrow::Frame<'a>}::advance]:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 24:4-29:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.nested_borrows_loop_reborrow.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame))
++  := do
++  let s ← Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.nested_borrows_loop_reborrow.Frame →
++      _root_.nested_borrows_loop_reborrow.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [nested_borrows_loop_reborrow::advance_or]:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 32:0-37:1
++    Visibility: public -/
++def advance_or
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))
++  := do
++  match execution with
++  | none =>
++    let back :=
++      (fun execution1 => match execution with
++                         | none => none
++                         | some f => some f : _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame)
++    _root_.Aeneas.Std.Result.ok (d, none, back)
++  | some f =>
++    let (d1, f1, advance_back) ←
++      _root_.nested_borrows_loop_reborrow.Frame.advance f
++    let back :=
++      (fun execution1 =>
++         let f2 :=
++           match execution1 with
++           | some f3 => { f1 with ctx := f3.ctx }
++           | _ => f1
++         let f3 := advance_back { f1 with ctx := f2.ctx }
++         match execution with
++         | none => none
++         | some f4 => some { f4 with ctx := f3.ctx } : _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++        _root_.nested_borrows_loop_reborrow.Frame)
++    _root_.Aeneas.Std.Result.ok (d1, some f1, back)
++
++/-- [nested_borrows_loop_reborrow::loop_reborrow]: loop body 0:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 43:4-46:5
++    Visibility: public -/
++@[rust_loop_body]
++def loop_reborrow_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame)))))
++  := do
++  if i < n
++  then
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_loop_reborrow.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_loop_reborrow.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (i1, o1, advance_or_back) ←
++      _root_.nested_borrows_loop_reborrow.advance_or o i
++    let acc1 ← lift (core.num.U32.wrapping_add acc i1)
++    let i2 ← i + 1#u32
++    let execution1 := as_deref_mut_back o1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back2 =>
++         let (back3, back4) := back back2
++         let (o2, back5) := as_deref_mut_back2 back3
++         (o2,
++           fun o3 =>
++             let (o4, back6) := back5 o3
++             let o5 := advance_or_back o4
++             let o6 := back6 o5
++             back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
++                                  back1 o3, execution1, acc1, i2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1 execution, fun back2 => back back2))
++
++/-- [nested_borrows_loop_reborrow::loop_reborrow]: loop 0:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 43:4-46:5
++    Visibility: public -/
++@[rust_loop]
++def loop_reborrow_loop
++  (back : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_loop_reborrow.loop_reborrow_loop.body n back2
++       back3 execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++      ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++      _root_.Option _root_.nested_borrows_loop_reborrow.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_loop_reborrow::loop_reborrow]:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 40:0-48:1
++    Visibility: public -/
++def loop_reborrow
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))
++  := do
++  let (execution1, acc, back, back1) ←
++    _root_.nested_borrows_loop_reborrow.loop_reborrow_loop
++      (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++  let back2 :=
++    (fun execution2 =>
++       let (_, back3) :=
++         back1
++           (match back with
++            | none => none
++            | some f =>
++              match execution2 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back)
++       let o := back3 execution1
++       match execution with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame)
++  _root_.Aeneas.Std.Result.ok (acc, back, back2)
++
++/-- [nested_borrows_loop_reborrow::loop_is_some_reborrow]: loop body 0:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 54:4-60:5
++    Visibility: public -/
++@[rust_loop_body]
++def loop_is_some_reborrow_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame)))))
++  := do
++  if i < n
++  then
++    let b := _root_.Aeneas.Std.core.option.Option.is_some execution
++    let acc1 ←
++      if b
++      then _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add acc 1#u32)
++      else _root_.Aeneas.Std.Result.ok acc
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_loop_reborrow.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_loop_reborrow.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (i1, o1, advance_or_back) ←
++      _root_.nested_borrows_loop_reborrow.advance_or o i
++    let acc2 ← lift (core.num.U32.wrapping_add acc1 i1)
++    let i2 ← i + 1#u32
++    let execution1 := as_deref_mut_back o1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back2 =>
++         let (back3, back4) := back back2
++         let (o2, back5) := as_deref_mut_back2 back3
++         (o2,
++           fun o3 =>
++             let (o4, back6) := back5 o3
++             let o5 := advance_or_back o4
++             let o6 := back6 o5
++             back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
++                                  back1 o3, execution1, acc2, i2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1 execution, fun back2 => back back2))
++
++/-- [nested_borrows_loop_reborrow::loop_is_some_reborrow]: loop 0:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 54:4-60:5
++    Visibility: public -/
++@[rust_loop]
++def loop_is_some_reborrow_loop
++  (back : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++  _root_.nested_borrows_loop_reborrow.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++  _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_loop_reborrow.loop_is_some_reborrow_loop.body n
++       back2 back3 execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++      ((_root_.Option _root_.nested_borrows_loop_reborrow.Frame) ×
++      (_root_.Option _root_.nested_borrows_loop_reborrow.Frame →
++      _root_.Option _root_.nested_borrows_loop_reborrow.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_loop_reborrow::loop_is_some_reborrow]:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 51:0-62:1
++    Visibility: public -/
++def loop_is_some_reborrow
++  (execution : _root_.Option _root_.nested_borrows_loop_reborrow.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++    _root_.nested_borrows_loop_reborrow.Frame))
++  := do
++  let (execution1, acc, back, back1) ←
++    _root_.nested_borrows_loop_reborrow.loop_is_some_reborrow_loop
++      (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++  let back2 :=
++    (fun execution2 =>
++       let (_, back3) :=
++         back1
++           (match back with
++            | none => none
++            | some f =>
++              match execution2 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back)
++       let o := back3 execution1
++       match execution with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame → _root_.Option
++      _root_.nested_borrows_loop_reborrow.Frame)
++  _root_.Aeneas.Std.Result.ok (acc, back, back2)
++
++/-- [nested_borrows_loop_reborrow::run_loop_reborrow]:
++    Source: 'tests/src/nested-borrows-loop-reborrow.rs', lines 64:0-66:1
++    Visibility: public -/
++def run_loop_reborrow
++  (f : _root_.nested_borrows_loop_reborrow.Frame) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_reborrow.Frame ×
++    (_root_.nested_borrows_loop_reborrow.Frame →
++    _root_.nested_borrows_loop_reborrow.Frame))
++  := do
++  let (i, o, loop_reborrow_back) ←
++    _root_.nested_borrows_loop_reborrow.loop_reborrow (some f) n
++  let f1 := match o with
++            | some f2 => f2
++            | _ => f
++  let back :=
++    (fun f2 =>
++       let f3 := match o with
++                 | some f4 => f4
++                 | _ => f
++       let o1 := loop_reborrow_back (some { f3 with ctx := f2.ctx })
++       let i1 :=
++         match o1 with
++         | some (_root_.nested_borrows_loop_reborrow.Frame.mk _ i2 _) => i2
++         | _ => f.ctx
++       { f with ctx := i1 } : _root_.nested_borrows_loop_reborrow.Frame →
++      _root_.nested_borrows_loop_reborrow.Frame)
++  _root_.Aeneas.Std.Result.ok (i, f1, back)
++
++end nested_borrows_loop_reborrow
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index f48182a..b8e9b6e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -51,6 +51,7 @@ package «tests» {}
+ @[default_target] lean_lib LetBranchingTupleValue
+ @[default_target] lean_lib NestedBorrowsReborrowJoin
+ @[default_target] lean_lib NestedBorrowsAsDerefMutArms
++@[default_target] lean_lib NestedBorrowsLoopReborrow
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectDispatch
+diff --git a/tests/src/nested-borrows-loop-reborrow.rs b/tests/src/nested-borrows-loop-reborrow.rs
+new file mode 100644
+index 0000000..0bc9920
+--- /dev/null
++++ b/tests/src/nested-borrows-loop-reborrow.rs
+@@ -0,0 +1,109 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsLoopReborrow
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over `Option::as_deref_mut` of the loop state
++//! `execution: Option<&'1 mut Frame<'2>>`, the reborrow given to a call at
++//! each iteration (the shape of `chelis_ir::eval`'s node loop over the frame
++//! option). The first stage of the backward function of `as_deref_mut` for the
++//! region of the frame receives the inner borrows of the value given back to
++//! the loop state's own borrow (level 1 of the loop abstraction of that
++//! region): the continuation of the loop abstraction is staged at level 1, and
++//! at each `continue` its first stage chains the first stage of the call. The
++//! backward function of the call gives back, at level 1, the value which the
++//! callee of the reborrow consumes, which gives back the input of the call at
++//! level 0: the continuation applies the call around the callee.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++}
++
++pub fn advance_or(execution: Option<&mut Frame<'_>>, d: u32) -> u32 {
++    match execution {
++        Some(f) => f.advance(),
++        None => d,
++    }
++}
++
++/// The reborrow is given to a call at each iteration.
++pub fn loop_reborrow(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        acc = acc.wrapping_add(advance_or(execution.as_deref_mut(), i));
++        i += 1;
++    }
++    acc
++}
++
++/// The option is read (`is_some`) before the reborrow at each iteration.
++pub fn loop_is_some_reborrow(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        if execution.is_some() {
++            acc = acc.wrapping_add(1);
++        }
++        acc = acc.wrapping_add(advance_or(execution.as_deref_mut(), i));
++        i += 1;
++    }
++    acc
++}
++
++pub fn run_loop_reborrow(f: &mut Frame<'_>, n: u32) -> u32 {
++    loop_reborrow(Some(f), n)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    const STEPS: [u32; 4] = [3, 5, 7, 11];
++
++    /// `run(Some(&mut frame), n)`: the result, the frame's `ctx` and `pos`
++    fn on_some(run: fn(Option<&mut Frame<'_>>, u32) -> u32, ctx: u32, pos: usize, n: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(Some(&mut f), n);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    /// `run(&mut frame, n)`
++    fn on_frame(run: fn(&mut Frame<'_>, u32) -> u32, ctx: u32, pos: usize, n: u32) -> (u32, u32, usize) {
++        let mut c = ctx;
++        let mut f = Frame { steps: &STEPS, ctx: &mut c, pos };
++        let r = run(&mut f, n);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn loop_reborrow_native() {
++        assert_eq!(on_some(loop_reborrow, 10, 0, 0), (0, 10, 0));
++        assert_eq!(on_some(loop_reborrow, 10, 0, 1), (3, 13, 1));
++        assert_eq!(on_some(loop_reborrow, 10, 0, 3), (15, 25, 3));
++        assert_eq!(on_some(loop_reborrow, u32::MAX - 4, 1, 2), (12, 7, 3));
++        assert_eq!(loop_reborrow(None, 3), 3);
++        assert_eq!(on_frame(run_loop_reborrow, 10, 1, 2), (12, 22, 3));
++    }
++
++    #[test]
++    fn loop_is_some_reborrow_native() {
++        assert_eq!(on_some(loop_is_some_reborrow, 10, 0, 0), (0, 10, 0));
++        assert_eq!(on_some(loop_is_some_reborrow, 10, 0, 3), (18, 25, 3));
++        assert_eq!(on_some(loop_is_some_reborrow, u32::MAX - 4, 1, 2), (14, 7, 3));
++        assert_eq!(loop_is_some_reborrow(None, 3), 3);
++    }
++}

@@ -1,0 +1,938 @@
+# aeneas integration step 88 after cba11f3beb: commit c0c7c336fa52246c452c087123b5168b2ab8b5ba
+# first parent 58a68b72cdc20d973bfa6a8842a17156489676dc, merged efaffb4c486af30efe9b16b73b2be8fe7c45cbf7
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (a borrow projector whose loans only non-fixed call abstractions project can end: family_then_collect; ignored shared-borrow join outputs keep the borrow's type)
+
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index 8172023..9adc14e 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -360,11 +360,13 @@ let convert_value_to_output_avalues (span : Meta.span) (ctx : eval_ctx)
+           match bc with
+           | VSharedBorrow (bid, sid) ->
+               (* The caller installs this fragment in the projection's owner;
+-                 no new abstraction is introduced here. *)
++                 no new abstraction is introduced here. A shared borrow gives
++                 nothing back: its output is ignored, with the type of the
++                 borrow (it can be a field of an ADT whose other fields give
++                 values back, see [bind_output]). *)
+               let value = ABorrow (ASharedBorrow (pm, bid, sid)) in
+               let value : tavalue = { value; ty = proj_ty } in
+-              let ev = mk_etuple ~borrow_proj:true [] in
+-              ([ value ], ev)
++              ([ value ], mk_eignored proj_ty)
+           | VMutBorrow (bid, _) ->
+               check_nested_regions ref_ty;
+               (* Create an avalue to push - note that we use [AIgnore] for the inner avalue *)
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index d586885..ab53e8a 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -2603,12 +2603,20 @@ let find_first_endable_loan_proj_in_abs (span : Meta.span) (ctx : eval_ctx)
+ 
+ (** Small helper
+ 
+-    Iterate over all the *concrete* mutable borrows in the abstraction and find
+-    their corresponding loans: return [true] if one of those loans is inside an
+-    abstraction identified by the set [fixed_abs_ids]. *)
++    Iterate over all the mutable borrows (concrete borrows and borrow
++    projectors) in the abstraction and find their corresponding loans: return
++    [true] if one of those loans is inside an abstraction identified by the set
++    [fixed_abs_ids]. *)
+ let abs_mut_borrows_loans_in_fixed span (ctx : eval_ctx)
+     (fixed_abs_ids : AbsId.Set.t) (abs : abs) : bool =
+-  (* Iterate through the loan projectors which intersect a given borrow projector *)
++  (* Iterate through the loan projectors which intersect a given borrow
++     projector and which are held by a fixed abstraction or by a loop
++     abstraction. Ending the borrow projector gives back to those loan
++     projectors, like ending a concrete borrow gives back to its loan: this
++     only matters for the fixed abstractions, and for the abstractions of the
++     loop fixed points, whose loan projectors must stay as in the fixed point
++     (the contexts at the [continue] and [break] of the loop body are matched
++     with the ones computed from the fixed point). *)
+   let visit_proj_loans (proj : symbolic_proj) =
+     object
+       inherit [_] iter_eval_ctx as super
+@@ -2620,10 +2628,21 @@ let abs_mut_borrows_loans_in_fixed span (ctx : eval_ctx)
+         super#visit_abs (Some abs) abs
+ 
+       method! visit_AProjLoans env proj' =
++        let holder = Option.get env in
++        let holder_fixed =
++          AbsId.Set.mem holder.abs_id fixed_abs_ids
++          ||
++          match holder.kind with
++          | Loop _ -> true
++          | FunCall _ | SynthInput _ | SynthRet _ | Identity
++          | CopySymbolicValue | WithCont | Join ->
++              false
++        in
+         if
+-          proj.sv_id = proj'.proj.sv_id
++          holder_fixed
++          && proj.sv_id = proj'.proj.sv_id
+           && projections_intersect span ctx abs.regions.owned proj.proj_ty
+-               (Option.get env).regions.owned proj'.proj.proj_ty
++               holder.regions.owned proj'.proj.proj_ty
+         then raise Found
+         else super#visit_AProjLoans env proj'
+     end
+diff --git a/tests/lean/IterMutFind/IterMutFind.lean b/tests/lean/IterMutFind/IterMutFind.lean
+index 24759da..42f1eec 100644
+--- a/tests/lean/IterMutFind/IterMutFind.lean
++++ b/tests/lean/IterMutFind/IterMutFind.lean
+@@ -310,11 +310,13 @@ def fold_loop.body
+         let v ←
+           if b
+           then
+-            let im2 := find_back im1 (some (i, none))
++            let back := find_back im1
++            let im2 := back (some (i, none))
+             let s1 := iter_mut_back im2
+             _root_.Aeneas.Std.Result.ok (deref_mut_back s1)
+           else
+-            let im2 := find_back im1 o
++            let back := find_back im1
++            let im2 := back o
+             let s1 := iter_mut_back im2
+             _root_.Aeneas.Std.Result.ok (deref_mut_back s1)
+         _root_.Aeneas.Std.Result.ok (v, model_state1)
+diff --git a/tests/lean/JoinSharedBorrowField.lean b/tests/lean/JoinSharedBorrowField.lean
+new file mode 100644
+index 0000000..fdb03e1
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowField.lean
+@@ -0,0 +1 @@
++import JoinSharedBorrowField.Checks
+diff --git a/tests/lean/JoinSharedBorrowField/Checks.lean b/tests/lean/JoinSharedBorrowField/Checks.lean
+new file mode 100644
+index 0000000..d7ea3f1
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowField/Checks.lean
+@@ -0,0 +1,46 @@
++import JoinSharedBorrowField.JoinSharedBorrowField
++
++/-! Evaluate the model of `tests/src/join-shared-borrow-field.rs` on the
++    inputs of its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame
++    back. -/
++
++namespace join_shared_borrow_field.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7], ctx := u ctx, pos := us pos }
++
++/-- `run (&mut frame)`; the caller then sets the frame's `ctx` to `set` (if
++    any) and gives the frame back -/
++def onFrame {R S : Type} (res : R → S) (run : Frame → Result (R × Frame × (Frame → Frame)))
++    (ctx pos : Nat) (set : Option Nat := none) : Option (S × Nat × Nat) :=
++  match run (frame ctx pos) with
++  | ok (r, f1, back) =>
++    let f1' := match set with
++      | some c => { f1 with ctx := u c }
++      | none => f1
++    some (res r, (back f1').ctx.val, f1.pos.val)
++  | _ => none
++
++def triple (r : U32 × U32 × Bool) : Nat × Nat × Bool := (r.1.val, r.2.1.val, r.2.2)
++
++-- run_try_plain_native
++#guard onFrame triple (run_try_plain · true (u 4)) 10 0 == some ((3, 4, true), 13, 1)
++#guard onFrame triple (run_try_plain · true (u 4)) 10 2 == some ((7, 4, true), 17, 3)
++#guard onFrame triple (run_try_plain · true (u 4)) 10 3 == some ((3, 4, false), 10, 3)
++#guard onFrame triple (run_try_plain · false (u 4)) 10 1 == some ((5, 5, true), 10, 1)
++#guard onFrame triple (run_try_plain · true (u max)) (max - 1) 2 == some ((7, max, true), 5, 3)
++#guard onFrame triple (run_try_plain · false (u max)) 10 1 == some ((0, 0, true), 10, 1)
++#guard onFrame triple (run_try_plain · false (u 4)) 10 1 (set := some 99) == some ((5, 5, true), 99, 1)
++
++end join_shared_borrow_field.checks
+diff --git a/tests/lean/JoinSharedBorrowField/JoinSharedBorrowField.lean b/tests/lean/JoinSharedBorrowField/JoinSharedBorrowField.lean
+new file mode 100644
+index 0000000..d953fe1
+--- /dev/null
++++ b/tests/lean/JoinSharedBorrowField/JoinSharedBorrowField.lean
+@@ -0,0 +1,161 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_shared_borrow_field]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_shared_borrow_field
++
++/-- [join_shared_borrow_field::Frame]
++    Source: 'tests/src/join-shared-borrow-field.rs', lines 17:0-21:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [join_shared_borrow_field::{join_shared_borrow_field::Frame<'a>}::advance]:
++    Source: 'tests/src/join-shared-borrow-field.rs', lines 24:4-29:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.join_shared_borrow_field.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.join_shared_borrow_field.Frame ×
++    (_root_.join_shared_borrow_field.Frame →
++    _root_.join_shared_borrow_field.Frame))
++  := do
++  let s ← Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.join_shared_borrow_field.Frame →
++      _root_.join_shared_borrow_field.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [join_shared_borrow_field::{join_shared_borrow_field::Frame<'a>}::try_advance]:
++    Source: 'tests/src/join-shared-borrow-field.rs', lines 31:4-36:5
++    Visibility: public -/
++def Frame.try_advance
++  (self : _root_.join_shared_borrow_field.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.join_shared_borrow_field.Frame ×
++    (_root_.join_shared_borrow_field.Frame →
++    _root_.join_shared_borrow_field.Frame))
++  := do
++  let i := _root_.Aeneas.Std.Slice.len self.steps
++  if self.pos >= i
++  then
++    let i1 ← lift (UScalar.cast .U32 self.pos)
++    let back'a :=
++      (fun self1 => { self with ctx := self1.ctx } :
++        _root_.join_shared_borrow_field.Frame →
++        _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err i1,
++      self, back'a)
++  else
++    let (i1, self1, advance_back) ←
++      _root_.join_shared_borrow_field.Frame.advance self
++    let back'a :=
++      (fun self2 =>
++         let f := advance_back { self1 with ctx := self2.ctx }
++         { self with ctx := f.ctx } : _root_.join_shared_borrow_field.Frame →
++        _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i1,
++      self1, back'a)
++
++/-- [join_shared_borrow_field::try_plain]:
++    Source: 'tests/src/join-shared-borrow-field.rs', lines 39:0-47:1
++    Visibility: public -/
++def try_plain
++  (execution : _root_.Option _root_.join_shared_borrow_field.Frame)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.join_shared_borrow_field.Frame) × (_root_.Option
++    _root_.join_shared_borrow_field.Frame → _root_.Option
++    _root_.join_shared_borrow_field.Frame) × _root_.Aeneas.Std.U32)
++  := do
++  match execution with
++  | none =>
++    let counter1 ← lift (core.num.U32.wrapping_add counter 1#u32)
++    let back :=
++      (fun execution1 => match execution with
++                         | none => none
++                         | some f => some f : _root_.Option
++        _root_.join_shared_borrow_field.Frame → _root_.Option
++        _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      counter1, none, back, counter1)
++  | some f =>
++    let (r, f1, try_advance_back) ←
++      _root_.join_shared_borrow_field.Frame.try_advance f
++    let back :=
++      (fun execution1 =>
++         let f2 :=
++           match execution1 with
++           | some f3 => { f1 with ctx := f3.ctx }
++           | _ => f1
++         let f3 := try_advance_back { f1 with ctx := f2.ctx }
++         match execution with
++         | none => none
++         | some f4 => some { f4 with ctx := f3.ctx } : _root_.Option
++        _root_.join_shared_borrow_field.Frame → _root_.Option
++        _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok (r, some f1, back, counter)
++
++/-- [join_shared_borrow_field::run_try_plain]:
++    Source: 'tests/src/join-shared-borrow-field.rs', lines 49:0-60:1
++    Visibility: public -/
++def run_try_plain
++  (f : _root_.join_shared_borrow_field.Frame) (some1 : _root_.Bool)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool) × _root_.join_shared_borrow_field.Frame ×
++    (_root_.join_shared_borrow_field.Frame →
++    _root_.join_shared_borrow_field.Frame))
++  := do
++  let (f1, c, r, back) ←
++    if some1
++    then
++      do
++      let (r1, o, try_plain_back, c1) ←
++        _root_.join_shared_borrow_field.try_plain (some f) counter
++      let f2 := match o with
++                | some f3 => f3
++                | _ => f
++      _root_.Aeneas.Std.Result.ok (f2, c1, r1,
++        (fun f3 =>
++           match try_plain_back (some f3) with
++           | some (_root_.join_shared_borrow_field.Frame.mk _ i _) => i
++           | _ => c1 : _root_.join_shared_borrow_field.Frame →
++        _root_.Aeneas.Std.U32))
++    else
++      do
++      let (r1, _, _, c1) ←
++        _root_.join_shared_borrow_field.try_plain none counter
++      _root_.Aeneas.Std.Result.ok (f, c1, r1,
++        (fun f2 => let ⟨ _, i, _ ⟩ := f2
++                   i : _root_.join_shared_borrow_field.Frame →
++        _root_.Aeneas.Std.U32))
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok k =>
++    let back1 :=
++      (fun f2 => let i := back { f1 with ctx := f2.ctx }
++                 { f with ctx := i } : _root_.join_shared_borrow_field.Frame
++        → _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok ((k, c, true), f1, back1)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    let back1 :=
++      (fun f2 => let i := back { f1 with ctx := f2.ctx }
++                 { f with ctx := i } : _root_.join_shared_borrow_field.Frame
++        → _root_.join_shared_borrow_field.Frame)
++    _root_.Aeneas.Std.Result.ok ((e, c, false), f1, back1)
++
++end join_shared_borrow_field
+diff --git a/tests/lean/LoopEndedSharedInput/LoopEndedSharedInput.lean b/tests/lean/LoopEndedSharedInput/LoopEndedSharedInput.lean
+index c6a8465..3adb963 100644
+--- a/tests/lean/LoopEndedSharedInput/LoopEndedSharedInput.lean
++++ b/tests/lean/LoopEndedSharedInput/LoopEndedSharedInput.lean
+@@ -163,7 +163,8 @@ def infer_loop0_loop0.body
+     _root_.loop_ended_shared_input.Witness _root_.Aeneas.Std.U32)) ×
+     _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
+     _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
+-    _root_.Unit)))
++    _root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize)))))
+   := do
+   let (model_state, model_state1) ←
+     _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
+@@ -173,7 +174,7 @@ def infer_loop0_loop0.body
+       _root_.Aeneas.Std.alloc.vec.Vec.push per_scope (name1, value)
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
+       (_root_.Sum.inr (inputs, per_scope1, iter, (), (), (), (), (), (), (),
+-      (), (), (), ())))
++      (), (), (), (), remaining)))
+   | some p =>
+     let (label, axis) := p
+     let r ← _root_.loop_ended_shared_input.read_axis inputs label axis
+@@ -247,7 +248,8 @@ def infer_loop0_loop0
+     _root_.loop_ended_shared_input.Witness _root_.Aeneas.Std.U32)) ×
+     _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
+     _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
+-    _root_.Unit))
++    _root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize))))
+   := do
+   loop
+     (fun iter2 => _root_.loop_ended_shared_input.infer_loop0_loop0.body inputs
+@@ -283,7 +285,8 @@ def infer_loop0_loop0
+       _root_.loop_ended_shared_input.Witness _root_.Aeneas.Std.U32)) ×
+       _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
+       × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
+-      _root_.Unit × _root_.Unit))))
++      _root_.Unit × _root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize))))))
+     iter
+ 
+ /-- [loop_ended_shared_input::infer]: loop body 0:
+@@ -338,7 +341,7 @@ def infer_loop0.body
+           _, _, _, _, _, _, _, _, _) =>
+           _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r2)
+         | _root_.Sum.inr (inputs1, per_scope1, iter1, _, _, _, _, _, _, _, _,
+-          _, _, _) =>
++          _, _, _, _) =>
+           _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
+             (iter1, inputs1, per_scope1))
+       | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
+diff --git a/tests/lean/LoopThenCollectJoin.lean b/tests/lean/LoopThenCollectJoin.lean
+new file mode 100644
+index 0000000..c1ecb7f
+--- /dev/null
++++ b/tests/lean/LoopThenCollectJoin.lean
+@@ -0,0 +1 @@
++import LoopThenCollectJoin.Checks
+diff --git a/tests/lean/LoopThenCollectJoin/Checks.lean b/tests/lean/LoopThenCollectJoin/Checks.lean
+new file mode 100644
+index 0000000..4d3a0ac
+--- /dev/null
++++ b/tests/lean/LoopThenCollectJoin/Checks.lean
+@@ -0,0 +1,37 @@
++import LoopThenCollectJoin.LoopThenCollectJoin
++
++/-! Evaluate the model of `tests/src/loop-then-collect-join.rs` on the inputs
++    of its `native` test module and compare with the native results. -/
++
++namespace loop_then_collect_join.checks
++open Aeneas Aeneas.Std Result
++
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++
++def a (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Storage :=
++  { buf := .A (vec (xs.map fun x => (⟨BitVec.ofNat _ x⟩ : U32)) (by simpa using h)) }
++def b (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Storage :=
++  { buf := .B (vec (xs.map fun x => (⟨BitVec.ofNat _ x⟩ : U64)) (by simpa using h)) }
++def c (xs : List Int) (h : xs.length ≤ Usize.max := by scalar_tac) : Storage :=
++  { buf := .C (vec (xs.map fun x => (⟨BitVec.ofInt _ x⟩ : I64)) (by simpa using h)) }
++
++/-- `Ok v` as the list of its values, `Err n` as `n` -/
++def res (r : Result (core.result.Result (alloc.vec.Vec U32) Usize)) : Option (Sum (List Nat) Nat) :=
++  match r with
++  | ok (core.result.Result.Ok v) => some (.inl (v.val.map (·.val)))
++  | ok (core.result.Result.Err n) => some (.inr n.val)
++  | _ => none
++
++-- family_then_collect_native
++#guard res (family_then_collect (a [1, 2, 3]) (b [4])) == some (.inl [1, 2, 3])
++#guard res (family_then_collect (a []) (a [5])) == some (.inl [])
++#guard res (family_then_collect (b [1, 2]) (a [5])) == some (.inl [])
++#guard res (family_then_collect (c [1, 2]) (a [5])) == some (.inr 2)
++#guard res (family_then_collect (a [7]) (c [1, 2, 3])) == some (.inr 3)
++
++-- family_then_collect_last_native
++#guard res (family_then_collect_last (a [9, 8]) (a [])) == some (.inl [9, 8])
++#guard res (family_then_collect_last (b [1]) (b [])) == some (.inl [])
++#guard res (family_then_collect_last (a [1]) (c [])) == some (.inr 0)
++
++end loop_then_collect_join.checks
+diff --git a/tests/lean/LoopThenCollectJoin/LoopThenCollectJoin.lean b/tests/lean/LoopThenCollectJoin/LoopThenCollectJoin.lean
+new file mode 100644
+index 0000000..015c30b
+--- /dev/null
++++ b/tests/lean/LoopThenCollectJoin/LoopThenCollectJoin.lean
+@@ -0,0 +1,284 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_then_collect_join]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_then_collect_join
++
++/-- [loop_then_collect_join::Buf]
++    Source: 'tests/src/loop-then-collect-join.rs', lines 20:0-24:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Buf where
++| A : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 → Buf
++| B : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U64 → Buf
++| C : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64 → Buf
++
++/-- [loop_then_collect_join::Storage]
++    Source: 'tests/src/loop-then-collect-join.rs', lines 26:0-28:1
++    Visibility: public -/
++structure Storage where
++  buf : _root_.loop_then_collect_join.Buf
++
++/-- [loop_then_collect_join::{loop_then_collect_join::Storage}::is_int]:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 31:4-33:5
++    Visibility: public -/
++def Storage.is_int
++  (self : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let joined ←
++    match self.buf with
++    | _root_.loop_then_collect_join.Buf.A _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl self.buf : _root_.Sum
++        _root_.loop_then_collect_join.Buf (_root_.loop_then_collect_join.Buf ×
++        _root_.Bool))
++    | _root_.loop_then_collect_join.Buf.B _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl self.buf : _root_.Sum
++        _root_.loop_then_collect_join.Buf (_root_.loop_then_collect_join.Buf ×
++        _root_.Bool))
++    | _root_.loop_then_collect_join.Buf.C _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (self.buf, true) : _root_.Sum
++        _root_.loop_then_collect_join.Buf (_root_.loop_then_collect_join.Buf ×
++        _root_.Bool))
++  let b ←
++    match joined with
++    | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++    | _root_.Sum.inr (_, exit) => _root_.Aeneas.Std.Result.ok exit
++  _root_.Aeneas.Std.Result.ok (¬ b)
++
++/-- [loop_then_collect_join::{loop_then_collect_join::Storage}::len]:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 35:4-41:5
++    Visibility: public -/
++def Storage.len
++  (self : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  match self.buf with
++  | _root_.loop_then_collect_join.Buf.A v =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len v)
++  | _root_.loop_then_collect_join.Buf.B v =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len v)
++  | _root_.loop_then_collect_join.Buf.C v =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len v)
++
++/-- [loop_then_collect_join::family_then_collect]: loop body 0:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 46:4-55:1
++    Visibility: public -/
++@[rust_loop_body]
++def family_then_collect_loop.body
++  (input : _root_.loop_then_collect_join.Storage)
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter
++  _root_.loop_then_collect_join.Storage 2#usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.array.iter.IntoIter
++    _root_.loop_then_collect_join.Storage 2#usize)
++    (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.Usize))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.array.iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    let joined ←
++      match input.buf with
++      | _root_.loop_then_collect_join.Buf.A x =>
++        do
++        let s := _root_.Aeneas.Std.alloc.vec.Vec.deref x
++        let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++        let c ←
++          _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) core.marker.CopyU32
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) i
++        let (model_state2, _) ←
++          _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) core.marker.CopyU32)
++            (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++            _root_.Aeneas.Std.U32) c
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (model_state2, input.buf) :
++          _root_.Sum _root_.loop_then_collect_join.Buf
++          ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.loop_then_collect_join.Buf))
++      | _root_.loop_then_collect_join.Buf.B _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl input.buf : _root_.Sum
++          _root_.loop_then_collect_join.Buf ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.loop_then_collect_join.Buf))
++      | _root_.loop_then_collect_join.Buf.C _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl input.buf : _root_.Sum
++          _root_.loop_then_collect_join.Buf ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.loop_then_collect_join.Buf))
++    let v ←
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.Aeneas.Std.U32)
++      | _root_.Sum.inr (exit, _) => _root_.Aeneas.Std.Result.ok exit
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok v))
++  | some value =>
++    let b ← _root_.loop_then_collect_join.Storage.is_int value
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++    else
++      let i ← _root_.loop_then_collect_join.Storage.len value
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err i))
++
++/-- [loop_then_collect_join::family_then_collect]: loop 0:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 46:4-55:1
++    Visibility: public -/
++@[rust_loop]
++def family_then_collect_loop
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter
++  _root_.loop_then_collect_join.Storage 2#usize)
++  (input : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Usize)
++  := do
++  loop
++    (fun iter1 => _root_.loop_then_collect_join.family_then_collect_loop.body
++       input iter1 : _root_.Aeneas.Std.core.array.iter.IntoIter
++      _root_.loop_then_collect_join.Storage 2#usize →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.core.array.iter.IntoIter
++      _root_.loop_then_collect_join.Storage 2#usize)
++      (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.Usize)))
++    iter
++
++/-- [loop_then_collect_join::family_then_collect]:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 45:0-55:1
++    Visibility: public -/
++def family_then_collect
++  (input : _root_.loop_then_collect_join.Storage)
++  (other : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Usize)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.array.iter.IntoIteratorArray.into_iter
++      (_root_.Aeneas.Std.Array.make 2#usize [ input, other ])
++  _root_.loop_then_collect_join.family_then_collect_loop model_state input
++
++/-- [loop_then_collect_join::family_then_collect_last]: loop body 0:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 59:4-68:1
++    Visibility: public -/
++@[rust_loop_body]
++def family_then_collect_last_loop.body
++  (input : _root_.loop_then_collect_join.Storage)
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter
++  _root_.loop_then_collect_join.Storage 2#usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.array.iter.IntoIter
++    _root_.loop_then_collect_join.Storage 2#usize)
++    (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.Usize))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.array.iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    let joined ←
++      match input.buf with
++      | _root_.loop_then_collect_join.Buf.A x =>
++        do
++        let s := _root_.Aeneas.Std.alloc.vec.Vec.deref x
++        let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++        let c ←
++          _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) core.marker.CopyU32
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) i
++        let (model_state2, _) ←
++          _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++            (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++            _root_.Aeneas.Std.U32) core.marker.CopyU32)
++            (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++            _root_.Aeneas.Std.U32) c
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (model_state2, input.buf) :
++          _root_.Sum _root_.loop_then_collect_join.Buf
++          ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.loop_then_collect_join.Buf))
++      | _root_.loop_then_collect_join.Buf.B _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl input.buf : _root_.Sum
++          _root_.loop_then_collect_join.Buf ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.loop_then_collect_join.Buf))
++      | _root_.loop_then_collect_join.Buf.C _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl input.buf : _root_.Sum
++          _root_.loop_then_collect_join.Buf ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.loop_then_collect_join.Buf))
++    let v ←
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.Aeneas.Std.U32)
++      | _root_.Sum.inr (exit, _) => _root_.Aeneas.Std.Result.ok exit
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok v))
++  | some value =>
++    let b ← _root_.loop_then_collect_join.Storage.is_int value
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++    else
++      let i ← _root_.loop_then_collect_join.Storage.len value
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err i))
++
++/-- [loop_then_collect_join::family_then_collect_last]: loop 0:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 59:4-68:1
++    Visibility: public -/
++@[rust_loop]
++def family_then_collect_last_loop
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter
++  _root_.loop_then_collect_join.Storage 2#usize)
++  (input : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Usize)
++  := do
++  loop
++    (fun iter1 =>
++       _root_.loop_then_collect_join.family_then_collect_last_loop.body input
++       iter1 : _root_.Aeneas.Std.core.array.iter.IntoIter
++      _root_.loop_then_collect_join.Storage 2#usize →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.core.array.iter.IntoIter
++      _root_.loop_then_collect_join.Storage 2#usize)
++      (_root_.Aeneas.Std.core.result.Result (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.Usize)))
++    iter
++
++/-- [loop_then_collect_join::family_then_collect_last]:
++    Source: 'tests/src/loop-then-collect-join.rs', lines 58:0-68:1
++    Visibility: public -/
++def family_then_collect_last
++  (input : _root_.loop_then_collect_join.Storage)
++  (other : _root_.loop_then_collect_join.Storage) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.Usize)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.array.iter.IntoIteratorArray.into_iter
++      (_root_.Aeneas.Std.Array.make 2#usize [ input, other ])
++  _root_.loop_then_collect_join.family_then_collect_last_loop model_state input
++
++end loop_then_collect_join
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index dcda6eb..f48182a 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -118,8 +118,10 @@ package «tests» {}
+ @[default_target] lean_lib LoopOptionNestedBorrow
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopSharedComponents
++@[default_target] lean_lib JoinSharedBorrowField
+ @[default_target] lean_lib JoinStaticNested
+ @[default_target] lean_lib LoopSharedLoanInJoin
++@[default_target] lean_lib LoopThenCollectJoin
+ @[default_target] lean_lib Loops
+ @[default_target] lean_lib LoopsRec
+ @[default_target] lean_lib LoopsAdts
+diff --git a/tests/src/join-shared-borrow-field.rs b/tests/src/join-shared-borrow-field.rs
+new file mode 100644
+index 0000000..40c9606
+--- /dev/null
++++ b/tests/src/join-shared-borrow-field.rs
+@@ -0,0 +1,94 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinSharedBorrowField
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A join over a struct holding a shared borrow and a mutable borrow of the
++//! same region (`Frame<'a>`), passed to a call in one branch
++//! (`try_plain(Some(f), ..)`) and left untouched in the other
++//! (`try_plain(None, ..)`). The join abstraction of the region gives the
++//! frame's mutable borrow back through a pattern over the whole frame: its
++//! shared-borrow field gives nothing back. That field used to be bound by a
++//! unit pattern (`let ⟨ (), i, _ ⟩ := f`), which Lean rejects; it is now
++//! ignored with the type of the field.
++//!
++//! JoinSharedBorrowField/Checks.lean compares the model with the native
++//! results asserted in the native test module.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++
++    pub fn try_advance(&mut self) -> Result<u32, u32> {
++        if self.pos >= self.steps.len() {
++            return Err(self.pos as u32);
++        }
++        Ok(self.advance())
++    }
++}
++
++pub fn try_plain(execution: Option<&mut Frame<'_>>, counter: &mut u32) -> Result<u32, u32> {
++    match execution {
++        Some(frame) => frame.try_advance(),
++        None => {
++            *counter = counter.wrapping_add(1);
++            Ok(*counter)
++        }
++    }
++}
++
++pub fn run_try_plain(f: &mut Frame<'_>, some: bool, counter: u32) -> (u32, u32, bool) {
++    let mut c = counter;
++    let r = if some {
++        try_plain(Some(f), &mut c)
++    } else {
++        try_plain(None, &mut c)
++    };
++    match r {
++        Ok(k) => (k, c, true),
++        Err(e) => (e, c, false),
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    /// `run (&mut frame)`, then the frame's `ctx` and `pos`
++    fn on_frame<R>(ctx: u32, pos: usize, run: impl FnOnce(&mut Frame<'_>) -> R) -> (R, u32, usize) {
++        let steps = [3u32, 5, 7];
++        let mut c = ctx;
++        let mut f = Frame { steps: &steps, ctx: &mut c, pos };
++        let r = run(&mut f);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn run_try_plain_native() {
++        assert_eq!(on_frame(10, 0, |f| run_try_plain(f, true, 4)), ((3, 4, true), 13, 1));
++        assert_eq!(on_frame(10, 2, |f| run_try_plain(f, true, 4)), ((7, 4, true), 17, 3));
++        assert_eq!(on_frame(10, 3, |f| run_try_plain(f, true, 4)), ((3, 4, false), 10, 3));
++        assert_eq!(on_frame(10, 1, |f| run_try_plain(f, false, 4)), ((5, 5, true), 10, 1));
++        assert_eq!(on_frame(u32::MAX - 1, 2, |f| run_try_plain(f, true, u32::MAX)), ((7, u32::MAX, true), 5, 3));
++        assert_eq!(on_frame(10, 1, |f| run_try_plain(f, false, u32::MAX)), ((0, 0, true), 10, 1));
++        // The caller writes through the frame after the call
++        assert_eq!(
++            on_frame(10, 1, |f| {
++                let r = run_try_plain(&mut *f, false, 4);
++                *f.ctx = 99;
++                r
++            }),
++            ((5, 5, true), 99, 1)
++        );
++    }
++}
+diff --git a/tests/src/loop-then-collect-join.rs b/tests/src/loop-then-collect-join.rs
+new file mode 100644
+index 0000000..5db43d9
+--- /dev/null
++++ b/tests/src/loop-then-collect-join.rs
+@@ -0,0 +1,99 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopThenCollectJoin
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop over `[input, other]` (an array of shared borrows) which may return
++//! early, then a `match &input.buf` whose `_` arm covers several variants and
++//! whose other arm collects an iterator over the payload (the shape of the
++//! family check followed by a collect in the tensor backward functions of
++//! chelis). At the loop exit, the region abstraction of the last `next` call
++//! only holds a borrow projector over the iterator, whose loan projector is
++//! held by the (non-fixed) abstraction of `into_iter`: ending the former only
++//! gives back to the latter, like ending a concrete mutable borrow whose loan
++//! is in a non-fixed abstraction. Simplifying the contexts before the join of
++//! the arms used to keep it in the arms without a join (while the join of the
++//! `_` contexts merged both abstractions), and matching the contexts failed.
++//!
++//! LoopThenCollectJoin/Checks.lean compares the model with the native results
++//! asserted in the native test module.
++
++pub enum Buf {
++    A(Vec<u32>),
++    B(Vec<u64>),
++    C(Vec<i64>),
++}
++
++pub struct Storage {
++    pub buf: Buf,
++}
++
++impl Storage {
++    pub fn is_int(&self) -> bool {
++        !matches!(self.buf, Buf::C(_))
++    }
++
++    pub fn len(&self) -> usize {
++        match &self.buf {
++            Buf::A(v) => v.len(),
++            Buf::B(v) => v.len(),
++            Buf::C(v) => v.len(),
++        }
++    }
++}
++
++/// The collecting arm first
++pub fn family_then_collect(input: &Storage, other: &Storage) -> Result<Vec<u32>, usize> {
++    for value in [input, other] {
++        if !value.is_int() {
++            return Err(value.len());
++        }
++    }
++    match &input.buf {
++        Buf::A(x) => Ok(x.iter().copied().collect()),
++        _ => Ok(Vec::new()),
++    }
++}
++
++/// The collecting arm last
++pub fn family_then_collect_last(input: &Storage, other: &Storage) -> Result<Vec<u32>, usize> {
++    for value in [input, other] {
++        if !value.is_int() {
++            return Err(value.len());
++        }
++    }
++    match &input.buf {
++        Buf::B(_) | Buf::C(_) => Ok(Vec::new()),
++        Buf::A(x) => Ok(x.iter().copied().collect()),
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn a(xs: &[u32]) -> Storage {
++        Storage { buf: Buf::A(xs.to_vec()) }
++    }
++    fn b(xs: &[u64]) -> Storage {
++        Storage { buf: Buf::B(xs.to_vec()) }
++    }
++    fn c(xs: &[i64]) -> Storage {
++        Storage { buf: Buf::C(xs.to_vec()) }
++    }
++
++    #[test]
++    fn family_then_collect_native() {
++        assert_eq!(family_then_collect(&a(&[1, 2, 3]), &b(&[4])), Ok(vec![1, 2, 3]));
++        assert_eq!(family_then_collect(&a(&[]), &a(&[5])), Ok(vec![]));
++        assert_eq!(family_then_collect(&b(&[1, 2]), &a(&[5])), Ok(vec![]));
++        assert_eq!(family_then_collect(&c(&[1, 2]), &a(&[5])), Err(2));
++        assert_eq!(family_then_collect(&a(&[7]), &c(&[1, 2, 3])), Err(3));
++    }
++
++    #[test]
++    fn family_then_collect_last_native() {
++        assert_eq!(family_then_collect_last(&a(&[9, 8]), &a(&[])), Ok(vec![9, 8]));
++        assert_eq!(family_then_collect_last(&b(&[1]), &b(&[])), Ok(vec![]));
++        assert_eq!(family_then_collect_last(&a(&[1]), &c(&[])), Err(0));
++    }
++}

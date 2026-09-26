@@ -1,0 +1,557 @@
+# charon integration step 50 after 546078ea5d: commit c3b42d30b55077287274c1ffee41db558c0aa37a
+# first parent 5d639e32bef8a61ea3dacd578be70df94269bb6c
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: a loop inside another loop exits to the code after it in the outer loop
+#
+# compute_loop_exits takes the exit reached by the most exit paths. In a loop with several early
+# returns (`?`), that is the cleanup they share, outside every loop, and the code that follows the
+# loop, where it normally exits to, is copied into the loop. When the loop is inside another loop
+# and inside an `if` (`if let Some(sites) = sites { for s in sites { g(*s)?; .. } }` in a loop
+# body), that code is also the exit of the `if`, so it gets a copy after the `if` and one in the
+# loop: the rest of the outer loop body is copied once more for every such loop.
+#
+# For a loop inside another loop, the exit is now first chosen among the exits inside the outer
+# loop (same ranking), and kept if it is the only best one that does not only lead to errors and
+# if it reaches a block of the outer loop that is not dominated by the loop header and is not an
+# exit cleanup, i.e. the code after the loop is also reached around it. Otherwise all the exits are
+# considered as before. The other exits leave the outer loop too: early returns and `break`s of an
+# outer loop are translated in place, as before for every exit but the chosen one.
+# CfgInfo::dominator_tree is now used.
+#
+# Test: control-flow/switch-exits-after-early-return guard_loop (one call of `tail`; before: 2, and 8
+# before the previous commit).
+
+diff --git a/src/transform/control_flow/ullbc_to_llbc.rs b/src/transform/control_flow/ullbc_to_llbc.rs
+index 0f167ba..68c87d2 100644
+--- a/src/transform/control_flow/ullbc_to_llbc.rs
++++ b/src/transform/control_flow/ullbc_to_llbc.rs
+@@ -111,7 +111,6 @@ struct CfgInfo {
+     /// The blocks whose terminators are a switch are stored here.
+     pub switch_blocks: HashSet<src::BlockId>,
+     /// Tree of which nodes dominates which other nodes.
+-    #[expect(unused)]
+     pub dominator_tree: Dominators<BlockId>,
+     /// Computed data about each block.
+     pub block_data: IndexVec<BlockId, Box<BlockData>>,
+@@ -679,6 +678,44 @@ impl ExitInfo {
+             // Compute the candidates.
+             let loop_exits: SeqHashMap<BlockId, LoopExitRank> =
+                 Self::compute_loop_exit_ranks(cfg, loop_id);
++            // For a loop inside another loop, the exits that leave the outer loop too (early
++            // returns, `break`s of an outer loop) may get the most occurrences: when the loop has
++            // several early returns (`?`), they share a cleanup. The code that follows the loop in
++            // the outer loop, where the loop normally exits to, is then copied into the loop. If
++            // that code is also reached around the loop (the loop is often in an `if`), it is
++            // where the `if` joins, and it gets a copy there too.
++            // In that case, i.e. if the best exit inside the outer loop reaches a block of the
++            // outer loop that is not dominated by the loop header and is not an exit cleanup, and
++            // if it is the only best one that does not only lead to errors, we use it. Otherwise
++            // we choose among all the exits as below.
++            let outer_loop = cfg.block_data[loop_id]
++                .within_loops
++                .iter()
++                .rev()
++                .nth(1)
++                .copied();
++            let exit_in_outer_loop = outer_loop.and_then(|outer_loop| {
++                loop_exits
++                    .iter()
++                    .filter(|&(&bid, _)| cfg.is_within_loop(outer_loop, bid))
++                    .max_set_by_key(|&(_, rank)| *rank)
++                    .into_iter()
++                    .map(|(&bid, _)| bid)
++                    .filter(|&bid| !cfg.block_data[bid].only_reach_error)
++                    .exactly_one()
++                    .ok()
++                    .filter(|&bid| {
++                        cfg.block_data[bid].reachable_including_self().any(|b| {
++                            cfg.is_within_loop(outer_loop, b)
++                                && cfg.block_data[b].exit_cleanup_size.is_none()
++                                && !cfg.dominator_tree.dominators(b).unwrap().contains(&loop_id)
++                        })
++                    })
++            });
++            if exit_in_outer_loop.is_some() {
++                cfg.block_data[loop_id].exit_info.loop_exit = exit_in_outer_loop;
++                continue;
++            }
+             // We choose the exit with:
+             // - the most occurrences
+             // - the least total distance (if there are several possibilities)
+diff --git a/tests/ui/control-flow/switch-exits-after-early-return.out b/tests/ui/control-flow/switch-exits-after-early-return.out
+index 4828975..f40b6f4 100644
+--- a/tests/ui/control-flow/switch-exits-after-early-return.out
++++ b/tests/ui/control-flow/switch-exits-after-early-return.out
+@@ -1588,6 +1588,430 @@ pub fn continue_after_try<'_0, '_1>(steps_1: &'_0 [Step], live_2: Option<&'_1 [b
+     return
+ }
+ 
++// Full name: test_crate::guard_loop
++pub fn guard_loop<'_0, '_1>(ops_1: &'_0 [Op], sites_2: Option<&'_1 [u32]>[{built_in impl Sized for &'_1 [u32]}]) -> Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]
++{
++    let _0: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // return
++    let ops_1: &'1 [Op]; // arg #1
++    let sites_2: Option<&'8 [u32]>[{built_in impl Sized for &'8 [u32]}]; // arg #2
++    let acc_3: u32; // local
++    let _4: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _5: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let residual_6: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _7: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_8: u32; // local
++    let _9: Iter<'12, Op>[{built_in impl Sized for Op}]; // anonymous local
++    let _10: &'13 [Op]; // anonymous local
++    let iter_11: Iter<'14, Op>[{built_in impl Sized for Op}]; // local
++    let _12: Option<&'21 Op>[{built_in impl Sized for &'21 Op}]; // anonymous local
++    let _13: &'26 mut Iter<'27, Op>[{built_in impl Sized for Op}]; // anonymous local
++    let _14: &'28 mut Iter<'29, Op>[{built_in impl Sized for Op}]; // anonymous local
++    let op_15: &'30 Op; // local
++    let sites_16: &'31 [u32]; // local
++    let _17: Iter<'33, u32>[{built_in impl Sized for u32}]; // anonymous local
++    let _18: &'34 [u32]; // anonymous local
++    let iter_19: Iter<'35, u32>[{built_in impl Sized for u32}]; // local
++    let _20: Option<&'42 u32>[{built_in impl Sized for &'42 u32}]; // anonymous local
++    let _21: &'47 mut Iter<'48, u32>[{built_in impl Sized for u32}]; // anonymous local
++    let _22: &'49 mut Iter<'50, u32>[{built_in impl Sized for u32}]; // anonymous local
++    let s_23: &'51 u32; // local
++    let _24: bool; // anonymous local
++    let _25: u32; // anonymous local
++    let _26: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _27: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let _28: u32; // anonymous local
++    let residual_29: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _30: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_31: u32; // local
++    let _32: u32; // anonymous local
++    let _33: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _34: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let _35: u32; // anonymous local
++    let _36: u32; // anonymous local
++    let _37: u32; // anonymous local
++    let residual_38: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _39: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_40: u32; // local
++    let v_41: u32; // local
++    let _42: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _43: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let residual_44: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _45: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_46: u32; // local
++    let _47: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _48: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let residual_49: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _50: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_51: u32; // local
++    let _52: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _53: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let residual_54: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _55: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_56: u32; // local
++    let _57: ControlFlow<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]; // anonymous local
++    let _58: Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]; // anonymous local
++    let residual_59: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // local
++    let _60: Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]; // anonymous local
++    let val_61: u32; // local
++    let _62: u32; // anonymous local
++    let _63: u32; // anonymous local
++    let _64: u32; // anonymous local
++    let _65: u32; // anonymous local
++
++    storage_live(_37)
++    storage_live(_64)
++    storage_live(acc_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = g(const 0 : u32)
++    _4 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _5)
++    storage_dead(_5)
++    match _4 {
++        ControlFlow::Continue => {
++            storage_live(val_8)
++            val_8 = copy (_4 as variant ControlFlow::Continue).0
++            acc_3 = copy val_8
++            storage_dead(val_8)
++            conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _4
++            storage_dead(_4)
++            storage_live(_9)
++            storage_live(_10)
++            _10 = copy ops_1
++            _9 = {impl IntoIterator for &'a [T]}::into_iter<'52, Op>[{built_in impl Sized for Op}](move _10)
++            storage_dead(_10)
++            storage_live(iter_11)
++            iter_11 = move _9
++            loop {
++                storage_live(_12)
++                storage_live(_13)
++                storage_live(_14)
++                _14 = &mut iter_11
++                _13 = &two-phase-mut (*_14)
++                _12 = {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'54, '56, Op>[{built_in impl Sized for Op}](move _13)
++                storage_dead(_13)
++                match _12 {
++                    Option::None => {
++                        storage_dead(_14)
++                        storage_dead(_12)
++                        storage_dead(iter_11)
++                        storage_dead(_9)
++                        storage_live(_65)
++                        _65 = copy acc_3
++                        _0 = Result::Ok { 0: move _65 }
++                        storage_dead(_65)
++                        storage_dead(acc_3)
++                        return
++                    },
++                    Option::Some => {
++                    },
++                }
++                storage_live(op_15)
++                op_15 = copy (_12 as variant Option::Some).0
++                match sites_2 {
++                    Option::Some => {
++                        storage_live(sites_16)
++                        sites_16 = copy (sites_2 as variant Option::Some).0
++                        storage_live(_17)
++                        storage_live(_18)
++                        _18 = copy sites_16
++                        _17 = {impl IntoIterator for &'a [T]}::into_iter<'65, u32>[{built_in impl Sized for u32}](move _18)
++                        storage_dead(_18)
++                        storage_live(iter_19)
++                        iter_19 = move _17
++                        loop {
++                            storage_live(_20)
++                            storage_live(_21)
++                            storage_live(_22)
++                            _22 = &mut iter_19
++                            _21 = &two-phase-mut (*_22)
++                            _20 = {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'67, '69, u32>[{built_in impl Sized for u32}](move _21)
++                            storage_dead(_21)
++                            match _20 {
++                                Option::None => {
++                                    break 0
++                                },
++                                Option::Some => {
++                                    storage_live(s_23)
++                                    s_23 = copy (_20 as variant Option::Some).0
++                                    storage_live(_24)
++                                    storage_live(_25)
++                                    storage_live(_26)
++                                    storage_live(_27)
++                                    storage_live(_28)
++                                    _28 = copy (*s_23)
++                                    _27 = g(move _28)
++                                    storage_dead(_28)
++                                    _26 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _27)
++                                    storage_dead(_27)
++                                    match _26 {
++                                        ControlFlow::Continue => {
++                                            storage_live(val_31)
++                                            val_31 = copy (_26 as variant ControlFlow::Continue).0
++                                            _25 = copy val_31
++                                            storage_dead(val_31)
++                                            _24 = move _25 > const 50 : u32
++                                            if move _24 {
++                                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _26
++                                                storage_dead(_26)
++                                                storage_dead(_25)
++                                                storage_dead(_24)
++                                                storage_dead(s_23)
++                                                storage_dead(_22)
++                                                storage_dead(_20)
++                                                continue 0
++                                            } else {
++                                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _26
++                                                storage_dead(_26)
++                                                storage_dead(_25)
++                                                storage_dead(_24)
++                                                storage_live(_32)
++                                                storage_live(_33)
++                                                storage_live(_34)
++                                                storage_live(_35)
++                                                storage_live(_36)
++                                                _36 = copy (*s_23)
++                                                _37 = copy _36 panic.+ const 1 : u32
++                                                _35 = move _37
++                                                storage_dead(_36)
++                                                _34 = g(move _35)
++                                                storage_dead(_35)
++                                                _33 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _34)
++                                                storage_dead(_34)
++                                                match _33 {
++                                                    ControlFlow::Continue => {
++                                                        storage_live(val_40)
++                                                        val_40 = copy (_33 as variant ControlFlow::Continue).0
++                                                        _32 = copy val_40
++                                                        storage_dead(val_40)
++                                                        conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _33
++                                                        storage_dead(_33)
++                                                        storage_dead(_32)
++                                                        storage_dead(s_23)
++                                                        storage_dead(_22)
++                                                        storage_dead(_20)
++                                                        continue 0
++                                                    },
++                                                    ControlFlow::Break => {
++                                                        storage_live(residual_38)
++                                                        residual_38 = move (_33 as variant ControlFlow::Break).0
++                                                        storage_live(_39)
++                                                        _39 = move residual_38
++                                                        _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _39)
++                                                        storage_dead(_39)
++                                                        conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_38
++                                                        storage_dead(residual_38)
++                                                        conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _33
++                                                        storage_dead(_33)
++                                                        storage_dead(_32)
++                                                        storage_dead(s_23)
++                                                        storage_dead(_22)
++                                                        storage_dead(_20)
++                                                        storage_dead(iter_19)
++                                                        storage_dead(_17)
++                                                        storage_dead(sites_16)
++                                                        break 1
++                                                    },
++                                                }
++                                            }
++                                        },
++                                        ControlFlow::Break => {
++                                            storage_live(residual_29)
++                                            residual_29 = move (_26 as variant ControlFlow::Break).0
++                                            storage_live(_30)
++                                            _30 = move residual_29
++                                            _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _30)
++                                            storage_dead(_30)
++                                            conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_29
++                                            storage_dead(residual_29)
++                                            conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _26
++                                            storage_dead(_26)
++                                            storage_dead(_25)
++                                            storage_dead(_24)
++                                            storage_dead(s_23)
++                                            storage_dead(_22)
++                                            storage_dead(_20)
++                                            storage_dead(iter_19)
++                                            storage_dead(_17)
++                                            storage_dead(sites_16)
++                                            break 1
++                                        },
++                                    }
++                                },
++                            }
++                        }
++                        storage_dead(_22)
++                        storage_dead(_20)
++                        storage_dead(iter_19)
++                        storage_dead(_17)
++                        storage_dead(sites_16)
++                    },
++                    _ => {
++                    },
++                }
++                storage_live(v_41)
++                match (*op_15) {
++                    Op::A => {
++                        storage_live(_42)
++                        storage_live(_43)
++                        _43 = g(const 1 : u32)
++                        _42 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _43)
++                        storage_dead(_43)
++                        match _42 {
++                            ControlFlow::Continue => {
++                                storage_live(val_46)
++                                val_46 = copy (_42 as variant ControlFlow::Continue).0
++                                v_41 = copy val_46
++                                storage_dead(val_46)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _42
++                                storage_dead(_42)
++                            },
++                            ControlFlow::Break => {
++                                storage_live(residual_44)
++                                residual_44 = move (_42 as variant ControlFlow::Break).0
++                                storage_live(_45)
++                                _45 = move residual_44
++                                _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _45)
++                                storage_dead(_45)
++                                conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_44
++                                storage_dead(residual_44)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _42
++                                storage_dead(_42)
++                                storage_dead(v_41)
++                                break 0
++                            },
++                        }
++                    },
++                    Op::B => {
++                        storage_live(_47)
++                        storage_live(_48)
++                        _48 = g(const 2 : u32)
++                        _47 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _48)
++                        storage_dead(_48)
++                        match _47 {
++                            ControlFlow::Continue => {
++                                storage_live(val_51)
++                                val_51 = copy (_47 as variant ControlFlow::Continue).0
++                                v_41 = copy val_51
++                                storage_dead(val_51)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _47
++                                storage_dead(_47)
++                            },
++                            ControlFlow::Break => {
++                                storage_live(residual_49)
++                                residual_49 = move (_47 as variant ControlFlow::Break).0
++                                storage_live(_50)
++                                _50 = move residual_49
++                                _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _50)
++                                storage_dead(_50)
++                                conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_49
++                                storage_dead(residual_49)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _47
++                                storage_dead(_47)
++                                storage_dead(v_41)
++                                break 0
++                            },
++                        }
++                    },
++                    Op::C => {
++                        storage_live(_52)
++                        storage_live(_53)
++                        _53 = g(const 3 : u32)
++                        _52 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _53)
++                        storage_dead(_53)
++                        match _52 {
++                            ControlFlow::Continue => {
++                                storage_live(val_56)
++                                val_56 = copy (_52 as variant ControlFlow::Continue).0
++                                v_41 = copy val_56
++                                storage_dead(val_56)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _52
++                                storage_dead(_52)
++                            },
++                            ControlFlow::Break => {
++                                storage_live(residual_54)
++                                residual_54 = move (_52 as variant ControlFlow::Break).0
++                                storage_live(_55)
++                                _55 = move residual_54
++                                _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _55)
++                                storage_dead(_55)
++                                conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_54
++                                storage_dead(residual_54)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _52
++                                storage_dead(_52)
++                                storage_dead(v_41)
++                                break 0
++                            },
++                        }
++                    },
++                    Op::D => {
++                        storage_live(_57)
++                        storage_live(_58)
++                        _58 = g(const 4 : u32)
++                        _57 = {impl Try for Result<T, E>[@TraitClause0, @TraitClause1]}::branch<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}](move _58)
++                        storage_dead(_58)
++                        match _57 {
++                            ControlFlow::Continue => {
++                                storage_live(val_61)
++                                val_61 = copy (_57 as variant ControlFlow::Continue).0
++                                v_41 = copy val_61
++                                storage_dead(val_61)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _57
++                                storage_dead(_57)
++                            },
++                            ControlFlow::Break => {
++                                storage_live(residual_59)
++                                residual_59 = move (_57 as variant ControlFlow::Break).0
++                                storage_live(_60)
++                                _60 = move residual_59
++                                _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _60)
++                                storage_dead(_60)
++                                conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_59
++                                storage_dead(residual_59)
++                                conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _57
++                                storage_dead(_57)
++                                storage_dead(v_41)
++                                break 0
++                            },
++                        }
++                    },
++                }
++                storage_live(_62)
++                storage_live(_63)
++                _63 = copy v_41
++                _62 = tail(move _63)
++                storage_dead(_63)
++                _64 = copy acc_3 panic.+ copy _62
++                acc_3 = move _64
++                storage_dead(_62)
++                storage_dead(v_41)
++                storage_dead(op_15)
++                storage_dead(_14)
++                storage_dead(_12)
++                continue 0
++            }
++            storage_dead(op_15)
++            storage_dead(_14)
++            storage_dead(_12)
++            storage_dead(iter_11)
++            storage_dead(_9)
++        },
++        ControlFlow::Break => {
++            storage_live(residual_6)
++            residual_6 = move (_4 as variant ControlFlow::Break).0
++            storage_live(_7)
++            _7 = move residual_6
++            _0 = {impl FromResidual<Result<Infallible, E>[{built_in impl Sized for Infallible}, @TraitClause1]> for Result<T, F>[@TraitClause0, @TraitClause2]}::from_residual<u32, String, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}, {built_in impl Sized for String}, {impl From<T> for T}<String>[{built_in impl Sized for String}]](move _7)
++            storage_dead(_7)
++            conditional_drop[{impl Destruct for Result<T, E>[@TraitClause0, @TraitClause1]}<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]] residual_6
++            storage_dead(residual_6)
++            conditional_drop[{impl Destruct for ControlFlow<B, C>[@TraitClause0, @TraitClause1]}<Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}], u32>[{built_in impl Sized for Result<Infallible, String>[{built_in impl Sized for Infallible}, {built_in impl Sized for String}]}, {built_in impl Sized for u32}]] _4
++            storage_dead(_4)
++        },
++    }
++    storage_dead(acc_3)
++    return
++}
++
+ // Full name: test_crate::early_return_in_if
+ pub fn early_return_in_if(x_1: u32, c_2: bool) -> Result<u32, String>[{built_in impl Sized for u32}, {built_in impl Sized for String}]
+ {
+diff --git a/tests/ui/control-flow/switch-exits-after-early-return.rs b/tests/ui/control-flow/switch-exits-after-early-return.rs
+index 9ab4e3d..4cce892 100644
+--- a/tests/ui/control-flow/switch-exits-after-early-return.rs
++++ b/tests/ui/control-flow/switch-exits-after-early-return.rs
+@@ -1,4 +1,4 @@
+-//! Early returns (`?`) must not keep later switches from getting an exit: without one,
++//! Early returns (`?`) must not keep later switches and loops from getting an exit: without one,
+ //! everything after the join of their branches is copied into every branch. Each function below
+ //! calls `tail` once in the source and must call it once in the LLBC.
+ pub enum Op {
+@@ -93,6 +93,30 @@ pub fn continue_after_try(steps: &[Step], live: Option<&[bool]>) -> Result<u32,
+     Ok(acc)
+ }
+ 
++/// A loop with early returns inside an `if`, inside the outer loop: the inner loop exits to the
++/// code after the `if`, not to the cleanup of the early returns.
++pub fn guard_loop(ops: &[Op], sites: Option<&[u32]>) -> Result<u32, String> {
++    let mut acc = g(0)?;
++    for op in ops {
++        if let Some(sites) = sites {
++            for s in sites {
++                if g(*s)? > 50 {
++                    continue;
++                }
++                g(*s + 1)?;
++            }
++        }
++        let v = match op {
++            Op::A => g(1)?,
++            Op::B => g(2)?,
++            Op::C => g(3)?,
++            Op::D => g(4)?,
++        };
++        acc += tail(v);
++    }
++    Ok(acc)
++}
++
+ /// Nothing is copied here; the `if` keeps its shape.
+ pub fn early_return_in_if(x: u32, c: bool) -> Result<u32, String> {
+     let a = g(x)?;

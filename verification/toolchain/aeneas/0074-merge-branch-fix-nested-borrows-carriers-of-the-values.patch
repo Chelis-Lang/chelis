@@ -1,0 +1,1702 @@
+# aeneas integration step 74 after cba11f3beb: commit aa9343a23503a9b136ba20cbb2224de2db76141c
+# first parent 6c1d03858458033bd47eb5e239d274237085970d, merged 4db5c860e1c55daf8816542ee966e3d1f751d166
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (carriers of the values given back at four levels with shared fields)
+
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 68cfb34..8a25a02 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -1659,7 +1659,7 @@ and aborrow_content_to_consumed_aux ~(filter : bool)
+   | V.AEndedMutBorrow (_, _) ->
+       (* TODO? *)
+       None
+-  | V.AEndedIgnoredMutBorrow { child; given_back; given_back_meta = _ } -> (
++  | V.AEndedIgnoredMutBorrow { child; given_back; given_back_meta } -> (
+       let child_ty = child.ty in
+       let given_back_ty = given_back.ty in
+       let child_av = child in
+@@ -1667,24 +1667,42 @@ and aborrow_content_to_consumed_aux ~(filter : bool)
+       (* Inside an ADT (no filtering), the borrowed value is the carrier of
+          the positions which the value given back does not own (see
+          [recombine_projection_exprs]). If the borrowed value holds nothing at
+-         the selected level while the value given back consumes a mutable
+-         projection which covers the whole value (see
+-         [projection_covers_value]), the recombination overwrites every
+-         position of the carrier: we do not translate it. This happens with
+-         four levels or more, when the borrowed value holds positions of other
+-         levels only (e.g., ended borrows of the same region group, which the
+-         consumed values of a deeper level do not translate). The kinds
+-         account for the loans below ignored shared loans exactly when the
+-         sides are then translated with them ([below_shared]). *)
++         the selected level, we do not translate it when the value given back
++         supplies the whole value:
++         - it consumes a mutable projection which covers the whole value (see
++           [projection_covers_value]): the recombination overwrites every
++           position of the carrier;
++         - or it is an ended loan projector, at the selected level, over the
++           symbolic value given back to the borrow: its translation (see
++           [aproj_to_consumed_aux]) is that value, recombined with the values
++           consumed by its projections. Its other positions (e.g., shared
++           borrows) are those of the value the lender gets back, while the
++           borrowed value holds the meta-values of an earlier snapshot, which
++           the holder of the borrow may have replaced since.
++         This happens with four levels or more, when the borrowed value holds
++         positions of other levels only (e.g., ended borrows of the same region
++         group, which the consumed values of a deeper level do not translate).
++         The kinds account for the loans below ignored shared loans exactly
++         when the sides are then translated with them ([below_shared]). *)
+       let kind level av =
+         compute_tavalue_proj_kind ~below_shared_loans:below_shared ctx.span
+           ctx.type_ctx.type_infos abs_regions abs_level level av
+       in
++      let given_back_whole =
++        current_level + 1 = abs_level
++        &&
++        match given_back_av.value with
++        | ASymbolic (_, AEndedProjLoans { proj; _ }) ->
++            proj = given_back_meta.sv_id
++        | _ -> false
++      in
+       let carrier_overwritten =
+         (not filter)
+         && kind current_level child_av = UnknownProj
+         && kind (current_level + 1) given_back_av = LoanProj BMut
+-        && projection_covers_value ctx.decls_ctx [] abs_regions given_back_ty
++        && (given_back_whole
++           || projection_covers_value ctx.decls_ctx [] abs_regions given_back_ty
++           )
+       in
+       let child =
+         if carrier_overwritten then None
+@@ -2099,7 +2117,6 @@ let select_back_side ?(dropped : dropped_consumed list ref option)
+           (take true) (true :: rev_path) (level + 1) g.ty
+       in
+       if in_adt && Option.is_none view then
+-        let c = child c and g = given_back g in
+         (* The selected positions of the ADT may form a single view while its
+            other positions at this level are on the other side of the ended
+            borrow (a stage selects one of two views, sd2 [set_once]): that
+@@ -2109,16 +2126,19 @@ let select_back_side ?(dropped : dropped_consumed list ref option)
+            placeholder which translates to nothing when consumed and to an
+            ignored pattern when given back. A side which holds nothing at this
+            level is a carrier of the other one (e.g., its fields which are not
+-           borrows): we keep it. *)
++           borrows): we keep it. We compare the kinds of the sides before
++           pruning them: pruning replaces a projector whose positions are not
++           selected with a placeholder which holds nothing (its symbolic value
++           as meta-value), which is not a carrier of the other side. *)
+         let kind lvl av =
+           compute_tavalue_proj_kind span ctx.type_ctx.type_infos abs_regions
+             abs_level lvl av
+         in
+-        if
+-          selected_child <> selected_given_back
+-          && kind level c <> UnknownProj
+-          && kind level c = kind (level + 1) g
+-        then
++        let same_kind =
++          kind level c <> UnknownProj && kind level c = kind (level + 1) g
++        in
++        let c = child c and g = given_back g in
++        if selected_child <> selected_given_back && same_kind then
+           if selected_child then (c, { g with value = V.AIgnored None })
+           else ({ c with value = V.AIgnored None }, g)
+         else (c, g)
+diff --git a/tests/lean/ClosureMutContext/ClosureMutContext.lean b/tests/lean/ClosureMutContext/ClosureMutContext.lean
+index 765e558..a5d97c4 100644
+--- a/tests/lean/ClosureMutContext/ClosureMutContext.lean
++++ b/tests/lean/ClosureMutContext/ClosureMutContext.lean
+@@ -161,7 +161,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 { c3 with depth := c.depth }
++       let (c4, back1) := call_mut_back1 { c3 with depth := c2.depth }
+        let c5 := back1 c4
+        let ⟨ r, n, _ ⟩ := c5
+        { c with runtime := r, native := n } :
+@@ -259,12 +259,14 @@ def LowerCtx.lower_all
+   let c := map_back { model_state with f := model_state2.f }
+   let back'p :=
+     (fun self1 =>
+-       let (m, back) := map_back1 { self1 with depth := self.depth }
+-       let lc1 := m.f
+-       let ⟨ r, n, _ ⟩ := { lc1 with depth := lc.depth }
+-       let c1 :=
++       let lc1 := model_state2.f
++       let c1 := map_back { model_state with f := lc1 }
++       let (m, back) := map_back1 { self1 with depth := c1.depth }
++       let lc2 := m.f
++       let ⟨ r, n, _ ⟩ := { lc2 with depth := lc1.depth }
++       let c2 :=
+          back { model_state with f := { lc with runtime := r, native := n } }
+-       let ⟨ r1, n1, _ ⟩ := c1
++       let ⟨ r1, n1, _ ⟩ := c2
+        { self with runtime := r1, native := n1 } :
+       _root_.closure_mut_context.LowerCtx →
+       _root_.closure_mut_context.LowerCtx)
+@@ -320,13 +322,14 @@ def LowerCtx.lower_pair
+   let c2 := call_mut_back c1
+   let back'p :=
+     (fun self1 =>
+-       let (c3, back) := call_mut_back1 { self1 with depth := self.depth }
+-       let (c4, back1) := call_mut_back3 { c3 with depth := f.depth }
+-       let ⟨ r, n, _ ⟩ := c4
+-       let c5 := back1 { c with runtime := r, native := n }
+-       let ⟨ r1, n1, _ ⟩ := c5
+-       let c6 := back { f with runtime := r1, native := n1 }
+-       let ⟨ r2, n2, _ ⟩ := c6
++       let c3 := call_mut_back c1
++       let (c4, back) := call_mut_back1 { self1 with depth := c3.depth }
++       let (c5, back1) := call_mut_back3 { c4 with depth := c1.depth }
++       let ⟨ r, n, _ ⟩ := c5
++       let c6 := back1 { c with runtime := r, native := n }
++       let ⟨ r1, n1, _ ⟩ := c6
++       let c7 := back { f with runtime := r1, native := n1 }
++       let ⟨ r2, n2, _ ⟩ := c7
+        { self with runtime := r2, native := n2 } :
+       _root_.closure_mut_context.LowerCtx →
+       _root_.closure_mut_context.LowerCtx)
+@@ -349,7 +352,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 { c3 with depth := c.depth }
++       let (c4, back1) := call_mut_back1 { c3 with depth := c2.depth }
+        let c5 := back1 c4
+        let ⟨ r, n, _ ⟩ := c5
+        { c with runtime := r, native := n } :
+@@ -528,7 +531,7 @@ def drive_through
+   let w3 := step_through_back w2
+   let (w4, back) := step_through_back1 { c := { w3.c with depth := 1#u32 } }
+   let (w5, back1) :=
+-    step_through_back3 { c := { w4.c with depth := w.c.depth } }
++    step_through_back3 { c := { w4.c with depth := w2.c.depth } }
+   let w6 := back1 { c := { w5.c with depth := w1.c.depth } }
+   let w7 := back { c := { w6.c with depth := w.c.depth } }
+   _root_.Aeneas.Std.Result.ok (r, w7.c.runtime.raised, w7.c.native.polls)
+@@ -554,7 +557,7 @@ def drive_put_back
+   let w3 := step_through_back w2
+   let (w4, back) := step_through_back1 { c := { w3.c with depth := 2#u32 } }
+   let (w5, back1) :=
+-    step_through_back3 { c := { w4.c with depth := w.c.depth } }
++    step_through_back3 { c := { w4.c with depth := w2.c.depth } }
+   let w6 := back1 { c := { w5.c with depth := w1.c.depth } }
+   let w7 := back { c := { w6.c with depth := w.c.depth } }
+   _root_.Aeneas.Std.Result.ok (r, w7.c.runtime.raised, w7.c.native.polls)
+diff --git a/tests/lean/NestedBorrowsAudit/NestedBorrowsAudit.lean b/tests/lean/NestedBorrowsAudit/NestedBorrowsAudit.lean
+index 6551a51..794b763 100644
+--- a/tests/lean/NestedBorrowsAudit/NestedBorrowsAudit.lean
++++ b/tests/lean/NestedBorrowsAudit/NestedBorrowsAudit.lean
+@@ -242,7 +242,7 @@ def wrapper_reused
+   let w3 := step_through_back w2
+   let (w4, back) := step_through_back1 { c := { w3.c with depth := 3#u32 } }
+   let (w5, back1) :=
+-    step_through_back3 { c := { w.c with runtime := w4.c.runtime } }
++    step_through_back3 { c := { w2.c with runtime := w4.c.runtime } }
+   let lc1 := step_back { lc with runtime := w5.c.runtime }
+   let w6 := back1 { c := { lc1 with depth := w1.c.depth } }
+   let w7 := back { c := { w.c with runtime := w6.c.runtime } }
+diff --git a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+index 777bce7..3d8a98b 100644
+--- a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
++++ b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+@@ -339,7 +339,7 @@ def
+         _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
+         coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+     let back1 :=
+-      (fun resolve1 => ((resolve1.#0, resolve.#1, resolve.#2),
++      (fun resolve1 => (resolve1,
+          fun resolve2 => let (i2, _, _) := resolve2
+                          (i2, i, i1)) :
+         _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
+@@ -382,8 +382,7 @@ def
+             coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+         let back1 :=
+           (fun resolve1 =>
+-             let (c, back2) :=
+-               call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++             let (c, back2) := call_mut_back resolve1
+              ((c.#0, c.#1, c.#2),
+                fun resolve2 =>
+                  let c1 :=
+@@ -409,8 +408,7 @@ def
+             coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+         let back1 :=
+           (fun resolve1 =>
+-             let (c, back2) :=
+-               call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++             let (c, back2) := call_mut_back resolve1
+              ((c.#0, c.#1, c.#2),
+                fun resolve2 =>
+                  let c1 :=
+@@ -441,8 +439,7 @@ def
+           coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+       let back1 :=
+         (fun resolve1 =>
+-           let (c, back2) :=
+-             call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++           let (c, back2) := call_mut_back resolve1
+            ((c.#0, c.#1, c.#2),
+              fun resolve2 =>
+                let c1 := back2 (resolve2.#0, model_state1.#1, model_state1.#2)
+@@ -486,13 +483,11 @@ def
+             coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+         let back1 :=
+           (fun resolve3 =>
+-             let (c, back2) :=
+-               map_symbols_back1 (resolve3.#0, resolve.#1, resolve.#2)
+-             let (c1, _) := map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++             let (c, back2) := map_symbols_back1 resolve3
++             let (c1, _) := map_symbols_back3 c
+              ((c1.#0, c1.#1, c1.#2),
+                fun resolve4 =>
+-                 let (_, back3) :=
+-                   map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++                 let (_, back3) := map_symbols_back3 c
+                  let c2 := back3 (resolve4.#0, resolve2.#1, resolve2.#2)
+                  let (i4, _, _) := c2
+                  let c3 := back2 (i4, i2, i3)
+@@ -525,13 +520,11 @@ def
+             coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+         let back1 :=
+           (fun resolve3 =>
+-             let (c, back2) :=
+-               map_symbols_back1 (resolve3.#0, resolve.#1, resolve.#2)
+-             let (c1, _) := map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++             let (c, back2) := map_symbols_back1 resolve3
++             let (c1, _) := map_symbols_back3 c
+              ((c1.#0, c1.#1, c1.#2),
+                fun resolve4 =>
+-                 let (_, back3) :=
+-                   map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++                 let (_, back3) := map_symbols_back3 c
+                  let c2 := back3 (resolve4.#0, resolve2.#1, resolve2.#2)
+                  let (i4, _, _) := c2
+                  let c3 := back2 (i4, i2, i3)
+@@ -560,8 +553,7 @@ def
+           coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
+       let back1 :=
+         (fun resolve2 =>
+-           let (c, back2) :=
+-             map_symbols_back1 (resolve2.#0, resolve.#1, resolve.#2)
++           let (c, back2) := map_symbols_back1 resolve2
+            ((c.#0, c.#1, c.#2),
+              fun resolve3 =>
+                let c1 := back2 (resolve3.#0, resolve1.#1, resolve1.#2)
+@@ -848,7 +840,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1, c2.#2).#0, c.#1, c.#2)
++       let (c4, back1) := call_mut_back1 (c3.#0, c2.#1, c2.#2)
+        let c5 := back1 c4
+        let (i3, _, _) := c5
+        (i3, i1, i2) :
+@@ -969,9 +961,7 @@ def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
+                  (resolve1.#0, model_state1.#1, model_state1.#2)
+                let (c2, back1) :=
+                  map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
+-               let (c3, back2) :=
+-                 map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1,
+-                   strict.#2)
++               let (c3, back2) := map_symbols_back3 (c2.#0, c.#1, c.#2)
+                let c4 := back2 c3
+                let (i7, _, _) := c4
+                let c5 := back1 (i7, i2, i3)
+@@ -988,9 +978,7 @@ def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
+                  (resolve1.#0, model_state1.#1, model_state1.#2)
+                let (c2, back1) :=
+                  map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
+-               let (c3, back2) :=
+-                 map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1,
+-                   strict.#2)
++               let (c3, back2) := map_symbols_back3 (c2.#0, c.#1, c.#2)
+                let c4 := back2 c3
+                let (i7, _, _) := c4
+                let c5 := back1 (i7, i2, i3)
+@@ -1011,8 +999,7 @@ def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
+              let (i6, _, _) := (resolve1.#0, model_state1.#1, model_state1.#2)
+              let (c2, back1) :=
+                map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
+-             let (c3, back2) :=
+-               map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1, strict.#2)
++             let (c3, back2) := map_symbols_back3 (c2.#0, c.#1, c.#2)
+              let c4 := back2 c3
+              let (i7, _, _) := c4
+              let c5 := back1 (i7, i2, i3)
+@@ -1033,11 +1020,8 @@ def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
+       let back :=
+         (fun resolve1 =>
+            let c2 := map_symbols_back c
+-           let (c3, back1) :=
+-             map_symbols_back1 ((resolve1.#0, c2.#1, c2.#2).#0, resolve.#1,
+-               resolve.#2)
+-           let (c4, back2) :=
+-             map_symbols_back3 ((c3.#0, c.#1, c.#2).#0, strict.#1, strict.#2)
++           let (c3, back1) := map_symbols_back1 (resolve1.#0, c2.#1, c2.#2)
++           let (c4, back2) := map_symbols_back3 (c3.#0, c.#1, c.#2)
+            let (i6, _, _) := c4
+            let c5 := back2 (i6, i4, i5)
+            let (i7, _, _) := c5
+@@ -1057,9 +1041,7 @@ def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
+     let c := map_symbols_back strict
+     let back :=
+       (fun resolve1 =>
+-         let (c1, back1) :=
+-           map_symbols_back1 ((resolve1.#0, c.#1, c.#2).#0, resolve.#1,
+-             resolve.#2)
++         let (c1, back1) := map_symbols_back1 (resolve1.#0, c.#1, c.#2)
+          let (i4, _, _) := c1
+          let c2 := back1 (i4, i2, i3)
+          let (i5, _, _) := c2
+@@ -1314,7 +1296,7 @@ def m_call0closure1closure_specialized_2c554342b9cd6edaaec283111724a252
+       coreopsfunctionFnMutclosurePairU32BoolU32Inst)
+   let back1 :=
+     (fun resolve1 =>
+-       let (c, back2) := call_mut_back (resolve1.#0, resolve.#1)
++       let (c, back2) := call_mut_back resolve1
+        ((c.#0, c.#1),
+          fun resolve2 =>
+            let c1 := back2 (resolve2.#0, model_state1.#1)
+@@ -1519,7 +1501,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let (c4, back1) := call_mut_back1 (c3.#0, c2.#1)
+        let c5 := back1 c4
+        let (i3, _) := c5
+        (i3, i1) :
+@@ -1618,7 +1600,7 @@ def node_call0closure_specialized_0c829648cef67f3c42a88db7d78dbd71
+     (fun resolve1 =>
+        let (i3, _) := (resolve1.#0, model_state1.#1)
+        let (c2, back1) := m_call_back1 ((i3, i2).#0, resolve.#1)
+-       let (c3, back2) := m_call_back3 ((c2.#0, c.#1).#0, strict.#1)
++       let (c3, back2) := m_call_back3 (c2.#0, c.#1)
+        let c4 := back2 c3
+        let (i4, _) := c4
+        let c5 := back1 (i4, i1)
+diff --git a/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+index b9312aa..62a2bfe 100644
+--- a/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
++++ b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+@@ -278,11 +278,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+       let back1 :=
+         (fun f1 =>
+-           let (c, back2) := call_mut_back (f1.#0, f.#1)
+-           let (c1, _) := call_mut_back1 (c.#0, model_state1.#1)
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back1 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back3) := call_mut_back1 (c.#0, model_state1.#1)
++               let (_, back3) := call_mut_back1 c
+                let c2 := back3 (f2.#0, model_state3.#1)
+                let (i2, _) := c2
+                let c3 := back2 (i2, i1)
+@@ -311,11 +311,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+       let back1 :=
+         (fun f1 =>
+-           let (c, back2) := call_mut_back (f1.#0, f.#1)
+-           let (c1, _) := call_mut_back1 (c.#0, model_state1.#1)
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back1 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back3) := call_mut_back1 (c.#0, model_state1.#1)
++               let (_, back3) := call_mut_back1 c
+                let c2 := back3 (f2.#0, model_state3.#1)
+                let (i2, _) := c2
+                let c3 := back2 (i2, i1)
+@@ -343,7 +343,7 @@ def
+         coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+     let back1 :=
+       (fun f1 =>
+-         let (c, back2) := call_mut_back (f1.#0, f.#1)
++         let (c, back2) := call_mut_back f1
+          ((c.#0, c.#1),
+            fun f2 =>
+              let c1 := back2 (f2.#0, model_state1.#1)
+@@ -685,11 +685,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+       let back1 :=
+         (fun f1 =>
+-           let (c, back2) := call_mut_back (f1.#0, f.#1)
+-           let (c1, _) := call_mut_back2 (c.#0, model_state1.#1)
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back2 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back3) := call_mut_back2 (c.#0, model_state1.#1)
++               let (_, back3) := call_mut_back2 c
+                let c2 := back3 (f2.#0, model_state3.#1)
+                let (i2, _) := c2
+                let c3 := back2 (i2, t1)
+@@ -709,11 +709,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
+       let back2 :=
+         (fun f1 =>
+-           let (c, back3) := call_mut_back1 (f.#0, f1.#1)
+-           let (c1, _) := call_mut_back3 (model_state1.#0, c.#1)
++           let (c, back3) := call_mut_back1 f1
++           let (c1, _) := call_mut_back3 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back4) := call_mut_back3 (model_state1.#0, c.#1)
++               let (_, back4) := call_mut_back3 c
+                let c2 := back4 (model_state3.#0, f2.#1)
+                let (_, t2) := c2
+                let c3 := back3 (i1, t2)
+@@ -748,11 +748,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+       let back1 :=
+         (fun f1 =>
+-           let (c, back2) := call_mut_back (f1.#0, f.#1)
+-           let (c1, _) := call_mut_back2 (c.#0, model_state1.#1)
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back2 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back3) := call_mut_back2 (c.#0, model_state1.#1)
++               let (_, back3) := call_mut_back2 c
+                let c2 := back3 (f2.#0, model_state3.#1)
+                let (i2, _) := c2
+                let c3 := back2 (i2, t1)
+@@ -772,11 +772,11 @@ def
+           coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
+       let back2 :=
+         (fun f1 =>
+-           let (c, back3) := call_mut_back1 (f.#0, f1.#1)
+-           let (c1, _) := call_mut_back3 (model_state1.#0, c.#1)
++           let (c, back3) := call_mut_back1 f1
++           let (c1, _) := call_mut_back3 c
+            ((c1.#0, c1.#1),
+              fun f2 =>
+-               let (_, back4) := call_mut_back3 (model_state1.#0, c.#1)
++               let (_, back4) := call_mut_back3 c
+                let c2 := back4 (model_state3.#0, f2.#1)
+                let (_, t2) := c2
+                let c3 := back3 (i1, t2)
+@@ -810,7 +810,7 @@ def
+         coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
+     let back1 :=
+       (fun f1 =>
+-         let (c, back2) := call_mut_back (f1.#0, f.#1)
++         let (c, back2) := call_mut_back f1
+          ((c.#0, c.#1),
+            fun f2 =>
+              let c1 := back2 (f2.#0, model_state1.#1)
+@@ -830,7 +830,7 @@ def
+         coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
+     let back2 :=
+       (fun f1 =>
+-         let (c, back3) := call_mut_back1 (f.#0, f1.#1)
++         let (c, back3) := call_mut_back1 f1
+          ((c.#0, c.#1),
+            fun f2 =>
+              let c1 := back3 (model_state1.#0, f2.#1)
+@@ -1098,7 +1098,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let (c4, back1) := call_mut_back1 (c3.#0, c2.#1)
+        let c5 := back1 c4
+        let (i1, _) := c5
+        (i1, i) :
+@@ -1191,7 +1191,7 @@ def
+   let c1 := try_map_payloads_back c
+   let back :=
+     (fun f1 =>
+-       let (c2, back1) := try_map_payloads_back1 ((f1.#0, c1.#1).#0, f.#1)
++       let (c2, back1) := try_map_payloads_back1 (f1.#0, c1.#1)
+        let (i2, _) := c2
+        let c3 := back1 (i2, i1)
+        let (i3, _) := c3
+@@ -1651,7 +1651,7 @@ def
+   let c2 := call_mut_back c1
+   let back :=
+     (fun c3 =>
+-       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let (c4, back1) := call_mut_back1 (c3.#0, c2.#1)
+        let c5 := back1 c4
+        let (i1, _) := c5
+        (i1, t) :
+@@ -1663,7 +1663,7 @@ def
+       coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
+   let back1 :=
+     (fun c3 =>
+-       let (c4, back2) := call_mut_back2 (c.#0, (c2.#0, c3.#1).#1)
++       let (c4, back2) := call_mut_back2 (c2.#0, c3.#1)
+        let c5 := back2 c4
+        let (_, t1) := c5
+        (i, t1) :
+@@ -1789,7 +1789,7 @@ def
+   let c1 := try_map_payloads_back c
+   let back :=
+     (fun f1 =>
+-       let (c2, back1) := try_map_payloads_back1 ((f1.#0, c1.#1).#0, f.#1)
++       let (c2, back1) := try_map_payloads_back1 (f1.#0, c1.#1)
+        let (i2, _) := c2
+        let c3 := back1 (i2, t1)
+        let (i3, _) := c3
+@@ -1799,7 +1799,7 @@ def
+       coreopsfunctionFnMutT1PairU32U8U32Inst)
+   let back1 :=
+     (fun f1 =>
+-       let (c2, back2) := try_map_payloads_back2 (f.#0, (c1.#0, f1.#1).#1)
++       let (c2, back2) := try_map_payloads_back2 (c1.#0, f1.#1)
+        let (_, t2) := c2
+        let c3 := back2 (i1, t2)
+        let (_, t3) := c3
+diff --git a/tests/lean/NestedBorrowsDropped/NestedBorrowsDropped.lean b/tests/lean/NestedBorrowsDropped/NestedBorrowsDropped.lean
+index a47842e..869f7c4 100644
+--- a/tests/lean/NestedBorrowsDropped/NestedBorrowsDropped.lean
++++ b/tests/lean/NestedBorrowsDropped/NestedBorrowsDropped.lean
+@@ -104,7 +104,7 @@ def drive_local
+   let w5 := step_through_back w4
+   let (w6, back) := step_through_back1 { c := { w5.c with depth := 2#u32 } }
+   let (w7, back1) :=
+-    step_through_back5 { c := { w6.c with depth := w1.c.depth } }
++    step_through_back5 { c := { w6.c with depth := w4.c.depth } }
+   let w8 := back1 { c := { w7.c with depth := w3.c.depth } }
+   let (w9, back2) :=
+     step_through_back3 { c := { w8.c with depth := w.c.depth } }
+diff --git a/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+index 7317ddb..025530a 100644
+--- a/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
++++ b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+@@ -163,14 +163,16 @@ def bump_once
+   (n : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (a, o, bump_back, _, bump_back1) ←
++  let (a, o, bump_back, bump_back1, bump_back2) ←
+     _root_.nested_borrows_four_levels.bump { w := { c := { r := n } } }
+   let o1 := bump_back o
+   let (o2, back) := bump_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok (a, o5.w.c.r)
++  let o3 := back o2
++  let (o4, back1) := bump_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (a, o7.w.c.r)
+ 
+ /-- [nested_borrows_four_levels::bump_twice]:
+     Source: 'tests/src/nested-borrows-four-levels.rs', lines 88:0-96:1
+@@ -180,21 +182,25 @@ def bump_twice
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+     _root_.Aeneas.Std.U32)
+   := do
+-  let (a, o, bump_back, _, bump_back1) ←
++  let (a, o, bump_back, bump_back1, bump_back2) ←
+     _root_.nested_borrows_four_levels.bump { w := { c := { r := n } } }
+-  let (b, o1, bump_back2, _, bump_back3) ←
++  let (b, o1, bump_back3, bump_back4, bump_back5) ←
+     _root_.nested_borrows_four_levels.bump o
+-  let o2 := bump_back2 o1
++  let o2 := bump_back3 o1
+   let o3 := bump_back o2
+   let (o4, back) := bump_back1 o3
+-  let (o5, back1) := bump_back3 o4
+-  let (o6, back2) := back1 o5
+-  let (o7, back3) := back o6
+-  let (o8, back4) := back3 o7
+-  let (o9, back5) := back2 o8
+-  let o10 := back5 o9
+-  let o11 := back4 o10
+-  _root_.Aeneas.Std.Result.ok (a, b, o11.w.c.r)
++  let (o5, back1) := bump_back4 o4
++  let o6 := back1 o5
++  let o7 := back o6
++  let (o8, back2) := bump_back2 o7
++  let (o9, back3) := bump_back5 o8
++  let (o10, back4) := back3 o9
++  let (o11, back5) := back2 o10
++  let (o12, back6) := back5 o11
++  let (o13, back7) := back4 o12
++  let o14 := back7 o13
++  let o15 := back6 o14
++  _root_.Aeneas.Std.Result.ok (a, b, o15.w.c.r)
+ 
+ /-- [nested_borrows_four_levels::set]:
+     Source: 'tests/src/nested-borrows-four-levels.rs', lines 102:0-104:1
+@@ -282,14 +288,16 @@ def set_once
+   (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+   := do
+-  let (o, set_back, _, set_back1) ←
++  let (o, set_back, set_back1, set_back2) ←
+     _root_.nested_borrows_four_levels.set { w := { c := { r := n } } } v
+   let o1 := set_back o
+   let (o2, back) := set_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok o5.w.c.r
++  let o3 := back o2
++  let (o4, back1) := set_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok o7.w.c.r
+ 
+ /-- [nested_borrows_four_levels::add_then_read]:
+     Source: 'tests/src/nested-borrows-four-levels.rs', lines 120:0-128:1
+@@ -298,14 +306,16 @@ def add_then_read
+   (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (o, add_back, _, add_back1) ←
++  let (o, add_back, add_back1, add_back2) ←
+     _root_.nested_borrows_four_levels.add { w := { c := { r := n } } } v
+   let o1 := add_back o
+   let (o2, back) := add_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok (o.w.c.r, o5.w.c.r)
++  let o3 := back o2
++  let (o4, back1) := add_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (o.w.c.r, o7.w.c.r)
+ 
+ /-- [nested_borrows_four_levels::set_add]:
+     Source: 'tests/src/nested-borrows-four-levels.rs', lines 131:0-139:1
+@@ -315,21 +325,25 @@ def set_add
+   (d : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+   := do
+-  let (o, set_back, _, set_back1) ←
++  let (o, set_back, set_back1, set_back2) ←
+     _root_.nested_borrows_four_levels.set { w := { c := { r := n } } } v
+-  let (o1, add_back, _, add_back1) ←
++  let (o1, add_back, add_back1, add_back2) ←
+     _root_.nested_borrows_four_levels.add o d
+   let o2 := add_back o1
+   let o3 := set_back o2
+   let (o4, back) := set_back1 o3
+   let (o5, back1) := add_back1 o4
+-  let (o6, back2) := back1 o5
+-  let (o7, back3) := back o6
+-  let (o8, back4) := back3 o7
+-  let (o9, back5) := back2 o8
+-  let o10 := back5 o9
+-  let o11 := back4 o10
+-  _root_.Aeneas.Std.Result.ok o11.w.c.r
++  let o6 := back1 o5
++  let o7 := back o6
++  let (o8, back2) := set_back2 o7
++  let (o9, back3) := add_back2 o8
++  let (o10, back4) := back3 o9
++  let (o11, back5) := back2 o10
++  let (o12, back6) := back5 o11
++  let (o13, back7) := back4 o12
++  let o14 := back7 o13
++  let o15 := back6 o14
++  _root_.Aeneas.Std.Result.ok o15.w.c.r
+ 
+ /-- [nested_borrows_four_levels::add_owned]:
+     Source: 'tests/src/nested-borrows-four-levels.rs', lines 147:0-150:1
+diff --git a/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean b/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
+index ed1c9a5..ea1de84 100644
+--- a/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
++++ b/tests/lean/NestedBorrowsModelState/NestedBorrowsModelState.lean
+@@ -657,24 +657,21 @@ def apply_ownedclosure_2_specialized_df8e549bc6b0f40ccb949c26b83b1e77
+       _root_.nested_borrows_model_state.via_owned.closure_2)
+   let back1 :=
+     (fun f1 =>
+-       let c := f1
+-       let (c1, back2) := call_mut_back1 c
+-       let c2 := c1
+-       let (c3, back3) := call_mut_back3 c2
+-       let (c4, _) := back3 c3
+-       let (c5, _) := back2 c4
+-       (c5,
++       let (c, back2) := call_mut_back1 f1
++       let (c1, back3) := call_mut_back3 c
++       let (c2, _) := back3 c1
++       let (c3, _) := back2 c2
++       (c3,
+          fun f2 =>
+-           let c6 := f1
+-           let (c7, back4) := call_mut_back1 c6
+-           let c8 := c7
+-           let (c9, back5) := call_mut_back3 c8
+-           let (c10, back6) := back5 c9
+-           let (_, back7) := back4 c10
+-           let (c11, back8) := back7 f2
+-           let (c12, back9) := back6 c11
+-           let c13 := back9 c12
+-           back8 c13) : _root_.nested_borrows_model_state.via_owned.closure_2
++           let c4 := f1
++           let (c5, back4) := call_mut_back1 c4
++           let (c6, back5) := call_mut_back3 c5
++           let (c7, back6) := back5 c6
++           let (_, back7) := back4 c7
++           let (c8, back8) := back7 f2
++           let (c9, back9) := back6 c8
++           let c10 := back9 c9
++           back8 c10) : _root_.nested_borrows_model_state.via_owned.closure_2
+       → (_root_.nested_borrows_model_state.via_owned.closure_2 ×
+       (_root_.nested_borrows_model_state.via_owned.closure_2 →
+       _root_.nested_borrows_model_state.via_owned.closure_2)))
+@@ -808,16 +805,15 @@ def via_owned.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+       → _root_.nested_borrows_model_state.via_owned.closure_2)
+   let back1 :=
+     (fun c3 =>
+-       let c4 := c3
+-       let (c5, back2) := call_mut_back2 c4
+-       let (c6, _) := back2 c5
+-       (c6,
+-         fun c7 =>
+-           let c8 := c3
+-           let (c9, back3) := call_mut_back2 c8
+-           let (_, back4) := back3 c9
+-           let (c10, back5) := back4 c7
+-           back5 c10) : _root_.nested_borrows_model_state.via_owned.closure_2
++       let (c4, back2) := call_mut_back2 c3
++       let (c5, _) := back2 c4
++       (c5,
++         fun c6 =>
++           let c7 := c3
++           let (c8, back3) := call_mut_back2 c7
++           let (_, back4) := back3 c8
++           let (c9, back5) := back4 c6
++           back5 c9) : _root_.nested_borrows_model_state.via_owned.closure_2
+       → (_root_.nested_borrows_model_state.via_owned.closure_2 ×
+       (_root_.nested_borrows_model_state.via_owned.closure_2 →
+       _root_.nested_borrows_model_state.via_owned.closure_2)))
+@@ -875,13 +871,14 @@ def via_owned
+   (n : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (a, c, _, apply_owned_back) ←
++  let (a, c, apply_owned_back, apply_owned_back1) ←
+     _root_.nested_borrows_model_state.apply_ownedclosure_2_specialized_df8e549bc6b0f40ccb949c26b83b1e77
+       _root_.nested_borrows_model_state.via_owned.closure_2.Insts.CoreOpsFunctionFnMutTupleU32U32
+       n 5#u32
+-  let (c1, back) := apply_owned_back c
+-  let c2 := back c1
+-  let calls := c2
++  let c1 := apply_owned_back c
++  let (c2, back) := apply_owned_back1 c1
++  let c3 := back c2
++  let calls := c3
+   _root_.Aeneas.Std.Result.ok (a, calls)
+ 
+ /-- [nested_borrows_model_state::via_owned::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_model_state::via_owned::closure<0>}::call_once]:
+@@ -1104,25 +1101,28 @@ def once
+   (n : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (a, o, call_mut_back, _, call_mut_back1) ←
++  let (a, o, call_mut_back, call_mut_back1, call_mut_back2) ←
+     _root_.nested_borrows_model_state.once.closure_2.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+       n 1#u32
+-  let (b, o1, call_mut_back2, _, call_mut_back3) ←
++  let (b, o1, call_mut_back3, call_mut_back4, call_mut_back5) ←
+     _root_.nested_borrows_model_state.once.closure_2.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
+       o a
+   let i ← lift (core.num.U32.wrapping_add a b)
+-  let c := call_mut_back2 o1
++  let c := call_mut_back3 o1
+   let c1 := call_mut_back c
+   let (c2, back) := call_mut_back1 c1
+-  let c3 := c2
+-  let (c4, back1) := call_mut_back3 c3
+-  let (c5, back2) := back1 c4
+-  let (c6, back3) := back c5
+-  let (c7, back4) := back3 c6
+-  let (c8, back5) := back2 c7
+-  let c9 := back5 c8
+-  let c10 := back4 c9
+-  let calls := c10
++  let (c3, back1) := call_mut_back4 c2
++  let c4 := back1 c3
++  let c5 := back c4
++  let (c6, back2) := call_mut_back2 c5
++  let (c7, back3) := call_mut_back5 c6
++  let (c8, back4) := back3 c7
++  let (c9, back5) := back2 c8
++  let (c10, back6) := back5 c9
++  let (c11, back7) := back4 c10
++  let c12 := back7 c11
++  let c13 := back6 c12
++  let calls := c13
+   _root_.Aeneas.Std.Result.ok (i, calls)
+ 
+ /-- [nested_borrows_model_state::once::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_model_state::once::closure<0>}::call_once]:
+@@ -1258,16 +1258,15 @@ def once.closure_2.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
+       _root_.nested_borrows_model_state.once.closure_2)
+   let back1 :=
+     (fun c3 =>
+-       let c4 := c3
+-       let (c5, back2) := call_mut_back2 c4
+-       let (c6, _) := back2 c5
+-       (c6,
+-         fun c7 =>
+-           let c8 := c3
+-           let (c9, back3) := call_mut_back2 c8
+-           let (_, back4) := back3 c9
+-           let (c10, back5) := back4 c7
+-           back5 c10) : _root_.nested_borrows_model_state.once.closure_2 →
++       let (c4, back2) := call_mut_back2 c3
++       let (c5, _) := back2 c4
++       (c5,
++         fun c6 =>
++           let c7 := c3
++           let (c8, back3) := call_mut_back2 c7
++           let (_, back4) := back3 c8
++           let (c9, back5) := back4 c6
++           back5 c9) : _root_.nested_borrows_model_state.once.closure_2 →
+       (_root_.nested_borrows_model_state.once.closure_2 ×
+       (_root_.nested_borrows_model_state.once.closure_2 →
+       _root_.nested_borrows_model_state.once.closure_2)))
+@@ -1445,16 +1444,15 @@ def map_chain.closure_2.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
+       → _root_.nested_borrows_model_state.map_chain.closure_2)
+   let back1 :=
+     (fun c3 =>
+-       let c4 := c3
+-       let (c5, back2) := call_mut_back2 c4
+-       let (c6, _) := back2 c5
+-       (c6,
+-         fun c7 =>
+-           let c8 := c3
+-           let (c9, back3) := call_mut_back2 c8
+-           let (_, back4) := back3 c9
+-           let (c10, back5) := back4 c7
+-           back5 c10) : _root_.nested_borrows_model_state.map_chain.closure_2
++       let (c4, back2) := call_mut_back2 c3
++       let (c5, _) := back2 c4
++       (c5,
++         fun c6 =>
++           let c7 := c3
++           let (c8, back3) := call_mut_back2 c7
++           let (_, back4) := back3 c8
++           let (c9, back5) := back4 c6
++           back5 c9) : _root_.nested_borrows_model_state.map_chain.closure_2
+       → (_root_.nested_borrows_model_state.map_chain.closure_2 ×
+       (_root_.nested_borrows_model_state.map_chain.closure_2 →
+       _root_.nested_borrows_model_state.map_chain.closure_2)))
+@@ -1528,6 +1526,17 @@ def map_chain
+       _root_.nested_borrows_model_state.map_chain.closure_2 →
+       _root_.nested_borrows_model_state.map_chain.closure_2)
+   let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_model_state.map_chain.closure_2 →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_model_state.map_chain.closure_2) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_model_state.map_chain.closure_2 →
++      _root_.nested_borrows_model_state.map_chain.closure_2)))
++  let map_back2 :=
+     (fun state_back => ({ model_state with f := state_back },
+        fun state_back1 => (state_back1.f,
+          fun state_back2 => ({ model_state with f := state_back2 },
+@@ -1574,14 +1583,16 @@ def map_chain
+   let c1 := map_back { model_state with f := model_state2.f }
+   let (m, back) := map_back1 c1
+   let c2 := m.f
+-  let (m1, back1) := collect_back { model_state with f := c2 }
+-  let c3 := m1.f
+-  let (c4, back2) := back { model_state with f := c3 }
+-  let (m2, back3) := back2 c4
+-  let c5 := m2.f
+-  let m3 := back1 { model_state with f := c5 }
+-  let c6 := back3 { model_state with f := m3.f }
+-  let calls := c6
++  let c3 := back { model_state with f := c2 }
++  let (m1, back1) := map_back2 c3
++  let (m2, back2) := collect_back { model_state with f := m1.f }
++  let c4 := m2.f
++  let (c5, back3) := back1 { model_state with f := c4 }
++  let (m3, back4) := back3 c5
++  let c6 := m3.f
++  let m4 := back2 { model_state with f := c6 }
++  let c7 := back4 { model_state with f := m4.f }
++  let calls := c7
+   _root_.Aeneas.Std.Result.ok (model_state1, calls)
+ 
+ /-- [nested_borrows_model_state::map_chain::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_model_state::map_chain::closure<0>}::call_once]:
+diff --git a/tests/lean/NestedBorrowsReturned/NestedBorrowsReturned.lean b/tests/lean/NestedBorrowsReturned/NestedBorrowsReturned.lean
+index 4c6a87e..025db5b 100644
+--- a/tests/lean/NestedBorrowsReturned/NestedBorrowsReturned.lean
++++ b/tests/lean/NestedBorrowsReturned/NestedBorrowsReturned.lean
+@@ -132,9 +132,10 @@ def drive_returned
+   let w4 := ctx_of_back1 w3
+   let w5 := step_through_back w4
+   let (w6, back) := step_through_back1 { c := { w5.c with depth := 2#u32 } }
+-  let (w7, back1) := ctx_of_back2 { c := { w6.c with depth := w.c.depth } }
++  let (w7, back1) := ctx_of_back2 { c := { w6.c with depth := w4.c.depth } }
+   let (lc, back2) := back1 { c := { w7.c with depth := w3.c.depth } }
+-  let (w8, back3) := step_through_back3 { c := { lc with depth := c.depth } }
++  let (w8, back3) :=
++    step_through_back3 { c := { lc with depth := w2.c.depth } }
+   let w9 := back3 { c := { w8.c with depth := w1.c.depth } }
+   let w10 := back2 { w9.c with depth := c.depth }
+   let w11 := back { c := { w10.c with depth := w.c.depth } }
+@@ -196,12 +197,13 @@ def drive_returned_reuse
+   let w6 := ctx_of_back1 w5
+   let w7 := step_through_back w6
+   let (w8, back) := step_through_back1 { c := { w7.c with depth := 2#u32 } }
+-  let (w9, back1) := ctx_of_back2 { c := { w8.c with depth := w.c.depth } }
++  let (w9, back1) := ctx_of_back2 { c := { w8.c with depth := w6.c.depth } }
+   let (w10, back2) :=
+-    step_through_back5 { c := { w9.c with depth := w3.c.depth } }
++    step_through_back5 { c := { w9.c with depth := w5.c.depth } }
+   let w11 := back2 { c := { w10.c with depth := w4.c.depth } }
+   let (lc, back3) := back1 { c := { w11.c with depth := w3.c.depth } }
+-  let (w12, back4) := step_through_back3 { c := { lc with depth := c.depth } }
++  let (w12, back4) :=
++    step_through_back3 { c := { lc with depth := w1.c.depth } }
+   let w13 := back4 w12
+   let w14 := back3 { w13.c with depth := c.depth }
+   let w15 := back { c := { w14.c with depth := w.c.depth } }
+diff --git a/tests/lean/NestedBorrowsSharedCapture.lean b/tests/lean/NestedBorrowsSharedCapture.lean
+new file mode 100644
+index 0000000..a863f2e
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSharedCapture.lean
+@@ -0,0 +1 @@
++import NestedBorrowsSharedCapture.Checks
+diff --git a/tests/lean/NestedBorrowsSharedCapture/Checks.lean b/tests/lean/NestedBorrowsSharedCapture/Checks.lean
+new file mode 100644
+index 0000000..7dae55a
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSharedCapture/Checks.lean
+@@ -0,0 +1,61 @@
++import NestedBorrowsSharedCapture.NestedBorrowsSharedCapture
++
++/-! Evaluate the model of `tests/src/nested-borrows-shared-capture.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_shared_capture.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def add1 (n k v : Nat) : Option (Nat × Nat) :=
++  match run_add (u n) (u k) (u v) with
++  | ok (a, n') => some (a.val, n'.val)
++  | _ => none
++
++def addTwice (n k v d : Nat) : Option (Nat × Nat × Nat) :=
++  match run_add_twice (u n) (u k) (u v) (u d) with
++  | ok (a, b, n') => some (a.val, b.val, n'.val)
++  | _ => none
++
++def via1 (n k v : Nat) : Option (Nat × Nat × Nat) :=
++  match run_via (u n) (u k) (u v) with
++  | ok (a, b, n') => some (a.val, b.val, n'.val)
++  | _ => none
++
++def swapD (n k1 k2 v : Nat) : Option (Nat × Nat × Nat) :=
++  match run_swap_d (u n) (u k1) (u k2) (u v) with
++  | ok (a, b, n') => some (a.val, b.val, n'.val)
++  | _ => none
++
++def swapRead (n k1 k2 v : Nat) : Option (Nat × Nat × Nat) :=
++  match run_swap_read (u n) (u k1) (u k2) (u v) with
++  | ok (a, d, x) => some (a.val, d.val, x.val)
++  | _ => none
++
++def redirect (n k1 k2 v : Nat) : Option (Nat × Nat × Nat) :=
++  match run_redirect (u n) (u k1) (u k2) (u v) with
++  | ok (a, b, x) => some (a.val, b.val, x.val)
++  | _ => none
++
++#guard add1 1 10 2 == some (13, 13)
++#guard add1 max 1 1 == some (1, 1)
++
++#guard addTwice 1 10 2 3 == some (13, 26, 26)
++#guard addTwice max 1 1 max == some (1, 1, 1)
++
++#guard via1 1 10 2 == some (13, 25, 25)
++#guard via1 max max 2 == some (0, 1, 1)
++
++#guard swapD 1 10 100 2 == some (13, 115, 115)
++#guard swapD 0 1 max 1 == some (2, 2, 2)
++
++#guard swapRead 1 10 100 2 == some (13, 100, 113)
++#guard swapRead 0 1 max 1 == some (2, 4294967295, 1)
++
++#guard redirect 1 10 100 2 == some (13, 115, 215)
++#guard redirect 0 1 max 1 == some (2, 2, 1)
++
++end nested_borrows_shared_capture.checks
+diff --git a/tests/lean/NestedBorrowsSharedCapture/NestedBorrowsSharedCapture.lean b/tests/lean/NestedBorrowsSharedCapture/NestedBorrowsSharedCapture.lean
+new file mode 100644
+index 0000000..d7ee190
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSharedCapture/NestedBorrowsSharedCapture.lean
+@@ -0,0 +1,405 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_shared_capture]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_shared_capture
++
++/-- [nested_borrows_shared_capture::C]
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 12:0-15:1
++    Visibility: public -/
++structure C where
++  r : _root_.Aeneas.Std.U32
++  d : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_shared_capture::W]
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 17:0-19:1
++    Visibility: public -/
++structure W where
++  c : _root_.nested_borrows_shared_capture.C
++
++/-- [nested_borrows_shared_capture::O]
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 21:0-23:1
++    Visibility: public -/
++structure O where
++  w : _root_.nested_borrows_shared_capture.W
++
++/-- [nested_borrows_shared_capture::add]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 25:0-28:1
++    Visibility: public -/
++def add
++  (o : _root_.nested_borrows_shared_capture.O) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))))))))
++  := do
++  let i ← lift (core.num.U32.wrapping_add o.w.c.r v)
++  let i1 ← lift (core.num.U32.wrapping_add i o.w.c.d)
++  let back :=
++    (fun o1 => (o1, fun o2 => o2) : _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))
++  let back1 :=
++    (fun o1 => (o1,
++       fun o2 => (o2,
++         fun o3 => (o3,
++           fun o4 => { w := { c := { o.w.c with r := o4.w.c.r } } }))) :
++      _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))))))
++  _root_.Aeneas.Std.Result.ok (i1, { w := { c := { o.w.c with r := i1 } } },
++    fun o1 => o1, back, back1)
++
++/-- [nested_borrows_shared_capture::add_twice]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 30:0-34:1
++    Visibility: public -/
++def add_twice
++  (o : _root_.nested_borrows_shared_capture.O) (v : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))))))))
++  := do
++  let (a, o1, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add o v
++  let (b, o2, add_back3, add_back4, add_back5) ←
++    _root_.nested_borrows_shared_capture.add o1 d
++  let back :=
++    (fun o3 => let o4 := add_back3 o3
++               add_back o4 : _root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)
++  let back1 :=
++    (fun o3 =>
++       let (o4, back2) := add_back1 o3
++       let (o5, _) := add_back4 o4
++       (o5,
++         fun o6 => let (_, back3) := add_back4 o4
++                   let o7 := back3 o6
++                   back2 o7) : _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))
++  let back2 :=
++    (fun o3 =>
++       let (o4, back3) := add_back2 o3
++       let (o5, _) := add_back5 o4
++       (o5,
++         fun o6 =>
++           let (_, back4) := add_back5 o4
++           let (o7, _) := back4 o6
++           let (o8, _) := back3 o7
++           (o8,
++             fun o9 =>
++               let (_, back5) := add_back5 o4
++               let (o10, back6) := back5 o6
++               let (_, back7) := back3 o10
++               let (o11, _) := back7 o9
++               let (o12, _) := back6 o11
++               (o12,
++                 fun o13 =>
++                   let (_, back8) := add_back5 o4
++                   let (o14, back9) := back8 o6
++                   let (_, back10) := back3 o14
++                   let (o15, back11) := back10 o9
++                   let (_, back12) := back9 o15
++                   let o16 :=
++                     back12 { w := { c := { o2.w.c with r := o13.w.c.r } } }
++                   let o17 :=
++                     back11 { w := { c := { o1.w.c with r := o16.w.c.r } } }
++                   { w := { c := { o.w.c with r := o17.w.c.r } } }))) :
++      _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))))))
++  _root_.Aeneas.Std.Result.ok ((a, b), o2, back, back1, back2)
++
++/-- [nested_borrows_shared_capture::via]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 36:0-39:1
++    Visibility: public -/
++def via
++  (w : _root_.nested_borrows_shared_capture.W) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_shared_capture.W ×
++    (_root_.nested_borrows_shared_capture.W →
++    _root_.nested_borrows_shared_capture.W) ×
++    (_root_.nested_borrows_shared_capture.W →
++    (_root_.nested_borrows_shared_capture.W ×
++    (_root_.nested_borrows_shared_capture.W →
++    _root_.nested_borrows_shared_capture.W))))
++  := do
++  let (p, o, add_twice_back, add_twice_back1, add_twice_back2) ←
++    _root_.nested_borrows_shared_capture.add_twice { w } v v
++  let o1 := add_twice_back o
++  let back :=
++    (fun w1 =>
++       let (o2, back1) := add_twice_back1 { w := w1 }
++       let o3 := back1 o2
++       o3.w : _root_.nested_borrows_shared_capture.W →
++      _root_.nested_borrows_shared_capture.W)
++  let back1 :=
++    (fun w1 =>
++       let (o2, back2) := add_twice_back2 { w := w1 }
++       let (o3, _) := back2 o2
++       (o3.w,
++         fun w2 =>
++           let (_, back3) := back2 o2
++           let (o4, back4) :=
++             back3 { w := { c := { w2.c with d := o1.w.c.d } } }
++           let o5 := back4 { w := { c := { o.w.c with r := o4.w.c.r } } }
++           { c := { w.c with r := o5.w.c.r } }) :
++      _root_.nested_borrows_shared_capture.W →
++      (_root_.nested_borrows_shared_capture.W ×
++      (_root_.nested_borrows_shared_capture.W →
++      _root_.nested_borrows_shared_capture.W)))
++  _root_.Aeneas.Std.Result.ok (p, o1.w, back, back1)
++
++/-- [nested_borrows_shared_capture::add_redirect]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 42:0-46:1
++    Visibility: public -/
++def add_redirect
++  (o : _root_.nested_borrows_shared_capture.O) (k : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))) ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    (_root_.nested_borrows_shared_capture.O ×
++    (_root_.nested_borrows_shared_capture.O →
++    _root_.nested_borrows_shared_capture.O))))))))
++  := do
++  let (a, o1, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add o v
++  let back :=
++    (fun o2 => add_back o2 : _root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)
++  let back1 :=
++    (fun o2 => let (o3, back2) := add_back1 o2
++               (o3, fun o4 => back2 o4) :
++      _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))
++  let back2 :=
++    (fun o2 =>
++       let (o3, back3) := add_back2 o2
++       (o3,
++         fun o4 =>
++           let (o5, _) := back3 o4
++           (o5,
++             fun o6 =>
++               let (_, back4) := back3 o4
++               let (o7, _) := back4 o6
++               (o7,
++                 fun o8 =>
++                   let (_, back5) := back3 o4
++                   let (_, back6) := back5 o6
++                   let o9 :=
++                     back6 { w := { c := { o1.w.c with r := o8.w.c.r } } }
++                   { w := { c := { o.w.c with r := o9.w.c.r } } }))) :
++      _root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      (_root_.nested_borrows_shared_capture.O ×
++      (_root_.nested_borrows_shared_capture.O →
++      _root_.nested_borrows_shared_capture.O)))))))
++  _root_.Aeneas.Std.Result.ok (a, { w := { c := { o1.w.c with d := k } } },
++    back, back1, back2)
++
++/-- [nested_borrows_shared_capture::run_add]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 48:0-55:1
++    Visibility: public -/
++def run_add
++  (n : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add
++      { w := { c := { r := n, d := k } } } v
++  let o1 := add_back o
++  let (o2, back) := add_back1 o1
++  let o3 := back o2
++  let (o4, back1) := add_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (a, o7.w.c.r)
++
++/-- [nested_borrows_shared_capture::run_add_twice]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 57:0-64:1
++    Visibility: public -/
++def run_add_twice
++  (n : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (p, o, add_twice_back, add_twice_back1, add_twice_back2) ←
++    _root_.nested_borrows_shared_capture.add_twice
++      { w := { c := { r := n, d := k } } } v d
++  let (a, b) := p
++  let o1 := add_twice_back o
++  let (o2, back) := add_twice_back1 o1
++  let o3 := back o2
++  let (o4, back1) := add_twice_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (a, b, o7.w.c.r)
++
++/-- [nested_borrows_shared_capture::run_via]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 66:0-72:1
++    Visibility: public -/
++def run_via
++  (n : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (p, w, via_back, via_back1) ←
++    _root_.nested_borrows_shared_capture.via { c := { r := n, d := k } } v
++  let (a, b) := p
++  let w1 := via_back w
++  let (w2, back) := via_back1 w1
++  let w3 := back w2
++  _root_.Aeneas.Std.Result.ok (a, b, w3.c.r)
++
++/-- [nested_borrows_shared_capture::run_swap_d]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 76:0-85:1
++    Visibility: public -/
++def run_swap_d
++  (n : _root_.Aeneas.Std.U32) (k1 : _root_.Aeneas.Std.U32)
++  (k2 : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add
++      { w := { c := { r := n, d := k1 } } } v
++  let (b, o1, add_back3, add_back4, add_back5) ←
++    _root_.nested_borrows_shared_capture.add
++      { w := { c := { o.w.c with d := k2 } } } v
++  let o2 := add_back3 o1
++  let o3 := add_back o2
++  let (o4, back) := add_back1 o3
++  let (o5, back1) := add_back4 o4
++  let o6 := back1 o5
++  let o7 := back o6
++  let (o8, back2) := add_back2 o7
++  let (o9, back3) := add_back5 { w := { c := { o6.w.c with r := o8.w.c.r } } }
++  let (o10, back4) := back3 o9
++  let (o11, back5) := back2 { w := { c := { o4.w.c with r := o10.w.c.r } } }
++  let (o12, back6) := back5 o11
++  let (o13, back7) := back4 { w := { c := { o2.w.c with r := o12.w.c.r } } }
++  let o14 := back7 o13
++  let o15 := back6 { w := { c := { o.w.c with r := o14.w.c.r } } }
++  _root_.Aeneas.Std.Result.ok (a, b, o15.w.c.r)
++
++/-- [nested_borrows_shared_capture::run_redirect]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 88:0-97:1
++    Visibility: public -/
++def run_redirect
++  (n : _root_.Aeneas.Std.U32) (k1 : _root_.Aeneas.Std.U32)
++  (k2 : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, add_redirect_back, add_redirect_back1, add_redirect_back2) ←
++    _root_.nested_borrows_shared_capture.add_redirect
++      { w := { c := { r := n, d := k1 } } } k2 v
++  let (b, o1, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add o v
++  let o2 := add_back o1
++  let o3 := add_redirect_back o2
++  let (o4, back) := add_redirect_back1 o3
++  let (o5, back1) := add_back1 o4
++  let o6 := back1 o5
++  let o7 := back o6
++  let (o8, back2) :=
++    add_redirect_back2 { w := { c := { o7.w.c with d := k1 } } }
++  let (o9, back3) := add_back2 { w := { c := { o6.w.c with r := o8.w.c.r } } }
++  let (o10, back4) := back3 o9
++  let (o11, back5) := back2 { w := { c := { o4.w.c with r := o10.w.c.r } } }
++  let (o12, back6) := back5 o11
++  let (o13, back7) := back4 { w := { c := { o2.w.c with r := o12.w.c.r } } }
++  let o14 := back7 o13
++  let o15 := back6 { w := { c := { o.w.c with r := o14.w.c.r } } }
++  let i ← lift (core.num.U32.wrapping_add o7.w.c.d o15.w.c.r)
++  _root_.Aeneas.Std.Result.ok (a, b, i)
++
++/-- [nested_borrows_shared_capture::run_swap_read]:
++    Source: 'tests/src/nested-borrows-shared-capture.rs', lines 101:0-114:1
++    Visibility: public -/
++def run_swap_read
++  (n : _root_.Aeneas.Std.U32) (k1 : _root_.Aeneas.Std.U32)
++  (k2 : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, add_back, add_back1, add_back2) ←
++    _root_.nested_borrows_shared_capture.add
++      { w := { c := { r := n, d := k1 } } } v
++  let o1 := add_back { w := { c := { o.w.c with d := k2 } } }
++  let (o2, back) := add_back1 o1
++  let o3 := back o2
++  let (o4, back1) := add_back2 { w := { c := { o3.w.c with d := k1 } } }
++  let (o5, back2) := back1 { w := { c := { o2.w.c with r := o4.w.c.r } } }
++  let (o6, back3) := back2 { w := { c := { o1.w.c with r := o5.w.c.r } } }
++  let o7 := back3 { w := { c := { o.w.c with r := o6.w.c.r } } }
++  let i ← lift (core.num.U32.wrapping_add o3.w.c.d o7.w.c.r)
++  _root_.Aeneas.Std.Result.ok (a, o1.w.c.d, i)
++
++end nested_borrows_shared_capture
+diff --git a/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean b/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean
+index 6a349e1..ed4ad6e 100644
+--- a/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean
++++ b/tests/lean/NestedBorrowsSymbolicPaths/NestedBorrowsSymbolicPaths.lean
+@@ -232,16 +232,18 @@ def run_add_twice
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+     _root_.Aeneas.Std.U32)
+   := do
+-  let (p, o, add_twice_back, _, add_twice_back1) ←
++  let (p, o, add_twice_back, add_twice_back1, add_twice_back2) ←
+     _root_.nested_borrows_symbolic_paths.add_twice { w := { c := { r := n } } }
+       v d
+   let (a, b) := p
+   let o1 := add_twice_back o
+   let (o2, back) := add_twice_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok (a, b, o5.w.c.r)
++  let o3 := back o2
++  let (o4, back1) := add_twice_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (a, b, o7.w.c.r)
+ 
+ /-- [nested_borrows_symbolic_paths::run_add_twice_then]:
+     Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 53:0-62:1
+@@ -252,17 +254,19 @@ def run_add_twice_then
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+     _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (p, o, add_twice_back, _, add_twice_back1) ←
++  let (p, o, add_twice_back, add_twice_back1, add_twice_back2) ←
+     _root_.nested_borrows_symbolic_paths.add_twice { w := { c := { r := n } } }
+       v d
+   let (a, b) := p
+   let i ← lift (core.num.U32.wrapping_mul o.w.c.r 3#u32)
+   let o1 := add_twice_back { w := { c := { r := i } } }
+   let (o2, back) := add_twice_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok (a, b, o.w.c.r, o5.w.c.r)
++  let o3 := back o2
++  let (o4, back1) := add_twice_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (a, b, o.w.c.r, o7.w.c.r)
+ 
+ /-- [nested_borrows_symbolic_paths::run_add_thrice]:
+     Source: 'tests/src/nested-borrows-symbolic-paths.rs', lines 64:0-71:1
+@@ -271,14 +275,16 @@ def run_add_thrice
+   (n : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+-  let (r, o, add_thrice_back, _, add_thrice_back1) ←
++  let (r, o, add_thrice_back, add_thrice_back1, add_thrice_back2) ←
+     _root_.nested_borrows_symbolic_paths.add_thrice
+       { w := { c := { r := n } } } v
+   let o1 := add_thrice_back o
+   let (o2, back) := add_thrice_back1 o1
+-  let (o3, back1) := back o2
+-  let (o4, back2) := back1 o3
+-  let o5 := back2 o4
+-  _root_.Aeneas.Std.Result.ok (r, o5.w.c.r)
++  let o3 := back o2
++  let (o4, back1) := add_thrice_back2 o3
++  let (o5, back2) := back1 o4
++  let (o6, back3) := back2 o5
++  let o7 := back3 o6
++  _root_.Aeneas.Std.Result.ok (r, o7.w.c.r)
+ 
+ end nested_borrows_symbolic_paths
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 24e507d..1dd76e6 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -41,6 +41,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsSameRegion
+ @[default_target] lean_lib NestedBorrowsClosureState
+ @[default_target] lean_lib NestedBorrowsSymbolicPaths
++@[default_target] lean_lib NestedBorrowsSharedCapture
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectFlatten
+diff --git a/tests/src/nested-borrows-shared-capture.rs b/tests/src/nested-borrows-shared-capture.rs
+new file mode 100644
+index 0000000..094dd13
+--- /dev/null
++++ b/tests/src/nested-borrows-shared-capture.rs
+@@ -0,0 +1,155 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsSharedCapture
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Four levels of nested mutable borrows through structures whose innermost
++//! structure also holds a shared reference (`C::d`). The shared reference is
++//! not a position of the backward function of the region of `C::r`, but the
++//! values of `C` given back at the levels of that function carry it: the `C`
++//! given back to `W::c` is the value its lender gets back, whose `d` is the
++//! one it holds when the region of `W::c` ends (a caller may have replaced
++//! it), not the one of a snapshot of the borrowed value.
++
++pub struct C<'a, 'x> {
++    pub r: &'a mut u32,
++    pub d: &'x u32,
++}
++
++pub struct W<'a, 'b, 'x> {
++    pub c: &'a mut C<'b, 'x>,
++}
++
++pub struct O<'a, 'b, 'c, 'x> {
++    pub w: &'a mut W<'b, 'c, 'x>,
++}
++
++pub fn add(o: &mut O<'_, '_, '_, '_>, v: u32) -> u32 {
++    *o.w.c.r = (*o.w.c.r).wrapping_add(v).wrapping_add(*o.w.c.d);
++    *o.w.c.r
++}
++
++pub fn add_twice(o: &mut O<'_, '_, '_, '_>, v: u32, d: u32) -> (u32, u32) {
++    let a = add(o, v);
++    let b = add(o, d);
++    (a, b)
++}
++
++pub fn via(w: &mut W<'_, '_, '_>, v: u32) -> (u32, u32) {
++    let mut o = O { w };
++    add_twice(&mut o, v, v)
++}
++
++/// The callee replaces the shared reference after the update.
++pub fn add_redirect<'x>(o: &mut O<'_, '_, '_, 'x>, k: &'x u32, v: u32) -> u32 {
++    let a = add(o, v);
++    o.w.c.d = k;
++    a
++}
++
++pub fn run_add(n: u32, k: u32, v: u32) -> (u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let a = add(&mut o, v);
++    (a, n)
++}
++
++pub fn run_add_twice(n: u32, k: u32, v: u32, d: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let (a, b) = add_twice(&mut o, v, d);
++    (a, b, n)
++}
++
++pub fn run_via(n: u32, k: u32, v: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k };
++    let mut w = W { c: &mut c };
++    let (a, b) = via(&mut w, v);
++    (a, b, n)
++}
++
++/// The caller replaces the shared reference between two calls, through the
++/// structures it got back from the first one.
++pub fn run_swap_d(n: u32, k1: u32, k2: u32, v: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k1 };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let a = add(&mut o, v);
++    o.w.c.d = &k2;
++    let b = add(&mut o, v);
++    (a, b, n)
++}
++
++/// The caller reads the shared reference which the callee left in `C`.
++pub fn run_redirect(n: u32, k1: u32, k2: u32, v: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k1 };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let a = add_redirect(&mut o, &k2, v);
++    let b = add(&mut o, v);
++    let d = *c.d;
++    (a, b, d.wrapping_add(n))
++}
++
++/// The caller replaces the shared reference through the structure it got back,
++/// then reads it through its own borrow once the others ended.
++pub fn run_swap_read(n: u32, k1: u32, k2: u32, v: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n, d: &k1 };
++    let mut w = W { c: &mut c };
++    let a = {
++        let mut o = O { w: &mut w };
++        let a = add(&mut o, v);
++        o.w.c.d = &k2;
++        a
++    };
++    let d = *w.c.d;
++    let e = *c.d;
++    (a, d, e.wrapping_add(n))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn run_add_native() {
++        assert_eq!(run_add(1, 10, 2), (13, 13));
++        assert_eq!(run_add(u32::MAX, 1, 1), (1, 1));
++    }
++
++    #[test]
++    fn run_add_twice_native() {
++        assert_eq!(run_add_twice(1, 10, 2, 3), (13, 26, 26));
++        assert_eq!(run_add_twice(u32::MAX, 1, 1, u32::MAX), (1, 1, 1));
++    }
++
++    #[test]
++    fn run_via_native() {
++        assert_eq!(run_via(1, 10, 2), (13, 25, 25));
++        assert_eq!(run_via(u32::MAX, u32::MAX, 2), (0, 1, 1));
++    }
++
++    #[test]
++    fn run_swap_d_native() {
++        assert_eq!(run_swap_d(1, 10, 100, 2), (13, 115, 115));
++        assert_eq!(run_swap_d(0, 1, u32::MAX, 1), (2, 2, 2));
++    }
++
++    #[test]
++    fn run_swap_read_native() {
++        assert_eq!(run_swap_read(1, 10, 100, 2), (13, 100, 113));
++        assert_eq!(run_swap_read(0, 1, u32::MAX, 1), (2, 4294967295, 1));
++    }
++
++    #[test]
++    fn run_redirect_native() {
++        assert_eq!(run_redirect(1, 10, 100, 2), (13, 115, 215));
++        assert_eq!(run_redirect(0, 1, u32::MAX, 1), (2, 2, 1));
++    }
++}

@@ -1,0 +1,783 @@
+# aeneas integration step 75 after cba11f3beb: commit 2900db8bf923aa012703688fc37a2fbd3f92a717
+# first parent aa9343a23503a9b136ba20cbb2224de2db76141c, merged 1a40b9a3c1c4d4a05369bfdaf73ff3cc5a7e1411
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/collection-contracts' (char patterns and str::rsplit_once)
+
+diff --git a/backends/lean/Aeneas/Std/String.lean b/backends/lean/Aeneas/Std/String.lean
+index 779acc9..46c95d9 100644
+--- a/backends/lean/Aeneas/Std/String.lean
++++ b/backends/lean/Aeneas/Std/String.lean
+@@ -258,10 +258,51 @@ def core.str.pattern.StrSearcher.forwardMatches (haystack needle : Str) :
+     .ok ((text.toList.scanl (fun pos char => pos + char.utf8Size) 0).map fun pos => (pos, pos))
+   else .ok (core.str.pattern.StrSearcher.needleMatches needle.val haystack.val 0 0)
+ 
++/-- The successive `next_match_back` results of `StrSearcher::new(haystack,
++    needle)` as a `ReverseSearcher` (core str/pattern.rs, rustc 1.95). An empty
++    needle's `EmptyNeedle::next_back` alternates a match at the current end with
++    a reject of the char before it, from the end: an empty match at every char
++    boundary, from the last to the first. A nonempty needle's two-way
++    `next_back` finds the rightmost occurrence ending at or before the search
++    end, which then resumes at the start of that match: the rightmost
++    non-overlapping occurrences, i.e. the leftmost non-overlapping occurrences
++    of the reversed needle in the reversed haystack, mirrored. -/
++def core.str.pattern.StrSearcher.reverseMatches (haystack needle : Str) :
++    Result (List (Nat × Nat)) := do
++  let text ← Str.toString haystack
++  if needle.val.isEmpty then
++    .ok ((text.toList.scanl (fun pos char => pos + char.utf8Size) 0).reverse.map fun pos => (pos, pos))
++  else
++    let length := haystack.val.length
++    .ok ((core.str.pattern.StrSearcher.needleMatches needle.val.reverse haystack.val.reverse 0 0).map
++      fun (start, stop) => (length - stop, length - start))
++
++/-- `core::str::pattern::CharSearcher<'a>`, the searcher of a `char` needle.
++    As for `StrSearcher`, only its construction data are modeled. -/
++@[rust_type "core::str::pattern::CharSearcher" (body := .opaque)]
++structure core.str.pattern.CharSearcher where
++  haystack : Str
++  needle : Char
++
++/-- The successive `next_match` results of the `CharSearcher` of `needle` (core
++    str/pattern.rs, rustc 1.95): each occurrence of the needle's UTF-8 encoding
++    (found with `memchr` on one of its bytes, then compared), from the first. In
++    a valid UTF-8 haystack an occurrence of a char's encoding starts at a char
++    boundary: these are the byte ranges of the chars equal to the needle.
++    `next_match_back` (`memrchr` on its last byte) returns the same ranges from
++    the last. -/
++def core.str.pattern.CharSearcher.forwardMatches (haystack : Str) (needle : Char) :
++    Result (List (Nat × Nat)) := do
++  let chars := (← Str.toString haystack).toList
++  let starts := chars.scanl (fun pos char => pos + char.utf8Size) 0
++  .ok ((chars.zip starts).filterMap fun (char, pos) =>
++    if char = needle then some (pos, pos + char.utf8Size) else none)
++
+ /-- `core::str::pattern::Pattern`, through its provided `is_prefix_of`
+     (the only method `str::starts_with` uses) and, as evidence, the matches of
+-    its forward searcher. -/
+-@[rust_trait "core::str::pattern::Pattern" (auxiliaryFields := ["forward_matches"])]
++    its forward and reverse searchers. -/
++@[rust_trait "core::str::pattern::Pattern"
++  (auxiliaryFields := ["forward_matches", "reverse_matches"])]
+ structure core.str.pattern.Pattern (Self : Type) where
+   is_prefix_of : Self → Str → Result Bool
+   /-- `forward_matches pat haystack` lists the successive `next_match` results
+@@ -270,6 +311,66 @@ structure core.str.pattern.Pattern (Self : Type) where
+       that evidence, never a Rust instance: every `Pattern` instance below
+       supplies the exact matches of its searcher. -/
+   forward_matches : Option (Self → Str → Result (List (Nat × Nat))) := none
++  /-- `reverse_matches pat haystack` lists the successive `next_match_back`
++      results of `pat.into_searcher(haystack)` when it is a `ReverseSearcher`:
++      how every reverse pattern consumer (`str::rsplit_once`, ...) searches.
++      `none` as for `forward_matches`. -/
++  reverse_matches : Option (Self → Str → Result (List (Nat × Nat))) := none
++
++/-- `core::str::pattern::Searcher<'a>`, through `haystack`. Its search steps
++    (`next`, `next_match`, ...) are not modeled, so an extracted call to them
++    is an unknown method: the pattern consumers read the searcher's matches
++    from `Pattern.forward_matches` and `Pattern.reverse_matches`. -/
++@[rust_trait "core::str::pattern::Searcher"]
++structure core.str.pattern.Searcher (Self : Type) where
++  haystack : Self → Result Str
++
++/-- `core::str::pattern::ReverseSearcher<'a>: Searcher<'a>`, through its
++    parent only (its steps `next_back`, ... are not modeled, as for
++    `Searcher`). -/
++@[rust_trait "core::str::pattern::ReverseSearcher" (parentClauses := ["searcherInst"])]
++structure core.str.pattern.ReverseSearcher (Self : Type) where
++  searcherInst : core.str.pattern.Searcher Self
++
++/-- `impl Searcher for StrSearcher`, pattern.rs: `haystack` returns `self.haystack`. -/
++@[rust_fun
++  "core::str::pattern::{core::str::pattern::Searcher<'a, core::str::pattern::StrSearcher<'a, 'b>>}::haystack"]
++def core.str.pattern.SearcherStrSearcher.haystack (self : core.str.pattern.StrSearcher) :
++    Result Str :=
++  .ok self.haystack
++
++@[reducible, rust_trait_impl
++  "core::str::pattern::Searcher<'a, core::str::pattern::StrSearcher<'a, 'b>>"]
++def core.str.pattern.SearcherStrSearcher : core.str.pattern.Searcher core.str.pattern.StrSearcher := {
++  haystack := core.str.pattern.SearcherStrSearcher.haystack
++}
++
++@[reducible, rust_trait_impl
++  "core::str::pattern::ReverseSearcher<'a, core::str::pattern::StrSearcher<'a, 'b>>"]
++def core.str.pattern.ReverseSearcherStrSearcher :
++    core.str.pattern.ReverseSearcher core.str.pattern.StrSearcher := {
++  searcherInst := core.str.pattern.SearcherStrSearcher
++}
++
++/-- `impl Searcher for CharSearcher`, pattern.rs: `haystack` returns `self.haystack`. -/
++@[rust_fun
++  "core::str::pattern::{core::str::pattern::Searcher<'a, core::str::pattern::CharSearcher<'a>>}::haystack"]
++def core.str.pattern.SearcherCharSearcher.haystack (self : core.str.pattern.CharSearcher) :
++    Result Str :=
++  .ok self.haystack
++
++@[reducible, rust_trait_impl
++  "core::str::pattern::Searcher<'a, core::str::pattern::CharSearcher<'a>>"]
++def core.str.pattern.SearcherCharSearcher : core.str.pattern.Searcher core.str.pattern.CharSearcher := {
++  haystack := core.str.pattern.SearcherCharSearcher.haystack
++}
++
++@[reducible, rust_trait_impl
++  "core::str::pattern::ReverseSearcher<'a, core::str::pattern::CharSearcher<'a>>"]
++def core.str.pattern.ReverseSearcherCharSearcher :
++    core.str.pattern.ReverseSearcher core.str.pattern.CharSearcher := {
++  searcherInst := core.str.pattern.SearcherCharSearcher
++}
+ 
+ /-- `impl Pattern for &str`, pattern.rs: `haystack.as_bytes().starts_with(self.as_bytes())`,
+     a prefix test on the UTF-8 bytes; its searcher is `StrSearcher`. -/
+@@ -282,6 +383,25 @@ def core.str.pattern.PatternSharedStr : core.str.pattern.Pattern Str := {
+   is_prefix_of := core.str.pattern.PatternSharedStr.is_prefix_of
+   forward_matches := some fun needle haystack =>
+     core.str.pattern.StrSearcher.forwardMatches haystack needle
++  reverse_matches := some fun needle haystack =>
++    core.str.pattern.StrSearcher.reverseMatches haystack needle
++}
++
++/-- `impl Pattern for char`, pattern.rs: `self.encode_utf8(&mut [0u8; 4])
++    .is_prefix_of(haystack)`, a prefix test of the char's UTF-8 bytes; its
++    searcher is `CharSearcher`. -/
++@[rust_fun "core::str::pattern::{core::str::pattern::Pattern<char>}::is_prefix_of"]
++def core.str.pattern.PatternChar.is_prefix_of (needle : Char) (haystack : Str) : Result Bool := do
++  let encoded ← Str.ofString (String.singleton needle)
++  .ok (encoded.val.isPrefixOf haystack.val)
++
++@[reducible, rust_trait_impl "core::str::pattern::Pattern<char>"]
++def core.str.pattern.PatternChar : core.str.pattern.Pattern Char := {
++  is_prefix_of := core.str.pattern.PatternChar.is_prefix_of
++  forward_matches := some fun needle haystack =>
++    core.str.pattern.CharSearcher.forwardMatches haystack needle
++  reverse_matches := some fun needle haystack => do
++    .ok (← core.str.pattern.CharSearcher.forwardMatches haystack needle).reverse
+ }
+ 
+ /-- `str::starts_with`, str/mod.rs: `pat.is_prefix_of(self)`. -/
+diff --git a/backends/lean/Aeneas/Std/StringIter.lean b/backends/lean/Aeneas/Std/StringIter.lean
+index 23b186d..d00b15b 100644
+--- a/backends/lean/Aeneas/Std/StringIter.lean
++++ b/backends/lean/Aeneas/Std/StringIter.lean
+@@ -209,6 +209,24 @@ def core.str.Str.split {P : Type} (patInst : core.str.pattern.Pattern P)
+     let pending ← search pat s
+     .ok { haystack := s, start := 0, pending, finished := false }
+ 
++/-- `str::rsplit_once` (core/src/str/mod.rs): `let (start, end) =
++    delimiter.into_searcher(self).next_match_back()?; Some((self[..start],
++    self[end..]))`, the text around the last match of the reverse searcher. Its
++    `for<'a> P::Searcher<'a>: ReverseSearcher<'a>` clause only states that the
++    searcher searches backwards: the model reads that match from
++    `Pattern.reverse_matches`. -/
++@[rust_fun "core::str::{str}::rsplit_once" (keepTraitClauses := [true, false])]
++def core.str.Str.rsplit_once {P : Type} (patInst : core.str.pattern.Pattern P)
++    (s : Str) (delimiter : P) : Result (Option (Str × Str)) :=
++  match patInst.reverse_matches with
++  | none => .fail .panic
++  | some search => do
++    match ← search delimiter s with
++    | [] => .ok none
++    | (start, stop) :: _ =>
++      .ok (some (core.str.iter.Split.piece s 0 start,
++        core.str.iter.Split.piece s stop s.val.length))
++
+ /-- `Split::next` = `SplitInternal::next`: the text from `start` to the next
+     match, resuming after it; once the searcher has no match left, `get_end`
+     yields the rest `start..end` (even when empty, as `allow_trailing_empty`
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 44c18e6..ed1c517 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -166,7 +166,7 @@ let lean_builtin_types = [
+   mk_type "core::slice::iter::IterMut" "_root_.Aeneas.Std.core.slice.iter.IterMut" ~mut_regions:([0]);
+   (* file: "Aeneas/Std/SliceIter.lean", line: 360 *)
+   mk_type "core::slice::iter::Windows" "_root_.Aeneas.Std.core.slice.iter.Windows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 244 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 262 *)
+   mk_type "core::str::iter::Bytes" "_root_.Aeneas.Std.core.str.iter.Bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 7 *)
+   mk_type "core::str::iter::Chars" "_root_.Aeneas.Std.core.str.iter.Chars";
+@@ -174,6 +174,8 @@ let lean_builtin_types = [
+   mk_type "core::str::iter::Lines" "_root_.Aeneas.Std.core.str.iter.Lines";
+   (* file: "Aeneas/Std/StringIter.lean", line: 187 *)
+   mk_type "core::str::iter::Split" "_root_.Aeneas.Std.core.str.iter.Split";
++  (* file: "Aeneas/Std/String.lean", line: 282 *)
++  mk_type "core::str::pattern::CharSearcher" "_root_.Aeneas.Std.core.str.pattern.CharSearcher";
+   (* file: "Aeneas/Std/String.lean", line: 224 *)
+   mk_type "core::str::pattern::StrSearcher" "_root_.Aeneas.Std.core.str.pattern.StrSearcher";
+   (* file: "Aeneas/Std/Core/Atomic.lean", line: 6 *)
+@@ -390,7 +392,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::slice::{[@T]}::sort_by_key" "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key";
+   (* file: "Aeneas/Std/Vec.lean", line: 421 *)
+   mk_fun "alloc::slice::{[@T]}::to_vec" "_root_.Aeneas.Std.alloc.slice.Slice.to_vec";
+-  (* file: "Aeneas/Std/String.lean", line: 308 *)
++  (* file: "Aeneas/Std/String.lean", line: 428 *)
+   mk_fun "alloc::str::{alloc::borrow::ToOwned<str, alloc::string::String>}::to_owned" "_root_.Aeneas.Std.alloc.str.ToOwnedStr.to_owned";
+   (* file: "Aeneas/Std/StringJoin.lean", line: 34 *)
+   mk_fun "alloc::str::{alloc::slice::Join<[@S], &'a str, alloc::string::String>}::join" "_root_.Aeneas.Std.alloc.str.JoinStr.join";
+@@ -424,9 +426,9 @@ let lean_builtin_funs = [
+   mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, str>}::ne" "_root_.Aeneas.Std.alloc.string.PartialEqStringStr.ne";
+   (* file: "Aeneas/Std/String.lean", line: 148 *)
+   mk_fun "alloc::string::{core::cmp::PartialOrd<alloc::string::String, alloc::string::String>}::partial_cmp" "_root_.Aeneas.Std.alloc.string.PartialOrdString.partial_cmp";
+-  (* file: "Aeneas/Std/String.lean", line: 311 *)
++  (* file: "Aeneas/Std/String.lean", line: 431 *)
+   mk_fun "alloc::string::{core::convert::From<Box<str>, alloc::string::String>}::from" "_root_.Aeneas.Std.alloc.string.FromStringBoxStr.from_";
+-  (* file: "Aeneas/Std/String.lean", line: 300 *)
++  (* file: "Aeneas/Std/String.lean", line: 420 *)
+   mk_fun "alloc::string::{core::convert::From<alloc::string::String, &'a str>}::from" "_root_.Aeneas.Std.alloc.string.FromStrString.from_";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 55 *)
+   mk_fun "alloc::string::{core::fmt::Debug<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugString.fmt";
+@@ -1640,17 +1642,17 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::swap" "_root_.Aeneas.Std.core.slice.Slice.swap";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 366 *)
+   mk_fun "core::slice::{[@T]}::windows" "_root_.Aeneas.Std.core.slice.Slice.windows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 282 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 300 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::all" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.all";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 274 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 292 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::any" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.any";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 267 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 285 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::count" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.count";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 291 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 309 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::find" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.find";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 253 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 271 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.next";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 260 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 278 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.size_hint";
+   (* file: "Aeneas/Std/StringIter.lean", line: 73 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>}::advance_by" "_root_.Aeneas.Std.core.str.iter.IteratorChars.advance_by";
+@@ -1666,10 +1668,16 @@ let lean_builtin_funs = [
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorLines.next";
+   (* file: "Aeneas/Std/StringIter.lean", line: 163 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorLines.size_hint";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 216 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 234 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Split<'a, @P>, &'a str>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorSplit.next";
+-  (* file: "Aeneas/Std/String.lean", line: 276 *)
++  (* file: "Aeneas/Std/String.lean", line: 377 *)
+   mk_fun "core::str::pattern::{core::str::pattern::Pattern<&'b str>}::is_prefix_of" "_root_.Aeneas.Std.core.str.pattern.PatternSharedStr.is_prefix_of";
++  (* file: "Aeneas/Std/String.lean", line: 393 *)
++  mk_fun "core::str::pattern::{core::str::pattern::Pattern<char>}::is_prefix_of" "_root_.Aeneas.Std.core.str.pattern.PatternChar.is_prefix_of";
++  (* file: "Aeneas/Std/String.lean", line: 356 *)
++  mk_fun "core::str::pattern::{core::str::pattern::Searcher<'a, core::str::pattern::CharSearcher<'a>>}::haystack" "_root_.Aeneas.Std.core.str.pattern.SearcherCharSearcher.haystack";
++  (* file: "Aeneas/Std/String.lean", line: 336 *)
++  mk_fun "core::str::pattern::{core::str::pattern::Searcher<'a, core::str::pattern::StrSearcher<'a, 'b>>}::haystack" "_root_.Aeneas.Std.core.str.pattern.SearcherStrSearcher.haystack";
+   (* file: "Aeneas/Std/String.lean", line: 135 *)
+   mk_fun "core::str::traits::{core::cmp::Eq<str>}::assert_receiver_is_total_eq" "_root_.Aeneas.Std.core.str.traits.EqStr.assert_receiver_is_total_eq";
+   (* file: "Aeneas/Std/String.lean", line: 165 *)
+@@ -1680,7 +1688,7 @@ let lean_builtin_funs = [
+   mk_fun "core::str::traits::{core::cmp::PartialEq<str, str>}::ne" "_root_.Aeneas.Std.core.str.traits.PartialEqStr.ne";
+   (* file: "Aeneas/Std/String.lean", line: 169 *)
+   mk_fun "core::str::traits::{core::cmp::PartialOrd<str, str>}::partial_cmp" "_root_.Aeneas.Std.core.str.traits.PartialOrdStr.partial_cmp";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 249 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 267 *)
+   mk_fun "core::str::{str}::bytes" "_root_.Aeneas.Std.core.str.Str.bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 99 *)
+   mk_fun "core::str::{str}::chars" "_root_.Aeneas.Std.core.str.Str.chars";
+@@ -1690,9 +1698,11 @@ let lean_builtin_funs = [
+   mk_fun "core::str::{str}::len" "_root_.Aeneas.Std.core.str.Str.len";
+   (* file: "Aeneas/Std/StringIter.lean", line: 113 *)
+   mk_fun "core::str::{str}::lines" "_root_.Aeneas.Std.core.str.Str.lines";
++  (* file: "Aeneas/Std/StringIter.lean", line: 218 *)
++  mk_fun "core::str::{str}::rsplit_once" "_root_.Aeneas.Std.core.str.Str.rsplit_once" ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/StringIter.lean", line: 203 *)
+   mk_fun "core::str::{str}::split" "_root_.Aeneas.Std.core.str.Str.split";
+-  (* file: "Aeneas/Std/String.lean", line: 288 *)
++  (* file: "Aeneas/Std/String.lean", line: 408 *)
+   mk_fun "core::str::{str}::starts_with" "_root_.Aeneas.Std.core.str.Str.starts_with";
+   (* file: "Aeneas/Std/Tuple.lean", line: 111 *)
+   mk_fun "core::tuple::{core::cmp::Ord<(@U, @T)>}::cmp" "_root_.Aeneas.Std.core.tuple.OrdPair.cmp";
+@@ -1997,8 +2007,12 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+   (* file: "Aeneas/Std/Slice.lean", line: 295 *)
+   mk_trait_decl "core::slice::index::private_slice_index::Sealed" "_root_.Aeneas.Std.core.slice.index.private_slice_index.Sealed";
+-  (* file: "Aeneas/Std/String.lean", line: 264 *)
++  (* file: "Aeneas/Std/String.lean", line: 304 *)
+   mk_trait_decl "core::str::pattern::Pattern" "_root_.Aeneas.Std.core.str.pattern.Pattern" ~methods:[("is_prefix_of", "is_prefix_of")];
++  (* file: "Aeneas/Std/String.lean", line: 331 *)
++  mk_trait_decl "core::str::pattern::ReverseSearcher" "_root_.Aeneas.Std.core.str.pattern.ReverseSearcher" ~parent_clauses:["searcherInst"];
++  (* file: "Aeneas/Std/String.lean", line: 324 *)
++  mk_trait_decl "core::str::pattern::Searcher" "_root_.Aeneas.Std.core.str.pattern.Searcher" ~methods:[("haystack", "haystack")];
+ ]
+ 
+ let lean_builtin_trait_impls = [
+@@ -2174,9 +2188,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.FromBox";
+   (* file: "Aeneas/Std/Vec.lean", line: 553 *)
+   mk_trait_impl "core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.FromBoxSliceVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/String.lean", line: 314 *)
++  (* file: "Aeneas/Std/String.lean", line: 434 *)
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+-  (* file: "Aeneas/Std/String.lean", line: 303 *)
++  (* file: "Aeneas/Std/String.lean", line: 423 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+   (* file: "Aeneas/Std/Vec.lean", line: 537 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
+@@ -2478,13 +2492,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Iter<'a, @T>, &'a @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 442 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Windows<'a, @T>, &'a [@T]>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorWindows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 299 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 317 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 79 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChars";
+   (* file: "Aeneas/Std/StringIter.lean", line: 172 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorLines";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 233 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 251 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Split<'a, @P>, &'a str>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplit";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 137 *)
+   mk_trait_impl "core::marker::Copy<bool>" "_root_.Aeneas.Std.core.core.marker.CopyBool";
+@@ -2630,7 +2644,17 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::RangeTo<usize>>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedRangeToUsize";
+   (* file: "Aeneas/Std/Slice.lean", line: 527 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<usize>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedUsize";
+-  (* file: "Aeneas/Std/String.lean", line: 280 *)
++  (* file: "Aeneas/Std/String.lean", line: 381 *)
+   mk_trait_impl "core::str::pattern::Pattern<&'b str>" "_root_.Aeneas.Std.core.str.pattern.PatternSharedStr";
++  (* file: "Aeneas/Std/String.lean", line: 398 *)
++  mk_trait_impl "core::str::pattern::Pattern<char>" "_root_.Aeneas.Std.core.str.pattern.PatternChar";
++  (* file: "Aeneas/Std/String.lean", line: 368 *)
++  mk_trait_impl "core::str::pattern::ReverseSearcher<'a, core::str::pattern::CharSearcher<'a>>" "_root_.Aeneas.Std.core.str.pattern.ReverseSearcherCharSearcher";
++  (* file: "Aeneas/Std/String.lean", line: 348 *)
++  mk_trait_impl "core::str::pattern::ReverseSearcher<'a, core::str::pattern::StrSearcher<'a, 'b>>" "_root_.Aeneas.Std.core.str.pattern.ReverseSearcherStrSearcher";
++  (* file: "Aeneas/Std/String.lean", line: 362 *)
++  mk_trait_impl "core::str::pattern::Searcher<'a, core::str::pattern::CharSearcher<'a>>" "_root_.Aeneas.Std.core.str.pattern.SearcherCharSearcher";
++  (* file: "Aeneas/Std/String.lean", line: 342 *)
++  mk_trait_impl "core::str::pattern::Searcher<'a, core::str::pattern::StrSearcher<'a, 'b>>" "_root_.Aeneas.Std.core.str.pattern.SearcherStrSearcher";
+ ]
+ 
+diff --git a/tests/lean/StrCharPattern.lean b/tests/lean/StrCharPattern.lean
+new file mode 100644
+index 0000000..561f3bf
+--- /dev/null
++++ b/tests/lean/StrCharPattern.lean
+@@ -0,0 +1 @@
++import StrCharPattern.Checks
+diff --git a/tests/lean/StrCharPattern/Checks.lean b/tests/lean/StrCharPattern/Checks.lean
+new file mode 100644
+index 0000000..b9d2021
+--- /dev/null
++++ b/tests/lean/StrCharPattern/Checks.lean
+@@ -0,0 +1,44 @@
++import StrCharPattern.StrCharPattern
++
++/-! Evaluate the model of `tests/src/str-char-pattern.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace str_char_pattern.checks
++open Aeneas Aeneas.Std Result
++
++def txt (x : Str) : Option String :=
++  match Str.toString x with | ok t => some t | _ => none
++def str (r : Result Str) : Option String :=
++  match r with | ok s => txt s | _ => none
++def strs (r : Result (alloc.vec.Vec Str)) : Option (List String) :=
++  match r with | ok v => v.val.mapM txt | _ => none
++def pair (r : Result (Option (Str × Str))) : Option (Option (String × String)) :=
++  match r with
++  | ok none => some none
++  | ok (some (a, b)) => do some (some (← txt a, ← txt b))
++  | _ => none
++def bool (r : Result Bool) : Option Bool :=
++  match r with | ok b => some b | _ => none
++
++#guard str (terminal_segment (toStr "Pkg__opq__Demo__Types__Probability")) == some "Probability"
++#guard str (terminal_segment (toStr "opq.Demo.Types")) == some "Types"
++#guard str (terminal_segment (toStr "plain")) == some "plain"
++#guard str (terminal_segment (toStr "a__b.c")) == some "b.c"
++#guard strs (dot_segments (toStr "opq.Demo.Types")) == some ["opq", "Demo", "Types"]
++#guard strs (dot_segments (toStr "")) == some [""]
++#guard strs (dot_segments (toStr ".a.")) == some ["", "a", ""]
++#guard strs (char_pieces (toStr "héllo wörld") 'ö') == some ["héllo w", "rld"]
++#guard strs (char_pieces (toStr "aéaé") 'é') == some ["a", "a", ""]
++#guard strs (char_pieces (toStr "abc") 'x') == some ["abc"]
++#guard pair (rsplit_str (toStr "a__b__c") (toStr "__")) == some (some ("a__b", "c"))
++#guard pair (rsplit_str (toStr "aaa") (toStr "aa")) == some (some ("a", ""))
++#guard pair (rsplit_str (toStr "abc") (toStr "")) == some (some ("abc", ""))
++#guard pair (rsplit_str (toStr "abc") (toStr "x")) == some none
++#guard pair (rsplit_str (toStr "") (toStr "")) == some (some ("", ""))
++#guard pair (rsplit_char (toStr "a.b.c") '.') == some (some ("a.b", "c"))
++#guard pair (rsplit_char (toStr "xéyéz") 'é') == some (some ("xéy", "z"))
++#guard pair (rsplit_char (toStr "abc") '.') == some none
++#guard bool (starts_with_char (toStr "é!") 'é') == some true
++#guard bool (starts_with_char (toStr "") 'a') == some false
++#guard bool (starts_with_char (toStr "ab") 'b') == some false
++
++end str_char_pattern.checks
+diff --git a/tests/lean/StrCharPattern/StrCharPattern.lean b/tests/lean/StrCharPattern/StrCharPattern.lean
+new file mode 100644
+index 0000000..9198281
+--- /dev/null
++++ b/tests/lean/StrCharPattern/StrCharPattern.lean
+@@ -0,0 +1,257 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [str_char_pattern]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace str_char_pattern
++
++/-- [core::option::{core::option::Option<T>}::map]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::map"]
++def core.option.Option.map
++  {T : Type} {U : Type} {F : Type} (opsfunctionFnOnceFTupleTUInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T U) (self : _root_.Option T)
++  (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceFTupleTUInst.call_once f x
++    _root_.Aeneas.Std.Result.ok (some model_state)
++
++/-- [core::option::{core::option::Option<T>}::or_else]:
++    Source: '/rustc/library/core/src/option.rs', lines 1647:4-1652:28
++    Name pattern: [core::option::{core::option::Option<@T>}::or_else]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::or_else"]
++def core.option.Option.or_else
++  {T : Type} {F : Type} (opsfunctionFnOnceFTupleOptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F _root_.Unit (_root_.Option T))
++  (self : _root_.Option T) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match self with
++  | none =>
++    let (model_state, _) ← opsfunctionFnOnceFTupleOptionInst.call_once f ()
++    _root_.Aeneas.Std.Result.ok model_state
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [core::str::pattern::SearchStep]
++    Source: '/rustc/library/core/src/str/pattern.rs', lines 184:0-184:19
++    Name pattern: [core::str::pattern::SearchStep]
++    Visibility: public -/
++@[discriminant isize, rust_type "core::str::pattern::SearchStep"]
++inductive core.str.pattern.SearchStep where
++| Match :
++  _root_.Aeneas.Std.Usize →
++  _root_.Aeneas.Std.Usize →
++  core.str.pattern.SearchStep
++| Reject :
++  _root_.Aeneas.Std.Usize →
++  _root_.Aeneas.Std.Usize →
++  core.str.pattern.SearchStep
++| Done : core.str.pattern.SearchStep
++
++/-- [str_char_pattern::terminal_segment::closure#1::closure]
++    Source: 'tests/src/str-char-pattern.rs', lines 16:46-16:62 -/
++@[reducible]
++def terminal_segment.closure_1.closure := _root_.Unit
++
++/-- [str_char_pattern::terminal_segment::closure#1::{core::ops::function::FnOnce<((&'_ (str), &'_ (str))), &'_ (str)> for str_char_pattern::terminal_segment::closure#1::closure}::call_once]:
++    Source: 'tests/src/str-char-pattern.rs', lines 16:46-16:62 -/
++def
++  terminal_segment.closure_1.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr.call_once
++  (c : _root_.str_char_pattern.terminal_segment.closure_1.closure)
++  (tupled_args : (_root_.Aeneas.Std.Str × _root_.Aeneas.Std.Str)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
++  := do
++  let (_, tail) := tupled_args
++  _root_.Aeneas.Std.Result.ok tail
++
++/-- Trait implementation: [str_char_pattern::terminal_segment::closure#1::{core::ops::function::FnOnce<((&'_ (str), &'_ (str))), &'_ (str)> for str_char_pattern::terminal_segment::closure#1::closure}]
++    Source: 'tests/src/str-char-pattern.rs', lines 16:46-16:62 -/
++@[reducible]
++def
++  terminal_segment.closure_1.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.str_char_pattern.terminal_segment.closure_1.closure
++  (_root_.Aeneas.Std.Str × _root_.Aeneas.Std.Str) _root_.Aeneas.Std.Str := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.str_char_pattern.terminal_segment.closure_1.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [str_char_pattern::terminal_segment::closure#1]
++    Source: 'tests/src/str-char-pattern.rs', lines 16:17-16:63 -/
++@[reducible]
++def terminal_segment.closure_1 := _root_.Aeneas.Std.Str
++
++/-- [str_char_pattern::terminal_segment::{core::ops::function::FnOnce<(), core::option::Option<&'_ (str)>> for str_char_pattern::terminal_segment::closure#1<0>}::call_once]:
++    Source: 'tests/src/str-char-pattern.rs', lines 16:17-16:63 -/
++def
++  terminal_segment.closure_1.Insts.CoreOpsFunctionFnOnceTupleOptionSharedStr.call_once
++  (c : _root_.str_char_pattern.terminal_segment.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let o ←
++    _root_.Aeneas.Std.core.str.Str.rsplit_once
++      _root_.Aeneas.Std.core.str.pattern.PatternChar c '.'
++  _root_.str_char_pattern.core.option.Option.map
++    _root_.str_char_pattern.terminal_segment.closure_1.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr
++    o ()
++
++/-- Trait implementation: [str_char_pattern::terminal_segment::{core::ops::function::FnOnce<(), core::option::Option<&'_ (str)>> for str_char_pattern::terminal_segment::closure#1<0>}]
++    Source: 'tests/src/str-char-pattern.rs', lines 16:17-16:63 -/
++@[reducible]
++def terminal_segment.closure_1.Insts.CoreOpsFunctionFnOnceTupleOptionSharedStr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.str_char_pattern.terminal_segment.closure_1 _root_.Unit (_root_.Option
++  _root_.Aeneas.Std.Str) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.str_char_pattern.terminal_segment.closure_1.Insts.CoreOpsFunctionFnOnceTupleOptionSharedStr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [str_char_pattern::terminal_segment::closure]
++    Source: 'tests/src/str-char-pattern.rs', lines 15:13-15:29 -/
++@[reducible]
++def terminal_segment.closure := _root_.Unit
++
++/-- [str_char_pattern::terminal_segment::{core::ops::function::FnOnce<((&'_ (str), &'_ (str))), &'_ (str)> for str_char_pattern::terminal_segment::closure}::call_once]:
++    Source: 'tests/src/str-char-pattern.rs', lines 15:13-15:29 -/
++def
++  terminal_segment.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr.call_once
++  (c : _root_.str_char_pattern.terminal_segment.closure)
++  (tupled_args : (_root_.Aeneas.Std.Str × _root_.Aeneas.Std.Str)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
++  := do
++  let (_, tail) := tupled_args
++  _root_.Aeneas.Std.Result.ok tail
++
++/-- Trait implementation: [str_char_pattern::terminal_segment::{core::ops::function::FnOnce<((&'_ (str), &'_ (str))), &'_ (str)> for str_char_pattern::terminal_segment::closure}]
++    Source: 'tests/src/str-char-pattern.rs', lines 15:13-15:29 -/
++@[reducible]
++def
++  terminal_segment.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.str_char_pattern.terminal_segment.closure (_root_.Aeneas.Std.Str ×
++  _root_.Aeneas.Std.Str) _root_.Aeneas.Std.Str := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.str_char_pattern.terminal_segment.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [str_char_pattern::terminal_segment]:
++    Source: 'tests/src/str-char-pattern.rs', lines 13:0-18:1
++    Visibility: public -/
++def terminal_segment
++  (name1 : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
++  := do
++  let o ←
++    _root_.Aeneas.Std.core.str.Str.rsplit_once
++      _root_.Aeneas.Std.core.str.pattern.PatternSharedStr name1
++      (_root_.Aeneas.Std.toStr "__")
++  let o1 ←
++    _root_.str_char_pattern.core.option.Option.map
++      _root_.str_char_pattern.terminal_segment.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedStrSharedStrSharedStr
++      o ()
++  let o2 ←
++    _root_.str_char_pattern.core.option.Option.or_else
++      _root_.str_char_pattern.terminal_segment.closure_1.Insts.CoreOpsFunctionFnOnceTupleOptionSharedStr
++      o1 name1
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.option.Option.unwrap_or
++    o2 name1)
++
++/-- [str_char_pattern::dot_segments]:
++    Source: 'tests/src/str-char-pattern.rs', lines 21:0-23:1
++    Visibility: public -/
++def dot_segments
++  (key : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.Str)
++  := do
++  let s ←
++    _root_.Aeneas.Std.core.str.Str.split
++      _root_.Aeneas.Std.core.str.pattern.PatternChar key '.'
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplit
++      _root_.Aeneas.Std.core.str.pattern.PatternChar)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.Str) s
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [str_char_pattern::char_pieces]:
++    Source: 'tests/src/str-char-pattern.rs', lines 25:0-27:1
++    Visibility: public -/
++def char_pieces
++  (text : _root_.Aeneas.Std.Str) (pattern : _root_.Char) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.Str)
++  := do
++  let s ←
++    _root_.Aeneas.Std.core.str.Str.split
++      _root_.Aeneas.Std.core.str.pattern.PatternChar text pattern
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplit
++      _root_.Aeneas.Std.core.str.pattern.PatternChar)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.Str) s
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [str_char_pattern::rsplit_str]:
++    Source: 'tests/src/str-char-pattern.rs', lines 29:0-31:1
++    Visibility: public -/
++def rsplit_str
++  (text : _root_.Aeneas.Std.Str) (pattern : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.Str ×
++    _root_.Aeneas.Std.Str))
++  := do
++  _root_.Aeneas.Std.core.str.Str.rsplit_once
++    _root_.Aeneas.Std.core.str.pattern.PatternSharedStr text pattern
++
++/-- [str_char_pattern::rsplit_char]:
++    Source: 'tests/src/str-char-pattern.rs', lines 33:0-35:1
++    Visibility: public -/
++def rsplit_char
++  (text : _root_.Aeneas.Std.Str) (pattern : _root_.Char) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.Str ×
++    _root_.Aeneas.Std.Str))
++  := do
++  _root_.Aeneas.Std.core.str.Str.rsplit_once
++    _root_.Aeneas.Std.core.str.pattern.PatternChar text pattern
++
++/-- [str_char_pattern::starts_with_char]:
++    Source: 'tests/src/str-char-pattern.rs', lines 37:0-39:1
++    Visibility: public -/
++def starts_with_char
++  (text : _root_.Aeneas.Std.Str) (pattern : _root_.Char) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.core.str.Str.starts_with
++    _root_.Aeneas.Std.core.str.pattern.PatternChar text pattern
++
++end str_char_pattern
+diff --git a/tests/lean/StrSplit/StrSplit.lean b/tests/lean/StrSplit/StrSplit.lean
+index 6a19966..a4bda99 100644
+--- a/tests/lean/StrSplit/StrSplit.lean
++++ b/tests/lean/StrSplit/StrSplit.lean
+@@ -27,16 +27,6 @@ inductive core.str.pattern.SearchStep where
+   core.str.pattern.SearchStep
+ | Done : core.str.pattern.SearchStep
+ 
+-/-- Trait declaration: [core::str::pattern::Searcher]
+-    Source: '/rustc/library/core/src/str/pattern.rs', lines 211:0-211:29
+-    Name pattern: [core::str::pattern::Searcher]
+-    Visibility: public -/
+-@[rust_trait "core::str::pattern::Searcher"]
+-structure core.str.pattern.Searcher (Self : Type) where
+-  haystack : Self → _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
+-  next : Self → _root_.Aeneas.Std.Result
+-    (_root_.str_split.core.str.pattern.SearchStep × Self)
+-
+ /-- [str_split::segments]:
+     Source: 'tests/src/str-split.rs', lines 12:0-14:1
+     Visibility: public -/
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 1dd76e6..584301a 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -144,6 +144,7 @@ package «tests» {}
+ @[default_target] lean_lib Static
+ @[default_target] lean_lib StaticRefs
+ @[default_target] lean_lib StepBy
++@[default_target] lean_lib StrCharPattern
+ @[default_target] lean_lib StrSplit
+ @[default_target] lean_lib StringChars
+ @[default_target] lean_lib SwitchTest
+diff --git a/tests/src/str-char-pattern.rs b/tests/src/str-char-pattern.rs
+new file mode 100644
+index 0000000..7621c8d
+--- /dev/null
++++ b/tests/src/str-char-pattern.rs
+@@ -0,0 +1,69 @@
++//@ [!lean] skip
++//@ [lean] subdir=StrCharPattern
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `char` patterns (`CharSearcher`) and `str::rsplit_once` with `&str` and
++//! `char` delimiters: the last match of the reverse searcher. The production
++//! shapes are chelis-types opacity.rs terminal_segment (rsplit_once "__" then
++//! '.') and demangle_module (split('.') collected). StrCharPattern/Checks.lean
++//! compares the model with the native results asserted in the native test
++//! module.
++
++/// chelis-types opacity.rs terminal_segment.
++pub fn terminal_segment(name: &str) -> &str {
++    name.rsplit_once("__")
++        .map(|(_, tail)| tail)
++        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
++        .unwrap_or(name)
++}
++
++/// chelis-types opacity.rs demangle_module: `key.split('.').collect()`.
++pub fn dot_segments(key: &str) -> Vec<&str> {
++    key.split('.').collect()
++}
++
++pub fn char_pieces(text: &str, pattern: char) -> Vec<&str> {
++    text.split(pattern).collect()
++}
++
++pub fn rsplit_str<'a>(text: &'a str, pattern: &str) -> Option<(&'a str, &'a str)> {
++    text.rsplit_once(pattern)
++}
++
++pub fn rsplit_char(text: &str, pattern: char) -> Option<(&str, &str)> {
++    text.rsplit_once(pattern)
++}
++
++pub fn starts_with_char(text: &str, pattern: char) -> bool {
++    text.starts_with(pattern)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn patterns() {
++        assert_eq!(terminal_segment("Pkg__opq__Demo__Types__Probability"), "Probability");
++        assert_eq!(terminal_segment("opq.Demo.Types"), "Types");
++        assert_eq!(terminal_segment("plain"), "plain");
++        assert_eq!(terminal_segment("a__b.c"), "b.c");
++        assert_eq!(dot_segments("opq.Demo.Types"), vec!["opq", "Demo", "Types"]);
++        assert_eq!(dot_segments(""), vec![""]);
++        assert_eq!(dot_segments(".a."), vec!["", "a", ""]);
++        assert_eq!(char_pieces("héllo wörld", 'ö'), vec!["héllo w", "rld"]);
++        assert_eq!(char_pieces("aéaé", 'é'), vec!["a", "a", ""]);
++        assert_eq!(char_pieces("abc", 'x'), vec!["abc"]);
++        assert_eq!(rsplit_str("a__b__c", "__"), Some(("a__b", "c")));
++        assert_eq!(rsplit_str("aaa", "aa"), Some(("a", "")));
++        assert_eq!(rsplit_str("abc", ""), Some(("abc", "")));
++        assert_eq!(rsplit_str("abc", "x"), None);
++        assert_eq!(rsplit_str("", ""), Some(("", "")));
++        assert_eq!(rsplit_char("a.b.c", '.'), Some(("a.b", "c")));
++        assert_eq!(rsplit_char("xéyéz", 'é'), Some(("xéy", "z")));
++        assert_eq!(rsplit_char("abc", '.'), None);
++        assert!(starts_with_char("é!", 'é'));
++        assert!(!starts_with_char("", 'a'));
++        assert!(!starts_with_char("ab", 'b'));
++    }
++}

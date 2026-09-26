@@ -1,0 +1,2285 @@
+# aeneas integration step 85 after cba11f3beb: commit 423625503544c3761d483f917f468ef074fd305d
+# first parent 19f5b77f236aa89bc216202f812f6016dbf51468, merged fa841cb45e7ecc9f2253e8c1e27666f470035c92
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (joins of distinct mutable borrows holding nested borrows; three-level loops reach a fixed point; join continuations apply the unapplied stages of a staged call)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index b1432f8..b312b7a 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -219,6 +219,8 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       dropped_twin_scope = None;
+       ignored_abs_ids = AbsId.Set.empty;
+       meta_symb_places = SymbolicToPureCore.MetaSymbPlaceSet.empty;
++      join_snapshots =
++        { positions = []; unreconciled = AbsId.Set.empty; renamings = [] };
+     }
+   in
+ 
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index 25bef01..3ac347c 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -948,29 +948,69 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+      With markers, the ignored loan of a reborrow which only exists in one
+      branch is only in the projection of that branch (see
+      {!tavalue_split_marker}), like the pending loans of that reborrow: they
+-     cancel out one to one. *)
++     cancel out one to one. With several levels of nesting (e.g., the
++     abstraction of ['c] for a reborrow of a [&'a mut C<'b, D<'c>>] where [C]
++     holds a [&'b mut D<'c>]), the ignored loan of the outer reborrow holds
++     the ignored loan of the inner one: the inner loan cancels out with the
++     pending loans of the inner borrow first, then the outer one with those of
++     the outer borrow. A shared loan held by an ignored loan, whose shared
++     borrows this merge eliminated and which no other value borrows, is
++     endable (as in {!end_endable_shared_loans_at_abs}): only its child can
++     hold ownership. *)
+   let pending_loan bid (av : tavalue) =
+     match av.value with
+     | ASymbolic (_, APendingLoans bid') -> bid = bid'
+     | _ -> false
+   in
+-  let empty_ignored_loan (av : tavalue) =
+-    match av.value with
+-    | ALoan (AIgnoredMutLoan (Some bid, child))
+-      when not (tavalue_has_ownership span ctx child) -> Some bid
+-    | _ -> None
+-  in
+   let rec remove_first f = function
+     | [] -> []
+     | x :: xs -> if f x then xs else x :: remove_first f xs
+   in
++  let live_borrows =
++    lazy
++      (let others =
++         List.filter
++           (function
++             | EAbs (abs : abs) ->
++                 abs.abs_id <> abs0.abs_id && abs.abs_id <> abs1.abs_id
++             | _ -> true)
++           ctx.env
++       in
++       let merged =
++         { abs0 with avalues = !left_avalues @ right_avalues; cont = None }
++       in
++       BorrowId.Set.union (fst (compute_env_ids others)).borrow_ids
++         (fst (compute_abs_ids merged)).borrow_ids)
++  in
++  (* The pending loans left once [av] and its nested ignored loans cancel out
++     with some of [pendings], if they all do *)
++  let rec cancel_loan (pendings : tavalue list) (av : tavalue) :
++      tavalue list option =
++    match av.value with
++    | ALoan (AIgnoredMutLoan (Some bid, child)) -> (
++        match cancel_loan pendings child with
++        | Some pendings when List.exists (pending_loan bid) pendings ->
++            Some (remove_first (pending_loan bid) pendings)
++        | _ -> None)
++    | AAdt adt ->
++        List.fold_left
++          (fun pendings field ->
++            Option.bind pendings (fun pendings -> cancel_loan pendings field))
++          (Some pendings) adt.fields
++    | ALoan (ASharedLoan (_, bid, sv, child))
++      when (not (tvalue_has_loans_or_borrows (Some span) ctx sv))
++           && not (BorrowId.Set.mem bid (Lazy.force live_borrows)) ->
++        cancel_loan pendings child
++    | _ -> if tavalue_has_ownership span ctx av then None else Some pendings
++  in
+   let cancel (loans : tavalue list) (pendings : tavalue list) =
+     List.fold_left
+-      (fun (loans, pendings) av ->
+-        match empty_ignored_loan av with
+-        | Some bid when List.exists (pending_loan bid) pendings ->
+-            ( remove_first (( == ) av) loans,
+-              remove_first (pending_loan bid) pendings )
++      (fun (loans, pendings) (av : tavalue) ->
++        match av.value with
++        | ALoan (AIgnoredMutLoan (Some _, _)) -> (
++            match cancel_loan pendings av with
++            | Some pendings -> (remove_first (( == ) av) loans, pendings)
++            | None -> (loans, pendings))
+         | _ -> (loans, pendings))
+       (loans, pendings) loans
+   in
+diff --git a/src/interp/InterpJoinCore.ml b/src/interp/InterpJoinCore.ml
+index ccfe430..9f1c3e9 100644
+--- a/src/interp/InterpJoinCore.ml
++++ b/src/interp/InterpJoinCore.ml
+@@ -182,6 +182,30 @@ module type PrimMatcher = sig
+     tvalue ->
+     borrow_id * tvalue
+ 
++  (** Match two mutable borrows with distinct ids whose borrowed values hold
++      distinct mutable borrows (or distinct symbolic values holding mutable
++      borrows), i.e., borrows of the regions nested in the region of the outer
++      borrows (see {!InterpMatchCtxs.distinct_nested_mut_borrows}). The input
++      parameters are:
++      - [match_values]
++      - [ty]
++      - [bid0]: first borrow id
++      - [bv0]: first borrowed value
++      - [bid1]
++      - [bv1]
++
++      Returns the matched value. *)
++  val match_distinct_nested_mut_borrows :
++    tvalue_matcher ->
++    eval_ctx ->
++    eval_ctx ->
++    ety ->
++    borrow_id ->
++    tvalue ->
++    borrow_id ->
++    tvalue ->
++    tvalue
++
+   (** Parameters:
+       - [match_values]
+       - [ctx0]
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 819a5d4..279eaf2 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -302,6 +302,45 @@ let compute_abs_borrows_loans_maps (span : Meta.span) (explore : abs -> bool)
+     loan_proj_to_abs = !loan_proj_to_abs;
+   }
+ 
++(** The mutable borrows held by a value and its symbolic values holding mutable
++    borrows, in traversal order. *)
++let value_mut_borrow_holders (span : Meta.span) (ctx : eval_ctx) (v : tvalue) :
++    [ `Borrow of BorrowId.id | `Symbolic of SymbolicValueId.id ] list =
++  let holders = ref [] in
++  let visitor =
++    object
++      inherit [_] iter_tvalue as super
++      method! visit_ty _ _ = ()
++
++      method! visit_VMutBorrow env bid bv =
++        holders := `Borrow bid :: !holders;
++        super#visit_VMutBorrow env bid bv
++
++      method! visit_symbolic_value _ sv =
++        if
++          ValuesUtils.symbolic_value_has_mut_borrows span
++            ctx.type_ctx.type_infos sv
++        then holders := `Symbolic sv.sv_id :: !holders
++    end
++  in
++  visitor#visit_tvalue () v;
++  List.rev !holders
++
++(** Are [MB bid0 bv0] and [MB bid1 bv1] distinct mutable borrows whose borrowed
++    values hold distinct mutable borrows (nested borrows)? Matching the borrowed
++    values would join those inner borrows independently of the outer ones (see
++    {!PrimMatcher.match_distinct_nested_mut_borrows}). Borrowed values holding
++    loans or bottoms are matched structurally: the join ends those loans
++    first. *)
++let distinct_nested_mut_borrows (span : Meta.span) (ctx0 : eval_ctx)
++    (ctx1 : eval_ctx) (bid0 : borrow_id) (bv0 : tvalue) (bid1 : borrow_id)
++    (bv1 : tvalue) : bool =
++  bid0 <> bid1
++  && (not (tvalue_has_loans bv0 || tvalue_has_loans bv1))
++  && (not (tvalue_has_bottom ctx0 bv0 || tvalue_has_bottom ctx1 bv1))
++  && value_mut_borrow_holders span ctx0 bv0
++     <> value_mut_borrow_holders span ctx1 bv1
++
+ (** Match two types during a join.
+ 
+     TODO: probably don't need to take [match_regions] as input anymore. *)
+@@ -318,8 +357,17 @@ let rec match_types (span : Meta.span) ~(recover : bool) (ctx0 : eval_ctx)
+       [%cassert_recover] recover span
+         (generics0.const_generics = generics1.const_generics)
+         "Not the same const generics";
++      (* The regions of the trait refs are not owned by any abstraction:
++         refreshing a type gives them fresh identifiers at every join (see
++         [TypesUtils.ty_refresh_regions]), e.g., in the type of a closure
++         capturing a closure through a clause on its type parameter *)
++      let erase_trait_refs =
++        let erase = new Substitute.erase_runtime_regions_visitor in
++        List.map (erase#visit_trait_ref 0)
++      in
+       [%cassert_recover] recover span
+-        (generics0.trait_refs = generics1.trait_refs)
++        (erase_trait_refs generics0.trait_refs
++        = erase_trait_refs generics1.trait_refs)
+         "Not the same trait refs";
+       let id = id0 in
+       let const_generics = generics1.const_generics in
+@@ -403,6 +451,10 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+           { value; ty = v1.ty }
+         else M.match_distinct_adts match_rec ctx0 ctx1 ty v0.ty av0 v1.ty av1
+     | VBottom, VBottom -> v0
++    | VBorrow (VMutBorrow (bid0, bv0)), VBorrow (VMutBorrow (bid1, bv1))
++      when distinct_nested_mut_borrows span ctx0 ctx1 bid0 bv0 bid1 bv1 ->
++        M.match_distinct_nested_mut_borrows match_rec ctx0 ctx1 ty bid0 bv0 bid1
++          bv1
+     | VBorrow bc0, VBorrow bc1 ->
+         let bc =
+           match (bc0, bc1) with
+@@ -1417,6 +1469,23 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       (* Return the new borrow *)
+       (bid2, bv)
+ 
++  let match_distinct_nested_mut_borrows (_ : tvalue_matcher) (ctx0 : eval_ctx)
++      (ctx1 : eval_ctx) (ty : ety) (bid0 : borrow_id) (bv0 : tvalue)
++      (bid1 : borrow_id) (bv1 : tvalue) : tvalue =
++    (* Matching the borrowed values would join their distinct inner borrows in
++       abstractions of the nested regions which are not children of the
++       abstraction joining the outer borrows and miss the loans given back
++       through the outer borrows. Join the two borrows as a whole instead,
++       like a symbolic value with a concrete borrow: the abstraction of a
++       nested region of the fresh symbolic value is a child of the abstraction
++       of the outer region and holds the pending loans of the outer borrows
++       (see {!InterpAbs.convert_value_to_output_avalues}). *)
++    let mk_borrow (bid : borrow_id) (bv : tvalue) : tvalue =
++      { value = VBorrow (VMutBorrow (bid, bv)); ty }
++    in
++    to_symbolic_value_with_borrows ctx0 ctx1 (mk_borrow bid0 bv0)
++      (mk_borrow bid1 bv1)
++
+   let match_shared_loans (_ : tvalue_matcher) (ctx0 : eval_ctx)
+       (_ctx1 : eval_ctx) (ty : ety) (id0 : loan_id) (id1 : loan_id)
+       (sv : tvalue) : tvalue =
+@@ -2237,6 +2306,15 @@ struct
+     let bid = match_borrow_id bid0 bid1 in
+     (bid, bv)
+ 
++  let match_distinct_nested_mut_borrows (match_tvalues : tvalue_matcher)
++      (ctx0 : eval_ctx) (ctx1 : eval_ctx) (ty : ety) (bid0 : borrow_id)
++      (bv0 : tvalue) (bid1 : borrow_id) (bv1 : tvalue) : tvalue =
++    let bv = match_tvalues bv0 bv1 in
++    let bid, bv =
++      match_mut_borrows match_tvalues ctx0 ctx1 ty bid0 bv0 bid1 bv1 bv
++    in
++    { value = VBorrow (VMutBorrow (bid, bv)); ty }
++
+   let match_shared_loans (_ : tvalue_matcher) (_ : eval_ctx) (_ : eval_ctx)
+       (ty : ety) (id0 : loan_id) (id1 : loan_id) (sv : tvalue) : tvalue =
+     let id = match_loan_id id0 id1 in
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 8703594..8e4648c 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -910,7 +910,8 @@ let retain_reconstructed_carriers (pat : V.tepat) (next : V.tevalue) =
+     monad?).
+ 
+     [bound_inputs]: see the doc of [bound_inputs] *)
+-let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
++let einput_to_texpr ?(snapshot : bool ref option) (ctx : bs_ctx)
++    (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+     (bound_inputs : bound_borrows_loans)
+     (fvar_to_texpr : texpr V.AbsFVarId.Map.t ref) (abs_level : abs_level)
+     (input : V.tevalue) : bs_ctx * bool * texpr =
+@@ -1007,42 +1008,43 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+         (ctx, false, e)
+     | V.EApp (f, args) ->
+         [%ldebug "app"];
++        (* This continuation applies the continuation of a join or loop
++           abstraction: its output is not recombined with the current values of
++           the nested loans of that abstraction (see [join_snapshots]) *)
++        (match f with
++        | V.EJoin aid | V.ELoop (aid, _) ->
++            ctx.join_snapshots.unreconciled <-
++              V.AbsId.Set.add aid ctx.join_snapshots.unreconciled
++        | _ -> ());
+         let stage =
+           match f with
+           | V.EFunCall aid -> V.AbsId.Map.find_opt aid ctx.fun_call_stages
+           | _ -> None
+         in
+-        let args =
++        (* Staged backward function (see [fun_call_stage.early_outputs]): the
++           stages which were not applied yet. Its current continuation receives
++           the inputs of its next stage: applying it to the inputs of the last
++           stage is only correct once the earlier stages are applied. *)
++        let early =
+           match stage with
+-          | None -> args
+-          | Some { output_values = Some _; _ } -> []
+-          | Some stage ->
+-              (* The current continuation of a staged backward function (see
+-                 [fun_call_stage.early_outputs]) receives the inputs of its next
+-                 stage: applying it to the inputs of the last stage is only
+-                 correct once the earlier stages are applied. A continuation
+-                 (e.g., of a join) does not receive the inputs of the earlier
+-                 stages of the calls it holds (its levels > 0 are not inputs). *)
+-              [%cassert] span
+-                (List.length stage.early_outputs
+-                = List.length stage.signature.early)
+-                "Nested borrows: the continuation of a join, loop or reborrow \
+-                 abstraction holds a function call whose staged backward \
+-                 function has stages which were not applied yet";
+-              (* Continuation arguments retain their abstraction levels, highest
+-                 first. Do not even translate levels already applied directly:
+-                 their values need not remain available after that EndAbs. *)
+-              let max_level = List.length args - 1 in
+-              let levels =
+-                List.mapi (fun i args -> (max_level - i, args)) args
+-              in
+-              List.map
+-                (fun (level, _) ->
+-                  [%unwrap_with_span] span
+-                    (List.assoc_opt level levels)
+-                    "Missing pending function-call continuation level")
+-                stage.pending_inputs
++          | Some ({ output_values = None; _ } as stage) ->
++              Collections.List.drop
++                (List.length stage.early_outputs)
++                stage.signature.early
++          | _ -> []
+         in
++        (* A join continuation applies them itself, in the snapshot of the join
++           (see [join_snapshots]); any other continuation (of a loop or a
++           reborrow) does not receive the inputs of the earlier stages of the
++           calls it holds (its levels > 0 are not inputs). *)
++        (match (early, snapshot) with
++        | [], _ -> ()
++        | _, Some snapshot -> snapshot := true
++        | _, None ->
++            [%craise] span
++              "Nested borrows: the continuation of a loop or reborrow \
++               abstraction holds a function call whose staged backward \
++               function has stages which were not applied yet");
+         let update_args ctx args =
+           let ctx, args =
+             List.fold_left_map
+@@ -1055,8 +1057,57 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+           let args = List.filter_map (fun x -> x) args in
+           (ctx, args)
+         in
+-        let ctx, args =
+-          List.fold_left_map (fun ctx args -> update_args ctx args) ctx args
++        (* Continuation arguments retain their abstraction levels, highest
++           first. Do not even translate levels already applied directly: their
++           values need not remain available after that EndAbs. *)
++        let max_level = List.length args - 1 in
++        let levels = List.mapi (fun i args -> (max_level - i, args)) args in
++        let level_args level =
++          [%unwrap_with_span] span
++            (List.assoc_opt level levels)
++            "Missing pending function-call continuation level"
++        in
++        let ctx, early_args, args =
++          match stage with
++          | None ->
++              let ctx, args = List.fold_left_map update_args ctx args in
++              (ctx, [], args)
++          | Some { output_values = Some _; _ } -> (ctx, [], [])
++          | Some stage when early = [] ->
++              let ctx, args =
++                List.fold_left_map update_args ctx
++                  (List.map (fun (level, _) -> level_args level)
++                     stage.pending_inputs)
++              in
++              (ctx, [], args)
++          | Some stage ->
++              (* The earlier stages receive the arguments of their levels, like
++                 the last one: in the snapshot of the join, the values
++                 consumed at a level are those the continuation receives *)
++              let used =
++                List.sort_uniq compare
++                  (List.map fst stage.pending_inputs
++                  @ List.concat_map
++                      (fun (early : back_early_sg) ->
++                        List.map fst early.early_inputs)
++                      early)
++              in
++              let ctx, translated =
++                List.fold_left_map
++                  (fun ctx level ->
++                    let ctx, args = update_args ctx (level_args level) in
++                    (ctx, (level, args)))
++                  ctx used
++              in
++              let of_levels levels =
++                List.map (fun (level, _) -> List.assoc level translated) levels
++              in
++              ( ctx,
++                List.map
++                  (fun (early : back_early_sg) ->
++                    (early, of_levels early.early_inputs))
++                  early,
++                of_levels stage.pending_inputs )
+         in
+         [%ldebug
+           "- app:\n"
+@@ -1072,7 +1123,7 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+               [%internal_error] span
+           | V.EFunCall abs_id | V.ELoop (abs_id, _) | V.EJoin abs_id ->
+               (* Lookup the variable introduced for the backward function *)
+-              let e, can_fail =
++              let ctx, e, can_fail =
+                 match V.AbsId.Map.find_opt abs_id ctx.abs_id_to_info with
+                 | None ->
+                     (* No variable was introduced: it means the abstraction should
+@@ -1080,7 +1131,7 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+                     [%sanity_check] span (args = [ [] ]);
+                     [%sanity_check] span
+                       (V.AbsId.Set.mem abs_id ctx.ignored_abs_ids);
+-                    (None, false)
++                    (ctx, None, false)
+                 | Some { fvar; can_fail } -> begin
+                     match stage with
+                     | Some { output_values = Some values; _ } ->
+@@ -1096,7 +1147,7 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+                                 (List.map mk_texpr_from_fvar vars))
+                             values
+                         in
+-                        (Some (mk_simpl_tuple_texpr span values), false)
++                        (ctx, Some (mk_simpl_tuple_texpr span values), false)
+                     | _ ->
+                         (* A function-call argument is one level's tuple, unlike
+                            the flat argument list used by joins and loops. *)
+@@ -1143,6 +1194,65 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+                               && stage.signature.inputs <> []
+                           | None -> false
+                         in
++                        (* Apply the stages which were not applied yet (see
++                           [early]): [let ((outputs), back) := back inputs]
++                           for each of them, their outputs being unused (the
++                           values given back at the nested levels are those
++                           of the snapshot of the join) *)
++                        let ctx, fvar, early_bindings =
++                          List.fold_left
++                            (fun (ctx, fvar, bindings)
++                                 ((early : back_early_sg), inputs) ->
++                              [%cassert] span
++                                (not
++                                   (can_fail
++                                   || (Option.get stage).signature.effect_info
++                                        .can_fail))
++                                "Nested borrows: the continuation of a join \
++                                 abstraction applies the earlier stages of a \
++                                 staged backward function which can fail";
++                              let inputs =
++                                List.map2
++                                  (fun (level, tys) args ->
++                                    let input = mk_simpl_tuple_texpr span args in
++                                    [%cassert] span
++                                      (input.ty
++                                      = mk_simpl_tuple_ty (List.map snd tys))
++                                      ("Nested borrows: the values which the \
++                                        continuation of a join abstraction \
++                                        receives at level "
++                                      ^ string_of_int level
++                                      ^ " disagree with the inputs of an \
++                                         earlier stage of the staged \
++                                         backward function of a call it \
++                                         holds");
++                                    input)
++                                  early.early_inputs inputs
++                              in
++                              let call =
++                                [%add_loc] mk_app span fvar
++                                  (mk_simpl_tuple_texpr span inputs)
++                              in
++                              let out_ty, late_ty =
++                                match opt_destruct_tuple span call.ty with
++                                | Some [ out_ty; late_ty ] -> (out_ty, late_ty)
++                                | _ -> [%internal_error] span
++                              in
++                              let ctx, late =
++                                fresh_var (Some "back") late_ty ctx
++                              in
++                              let pat =
++                                mk_simpl_tuple_pat
++                                  [
++                                    mk_ignored_pat out_ty;
++                                    mk_tpat_from_fvar None late;
++                                  ]
++                              in
++                              ( ctx,
++                                mk_texpr_from_fvar late,
++                                bindings @ [ (pat, call) ] ))
++                            (ctx, fvar, []) early_args
++                        in
+                         let call = [%add_loc] mk_apps span fvar args in
+                         let call =
+                           match stage with
+@@ -1182,7 +1292,11 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+                               else project call
+                           | _ -> call
+                         in
+-                        (Some call, can_fail)
++                        let call =
++                          mk_closed_checked_lets __FILE__ __LINE__ ctx false
++                            early_bindings call
++                        in
++                        (ctx, Some call, can_fail)
+                   end
+               in
+               (ctx, can_fail, e)
+@@ -1733,8 +1847,9 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+   in
+   (ctx, cont_chain @ call_chain)
+ 
+-let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+-    (output : V.tevalue) (input : V.tevalue) : texpr option =
++let abs_cont_to_texpr_aux ?(snapshot : bool ref option) (ctx : bs_ctx)
++    (ectx : C.eval_ctx) (abs : V.abs) (output : V.tevalue) (input : V.tevalue)
++    : texpr option =
+   let span = ctx.span in
+   (* TODO: properly handle the sub-abstractions *)
+   let abs_level = 0 in
+@@ -1768,8 +1883,8 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+   (* Translate the abstraction expression *)
+   let fvar_to_texpr = ref V.AbsFVarId.Map.empty in
+   let ctx, can_fail, input_e =
+-    einput_to_texpr ctx ectx abs.regions.owned bound_inputs fvar_to_texpr
+-      abs_level input
++    einput_to_texpr ?snapshot ctx ectx abs.regions.owned bound_inputs
++      fvar_to_texpr abs_level input
+   in
+   [%sanity_check] span (not can_fail);
+   let ctx, bound_outputs, pat =
+@@ -1813,16 +1928,20 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+ (** Translate the continuation of a region abstraction to a pure continuation.
+ 
+     Returns [None] if the continuation has type [unit] (i.e., it consumes
+-    nothing and returns nothing). *)
+-let translate_abs_to_cont (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs) :
+-    texpr option =
++    nothing and returns nothing).
++
++    [snapshot]: the continuation of an abstraction of a join, which may apply
++    the earlier stages of the staged backward functions of the calls it holds;
++    it is set if it does (see [join_snapshots]). *)
++let translate_abs_to_cont ?(snapshot : bool ref option) (ctx : bs_ctx)
++    (ectx : C.eval_ctx) (abs : V.abs) : texpr option =
+   [%ltrace "abs:\n" ^ abs_to_string ctx abs];
+   match abs.cont with
+   | None -> [%internal_error] ctx.span
+   | Some cont -> (
+       match (cont.output, cont.input) with
+       | Some output, Some input ->
+-          let abs = abs_cont_to_texpr_aux ctx ectx abs output input in
++          let abs = abs_cont_to_texpr_aux ?snapshot ctx ectx abs output input in
+           [%ltrace
+             "translated abs:\n"
+             ^ Print.option_to_string (texpr_to_string ctx) abs];
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 69f6369..cca75b4 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -250,6 +250,37 @@ type owned_state_recovery =
+   | UnavailableOwnedState
+ [@@deriving show]
+ 
++(** Nested borrows: the continuation of a join abstraction may hold, in a
++    branch, a function call whose staged backward function (see
++    [Pure.back_sg_info.early]) has stages which were not applied in that branch
++    (e.g., [Option::as_deref_mut] on [Option<&'1 mut Frame<'2>>] in one branch,
++    with the option used after the join). The continuation then applies these
++    stages itself, in the snapshot of the join (see
++    [SymbolicToPureAbs.einput_to_texpr]): the values given back at the nested
++    levels of the call which the branch consumed are those at the join, not
++    the values the stages compute. Its outputs on the positions of its regions
++    are thus only correct once recombined with the current values of its
++    nested loans, which the translation of the end of a join abstraction does
++    (see [SymbolicToPureExpressions.translate_end_abstraction_join_or_loop]).
++    Shared by the whole translation of a function body: the joins are
++    translated after (in a [let] with early exits) or before the uses of their
++    abstractions. *)
++type join_snapshots = {
++  mutable positions : (Contexts.SymbolicExprId.id * int) list;
++      (** The joins, and the positions among their abstractions, whose
++          continuation applies stages in the snapshot of the join in some
++          branch *)
++  mutable unreconciled : V.AbsId.Set.t;
++      (** The join and loop abstractions whose continuation output is used
++          without recombination with the current values of their nested loans
++          (applied by another continuation, staged, or with no nested loan
++          update to recombine) *)
++  mutable renamings : (V.AbsId.id * V.AbsId.id) list;
++      (** The substitutions of abstraction identifiers (see
++          [SymbolicToPureExpressions.translate_substitute_abs_ids]) *)
++}
++[@@deriving show]
++
+ (** Body synthesis context *)
+ type bs_ctx = {
+   (* TODO: there are a lot of duplications with the various decls ctx *)
+@@ -495,6 +526,8 @@ type bs_ctx = {
+       (** Keep track of the [SymbolicPlaces] meta-information that we already
+           inserted, to prevent duplication (there tends to be a *lot* of
+           meta-information in the generated expressions. *)
++  join_snapshots : join_snapshots;
++      (** See [join_snapshots] *)
+ }
+ [@@deriving show]
+ 
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index c3e0a3b..6a59209 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -3206,7 +3206,11 @@ and translate_end_abstraction_join_or_loop (ectx : C.eval_ctx) (abs : V.abs)
+          continuation: bind the output of the call, then recombine it *)
+       let ctx, back_binding, can_fail, call =
+         match nested_updates with
+-        | None -> (ctx, None, can_fail, call)
++        | None ->
++            (* See [join_snapshots] *)
++            ctx.join_snapshots.unreconciled <-
++              V.AbsId.Set.add abs.abs_id ctx.join_snapshots.unreconciled;
++            (ctx, None, can_fail, call)
+         | Some (output_ty, updates) ->
+             [%cassert] span
+               (List.length outputs = 1)
+@@ -3311,6 +3315,9 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+   let span = ctx.span in
+   [%ltrace
+     "abs (level: " ^ string_of_int abs_level ^ "):\n" ^ abs_to_string ctx abs];
++  (* See [join_snapshots] *)
++  ctx.join_snapshots.unreconciled <-
++    V.AbsId.Set.add abs.abs_id ctx.join_snapshots.unreconciled;
+   let sides ~(pending : bool) =
+     List.mapi
+       (fun index _ ->
+@@ -4747,6 +4754,7 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+           { ctx with owned_state_recovery = state }
+     in
+     let next_e = translate_expr lete.next_expr ctx in
++    check_join_snapshots ctx lete;
+     [%add_loc] mk_closed_checked_let ctx true output bound_e next_e
+   else
+     let next_e = translate_expr lete.next_expr ctx in
+@@ -4879,6 +4887,7 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+       }
+     in
+     let bound_e = translate_expr lete.bound_expr bound_ctx in
++    check_join_snapshots ctx lete;
+     let ctx, result = fresh_var (Some "joined") (sum_ty cases) ctx in
+     let branches =
+       List.map
+@@ -4893,6 +4902,49 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+       (mk_tpat_from_fvar None result)
+       bound_e next_e
+ 
++(** See [join_snapshots]: once the bound expression and the next expression of
++    a [let] are translated, the continuations of the join abstractions which
++    apply stages in the snapshot of the join in some branch must only have been
++    applied with their outputs recombined with the current values of their
++    nested loans. *)
++and check_join_snapshots (ctx : bs_ctx) (lete : S.let_expr) : unit =
++  let snapshots = ctx.join_snapshots in
++  let positions =
++    List.filter_map
++      (fun (join_id, position) ->
++        if join_id = lete.join_id then Some position else None)
++      snapshots.positions
++  in
++  if positions <> [] then (
++    let ids =
++      List.map
++        (fun position ->
++          match List.nth_opt lete.out_abs position with
++          | Some (abs : V.abs) -> abs.abs_id
++          | None -> [%internal_error] ctx.span)
++        positions
++    in
++    (* The identifiers they got through substitutions *)
++    let rec close ids =
++      let ids' =
++        V.AbsId.Set.union ids
++          (V.AbsId.Set.of_list
++             (List.filter_map
++                (fun (id, id') ->
++                  if V.AbsId.Set.mem id ids then Some id' else None)
++                snapshots.renamings))
++      in
++      if V.AbsId.Set.equal ids ids' then ids else close ids'
++    in
++    let ids = close (V.AbsId.Set.of_list ids) in
++    [%cassert] ctx.span
++      (V.AbsId.Set.disjoint ids snapshots.unreconciled)
++      "Nested borrows: the continuation of a join abstraction applies the \
++       earlier stages of a staged backward function of a call in the snapshot \
++       of the join (the values given back at the nested levels of the call are \
++       those at the join), but its output is used without recombination with \
++       the current values of its nested loans")
++
+ and translate_join (ctx : bs_ctx) (join_id : S.symbolic_expr_id)
+     (ectx : C.eval_ctx) (input_values : V.tvalue list) (input_abs : V.abs list)
+     : texpr =
+@@ -4901,7 +4953,21 @@ and translate_join (ctx : bs_ctx) (join_id : S.symbolic_expr_id)
+     ^ String.concat "\n" (List.map (tvalue_to_string ctx) input_values)
+     ^ "\n- input_abs:\n"
+     ^ String.concat "\n\n" (List.map (abs_to_string ctx) input_abs)];
+-  let conts = List.filter_map (translate_abs_to_cont ctx ectx) input_abs in
++  (* The continuations may apply the earlier stages of the staged backward
++     functions of the calls they hold, in the snapshot of the join: record
++     their positions (see [join_snapshots]) *)
++  let conts =
++    List.filter_map Fun.id
++      (List.mapi
++         (fun position abs ->
++           let snapshot = ref false in
++           let cont = translate_abs_to_cont ~snapshot ctx ectx abs in
++           if !snapshot then
++             ctx.join_snapshots.positions <-
++               (join_id, position) :: ctx.join_snapshots.positions;
++           cont)
++         input_abs)
++  in
+   let values = List.map (tvalue_to_texpr ctx ectx) input_values in
+   [%ldebug
+     "- translated values:\n"
+@@ -4924,6 +4990,9 @@ and translate_substitute_abs_ids (ctx : bs_ctx) (eid : S.symbolic_expr_id)
+     | Some aid -> aid
+     | None -> aid
+   in
++  (* See [join_snapshots] *)
++  ctx.join_snapshots.renamings <-
++    V.AbsId.Map.bindings aids @ ctx.join_snapshots.renamings;
+ 
+   (* *)
+   let abs_id_to_info' =
+diff --git a/tests/lean/LoopNestedJoin.lean b/tests/lean/LoopNestedJoin.lean
+new file mode 100644
+index 0000000..2295837
+--- /dev/null
++++ b/tests/lean/LoopNestedJoin.lean
+@@ -0,0 +1 @@
++import LoopNestedJoin.Checks
+diff --git a/tests/lean/LoopNestedJoin/Checks.lean b/tests/lean/LoopNestedJoin/Checks.lean
+new file mode 100644
+index 0000000..9bbe948
+--- /dev/null
++++ b/tests/lean/LoopNestedJoin/Checks.lean
+@@ -0,0 +1,22 @@
++import LoopNestedJoin.LoopNestedJoin
++
++/-! Evaluate the model of `tests/src/loop-nested-join.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace loop_nested_join.checks
++open Aeneas Aeneas.Std Result
++
++def val3 (r : Result (U32 × U32 × U32)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++-- native::drives
++#guard val3 (drive_odd 0#u32) == some (0, 2, 1007)
++#guard val3 (drive_odd 1#u32) == some (0, 2, 1007)
++#guard val3 (drive_odd 5#u32) == some (7, 4, 1011)
++#guard val3 (drive_even 0#u32) == some (0, 10, 3)
++#guard val3 (drive_even 1#u32) == some (11, 11, 3)
++#guard val3 (drive_even 6#u32) == some (36, 13, 9)
++
++end loop_nested_join.checks
+diff --git a/tests/lean/LoopNestedJoin/LoopNestedJoin.lean b/tests/lean/LoopNestedJoin/LoopNestedJoin.lean
+new file mode 100644
+index 0000000..776e0b7
+--- /dev/null
++++ b/tests/lean/LoopNestedJoin/LoopNestedJoin.lean
+@@ -0,0 +1,300 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_nested_join]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_nested_join
++
++/-- [loop_nested_join::Counter]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 12:0-15:1
++    Visibility: public -/
++structure Counter where
++  total : _root_.Aeneas.Std.U32
++  calls : _root_.Aeneas.Std.U32
++
++/-- [loop_nested_join::bump]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 17:0-21:1
++    Visibility: public -/
++def bump
++  (c : _root_.loop_nested_join.Counter) (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.loop_nested_join.Counter) × (_root_.loop_nested_join.Counter →
++    (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.loop_nested_join.Counter))))
++  := do
++  let i ← lift (core.num.U32.wrapping_add c.total v)
++  let i1 ← lift (core.num.U32.wrapping_add c.calls 1#u32)
++  let back :=
++    (fun c1 => (c1, fun c2 => { c with total := c2.total }) :
++      _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter)))
++  _root_.Aeneas.Std.Result.ok (i1, { total := i, calls := i1 }, fun c1 => c1,
++    back)
++
++/-- [loop_nested_join::bump_odd]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 28:4-32:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_odd_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter)
++  (back1 : _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++  × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32)))
++  (r : _root_.loop_nested_join.Counter) (i : _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter) ×
++    (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++    (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))) ×
++    _root_.loop_nested_join.Counter × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.Aeneas.Std.U32)))))
++  := do
++  if i < n
++  then
++    let i1 ← i % 2#u32
++    let (r1, d, back2, back3) ←
++      if i1 = 1#u32
++      then
++        do
++        let (d1, r2, bump_back, bump_back1) ←
++          _root_.loop_nested_join.bump r i
++        _root_.Aeneas.Std.Result.ok (r2, d1,
++          (fun c =>
++             let (back4, back5) := back1 c
++             let (c1, back6) := bump_back1 back4
++             (c1, fun c2 => back5 { r with total := (back6 c2).total }) :
++          _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++          × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))),
++          (fun c => let c1 := bump_back c
++                    back c1 : _root_.loop_nested_join.Counter →
++          _root_.loop_nested_join.Counter))
++      else
++        _root_.Aeneas.Std.Result.ok (r, 0#u32,
++          (fun c =>
++             let (back4, back5) := back1 c
++             (back4,
++               fun c1 => let ⟨ i2, _ ⟩ := c1
++                         back5 { r with total := i2 }) :
++          _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++          × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))),
++          back)
++    let acc1 ← lift (core.num.U32.wrapping_add acc d)
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (back3,
++      fun c =>
++        let (back4, back5) := back2 c
++        (back4,
++          fun c1 => let ⟨ i3, _ ⟩ := c1
++                    back5 { r1 with total := i3 }), r1, i2, acc1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (
++      r.calls, acc, back r, fun c => back1 c))
++
++/-- [loop_nested_join::bump_odd]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 28:4-32:5
++    Visibility: public -/
++@[rust_loop]
++def bump_odd_loop
++  (back : _root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter)
++  (back1 : _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++  × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32)))
++  (n : _root_.Aeneas.Std.U32) (r : _root_.loop_nested_join.Counter)
++  (i : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.Aeneas.Std.U32))))
++  := do
++  loop
++    (fun (back2, back3, r1, i1, acc1) =>
++       _root_.loop_nested_join.bump_odd_loop.body n back2 back3 r1 i1 acc1 :
++      ((_root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter) ×
++      (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))) ×
++      _root_.loop_nested_join.Counter × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.loop_nested_join.Counter →
++      _root_.loop_nested_join.Counter) × (_root_.loop_nested_join.Counter →
++      (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++      _root_.Aeneas.Std.U32))) × _root_.loop_nested_join.Counter ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × _root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))))))
++    (back, back1, r, i, acc)
++
++/-- [loop_nested_join::bump_odd]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 24:0-34:1
++    Visibility: public -/
++def bump_odd
++  (c : _root_.loop_nested_join.Counter) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.loop_nested_join.Counter))
++  := do
++  let (i, acc, back, back1) ←
++    _root_.loop_nested_join.bump_odd_loop (fun c1 => c1)
++      (fun c1 => (c1, fun c2 => let ⟨ i1, _ ⟩ := c2
++                                i1)) n c 0#u32 0#u32
++  let back2 :=
++    (fun c1 =>
++       let (⟨ i1, _ ⟩, back3) := back1 { back with total := c1.total }
++       let i2 := back3 { total := i1, calls := i }
++       { c with total := i2 } : _root_.loop_nested_join.Counter →
++      _root_.loop_nested_join.Counter)
++  _root_.Aeneas.Std.Result.ok (acc, back, back2)
++
++/-- [loop_nested_join::bump_even]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 42:4-46:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_even_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter)
++  (back1 : _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++  × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32)))
++  (r : _root_.loop_nested_join.Counter) (i : _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter) ×
++    (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++    (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))) ×
++    _root_.loop_nested_join.Counter × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.Aeneas.Std.U32)))))
++  := do
++  if i < n
++  then
++    let i1 ← i % 2#u32
++    let (r1, d, back2, back3) ←
++      if i1 = 1#u32
++      then
++        _root_.Aeneas.Std.Result.ok (r, 0#u32,
++          (fun c =>
++             let (back4, back5) := back1 c
++             (back4,
++               fun c1 => let ⟨ i2, _ ⟩ := c1
++                         back5 { r with total := i2 }) :
++          _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++          × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))),
++          back)
++      else
++        do
++        let (d1, r2, bump_back, bump_back1) ←
++          _root_.loop_nested_join.bump r i
++        _root_.Aeneas.Std.Result.ok (r2, d1,
++          (fun c =>
++             let (back4, back5) := back1 c
++             let (c1, back6) := bump_back1 back4
++             (c1, fun c2 => back5 { r with total := (back6 c2).total }) :
++          _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++          × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))),
++          (fun c => let c1 := bump_back c
++                    back c1 : _root_.loop_nested_join.Counter →
++          _root_.loop_nested_join.Counter))
++    let acc1 ← lift (core.num.U32.wrapping_add acc d)
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (back3,
++      fun c =>
++        let (back4, back5) := back2 c
++        (back4,
++          fun c1 => let ⟨ i3, _ ⟩ := c1
++                    back5 { r1 with total := i3 }), r1, i2, acc1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (
++      r.calls, acc, back r, fun c => back1 c))
++
++/-- [loop_nested_join::bump_even]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 42:4-46:5
++    Visibility: public -/
++@[rust_loop]
++def bump_even_loop
++  (back : _root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter)
++  (back1 : _root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter
++  × (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32)))
++  (n : _root_.Aeneas.Std.U32) (r : _root_.loop_nested_join.Counter)
++  (i : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.Aeneas.Std.U32))))
++  := do
++  loop
++    (fun (back2, back3, r1, i1, acc1) =>
++       _root_.loop_nested_join.bump_even_loop.body n back2 back3 r1 i1 acc1 :
++      ((_root_.loop_nested_join.Counter → _root_.loop_nested_join.Counter) ×
++      (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))) ×
++      _root_.loop_nested_join.Counter × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.loop_nested_join.Counter →
++      _root_.loop_nested_join.Counter) × (_root_.loop_nested_join.Counter →
++      (_root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++      _root_.Aeneas.Std.U32))) × _root_.loop_nested_join.Counter ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × _root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → (_root_.loop_nested_join.Counter ×
++      (_root_.loop_nested_join.Counter → _root_.Aeneas.Std.U32))))))
++    (back, back1, r, i, acc)
++
++/-- [loop_nested_join::bump_even]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 38:0-48:1
++    Visibility: public -/
++def bump_even
++  (c : _root_.loop_nested_join.Counter) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_nested_join.Counter × (_root_.loop_nested_join.Counter →
++    _root_.loop_nested_join.Counter))
++  := do
++  let (i, acc, back, back1) ←
++    _root_.loop_nested_join.bump_even_loop (fun c1 => c1)
++      (fun c1 => (c1, fun c2 => let ⟨ i1, _ ⟩ := c2
++                                i1)) n c 0#u32 0#u32
++  let back2 :=
++    (fun c1 =>
++       let (⟨ i1, _ ⟩, back3) := back1 { back with total := c1.total }
++       let i2 := back3 { total := i1, calls := i }
++       { c with total := i2 } : _root_.loop_nested_join.Counter →
++      _root_.loop_nested_join.Counter)
++  _root_.Aeneas.Std.Result.ok (acc, back, back2)
++
++/-- [loop_nested_join::drive_odd]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 51:0-58:1
++    Visibility: public -/
++def drive_odd
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_odd_back) ←
++    _root_.loop_nested_join.bump_odd { total := 7#u32, calls := 2#u32 } n
++  let i ← lift (core.num.U32.wrapping_add c.total 1000#u32)
++  let c1 := bump_odd_back { c with total := i }
++  _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
++
++/-- [loop_nested_join::drive_even]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/loop-nested-join.rs', lines 60:0-66:1
++    Visibility: public -/
++def drive_even
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, bump_even_back) ←
++    _root_.loop_nested_join.bump_even { total := 3#u32, calls := 10#u32 } n
++  let c1 := bump_even_back c
++  _root_.Aeneas.Std.Result.ok (r, c.calls, c1.total)
++
++end loop_nested_join
+diff --git a/tests/lean/NestedBorrowsAsDerefMutJoin.lean b/tests/lean/NestedBorrowsAsDerefMutJoin.lean
+new file mode 100644
+index 0000000..2ba505f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAsDerefMutJoin.lean
+@@ -0,0 +1 @@
++import NestedBorrowsAsDerefMutJoin.Checks
+diff --git a/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean b/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean
+new file mode 100644
+index 0000000..598b2d6
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAsDerefMutJoin/Checks.lean
+@@ -0,0 +1,56 @@
++import NestedBorrowsAsDerefMutJoin.NestedBorrowsAsDerefMutJoin
++
++/-! Evaluate the model of `tests/src/nested-borrows-as-deref-mut-join.rs` on
++    the inputs of its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame
++    back. -/
++
++namespace nested_borrows_as_deref_mut_join.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7], ctx := u ctx, pos := us pos }
++
++/-- `run (&mut frame)`; the caller then sets the frame's `ctx` to `set` (if
++    any) and gives the frame back -/
++def onFrame {R S : Type} (res : R → S) (run : Frame → Result (R × Frame × (Frame → Frame)))
++    (ctx pos : Nat) (set : Option Nat := none) : Option (S × Nat × Nat) :=
++  match run (frame ctx pos) with
++  | ok (r, f1, back) =>
++    let f1' := match set with
++      | some c => { f1 with ctx := u c }
++      | none => f1
++    some (res r, (back f1').ctx.val, f1.pos.val)
++  | _ => none
++
++def pair (r : U32 × U32) : Nat × Nat := (r.1.val, r.2.val)
++def triple (r : U32 × U32 × Bool) : Nat × Nat × Bool := (r.1.val, r.2.1.val, r.2.2)
++def one (r : U32) : Nat := r.val
++
++-- advance_reread_native
++#guard onFrame pair (run_advance_reread · true (u 4)) 10 0 == some ((3, 4), 13, 1)
++#guard onFrame pair (run_advance_reread · true (u 4)) 10 1 == some ((5, 4), 15, 2)
++#guard onFrame pair (run_advance_reread · false (u 4)) 10 1 == some ((4, 5), 10, 1)
++#guard onFrame pair (run_advance_reread · true (u 4)) (max - 4) 1 == some ((5, 4), 0, 2)
++#guard onFrame pair (run_advance_reread · true (u 4)) 10 1 (set := some 99) == some ((5, 4), 99, 2)
++
++-- try_reread_native
++#guard onFrame triple (run_try_reread · (u 4)) 10 1 == some ((5, 4, true), 15, 2)
++#guard onFrame triple (run_try_reread · (u 4)) 10 3 == some ((3, 4, false), 10, 3)
++#guard (match run_try_reread_none (u 4) with | ok r => some (triple r) | _ => none) == some (4, 5, true)
++#guard onFrame triple (run_try_reread · (u 4)) 10 2 (set := some 99) == some ((7, 4, true), 99, 3)
++
++-- pos_reread_native
++#guard onFrame one (run_pos_reread · true (u 9)) 10 2 == some (2, 10, 2)
++#guard onFrame one (run_pos_reread · false (u 9)) 10 2 == some (0, 10, 2)
++
++end nested_borrows_as_deref_mut_join.checks
+diff --git a/tests/lean/NestedBorrowsAsDerefMutJoin/NestedBorrowsAsDerefMutJoin.lean b/tests/lean/NestedBorrowsAsDerefMutJoin/NestedBorrowsAsDerefMutJoin.lean
+new file mode 100644
+index 0000000..0ed1e55
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAsDerefMutJoin/NestedBorrowsAsDerefMutJoin.lean
+@@ -0,0 +1,775 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_as_deref_mut_join]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_as_deref_mut_join
++
++/-- [nested_borrows_as_deref_mut_join::Frame]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 20:0-24:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- Trait declaration: [core::ops::deref::Deref::<&0 mut (nested_borrows_as_deref_mut_join::Frame<1>), nested_borrows_as_deref_mut_join::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 139:0-139:35
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::Deref<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>"]
++structure
++  core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  where
++  deref : _root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.Aeneas.Std.Result _root_.nested_borrows_as_deref_mut_join.Frame
++
++/-- [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::deref::<0, 2, nested_borrows_as_deref_mut_join::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 172:4-172:25
++    Name pattern: [core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_as_deref_mut_join::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_as_deref_mut_join::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d.deref_specialized_f5241b514e867838b2c70437ca821848
++  (self : _root_.nested_borrows_as_deref_mut_join.Frame) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_as_deref_mut_join.Frame
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_as_deref_mut_join::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 169:0-169:38
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::Deref<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d
++  :
++  _root_.nested_borrows_as_deref_mut_join.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  := {
++  deref :=
++    _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d.deref_specialized_f5241b514e867838b2c70437ca821848
++}
++
++/-- Trait declaration: [core::ops::deref::DerefMut::<&0 mut (nested_borrows_as_deref_mut_join::Frame<1>), nested_borrows_as_deref_mut_join::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 270:0-270:54
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>"
++  (parentClauses := ["DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst"])]
++structure
++  core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  where
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :
++    _root_.nested_borrows_as_deref_mut_join.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  deref_mut : _root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.Aeneas.Std.Result (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame) ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame) ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))))))
++
++/-- [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::deref_mut::<0, 2, nested_borrows_as_deref_mut_join::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 280:4-280:37
++    Name pattern: [core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_as_deref_mut_join::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_as_deref_mut_join::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++  (self : _root_.nested_borrows_as_deref_mut_join.Frame) :
++  _root_.Aeneas.Std.Result (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame) ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame) ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    (_root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))))))
++  := do
++  let back :=
++    (fun self1 => (self1,
++       fun self2 => ({ self with ctx := self2.ctx },
++         fun f => { self with ctx := f.ctx })) :
++      _root_.nested_borrows_as_deref_mut_join.Frame →
++      (_root_.nested_borrows_as_deref_mut_join.Frame ×
++      (_root_.nested_borrows_as_deref_mut_join.Frame →
++      (_root_.nested_borrows_as_deref_mut_join.Frame ×
++      (_root_.nested_borrows_as_deref_mut_join.Frame →
++      _root_.nested_borrows_as_deref_mut_join.Frame)))))
++  _root_.Aeneas.Std.Result.ok (self, fun self1 => self1, fun self1 => self1,
++    back)
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_as_deref_mut_join::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 279:0-279:41
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_as_deref_mut_join::Frame<'1>, nested_borrows_as_deref_mut_join::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++  :
++  _root_.nested_borrows_as_deref_mut_join.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  := {
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :=
++    _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d
++  deref_mut :=
++    _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++}
++
++/-- [core::option::{core::option::Option<T>}::as_deref_mut::<0, &1 mut (nested_borrows_as_deref_mut_join::Frame<2>), nested_borrows_as_deref_mut_join::Frame<2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1414:4-1416:28
++    Name pattern: [core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_as_deref_mut_join::Frame<'2>, nested_borrows_as_deref_mut_join::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_as_deref_mut_join::Frame<'2>, nested_borrows_as_deref_mut_join::Frame<'2>>"]
++def
++  core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++  (opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst
++  :
++  _root_.nested_borrows_as_deref_mut_join.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5)
++  (self : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → ((_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → ((_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame))))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => none : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    let back1 :=
++      (fun self1 => none : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    let back2 :=
++      (fun self1 => (none,
++         fun self2 => (none,
++           fun o => match self with
++                    | none => none
++                    | some f => some f)) : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → ((_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → ((_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)))))
++    _root_.Aeneas.Std.Result.ok (none, back, back1, back2)
++  | some f =>
++    let (f1, deref_mut_back, deref_mut_back1, deref_mut_back2) ←
++      opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst.deref_mut
++        f
++    let back :=
++      (fun o =>
++         let f2 := match o with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back f2
++         some f3 : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)
++    let back1 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back1 f2
++         some f3 : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)
++    let back2 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f
++         let (f3, _) := deref_mut_back2 f2
++         (some f3,
++           fun self2 =>
++             let f4 := deref_mut_back f1
++             let f5 := match self2 with
++                       | some f6 => f6
++                       | _ => f4
++             let f6 := match self1 with
++                       | some f7 => f7
++                       | _ => f
++             let (_, back3) := deref_mut_back2 f6
++             let (f7, _) := back3 { f4 with ctx := f5.ctx }
++             (some { f1 with ctx := f7.ctx },
++               fun o =>
++                 let f8 := match self2 with
++                           | some f9 => f9
++                           | _ => f1
++                 let f9 := match self1 with
++                           | some f10 => f10
++                           | _ => f
++                 let (_, back4) := deref_mut_back2 f9
++                 let (_, back5) := back4 { f4 with ctx := f8.ctx }
++                 let i :=
++                   match o with
++                   | some (_root_.nested_borrows_as_deref_mut_join.Frame.mk _
++                     i1 _) =>
++                     i1
++                   | _ => f1.ctx
++                 let f10 := back5 { f1 with ctx := i }
++                 match self with
++                 | none => none
++                 | some f11 => some { f11 with ctx := f10.ctx })) :
++        _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame →
++        ((_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame) ×
++        (_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame →
++        ((_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame) ×
++        (_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)))))
++    _root_.Aeneas.Std.Result.ok (some f1, back, back1, back2)
++
++/-- [nested_borrows_as_deref_mut_join::{nested_borrows_as_deref_mut_join::Frame<'a>}::advance]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 27:4-32:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.nested_borrows_as_deref_mut_join.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  let s ← Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.nested_borrows_as_deref_mut_join.Frame →
++      _root_.nested_borrows_as_deref_mut_join.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [nested_borrows_as_deref_mut_join::{nested_borrows_as_deref_mut_join::Frame<'a>}::try_advance]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 34:4-39:5
++    Visibility: public -/
++def Frame.try_advance
++  (self : _root_.nested_borrows_as_deref_mut_join.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  let i := _root_.Aeneas.Std.Slice.len self.steps
++  if self.pos >= i
++  then
++    let i1 ← lift (UScalar.cast .U32 self.pos)
++    let back'a :=
++      (fun self1 => { self with ctx := self1.ctx } :
++        _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err i1,
++      self, back'a)
++  else
++    let (i1, self1, advance_back) ←
++      _root_.nested_borrows_as_deref_mut_join.Frame.advance self
++    let back'a :=
++      (fun self2 =>
++         let f := advance_back { self1 with ctx := self2.ctx }
++         { self with ctx := f.ctx } :
++        _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i1,
++      self1, back'a)
++
++/-- [nested_borrows_as_deref_mut_join::advance_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 44:0-54:1
++    Visibility: public -/
++def advance_reread
++  (execution : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × _root_.Aeneas.Std.U32)
++  := do
++  let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++    _root_.nested_borrows_as_deref_mut_join.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++      _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++      execution
++  let (execution1, key, back, back1) ←
++    match o with
++    | none =>
++      let execution2 := as_deref_mut_back none
++      _root_.Aeneas.Std.Result.ok (execution2, counter,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 none : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame), as_deref_mut_back1)
++    | some f =>
++      do
++      let (key1, f1, advance_back) ←
++        _root_.nested_borrows_as_deref_mut_join.Frame.advance f
++      let execution2 := as_deref_mut_back (some f1)
++      _root_.Aeneas.Std.Result.ok (execution2, key1,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 (some { f with ctx := (advance_back f1).ctx }) : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame), as_deref_mut_back1)
++  let b := _root_.Aeneas.Std.core.option.Option.is_none execution1
++  if b
++  then
++    let counter1 ← lift (core.num.U32.wrapping_add counter 1#u32)
++    let execution2 := back1 execution1
++    let back2 :=
++      (fun execution3 =>
++         let back3 := back execution1
++         let o1 :=
++           match back3 with
++           | none => none
++           | some f =>
++             match execution3 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back3
++         match execution with
++         | none => none
++         | some f =>
++           match o1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (key, execution2, back2, counter1)
++  else
++    let execution2 := back1 execution1
++    let back2 :=
++      (fun execution3 =>
++         let back3 := back execution1
++         let o1 :=
++           match back3 with
++           | none => none
++           | some f =>
++             match execution3 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back3
++         match execution with
++         | none => none
++         | some f =>
++           match o1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (key, execution2, back2, counter)
++
++/-- [nested_borrows_as_deref_mut_join::try_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 57:0-67:1
++    Visibility: public -/
++def try_reread
++  (execution : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × _root_.Aeneas.Std.U32)
++  := do
++  let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++    _root_.nested_borrows_as_deref_mut_join.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++      _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++      execution
++  let joined ←
++    match o with
++    | none =>
++      let execution1 := as_deref_mut_back none
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (execution1, counter,
++        fun o1 =>
++          let (_, back) := as_deref_mut_back2 o1
++          let (_, back1) := back o1
++          back1 none, as_deref_mut_back1) : _root_.Sum ((_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame) × _root_.Aeneas.Std.U32
++        × (_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame) ×
++        (_root_.Option _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame))
++        ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++        _root_.Aeneas.Std.U32) × (_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame) ×
++        _root_.Aeneas.Std.U32))
++    | some f =>
++      do
++      let (r, f1, try_advance_back) ←
++        _root_.nested_borrows_as_deref_mut_join.Frame.try_advance f
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++        let execution1 := as_deref_mut_back (some f1)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (execution1, val,
++          fun o1 =>
++            let (_, back) := as_deref_mut_back2 o1
++            let (_, back1) := back o1
++            back1 (some { f with ctx := (try_advance_back f1).ctx }),
++          as_deref_mut_back1) : _root_.Sum ((_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) ×
++          _root_.Aeneas.Std.U32 × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) ×
++          _root_.Aeneas.Std.U32))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r1 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++            _root_.Aeneas.Std.U32) residual
++        let o1 := as_deref_mut_back (some f1)
++        let execution1 := as_deref_mut_back1 o1
++        let back :=
++          (fun execution2 =>
++             let o2 := as_deref_mut_back1 o1
++             let (o3, back1) :=
++               as_deref_mut_back2
++                 (match o2 with
++                  | none => none
++                  | some f2 =>
++                    match execution2 with
++                    | some f3 => some { f2 with ctx := f3.ctx }
++                    | _ => o2)
++             let (o4, back2) := back1 o3
++             let f2 := match o4 with
++                       | some f3 => f3
++                       | _ => f1
++             let f3 := try_advance_back { f1 with ctx := f2.ctx }
++             let o5 := back2 (some { f with ctx := f3.ctx })
++             match execution with
++             | none => none
++             | some f4 =>
++               match o5 with
++               | some f5 => some { f4 with ctx := f5.ctx }
++               | _ => execution : _root_.Option
++            _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++            _root_.nested_borrows_as_deref_mut_join.Frame)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r1, execution1, back,
++          counter) : _root_.Sum ((_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) ×
++          _root_.Aeneas.Std.U32 × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame) ×
++          _root_.Aeneas.Std.U32))
++  match joined with
++  | _root_.Sum.inl (execution1, key, back, back1) =>
++    let b := _root_.Aeneas.Std.core.option.Option.is_none execution1
++    if b
++    then
++      let counter1 ← lift (core.num.U32.wrapping_add counter 1#u32)
++      let execution2 := back1 execution1
++      let back2 :=
++        (fun execution3 =>
++           let back3 := back execution1
++           let o1 :=
++             match back3 with
++             | none => none
++             | some f =>
++               match execution3 with
++               | some f1 => some { f with ctx := f1.ctx }
++               | _ => back3
++           match execution with
++           | none => none
++           | some f =>
++             match o1 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => execution : _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok key,
++        execution2, back2, counter1)
++    else
++      let execution2 := back1 execution1
++      let back2 :=
++        (fun execution3 =>
++           let back3 := back execution1
++           let o1 :=
++             match back3 with
++             | none => none
++             | some f =>
++               match execution3 with
++               | some f1 => some { f with ctx := f1.ctx }
++               | _ => back3
++           match execution with
++           | none => none
++           | some f =>
++             match o1 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => execution : _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++          _root_.nested_borrows_as_deref_mut_join.Frame)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok key,
++        execution2, back2, counter)
++  | _root_.Sum.inr (exit, exit1, exit2, exit3) =>
++    _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3)
++
++/-- [nested_borrows_as_deref_mut_join::pos_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 70:0-79:1
++    Visibility: public -/
++def pos_reread
++  (execution : _root_.Option _root_.nested_borrows_as_deref_mut_join.Frame)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame) × (_root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++    _root_.nested_borrows_as_deref_mut_join.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++      _root_.nested_borrows_as_deref_mut_join.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++      execution
++  let (execution1, k, back, back1) ←
++    match o with
++    | none =>
++      let execution2 := as_deref_mut_back none
++      _root_.Aeneas.Std.Result.ok (execution2, d,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 none : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame), as_deref_mut_back1)
++    | some f =>
++      do
++      let k1 ← lift (UScalar.cast .U32 f.pos)
++      let execution2 := as_deref_mut_back o
++      _root_.Aeneas.Std.Result.ok (execution2, k1,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 o : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame), as_deref_mut_back1)
++  let b := _root_.Aeneas.Std.core.option.Option.is_none execution1
++  if b
++  then
++    let execution2 := back1 execution1
++    let back2 :=
++      (fun execution3 =>
++         let back3 := back execution1
++         let o1 :=
++           match back3 with
++           | none => none
++           | some f =>
++             match execution3 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back3
++         match execution with
++         | none => none
++         | some f =>
++           match o1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (0#u32, execution2, back2)
++  else
++    let execution2 := back1 execution1
++    let back2 :=
++      (fun execution3 =>
++         let back3 := back execution1
++         let o1 :=
++           match back3 with
++           | none => none
++           | some f =>
++             match execution3 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back3
++         match execution with
++         | none => none
++         | some f =>
++           match o1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame → _root_.Option
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (k, execution2, back2)
++
++/-- [nested_borrows_as_deref_mut_join::run_advance_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 81:0-89:1
++    Visibility: public -/
++def run_advance_reread
++  (f : _root_.nested_borrows_as_deref_mut_join.Frame) (some1 : _root_.Bool)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  if some1
++  then
++    let (r, o, advance_reread_back, c) ←
++      _root_.nested_borrows_as_deref_mut_join.advance_reread (some f) counter
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := advance_reread_back (some { f3 with ctx := f2.ctx })
++         let i :=
++           match o1 with
++           | some (_root_.nested_borrows_as_deref_mut_join.Frame.mk _ i1 _) =>
++             i1
++           | _ => f.ctx
++         { f with ctx := i } : _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok ((r, c), f1, back)
++  else
++    let (r, _, _, c) ←
++      _root_.nested_borrows_as_deref_mut_join.advance_reread none counter
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok ((r, c), f, back)
++
++/-- [nested_borrows_as_deref_mut_join::run_try_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 91:0-97:1
++    Visibility: public -/
++def run_try_reread
++  (f : _root_.nested_borrows_as_deref_mut_join.Frame)
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool) × _root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  let (r, o, try_reread_back, c) ←
++    _root_.nested_borrows_as_deref_mut_join.try_reread (some f) counter
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok k =>
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := try_reread_back (some { f3 with ctx := f2.ctx })
++         let i :=
++           match o1 with
++           | some (_root_.nested_borrows_as_deref_mut_join.Frame.mk _ i1 _) =>
++             i1
++           | _ => f.ctx
++         { f with ctx := i } : _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok ((k, c, true), f1, back)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := try_reread_back (some { f3 with ctx := f2.ctx })
++         let i :=
++           match o1 with
++           | some (_root_.nested_borrows_as_deref_mut_join.Frame.mk _ i1 _) =>
++             i1
++           | _ => f.ctx
++         { f with ctx := i } : _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok ((e, c, false), f1, back)
++
++/-- [nested_borrows_as_deref_mut_join::run_try_reread_none]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 99:0-105:1
++    Visibility: public -/
++def run_try_reread_none
++  (counter : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool)
++  := do
++  let (r, _, _, c) ←
++    _root_.nested_borrows_as_deref_mut_join.try_reread none counter
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok k =>
++    _root_.Aeneas.Std.Result.ok (k, c, true)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    _root_.Aeneas.Std.Result.ok (e, c, false)
++
++/-- [nested_borrows_as_deref_mut_join::run_pos_reread]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-sc/tests/src/nested-borrows-as-deref-mut-join.rs', lines 107:0-113:1
++    Visibility: public -/
++def run_pos_reread
++  (f : _root_.nested_borrows_as_deref_mut_join.Frame) (some1 : _root_.Bool)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_as_deref_mut_join.Frame ×
++    (_root_.nested_borrows_as_deref_mut_join.Frame →
++    _root_.nested_borrows_as_deref_mut_join.Frame))
++  := do
++  if some1
++  then
++    let (i, o, pos_reread_back) ←
++      _root_.nested_borrows_as_deref_mut_join.pos_reread (some f) d
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := pos_reread_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_as_deref_mut_join.Frame.mk _ i2 _) =>
++             i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_as_deref_mut_join.Frame
++        → _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ← _root_.nested_borrows_as_deref_mut_join.pos_reread none d
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_as_deref_mut_join.Frame →
++        _root_.nested_borrows_as_deref_mut_join.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++end nested_borrows_as_deref_mut_join
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index d51963d..eceaa22 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -43,6 +43,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsSymbolicPaths
+ @[default_target] lean_lib NestedBorrowsSharedCapture
+ @[default_target] lean_lib NestedBorrowsAsDerefMut
++@[default_target] lean_lib NestedBorrowsAsDerefMutJoin
+ @[default_target] lean_lib NestedBorrowsUntouchedJoin
+ @[default_target] lean_lib LetMatchPattern
+ @[default_target] lean_lib LetBranchingTupleValue
+@@ -108,6 +109,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopHigherRankedClause
+ @[default_target] lean_lib LoopJoinClosures
+ @[default_target] lean_lib LoopNestedClosure
++@[default_target] lean_lib LoopNestedJoin
+ @[default_target] lean_lib LoopNestedStaged
+ @[default_target] lean_lib LoopOptionNestedBorrow
+ @[default_target] lean_lib LoopReturnedVecIter
+diff --git a/tests/src/loop-nested-closure-levels.lean.out b/tests/src/loop-nested-closure-levels.lean.out
+new file mode 100644
+index 0000000..81528bf
+--- /dev/null
++++ b/tests/src/loop-nested-closure-levels.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/loop_nested_closure_levels.llbc
++[[91mError[39m] Nested borrows: the continuation of a join or loop abstraction with pending loans calls a function whose backward function is not staged in two stages, or whose first stage was applied
++Source: 'tests/src/loop-nested-closure-levels.rs', lines 23:0-37:1
++Compiler source: symbolic/SymbolicToPureAbs.ml, line 1839
++
+diff --git a/tests/src/loop-nested-closure-levels.rs b/tests/src/loop-nested-closure-levels.rs
+new file mode 100644
+index 0000000..d60e52a
+--- /dev/null
++++ b/tests/src/loop-nested-closure-levels.rs
+@@ -0,0 +1,60 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The shape of `chelis_ir::eval::resolve_load_inputs` with three levels of
++//! mutable borrows: the loop of `resolve_inputs` calls a
++//! `&'1 mut eval_with::closure<'2, run::closure<'3, '4>>`, where the closure
++//! of `eval_with` captures `&'2 mut run::closure` and the closure of `run`
++//! captures `&'3 mut u32` (and `&'4 u32`). The loop fixed point is computed:
++//! at the end of an iteration the abstraction of `'3` lends the counter to the
++//! call through the ignored loans of the two reborrows (the reborrow of
++//! `'1`, holding the one of `'2`), and the region group `'3` of the call gives
++//! back the pending loans of both; the closure type holds a trait clause
++//! whose regions are refreshed at every join. The continuation of the loop
++//! abstraction of `'3` is then staged in three stages (two levels of pending
++//! loans), which the translation does not support yet: explicit error.
++
++pub enum Demand {
++    Selected,
++    Shape,
++}
++
++fn resolve_inputs<F>(names: &Vec<u32>, strict: bool, mut load: F) -> Result<Vec<u32>, u32>
++where
++    F: FnMut(u32, Demand) -> Result<Option<u32>, u32>,
++{
++    let mut out = Vec::new();
++    for n in names.iter() {
++        let demand = if *n > 3 { Demand::Selected } else { Demand::Shape };
++        match load(*n, demand)? {
++            Some(v) => out.push(v),
++            None if strict => return Err(*n),
++            None => {}
++        }
++    }
++    Ok(out)
++}
++
++fn prepare<G>(names: &Vec<u32>, strict: bool, mut load: G) -> Result<Vec<u32>, u32>
++where
++    G: FnMut(u32, Demand) -> Result<Option<u32>, u32>,
++{
++    resolve_inputs(names, strict, &mut load)
++}
++
++fn eval_with<F>(names: &Vec<u32>, mut load: F) -> Result<Vec<u32>, u32>
++where
++    F: FnMut(u32) -> Option<u32>,
++{
++    prepare(names, true, |n, _| Ok(load(n)))
++}
++
++pub fn run(names: &Vec<u32>, k: u32) -> (Result<Vec<u32>, u32>, u32) {
++    let mut calls = 0u32;
++    let r = eval_with(names, |n| {
++        calls = calls.wrapping_add(1);
++        if n == k { None } else { Some(n.wrapping_mul(2)) }
++    });
++    (r, calls)
++}
+diff --git a/tests/src/loop-nested-join.rs b/tests/src/loop-nested-join.rs
+new file mode 100644
+index 0000000..f610ded
+--- /dev/null
++++ b/tests/src/loop-nested-join.rs
+@@ -0,0 +1,81 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopNestedJoin
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over a reborrowed `&'a mut Counter<'b>` whose body joins a branch
++//! calling `bump` with a branch leaving the reference untouched. The join
++//! gives a fresh reference which is expanded (a concrete borrow of a counter
++//! holding a concrete borrow of `'b`), and the loop entry joins it with the
++//! concrete reborrow of the input: two distinct outer borrows whose borrowed
++//! values hold distinct inner borrows of the nested region `'b`.
++
++pub struct Counter<'b> {
++    pub total: &'b mut u32,
++    pub calls: u32,
++}
++
++pub fn bump(c: &mut &mut Counter<'_>, v: u32) -> u32 {
++    *c.total = (*c.total).wrapping_add(v);
++    c.calls = c.calls.wrapping_add(1);
++    c.calls
++}
++
++/// The reference is given back by the call at the odd iterations only
++pub fn bump_odd(c: &mut Counter<'_>, n: u32) -> u32 {
++    let mut r = c;
++    let mut i = 0;
++    let mut acc = 0u32;
++    while i < n {
++        let d = if i % 2 == 1 { bump(&mut r, i) } else { 0 };
++        acc = acc.wrapping_add(d);
++        i += 1;
++    }
++    acc
++}
++
++/// The call is in the other branch of the join: the reference is given back
++/// by the call at the even iterations
++pub fn bump_even(c: &mut Counter<'_>, n: u32) -> u32 {
++    let mut r = c;
++    let mut i = 0;
++    let mut acc = 0u32;
++    while i < n {
++        let d = if i % 2 == 1 { 0 } else { bump(&mut r, i) };
++        acc = acc.wrapping_add(d);
++        i += 1;
++    }
++    acc
++}
++
++/// The caller writes through the inner borrow after the loop
++pub fn drive_odd(n: u32) -> (u32, u32, u32) {
++    let mut t = 7u32;
++    let mut c = Counter { total: &mut t, calls: 2 };
++    let r = bump_odd(&mut c, n);
++    *c.total = (*c.total).wrapping_add(1000);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
++pub fn drive_even(n: u32) -> (u32, u32, u32) {
++    let mut t = 3u32;
++    let mut c = Counter { total: &mut t, calls: 10 };
++    let r = bump_even(&mut c, n);
++    let calls = c.calls;
++    (r, calls, t)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        println!("{:?}", drive_odd(0));
++        println!("{:?}", drive_odd(1));
++        println!("{:?}", drive_odd(5));
++        println!("{:?}", drive_even(0));
++        println!("{:?}", drive_even(1));
++        println!("{:?}", drive_even(6));
++    }
++}
+diff --git a/tests/src/nested-borrows-as-deref-mut-join.rs b/tests/src/nested-borrows-as-deref-mut-join.rs
+new file mode 100644
+index 0000000..83bcdcd
+--- /dev/null
++++ b/tests/src/nested-borrows-as-deref-mut-join.rs
+@@ -0,0 +1,166 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsAsDerefMutJoin
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Option::as_deref_mut` on `Option<&'1 mut Frame<'2>>` in one branch of a
++//! join, the option being read again after the join (the shape of the
++//! `UniformLike` arm of `chelis_ir::eval::eval_node_value`). The region of the
++//! frame has a backward function in three stages; in the branches, none of
++//! them was applied when the join happens (no sub-abstraction of the call
++//! ended), so the continuation of the join abstraction of that region applies
++//! them itself, in the snapshot of the join: the values given back at the
++//! nested levels of the call are those at the join. Its output is recombined
++//! with the current values of its nested loans (the frame the caller gives
++//! back) when the join abstraction ends.
++//!
++//! Using the frame again mutably after the join (e.g. `match execution {
++//! Some(f) => f.advance(), .. }`) would apply that continuation without the
++//! recombination: this is rejected with an explicit error.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++
++    pub fn try_advance(&mut self) -> Result<u32, u32> {
++        if self.pos >= self.steps.len() {
++            return Err(self.pos as u32);
++        }
++        Ok(self.advance())
++    }
++}
++
++/// The frame is advanced through the reborrow in one branch; the option is
++/// tested after the join.
++pub fn advance_reread(mut execution: Option<&mut Frame<'_>>, counter: &mut u32) -> u32 {
++    let key = if let Some(frame) = execution.as_deref_mut() {
++        frame.advance()
++    } else {
++        *counter
++    };
++    if execution.is_none() {
++        *counter = counter.wrapping_add(1);
++    }
++    key
++}
++
++/// Same, with an early exit from the reborrowing branch.
++pub fn try_reread(mut execution: Option<&mut Frame<'_>>, counter: &mut u32) -> Result<u32, u32> {
++    let key = if let Some(frame) = execution.as_deref_mut() {
++        frame.try_advance()?
++    } else {
++        *counter
++    };
++    if execution.is_none() {
++        *counter = counter.wrapping_add(1);
++    }
++    Ok(key)
++}
++
++/// The frame is only read through the reborrow.
++pub fn pos_reread(mut execution: Option<&mut Frame<'_>>, d: u32) -> u32 {
++    let k = match execution.as_deref_mut() {
++        Some(f) => f.pos as u32,
++        None => d,
++    };
++    if execution.is_none() {
++        return 0;
++    }
++    k
++}
++
++pub fn run_advance_reread(f: &mut Frame<'_>, some: bool, counter: u32) -> (u32, u32) {
++    let mut c = counter;
++    let r = if some {
++        advance_reread(Some(f), &mut c)
++    } else {
++        advance_reread(None, &mut c)
++    };
++    (r, c)
++}
++
++pub fn run_try_reread(f: &mut Frame<'_>, counter: u32) -> (u32, u32, bool) {
++    let mut c = counter;
++    match try_reread(Some(f), &mut c) {
++        Ok(k) => (k, c, true),
++        Err(e) => (e, c, false),
++    }
++}
++
++pub fn run_try_reread_none(counter: u32) -> (u32, u32, bool) {
++    let mut c = counter;
++    match try_reread(None, &mut c) {
++        Ok(k) => (k, c, true),
++        Err(e) => (e, c, false),
++    }
++}
++
++pub fn run_pos_reread(f: &mut Frame<'_>, some: bool, d: u32) -> u32 {
++    if some {
++        pos_reread(Some(f), d)
++    } else {
++        pos_reread(None, d)
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    /// `(result, ctx, pos)` after running `run` on a frame over `steps`
++    fn on_frame<R>(ctx: u32, pos: usize, run: impl FnOnce(&mut Frame<'_>) -> R) -> (R, u32, usize) {
++        let steps = [3u32, 5, 7];
++        let mut c = ctx;
++        let mut f = Frame { steps: &steps, ctx: &mut c, pos };
++        let r = run(&mut f);
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn advance_reread_native() {
++        assert_eq!(on_frame(10, 0, |f| run_advance_reread(f, true, 4)), ((3, 4), 13, 1));
++        assert_eq!(on_frame(10, 1, |f| run_advance_reread(f, true, 4)), ((5, 4), 15, 2));
++        assert_eq!(on_frame(10, 1, |f| run_advance_reread(f, false, 4)), ((4, 5), 10, 1));
++        assert_eq!(on_frame(u32::MAX - 4, 1, |f| run_advance_reread(f, true, 4)), ((5, 4), 0, 2));
++        // The caller writes through the frame after the call
++        assert_eq!(
++            on_frame(10, 1, |f| {
++                let r = run_advance_reread(&mut *f, true, 4);
++                *f.ctx = 99;
++                r
++            }),
++            ((5, 4), 99, 2)
++        );
++    }
++
++    #[test]
++    fn try_reread_native() {
++        assert_eq!(on_frame(10, 1, |f| run_try_reread(f, 4)), ((5, 4, true), 15, 2));
++        assert_eq!(on_frame(10, 3, |f| run_try_reread(f, 4)), ((3, 4, false), 10, 3));
++        assert_eq!(run_try_reread_none(4), (4, 5, true));
++        assert_eq!(
++            on_frame(10, 2, |f| {
++                let r = run_try_reread(&mut *f, 4);
++                *f.ctx = 99;
++                r
++            }),
++            ((7, 4, true), 99, 3)
++        );
++    }
++
++    #[test]
++    fn pos_reread_native() {
++        assert_eq!(on_frame(10, 2, |f| run_pos_reread(f, true, 9)), (2, 10, 2));
++        assert_eq!(on_frame(10, 2, |f| run_pos_reread(f, false, 9)), (0, 10, 2));
++    }
++}

@@ -1,0 +1,206 @@
+# aeneas integration step 82 after cba11f3beb: commit 570e06ccf3f5c7ec67d63bb14e254d968c2424cd
+# first parent 9fc5c6170c391e7c7bd35e6b46188d1dd2fd0547, merged f76589def19d449ea8c2c6bbf592103cf5b73a97
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (the staged join continuation applies the first stage of the call it holds; fixes the round-16 semantic conflict between 0f2845f and 542b9c4)
+
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index a26e37a..1b7f903 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -1480,10 +1480,16 @@ let register_outputs (ctx : bs_ctx) (bound_outputs : bound_borrows_loans)
+     that function, and the continuation calls the second one.
+ 
+     Returns the function call abstraction, if any, with the context in which
+-    the continuation calls its second stage, and the variables for the outputs
+-    of the first stage. *)
++    the continuation calls its second stage, and the pattern and expression of
++    the outputs of the first stage, with the variable for the second stage.
++    The first stage is then applied in that context (see
++    [fun_call_stage.early_outputs]): the outputs of the first stage are bound
++    to variables per level, as for a stage applied when a sub-abstraction of
++    the call ends (see [SymbolicToPureExpressions.translate_apply_early_stage]),
++    and the application of the call in the continuation receives the inputs
++    of the second stage. *)
+ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+-    : bs_ctx * (texpr * fvar * fvar) option =
++    : bs_ctx * (texpr * tpat * texpr * fvar) option =
+   let span = ctx.span in
+   let apps = ref [] in
+   let visitor =
+@@ -1503,7 +1509,7 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+         ( V.AbsId.Map.find_opt aid ctx.fun_call_stages,
+           V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
+       with
+-      | Some { signature; early_outputs = []; _ }, Some info
++      | Some ({ signature; early_outputs = []; _ } as stage), Some info
+         when List.length signature.early = 1 ->
+           [%cassert] span
+             (not (info.can_fail || signature.effect_info.can_fail))
+@@ -1521,7 +1527,28 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+             "Nested borrows: the first stage of the backward function called \
+              by the continuation of a join or loop abstraction with pending \
+              loans does not route the values given back to them";
+-          let ctx, out = fresh_var (Some "back") out_ty ctx in
++          let ctx, outputs =
++            List.fold_left_map
++              (fun ctx (level, tys) ->
++                let ctx, vars = fresh_vars tys ctx in
++                (ctx, (level, vars)))
++              ctx (List.hd signature.early).early_outputs
++          in
++          let out_pat =
++            mk_simpl_tuple_pat
++              (List.map
++                 (fun (_, vars) ->
++                   mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) vars))
++                 outputs)
++          in
++          let out_e =
++            mk_simpl_tuple_texpr span
++              (List.map
++                 (fun (_, vars) ->
++                   mk_simpl_tuple_texpr span (List.map mk_texpr_from_fvar vars))
++                 outputs)
++          in
++          [%sanity_check] span (out_e.ty = out_ty);
+           let ctx, later = fresh_var (Some "back") later_ty ctx in
+           let ctx =
+             {
+@@ -1530,9 +1557,13 @@ let staged_cont_first_stage (ctx : bs_ctx) (stage1_ty : ty) (input : V.tevalue)
+                 V.AbsId.Map.add aid
+                   { fvar = mk_texpr_from_fvar later; can_fail = false }
+                   ctx.abs_id_to_info;
++              fun_call_stages =
++                V.AbsId.Map.add aid
++                  { stage with early_outputs = [ outputs ] }
++                  ctx.fun_call_stages;
+             }
+           in
+-          (ctx, Some (info.fvar, out, later))
++          (ctx, Some (info.fvar, out_pat, out_e, later))
+       | _ ->
+           [%craise] span
+             "Nested borrows: the continuation of a join or loop abstraction \
+@@ -1610,12 +1641,11 @@ let abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+       let body =
+         match stage1 with
+         | None -> mk_simpl_tuple_texpr span [ pending_e; e ]
+-        | Some (f, out, later) ->
++        | Some (f, out_pat, out_e, later) ->
+             mk_closed_checked_let __FILE__ __LINE__ ctx false
+-              (mk_simpl_tuple_pat
+-                 [ mk_tpat_from_fvar None out; mk_tpat_from_fvar None later ])
++              (mk_simpl_tuple_pat [ out_pat; mk_tpat_from_fvar None later ])
+               ([%add_loc] mk_app span f pending_e)
+-              (mk_simpl_tuple_texpr span [ mk_texpr_from_fvar out; e ])
++              (mk_simpl_tuple_texpr span [ out_e; e ])
+       in
+       Some (mk_closed_lambdas span [ stage1_pat ] body)
+ 
+diff --git a/tests/lean/JoinNestedClosure/JoinNestedClosure.lean b/tests/lean/JoinNestedClosure/JoinNestedClosure.lean
+index 04edd95..5d5bf5f 100644
+--- a/tests/lean/JoinNestedClosure/JoinNestedClosure.lean
++++ b/tests/lean/JoinNestedClosure/JoinNestedClosure.lean
+@@ -116,9 +116,9 @@ def pickMut0closure_specialized_a5ecf74a63f595f0b24e014ac42e6504
+           coreopsfunctionFnMutT0TupleU32OptionU32Inst)))
+       _root_.Aeneas.Std.Result.ok (model_state1, model_state,
+         (fun c =>
+-           let (back2, back3) := call_mut_back c
+-           (back2, fun c1 => let t := back3 c1
+-                             t) : _root_.join_nested_closure.pick_with.closure
++           let (c1, back2) := call_mut_back c
++           (c1, fun c2 => let t := back2 c2
++                          t) : _root_.join_nested_closure.pick_with.closure
+         coreopsfunctionFnMutT0TupleU32OptionU32Inst →
+         ((_root_.join_nested_closure.pick_with.closure
+         coreopsfunctionFnMutT0TupleU32OptionU32Inst) ×
+@@ -482,9 +482,9 @@ def eitherMut0closure_specialized_a9f2a1d58f8d6dfd95744776c0e15ea0
+           _root_.join_nested_closure.run_either.closure)))
+       _root_.Aeneas.Std.Result.ok (model_state1, model_state,
+         (fun c =>
+-           let (back2, back3) := call_mut_back c
+-           (back2, fun c1 => let i := back3 c1
+-                             i) : _root_.join_nested_closure.run_either.closure
++           let (c1, back2) := call_mut_back c
++           (c1, fun c2 => let i := back2 c2
++                          i) : _root_.join_nested_closure.run_either.closure
+         → (_root_.join_nested_closure.run_either.closure ×
+         (_root_.join_nested_closure.run_either.closure →
+         _root_.Aeneas.Std.U32))), (fun c => c :
+@@ -503,11 +503,10 @@ def eitherMut0closure_specialized_a9f2a1d58f8d6dfd95744776c0e15ea0
+           _root_.join_nested_closure.run_either.closure)))
+       _root_.Aeneas.Std.Result.ok (model_state1, model_state,
+         (fun c =>
+-           let (back2, back3) := call_mut_back c
+-           (back2, fun c1 => let i1 := back3 c1
+-                             i1) :
+-        _root_.join_nested_closure.run_either.closure →
+-        (_root_.join_nested_closure.run_either.closure ×
++           let (c1, back2) := call_mut_back c
++           (c1, fun c2 => let i1 := back2 c2
++                          i1) : _root_.join_nested_closure.run_either.closure
++        → (_root_.join_nested_closure.run_either.closure ×
+         (_root_.join_nested_closure.run_either.closure →
+         _root_.Aeneas.Std.U32))), (fun c => c :
+         _root_.join_nested_closure.run_either.closure →
+diff --git a/tests/lean/JoinNestedStaged/JoinNestedStaged.lean b/tests/lean/JoinNestedStaged/JoinNestedStaged.lean
+index 5084b93..8d4144b 100644
+--- a/tests/lean/JoinNestedStaged/JoinNestedStaged.lean
++++ b/tests/lean/JoinNestedStaged/JoinNestedStaged.lean
+@@ -58,10 +58,9 @@ def maybe_bump
+         _root_.join_nested_staged.bump c v
+       _root_.Aeneas.Std.Result.ok (r1, a1,
+         (fun c1 =>
+-           let (back2, back3) := bump_back1 c1
+-           (back2, fun c2 => (back3 c2).total) :
+-        _root_.join_nested_staged.Counter →
+-        (_root_.join_nested_staged.Counter ×
++           let (c2, back2) := bump_back1 c1
++           (c2, fun c3 => (back2 c3).total) : _root_.join_nested_staged.Counter
++        → (_root_.join_nested_staged.Counter ×
+         (_root_.join_nested_staged.Counter → _root_.Aeneas.Std.U32))),
+         bump_back)
+     else
+@@ -104,10 +103,9 @@ def either_bump
+         _root_.join_nested_staged.bump c 10#u32
+       _root_.Aeneas.Std.Result.ok (r1, a1,
+         (fun c1 =>
+-           let (back2, back3) := bump_back1 c1
+-           (back2, fun c2 => (back3 c2).total) :
+-        _root_.join_nested_staged.Counter →
+-        (_root_.join_nested_staged.Counter ×
++           let (c2, back2) := bump_back1 c1
++           (c2, fun c3 => (back2 c3).total) : _root_.join_nested_staged.Counter
++        → (_root_.join_nested_staged.Counter ×
+         (_root_.join_nested_staged.Counter → _root_.Aeneas.Std.U32))),
+         bump_back)
+     else
+@@ -116,10 +114,9 @@ def either_bump
+         _root_.join_nested_staged.bump c 20#u32
+       _root_.Aeneas.Std.Result.ok (r1, a1,
+         (fun c1 =>
+-           let (back2, back3) := bump_back1 c1
+-           (back2, fun c2 => (back3 c2).total) :
+-        _root_.join_nested_staged.Counter →
+-        (_root_.join_nested_staged.Counter ×
++           let (c2, back2) := bump_back1 c1
++           (c2, fun c3 => (back2 c3).total) : _root_.join_nested_staged.Counter
++        → (_root_.join_nested_staged.Counter ×
+         (_root_.join_nested_staged.Counter → _root_.Aeneas.Std.U32))),
+         bump_back)
+   let (i, c1, bump_back, bump_back1) ← _root_.join_nested_staged.bump r 1#u32
+@@ -155,10 +152,9 @@ def maybe_bump_write
+         _root_.join_nested_staged.bump c v
+       _root_.Aeneas.Std.Result.ok (r1, a1,
+         (fun c1 =>
+-           let (back2, back3) := bump_back1 c1
+-           (back2, fun c2 => (back3 c2).total) :
+-        _root_.join_nested_staged.Counter →
+-        (_root_.join_nested_staged.Counter ×
++           let (c2, back2) := bump_back1 c1
++           (c2, fun c3 => (back2 c3).total) : _root_.join_nested_staged.Counter
++        → (_root_.join_nested_staged.Counter ×
+         (_root_.join_nested_staged.Counter → _root_.Aeneas.Std.U32))),
+         bump_back)
+     else

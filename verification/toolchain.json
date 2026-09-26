@@ -9,7 +9,7 @@
     "integration": {
       "repository": ".work/toolchain/aeneas-src",
       "base": "cba11f3bebc2bac2bdc6ce1298f6277f6d4d04de",
-      "commit": "b0aa862635248d5e3495a89bc74ccaba83999e98"
+      "commit": "ebf73f56e0940266f1dd8a754182486325f02c5b"
     },
     "series": [
       {
@@ -33,7 +33,7 @@
     "integration": {
       "repository": ".work/toolchain/charon-src",
       "base": "546078ea5da1376d7fca8b9773f4be97a36a0248",
-      "commit": "5fd1554b3c352efc22e4d4c3eff0aa7c68ca9e01"
+      "commit": "c3b42d30b55077287274c1ffee41db558c0aa37a"
     },
     "series": [
       {

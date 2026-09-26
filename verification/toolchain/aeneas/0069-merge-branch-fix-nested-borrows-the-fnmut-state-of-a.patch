@@ -1,0 +1,2589 @@
+# aeneas integration step 69 after cba11f3beb: commit 4f9f788e38e11785783d20750c7163d83aa4deaf
+# first parent b0aa862635248d5e3495a89bc74ccaba83999e98, merged c3354709d9babe3bcf924f8a731da69baca23475
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (the FnMut state of a closure recombines inner borrows over a type parameter)
+
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 5bcf9b2..640b712 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -360,15 +360,6 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+               [%add_loc] mk_apps span func args)
+             original updates
+       | T.TRef (r, inner, T.RMut) -> (
+-          let check_shallow () =
+-            (* Shared captures are retained, not reconstructed. Require the
+-               shallow-borrow shape only where a mutable projection is merged
+-               into the value given back to an owned borrow. *)
+-            [%sanity_check] span
+-              (not
+-                 (TypesUtils.ty_has_nested_borrows (Some span)
+-                    decls_ctx.type_ctx.type_infos ty))
+-          in
+           if not (TypesUtils.region_in_set r owned) then
+             (* An unowned mutable wrapper does not freeze separately owned
+                inner borrows. Reconcile their payload without claiming the
+@@ -396,18 +387,20 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+             | [ (_, _, e) ] ->
+                 [%sanity_check] span (e.ty = original.ty);
+                 if inner_updates = [] then e
+-                else (
+-                  check_shallow ();
++                else
+                   (* Nested borrows: the value given back to the owned borrow
+-                     is authoritative, except at the positions of the inner
+-                     mutable borrows selected by the other projections *)
++                     is a whole value of its type. It is authoritative, except
++                     at the positions of the inner mutable borrows selected by
++                     the other projections: the rest (e.g., shared captures, or
++                     a type parameter under an inner borrow) is retained from
++                     it. *)
+                   update seen inner e
+                     (List.map
+                        (fun (ty, regions, e) ->
+                          match ty with
+                          | T.TRef (_, inner, T.RMut) -> (inner, regions, e)
+                          | _ -> [%internal_error] span)
+-                       inner_updates))
++                       inner_updates)
+             | _ ->
+                 [%craise] span
+                   "Overlapping mutable projections in a consumed symbolic loan")
+diff --git a/tests/lean/NestedBorrowsClosureState.lean b/tests/lean/NestedBorrowsClosureState.lean
+new file mode 100644
+index 0000000..b51f67c
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureState.lean
+@@ -0,0 +1 @@
++import NestedBorrowsClosureState.Checks
+diff --git a/tests/lean/NestedBorrowsClosureState/Checks.lean b/tests/lean/NestedBorrowsClosureState/Checks.lean
+new file mode 100644
+index 0000000..59a225c
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureState/Checks.lean
+@@ -0,0 +1,38 @@
++import NestedBorrowsClosureState.NestedBorrowsClosureState
++
++/-! Evaluate the model of `tests/src/nested-borrows-closure-state.rs` on
++    the inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_closure_state.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def useMap (a b d : Nat) : Option (Nat × Nat) :=
++  match use_map (u a) (u b) (u d) with
++  | ok (x, y) => some (x.val, y.val)
++  | _ => none
++
++def useCount (a b d : Nat) : Option (Nat × Nat × Nat) :=
++  match use_count (u a) (u b) (u d) with
++  | ok (x, y, n) => some (x.val, y.val, n.val)
++  | _ => none
++
++def useTry (a b limit : Nat) : Option (Nat × Nat × Nat × Bool) :=
++  match use_try (u a) (u b) (u limit) with
++  | ok (x, y, seen, ok') => some (x.val, y.val, seen.val, ok')
++  | _ => none
++
++#guard useMap 1 2 10 == some (12, 14)
++#guard useMap max 0 1 == some (1, 3)
++
++#guard useCount 3 4 5 == some (16, 22, 2)
++#guard useCount max 7 2 == some (max, 16, 2)
++
++#guard useTry 1 2 5 == some (3, 5, 2, true)
++#guard useTry 1 9 5 == some (1, 0, 2, false)
++#guard useTry 9 1 5 == some (0, 0, 1, false)
++
++end nested_borrows_closure_state.checks
+diff --git a/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+new file mode 100644
+index 0000000..b9312aa
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureState/NestedBorrowsClosureState.lean
+@@ -0,0 +1,2353 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_closure_state]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_closure_state
++
++/-- [nested_borrows_closure_state::use_try::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 73:39-80:5 -/
++def use_try.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def M.try_map_expressions.closure {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E)) :=
++  T1
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 39:38-39:62 -/
++@[reducible]
++def M.map_expressions.closure {T0 : Type}
++  (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :=
++  T0
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 44:46-47:9 -/
++def M.map_count.closure {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :=
++  _root_.Aeneas.Std.U32 × T0
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::use_try::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) :=
++  _root_.nested_borrows_closure_state.use_try.closure
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) :=
++  _root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) :=
++  _root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++
++/-- [nested_borrows_closure_state::M]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 16:0-19:1
++    Visibility: public -/
++structure M where
++  a : _root_.Aeneas.Std.U32
++  b : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_payloads]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 22:4-29:5
++    Visibility: public -/
++def M.try_map_payloads
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E)) (self : _root_.nested_borrows_closure_state.M)
++  (f : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M E) × T1)
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst.call_mut f (self.a, 0#u8)
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutT1PairU32U8ResultU32EInst.call_mut model_state1
++        (self.b, 1#u8)
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        { a := val, b := val1 }, model_state3)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_state.M
++          (_root_.Aeneas.Std.core.convert.FromSame E) residual
++      _root_.Aeneas.Std.Result.ok (r, model_state3)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.nested_borrows_closure_state.M
++        (_root_.Aeneas.Std.core.convert.FromSame E) residual
++    _root_.Aeneas.Std.Result.ok (r, model_state1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_payloads::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<2, T1, T2>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 22:4-29:5
++    Visibility: public -/
++def M.try_map_payloads01T0closure_specialized_14debb12e65b528f06a5c49f37684a2d
++  {T0 : Type} {T1 : Type} {T2 : Type}
++  (coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T2 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T1))
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f : _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst.call_mut f (self.a,
++      0#u8)
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst.call_mut model_state1
++        (self.b, 1#u8)
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++          coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++          coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        { a := val, b := val1 }, model_state3, back)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_state.M
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++          coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++          coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst)
++      _root_.Aeneas.Std.Result.ok (r, model_state3, back)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.nested_borrows_closure_state.M
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT2PairU32U8ResultU32T1Inst)
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_payloads::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::use_try::closure<1, 2>><2, 3, 4, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 22:4-29:5
++    Visibility: public -/
++def
++  M.try_map_payloads01T0closure2T1closure_specialized_27c1ba17cd33369c4b8d085742b48d74
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T1))
++  (coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst))))
++  := do
++  let (_, i) := f
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut f
++      (self.a, 0#u8)
++  let call_mut_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (_, i1) := model_state1
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut
++        model_state1 (self.b, 1#u8)
++    let call_mut_back1 :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back (f1.#0, f.#1)
++           let (c1, _) := call_mut_back1 (c.#0, model_state1.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back3) := call_mut_back1 (c.#0, model_state1.#1)
++               let c2 := back3 (f2.#0, model_state3.#1)
++               let (i2, _) := c2
++               let c3 := back2 (i2, i1)
++               let (i3, _) := c3
++               (i3, i)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        { a := val, b := val1 }, model_state3, back, back1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_state.M
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back (f1.#0, f.#1)
++           let (c1, _) := call_mut_back1 (c.#0, model_state1.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back3) := call_mut_back1 (c.#0, model_state1.#1)
++               let c2 := back3 (f2.#0, model_state3.#1)
++               let (i2, _) := c2
++               let c3 := back2 (i2, i1)
++               let (i3, _) := c3
++               (i3, i)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (r, model_state3, back, back1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.nested_borrows_closure_state.M
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++    let back1 :=
++      (fun f1 =>
++         let (c, back2) := call_mut_back (f1.#0, f.#1)
++         ((c.#0, c.#1),
++           fun f2 =>
++             let c1 := back2 (f2.#0, model_state1.#1)
++             let (i1, _) := c1
++             (i1, i)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_payloads::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]><2, 3, T1, T2>[TraitClause@0, TraitClause@1]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 22:4-29:5
++    Visibility: public -/
++def
++  M.try_map_payloads01T0closure2T1closure_specialized_166034fbc6a9a2b51b1490b476a2a163
++  {T0 : Type} {T1 : Type} {T2 : Type} (coreopsfunctionFnMutT2PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T2 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT2PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T1))
++  (coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT2PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT2PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst))))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut f
++      (self.a, 0#u8)
++  let call_mut_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut
++        model_state1 (self.b, 1#u8)
++    let call_mut_back1 :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back1 c
++           (c1,
++             fun f2 =>
++               let (_, back3) := call_mut_back1 c
++               let c2 := back3 f2
++               back2 c2) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        { a := val, b := val1 }, model_state3, back, back1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_state.M
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back f1
++           let (c1, _) := call_mut_back1 c
++           (c1,
++             fun f2 =>
++               let (_, back3) := call_mut_back1 c
++               let c2 := back3 f2
++               back2 c2) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (r, model_state3, back, back1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.nested_borrows_closure_state.M
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++    let back1 :=
++      (fun f1 => let (c, back2) := call_mut_back f1
++                 (c, fun f2 => back2 f2) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_payloads::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]><2, 3, 4, T1, T2>[TraitClause@0, TraitClause@1]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 22:4-29:5
++    Visibility: public -/
++def
++  M.try_map_payloads01T0closure2T1closure_specialized_5d17dc2b954c8a111e2a09d6bc02ac92
++  {T0 : Type} {T1 : Type} {T2 : Type} (coreopsfunctionFnMutT2PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T2 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT2PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T1))
++  (coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT2PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT2PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst))) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT2PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst))))
++  := do
++  let (i, t) := f
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut f
++      (self.a, 0#u8)
++  let call_mut_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++  let call_mut_back1 :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT2PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (i1, t1) := model_state1
++    let (model_state2, model_state3) ←
++      coreopsfunctionFnMutclosure2T1closurePairU32U8ResultU32T0Inst.call_mut
++        model_state1 (self.b, 1#u8)
++    let call_mut_back2 :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    let call_mut_back3 :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back (f1.#0, f.#1)
++           let (c1, _) := call_mut_back2 (c.#0, model_state1.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back3) := call_mut_back2 (c.#0, model_state1.#1)
++               let c2 := back3 (f2.#0, model_state3.#1)
++               let (i2, _) := c2
++               let c3 := back2 (i2, t1)
++               let (i3, _) := c3
++               (i3, t)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      let back2 :=
++        (fun f1 =>
++           let (c, back3) := call_mut_back1 (f.#0, f1.#1)
++           let (c1, _) := call_mut_back3 (model_state1.#0, c.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back4) := call_mut_back3 (model_state1.#0, c.#1)
++               let c2 := back4 (model_state3.#0, f2.#1)
++               let (_, t2) := c2
++               let c3 := back3 (i1, t2)
++               let (_, t3) := c3
++               (i, t3)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        { a := val, b := val1 }, model_state3, back, back1, back2)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_state.M
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun f1 => f1 :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++      let back1 :=
++        (fun f1 =>
++           let (c, back2) := call_mut_back (f1.#0, f.#1)
++           let (c1, _) := call_mut_back2 (c.#0, model_state1.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back3) := call_mut_back2 (c.#0, model_state1.#1)
++               let c2 := back3 (f2.#0, model_state3.#1)
++               let (i2, _) := c2
++               let c3 := back2 (i2, t1)
++               let (i3, _) := c3
++               (i3, t)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      let back2 :=
++        (fun f1 =>
++           let (c, back3) := call_mut_back1 (f.#0, f1.#1)
++           let (c1, _) := call_mut_back3 (model_state1.#0, c.#1)
++           ((c1.#0, c1.#1),
++             fun f2 =>
++               let (_, back4) := call_mut_back3 (model_state1.#0, c.#1)
++               let c2 := back4 (model_state3.#0, f2.#1)
++               let (_, t2) := c2
++               let c3 := back3 (i1, t2)
++               let (_, t3) := c3
++               (i, t3)) :
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++          (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++          _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++          coreopsfunctionFnMutT2PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (r, model_state3, back, back1, back2)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.nested_borrows_closure_state.M
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let back :=
++      (fun f1 => f1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)
++    let back1 :=
++      (fun f1 =>
++         let (c, back2) := call_mut_back (f1.#0, f.#1)
++         ((c.#0, c.#1),
++           fun f2 =>
++             let c1 := back2 (f2.#0, model_state1.#1)
++             let (i1, _) := c1
++             (i1, t)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    let back2 :=
++      (fun f1 =>
++         let (c, back3) := call_mut_back1 (f.#0, f1.#1)
++         ((c.#0, c.#1),
++           fun f2 =>
++             let c1 := back3 (model_state1.#0, f2.#1)
++             let (_, t1) := c1
++             (i, t1)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT2PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T1Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1, back2)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32E.call_mut
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E))
++  (c : _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8ResultU32EInst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 E) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst.call_mut c tupled_args
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let i ← lift (core.num.U32.wrapping_add val 1#u32)
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT1PairU32U8ResultU32EInst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT1PairU32U8ResultU32EInst)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i,
++      model_state1, back)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame E)
++        residual
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT1PairU32U8ResultU32EInst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++        coreopsfunctionFnMutT1PairU32U8ResultU32EInst)
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32E.call_once
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E))
++  (c : _root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8ResultU32EInst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 E) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst))
++  := do
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32E.call_mut
++      coreopsfunctionFnMutT1PairU32U8ResultU32EInst c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (r, c2)
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32E
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8ResultU32EInst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32E.call_once
++          coreopsfunctionFnMutT1PairU32U8ResultU32EInst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def M.try_map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32E
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8ResultU32EInst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32E
++    coreopsfunctionFnMutT1PairU32U8ResultU32EInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32E.call_mut
++          coreopsfunctionFnMutT1PairU32U8ResultU32EInst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 31:4-36:5
++    Visibility: public -/
++def M.try_map_expressions
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8ResultU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 E)) (self : _root_.nested_borrows_closure_state.M)
++  (f : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M E) × T1)
++  := do
++  let (r, c, try_map_payloads_back) ←
++    _root_.nested_borrows_closure_state.M.try_map_payloads01T0closure_specialized_14debb12e65b528f06a5c49f37684a2d
++      coreopsfunctionFnMutT1PairU32U8ResultU32EInst
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32E
++      coreopsfunctionFnMutT1PairU32U8ResultU32EInst) self f
++  let c1 := try_map_payloads_back c
++  _root_.Aeneas.Std.Result.ok (r, c1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 3, T0, nested_borrows_closure_state::use_try::closure<1, 2>>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_3b3f602207c3f0dc780dc9ee9456c1f2.call_mut_specialized_33de569834ee5955ff9c1f3fa39d84a9
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))))
++  := do
++  let (_, i) := c
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst.call_mut c tupled_args
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let i1 ← lift (core.num.U32.wrapping_add val 1#u32)
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1,
++         fun c2 => let (i2, _) := (c2.#0, model_state1.#1)
++                   (i2, i)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i1,
++      model_state1, back, back1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame T0)
++        residual
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1,
++         fun c2 => let (i1, _) := (c2.#0, model_state1.#1)
++                   (i1, i)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_once::<0, T0, nested_borrows_closure_state::use_try::closure<1, 2>>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_1c703a6aff3393e57803c92f0a35fe4a.call_once_specialized_99d25d3e0cfb546f83d245698cb0db4b
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))
++  := do
++  let (_, i) := c
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_3b3f602207c3f0dc780dc9ee9456c1f2.call_mut_specialized_33de569834ee5955ff9c1f3fa39d84a9
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst c p
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let c5 := back1 c4
++       let (i1, _) := c5
++       (i1, i) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::use_try::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_1c703a6aff3393e57803c92f0a35fe4a
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_1c703a6aff3393e57803c92f0a35fe4a.call_once_specialized_99d25d3e0cfb546f83d245698cb0db4b
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::use_try::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_3b3f602207c3f0dc780dc9ee9456c1f2
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_1c703a6aff3393e57803c92f0a35fe4a
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_3b3f602207c3f0dc780dc9ee9456c1f2.call_mut_specialized_33de569834ee5955ff9c1f3fa39d84a9
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1))
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::<0, 1, T0, nested_borrows_closure_state::use_try::closure<2, 3>>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 31:4-36:5
++    Visibility: public -/
++def
++  M.try_map_expressions01T0closure_specialized_4e14760056e10a70e56237dd9e28c716
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f : _root_.nested_borrows_closure_state.use_try.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    _root_.nested_borrows_closure_state.use_try.closure ×
++    (_root_.nested_borrows_closure_state.use_try.closure →
++    _root_.nested_borrows_closure_state.use_try.closure))
++  := do
++  let (_, i) := f
++  let (r, c, try_map_payloads_back, try_map_payloads_back1) ←
++    _root_.nested_borrows_closure_state.M.try_map_payloads01T0closure2T1closure_specialized_27c1ba17cd33369c4b8d085742b48d74
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_5fca997cd6ee1c81b122df4725d36dac.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_3b3f602207c3f0dc780dc9ee9456c1f2
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) self f
++  let (_, i1) := c
++  let c1 := try_map_payloads_back c
++  let back :=
++    (fun f1 =>
++       let (c2, back1) := try_map_payloads_back1 ((f1.#0, c1.#1).#0, f.#1)
++       let (i2, _) := c2
++       let c3 := back1 (i2, i1)
++       let (i3, _) := c3
++       (i3, i) : _root_.nested_borrows_closure_state.use_try.closure →
++      _root_.nested_borrows_closure_state.use_try.closure)
++  _root_.Aeneas.Std.Result.ok (r, c1, back)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 2, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_03e9d2aceaccd8c03af025535517e4e8.call_mut_specialized_9a83eb746aecf3ed90c691fced7b0f2a
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst.call_mut c tupled_args
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let i ← lift (core.num.U32.wrapping_add val 1#u32)
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1, fun c2 => c2) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i,
++      model_state1, back, back1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame T0)
++        residual
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1, fun c2 => c2) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_once::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_b988c5023bf32a6d8b9859acfa016ee3.call_once_specialized_823c2a8ea77a7757b36204c3e58fbdc0
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))
++  := do
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_03e9d2aceaccd8c03af025535517e4e8.call_mut_specialized_9a83eb746aecf3ed90c691fced7b0f2a
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst c p
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 => let (c4, back1) := call_mut_back1 c3
++               back1 c4 :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_b988c5023bf32a6d8b9859acfa016ee3
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_b988c5023bf32a6d8b9859acfa016ee3.call_once_specialized_823c2a8ea77a7757b36204c3e58fbdc0
++          coreopsfunctionFnMutT1PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<1, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_03e9d2aceaccd8c03af025535517e4e8
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_b988c5023bf32a6d8b9859acfa016ee3
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_03e9d2aceaccd8c03af025535517e4e8.call_mut_specialized_9a83eb746aecf3ed90c691fced7b0f2a
++          coreopsfunctionFnMutT1PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<2, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 31:4-36:5
++    Visibility: public -/
++def
++  M.try_map_expressions01T0closure_specialized_36c2cdd0d59841270a9f83ca5675b992
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f : _root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst))
++  := do
++  let (r, c, try_map_payloads_back, try_map_payloads_back1) ←
++    _root_.nested_borrows_closure_state.M.try_map_payloads01T0closure2T1closure_specialized_166034fbc6a9a2b51b1490b476a2a163
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_f15f2682da43bc5f379e81bd83e63138.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_03e9d2aceaccd8c03af025535517e4e8
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) self f
++  let c1 := try_map_payloads_back c
++  let back :=
++    (fun f1 =>
++       let (c2, back1) := try_map_payloads_back1 f1
++       let c3 := back1 c2
++       let t := c3
++       t : _root_.nested_borrows_closure_state.M.map_expressions.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_expressions.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst)
++  _root_.Aeneas.Std.Result.ok (r, c1, back)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 3, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_295cc221e3e4bf1fa485a64f06196ab0.call_mut_specialized_7555453b34ef8046e9374f51ac38a395
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))))
++  := do
++  let (i, t) := c
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst.call_mut c tupled_args
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let i1 ← lift (core.num.U32.wrapping_add val 1#u32)
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1,
++         fun c2 => let (i2, _) := (c2.#0, model_state1.#1)
++                   (i2, t)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    let back2 :=
++      (fun c1 => (c1,
++         fun c2 => let (_, t1) := (model_state1.#0, c2.#1)
++                   (i, t1)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i1,
++      model_state1, back, back1, back2)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame T0)
++        residual
++    let back :=
++      (fun c1 => c1 :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++    let back1 :=
++      (fun c1 => (c1,
++         fun c2 => let (i1, _) := (c2.#0, model_state1.#1)
++                   (i1, t)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    let back2 :=
++      (fun c1 => (c1,
++         fun c2 => let (_, t1) := (model_state1.#0, c2.#1)
++                   (i, t1)) :
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        ((_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++        (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++        coreopsfunctionFnMutT1PairU32U8U32Inst
++        coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)))
++    _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1, back2)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::call_once::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++def
++  M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_bf80693a258744d04b3cba14051d83ea.call_once_specialized_57d505db8428e592543ba192512b4b5a
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0))
++  (c :
++  _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 T0) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) ×
++    (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst))
++  := do
++  let (i, t) := c
++  let (r, c1, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_295cc221e3e4bf1fa485a64f06196ab0.call_mut_specialized_7555453b34ef8046e9374f51ac38a395
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst c p
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let c5 := back1 c4
++       let (i1, _) := c5
++       (i1, t) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  let back1 :=
++    (fun c3 =>
++       let (c4, back2) := call_mut_back2 (c.#0, (c2.#0, c3.#1).#1)
++       let c5 := back2 c4
++       let (_, t1) := c5
++       (i, t1) :
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst →
++      _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back, back1)
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_bf80693a258744d04b3cba14051d83ea
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_bf80693a258744d04b3cba14051d83ea.call_once_specialized_57d505db8428e592543ba192512b4b5a
++          coreopsfunctionFnMutT1PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      let capture_state2 := captured2 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state2.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, E>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<1, 2, T1>[TraitClause@0]>]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 35:35-35:76 -/
++@[reducible]
++def
++  M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_295cc221e3e4bf1fa485a64f06196ab0
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0
++  coreopsfunctionFnMutT1PairU32U8U32Inst
++  coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32T0_specialized_bf80693a258744d04b3cba14051d83ea
++    coreopsfunctionFnMutT1PairU32U8U32Inst
++    coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_295cc221e3e4bf1fa485a64f06196ab0.call_mut_specialized_7555453b34ef8046e9374f51ac38a395
++          coreopsfunctionFnMutT1PairU32U8U32Inst
++          coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      let (c1, back1) := captured3 captured
++      let capture_state2 := back1 c1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state2.#1))
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::try_map_expressions::<0, 1, T0, nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<2, 3, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 31:4-36:5
++    Visibility: public -/
++def
++  M.try_map_expressions01T0closure_specialized_48e2c128b7aee76bc26ac6b146c9dac5
++  {T0 : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 T0)) (self : _root_.nested_borrows_closure_state.M)
++  (f : _root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT1PairU32U8U32Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M T0) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT1PairU32U8U32Inst))
++  := do
++  let (i, t) := f
++  let (r, c, try_map_payloads_back, try_map_payloads_back1,
++    try_map_payloads_back2) ←
++    _root_.nested_borrows_closure_state.M.try_map_payloads01T0closure2T1closure_specialized_5d17dc2b954c8a111e2a09d6bc02ac92
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst
++      (_root_.nested_borrows_closure_state.M.try_map_expressions.closure0T0closure_specialized_acdccafda828850546630d99f15638e0.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32T0_specialized_295cc221e3e4bf1fa485a64f06196ab0
++      coreopsfunctionFnMutT1PairU32U8U32Inst
++      coreopsfunctionFnMutclosurePairU32U8ResultU32T0Inst) self f
++  let (i1, t1) := c
++  let c1 := try_map_payloads_back c
++  let back :=
++    (fun f1 =>
++       let (c2, back1) := try_map_payloads_back1 ((f1.#0, c1.#1).#0, f.#1)
++       let (i2, _) := c2
++       let c3 := back1 (i2, t1)
++       let (i3, _) := c3
++       (i3, t) : _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst)
++  let back1 :=
++    (fun f1 =>
++       let (c2, back2) := try_map_payloads_back2 (f.#0, (c1.#0, f1.#1).#1)
++       let (_, t2) := c2
++       let c3 := back2 (i1, t2)
++       let (_, t3) := c3
++       (i, t3) : _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT1PairU32U8U32Inst)
++  _root_.Aeneas.Std.Result.ok (r, c1, back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<0, T0>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 39:38-39:62 -/
++def
++  M.map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Unit) ×
++    (_root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT0PairU32U8U32Inst.call_mut c tupled_args
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_closure_state.M.map_expressions.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_expressions.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++    model_state, model_state1, back)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<0, T0>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 39:38-39:62 -/
++def
++  M.map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple.call_once
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Unit) ×
++    (_root_.nested_borrows_closure_state.M.map_expressions.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst))
++  := do
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_state.M.map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++      coreopsfunctionFnMutT0PairU32U8U32Inst c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (r, c2)
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 39:38-39:62 -/
++@[reducible]
++def
++  M.map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Unit) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_state.M.map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple.call_once
++          coreopsfunctionFnMutT0PairU32U8U32Inst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 39:38-39:62 -/
++@[reducible]
++def M.map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_expressions.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Unit) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.map_expressions.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple
++    coreopsfunctionFnMutT0PairU32U8U32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.M.map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++          coreopsfunctionFnMutT0PairU32U8U32Inst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_expressions]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 38:4-40:5
++    Visibility: public -/
++def M.map_expressions
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (self : _root_.nested_borrows_closure_state.M) (f : T0) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M _root_.Unit) × T0)
++  := do
++  let (r, c, try_map_expressions_back) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions01T0closure_specialized_36c2cdd0d59841270a9f83ca5675b992
++      coreopsfunctionFnMutT0PairU32U8U32Inst
++      (_root_.nested_borrows_closure_state.M.map_expressions.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple
++      coreopsfunctionFnMutT0PairU32U8U32Inst) self f
++  let c1 := try_map_expressions_back c
++  _root_.Aeneas.Std.Result.ok (r, c1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<0, 1, T0>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 44:46-47:9 -/
++def
++  M.map_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Unit) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst →
++    _root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst))
++  := do
++  let (i, t) := c
++  let i1 ← lift (core.num.U32.wrapping_add i 1#u32)
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT0PairU32U8U32Inst.call_mut t tupled_args
++  let back :=
++    (fun c1 => let (i2, _) := c1
++               (i2, t) :
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst)
++  let back1 :=
++    (fun c1 => let (_, t1) := c1
++               (i, t1) :
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst →
++      _root_.nested_borrows_closure_state.M.map_count.closure
++      coreopsfunctionFnMutT0PairU32U8U32Inst)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++    model_state, (i1, model_state1), back, back1)
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<0, 1, T0>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 44:46-47:9 -/
++def
++  M.map_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple.call_once
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Unit) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst) ×
++    (_root_.nested_borrows_closure_state.M.map_count.closure
++    coreopsfunctionFnMutT0PairU32U8U32Inst))
++  := do
++  let (i, t) := c
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_state.M.map_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++      coreopsfunctionFnMutT0PairU32U8U32Inst c p
++  let c2 := call_mut_back c1
++  let (i1, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, t1) := c3
++  _root_.Aeneas.Std.Result.ok (r, (i1, t), (i, t1))
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<0, 1, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 44:46-47:9 -/
++@[reducible]
++def M.map_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple {T0
++  : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Unit) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.M.map_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple.call_once
++          coreopsfunctionFnMutT0PairU32U8U32Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, ()>> for nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count::closure<0, 1, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 44:46-47:9 -/
++@[reducible]
++def M.map_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple {T0 :
++  Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_state.M.map_count.closure
++  coreopsfunctionFnMutT0PairU32U8U32Inst) (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Unit) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.M.map_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32Tuple
++    coreopsfunctionFnMutT0PairU32U8U32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_state.M.map_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple.call_mut
++          coreopsfunctionFnMutT0PairU32U8U32Inst arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [nested_borrows_closure_state::{nested_borrows_closure_state::M}::map_count]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 42:4-49:5
++    Visibility: public -/
++def M.map_count
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32U8U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32)
++  (self : _root_.nested_borrows_closure_state.M) (f : T0) :
++  _root_.Aeneas.Std.Result (((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_state.M _root_.Unit) ×
++    _root_.Aeneas.Std.U32) × T0)
++  := do
++  let (r, c, try_map_expressions_back, try_map_expressions_back1) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions01T0closure_specialized_48e2c128b7aee76bc26ac6b146c9dac5
++      coreopsfunctionFnMutT0PairU32U8U32Inst
++      (_root_.nested_borrows_closure_state.M.map_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32Tuple
++      coreopsfunctionFnMutT0PairU32U8U32Inst) self (0#u32, f)
++  let c1 := try_map_expressions_back c
++  let (n, _) := c1
++  let c2 := try_map_expressions_back1 c
++  let (_, f1) := c2
++  _root_.Aeneas.Std.Result.ok ((r, n), f1)
++
++/-- [nested_borrows_closure_state::use_map::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 54:35-54:88 -/
++@[reducible]
++def use_map.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_state::use_map::{core::ops::function::FnMut<(u32, u8), u32> for nested_borrows_closure_state::use_map::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 54:35-54:88 -/
++def use_map.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++  (c : _root_.nested_borrows_closure_state.use_map.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_state.use_map.closure)
++  := do
++  let (v, role) := tupled_args
++  let i ← lift (core.num.U32.wrapping_add v c)
++  let i1 ← lift (UScalar.cast .U32 role)
++  let i2 ← lift (core.num.U32.wrapping_add i i1)
++  _root_.Aeneas.Std.Result.ok (i2, c)
++
++/-- [nested_borrows_closure_state::use_map::{core::ops::function::FnOnce<(u32, u8), u32> for nested_borrows_closure_state::use_map::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 54:35-54:88 -/
++def use_map.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32.call_once
++  (c : _root_.nested_borrows_closure_state.use_map.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.nested_borrows_closure_state.use_map.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [nested_borrows_closure_state::use_map::{core::ops::function::FnOnce<(u32, u8), u32> for nested_borrows_closure_state::use_map::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 54:35-54:88 -/
++@[reducible]
++def use_map.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_state.use_map.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.nested_borrows_closure_state.use_map.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::use_map::{core::ops::function::FnMut<(u32, u8), u32> for nested_borrows_closure_state::use_map::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 54:35-54:88 -/
++@[reducible]
++def use_map.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_map.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.use_map.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_state.use_map.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [nested_borrows_closure_state::use_map]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 52:0-59:1
++    Visibility: public -/
++def use_map
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, _) ←
++    _root_.nested_borrows_closure_state.M.map_expressions
++      _root_.nested_borrows_closure_state.use_map.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32
++      { a, b } d
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok m =>
++    _root_.Aeneas.Std.Result.ok (m.a, m.b)
++  | _root_.Aeneas.Std.core.result.Result.Err _ =>
++    _root_.Aeneas.Std.Result.ok (0#u32, 0#u32)
++
++/-- [nested_borrows_closure_state::use_count::closure]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 63:34-63:87 -/
++@[reducible]
++def use_count.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_state::use_count::{core::ops::function::FnMut<(u32, u8), u32> for nested_borrows_closure_state::use_count::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 63:34-63:87 -/
++def use_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++  (c : _root_.nested_borrows_closure_state.use_count.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_state.use_count.closure)
++  := do
++  let (v, role) := tupled_args
++  let i ← lift (core.num.U32.wrapping_mul v c)
++  let i1 ← lift (UScalar.cast .U32 role)
++  let i2 ← lift (core.num.U32.wrapping_add i i1)
++  _root_.Aeneas.Std.Result.ok (i2, c)
++
++/-- [nested_borrows_closure_state::use_count::{core::ops::function::FnOnce<(u32, u8), u32> for nested_borrows_closure_state::use_count::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 63:34-63:87 -/
++def use_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32.call_once
++  (c : _root_.nested_borrows_closure_state.use_count.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.nested_borrows_closure_state.use_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [nested_borrows_closure_state::use_count::{core::ops::function::FnOnce<(u32, u8), u32> for nested_borrows_closure_state::use_count::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 63:34-63:87 -/
++@[reducible]
++def use_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_state.use_count.closure (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.nested_borrows_closure_state.use_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::use_count::{core::ops::function::FnMut<(u32, u8), u32> for nested_borrows_closure_state::use_count::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 63:34-63:87 -/
++@[reducible]
++def use_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_count.closure (_root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U8) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.use_count.closure.Insts.CoreOpsFunctionFnOncePairU32U8U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_state.use_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [nested_borrows_closure_state::use_count]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 61:0-68:1
++    Visibility: public -/
++def use_count
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (p, _) ←
++    _root_.nested_borrows_closure_state.M.map_count
++      _root_.nested_borrows_closure_state.use_count.closure.Insts.CoreOpsFunctionFnMutPairU32U8U32
++      { a, b } d
++  let (r, n) := p
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok m =>
++    _root_.Aeneas.Std.Result.ok (m.a, m.b, n)
++  | _root_.Aeneas.Std.core.result.Result.Err _ =>
++    _root_.Aeneas.Std.Result.ok (0#u32, 0#u32, n)
++
++/-- [nested_borrows_closure_state::use_try::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, u8>> for nested_borrows_closure_state::use_try::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 73:39-80:5 -/
++def use_try.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32U8.call_mut
++  (c : _root_.nested_borrows_closure_state.use_try.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U8) ×
++    _root_.nested_borrows_closure_state.use_try.closure ×
++    (_root_.nested_borrows_closure_state.use_try.closure →
++    _root_.nested_borrows_closure_state.use_try.closure))
++  := do
++  let (i, i1) := c
++  let (v, role) := tupled_args
++  let i2 ← lift (core.num.U32.wrapping_add i 1#u32)
++  if v > i1
++  then
++    let back :=
++      (fun c1 => let (i3, _) := c1
++                 (i3, i1) : _root_.nested_borrows_closure_state.use_try.closure
++        → _root_.nested_borrows_closure_state.use_try.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err role,
++      (i2, i1), back)
++  else
++    let i3 ← lift (core.num.U32.wrapping_mul v 2#u32)
++    let back :=
++      (fun c1 => let (i4, _) := c1
++                 (i4, i1) : _root_.nested_borrows_closure_state.use_try.closure
++        → _root_.nested_borrows_closure_state.use_try.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i3,
++      (i2, i1), back)
++
++/-- [nested_borrows_closure_state::use_try::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, u8>> for nested_borrows_closure_state::use_try::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 73:39-80:5 -/
++def use_try.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32U8.call_once
++  (c : _root_.nested_borrows_closure_state.use_try.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U8) ×
++    _root_.nested_borrows_closure_state.use_try.closure)
++  := do
++  let (_, i) := c
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_state.use_try.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32U8.call_mut
++      c p
++  let c2 := call_mut_back c1
++  let (i1, _) := c2
++  _root_.Aeneas.Std.Result.ok (r, (i1, i))
++
++/-- Trait implementation: [nested_borrows_closure_state::use_try::{core::ops::function::FnOnce<(u32, u8), core::result::Result<u32, u8>> for nested_borrows_closure_state::use_try::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 73:39-80:5 -/
++@[reducible]
++def use_try.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32U8 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U8) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_state.use_try.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32U8.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_state::use_try::{core::ops::function::FnMut<(u32, u8), core::result::Result<u32, u8>> for nested_borrows_closure_state::use_try::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 73:39-80:5 -/
++@[reducible]
++def use_try.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32U8 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_state.use_try.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U8) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_state.use_try.closure.Insts.CoreOpsFunctionFnOncePairU32U8ResultU32U8
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_state.use_try.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32U8.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1))
++}
++
++/-- [nested_borrows_closure_state::use_try]:
++    Source: 'tests/src/nested-borrows-closure-state.rs', lines 70:0-85:1
++    Visibility: public -/
++def use_try
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Bool)
++  := do
++  let (r, c, try_map_expressions_back) ←
++    _root_.nested_borrows_closure_state.M.try_map_expressions01T0closure_specialized_4e14760056e10a70e56237dd9e28c716
++      _root_.nested_borrows_closure_state.use_try.closure.Insts.CoreOpsFunctionFnMutPairU32U8ResultU32U8
++      { a, b } (0#u32, limit)
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok m =>
++    let c1 := try_map_expressions_back c
++    let (seen, _) := c1
++    _root_.Aeneas.Std.Result.ok (m.a, m.b, seen, true)
++  | _root_.Aeneas.Std.core.result.Result.Err role =>
++    let i ← lift (UScalar.cast .U32 role)
++    let c1 := try_map_expressions_back c
++    let (seen, _) := c1
++    _root_.Aeneas.Std.Result.ok (i, 0#u32, seen, false)
++
++end nested_borrows_closure_state
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index c649f39..638c43b 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -39,6 +39,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsAbsentLevel
+ @[default_target] lean_lib NestedBorrowsTuple
+ @[default_target] lean_lib NestedBorrowsSameRegion
++@[default_target] lean_lib NestedBorrowsClosureState
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectFlatten
+diff --git a/tests/src/nested-borrows-closure-state.rs b/tests/src/nested-borrows-closure-state.rs
+new file mode 100644
+index 0000000..00cb9f0
+--- /dev/null
++++ b/tests/src/nested-borrows-closure-state.rs
+@@ -0,0 +1,109 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsClosureState
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Closures forwarding `&mut impl FnMut(u32, u8)` (the `map_expressions` /
++//! `try_map_expressions` / `try_map_payloads` shapes of chelis_deep
++//! `annotations_transform.rs` and `authoring.rs`, with arguments by value):
++//! the closure of `try_map_expressions` captures `f: &'0 mut F`, whose type
++//! parameter `F` is instantiated with the closure of `map_expressions` (or
++//! `map_count`), which holds a borrow of the type parameter of the caller's
++//! closure. The canonical `FnMut` state of the closure of
++//! `try_map_expressions` recombines the closure given back to `'0` with the
++//! values given back to the borrows it holds, under which a type parameter
++//! lies (`map_count` counts its calls through such a borrow).
++
++pub struct M {
++    pub a: u32,
++    pub b: u32,
++}
++
++impl M {
++    pub fn try_map_payloads<E>(
++        &self,
++        f: &mut impl FnMut(u32, u8) -> Result<u32, E>,
++    ) -> Result<M, E> {
++        let a = f(self.a, 0)?;
++        let b = f(self.b, 1)?;
++        Ok(M { a, b })
++    }
++
++    pub fn try_map_expressions<E>(
++        &self,
++        f: &mut impl FnMut(u32, u8) -> Result<u32, E>,
++    ) -> Result<M, E> {
++        self.try_map_payloads(&mut |v, role| Ok(f(v, role)?.wrapping_add(1)))
++    }
++
++    pub fn map_expressions(&self, f: &mut impl FnMut(u32, u8) -> u32) -> Result<M, ()> {
++        self.try_map_expressions(&mut |v, role| Ok(f(v, role)))
++    }
++
++    pub fn map_count(&self, f: &mut impl FnMut(u32, u8) -> u32) -> (Result<M, ()>, u32) {
++        let mut n = 0u32;
++        let r = self.try_map_expressions(&mut |v, role| {
++            n = n.wrapping_add(1);
++            Ok(f(v, role))
++        });
++        (r, n)
++    }
++}
++
++pub fn use_map(a: u32, b: u32, d: u32) -> (u32, u32) {
++    let m = M { a, b };
++    let r = m.map_expressions(&mut |v, role| v.wrapping_add(d).wrapping_add(role as u32));
++    match r {
++        Ok(m) => (m.a, m.b),
++        Err(()) => (0, 0),
++    }
++}
++
++pub fn use_count(a: u32, b: u32, d: u32) -> (u32, u32, u32) {
++    let m = M { a, b };
++    let (r, n) = m.map_count(&mut |v, role| v.wrapping_mul(d).wrapping_add(role as u32));
++    match r {
++        Ok(m) => (m.a, m.b, n),
++        Err(()) => (0, 0, n),
++    }
++}
++
++pub fn use_try(a: u32, b: u32, limit: u32) -> (u32, u32, u32, bool) {
++    let m = M { a, b };
++    let mut seen = 0u32;
++    let r = m.try_map_expressions(&mut |v: u32, role: u8| {
++        seen = seen.wrapping_add(1);
++        if v > limit {
++            Err(role)
++        } else {
++            Ok(v.wrapping_mul(2))
++        }
++    });
++    match r {
++        Ok(m) => (m.a, m.b, seen, true),
++        Err(role) => (role as u32, 0, seen, false),
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn use_map_native() {
++        assert_eq!(use_map(1, 2, 10), (12, 14));
++        assert_eq!(use_map(u32::MAX, 0, 1), (1, 3));
++    }
++
++    #[test]
++    fn use_count_native() {
++        assert_eq!(use_count(3, 4, 5), (16, 22, 2));
++        assert_eq!(use_count(u32::MAX, 7, 2), (u32::MAX, 16, 2));
++    }
++
++    #[test]
++    fn use_try_native() {
++        assert_eq!(use_try(1, 2, 5), (3, 5, 2, true));
++        assert_eq!(use_try(1, 9, 5), (1, 0, 2, false));
++        assert_eq!(use_try(9, 1, 5), (0, 0, 1, false));
++    }
++}
