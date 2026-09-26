@@ -51,3 +51,6 @@ sibling declared later can still determine the type they wait on. Recursive
 definitions with annotated parameters and an omitted result keep checking when
 they read their own result's tuple or record fields or pass it to `take`,
 and the ill-typed `step(n - 1).0` is rejected with the access's own diagnostic.
+An `eq` over a list reached through such a recursive call is now rejected by
+`eq`'s own rule, as the direct `eq([1i32], [1i32])` already was; previously the
+check was dropped.
