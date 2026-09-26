@@ -175,7 +175,7 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(key, &tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; consumes its key and introduces no effect; fixed-control input AD replays its forward mask. C build accepts source-fixed rates/keys through sealed direct entries and host helpers; runtime controls and HIP/Metal remain unsupported. |
+| `dropout` | `(key, &tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; consumes its key and introduces no effect; fixed-control input AD replays its forward mask. C builds it with a runtime key (a `chelis_key` entry argument or a derived key) and a runtime rate (#2411). HIP refuses every draw (#2585); Metal has no compiled dropout. |
 | `uniform_like` | `(key, &tensor[D,p_float], lo: p_float, hi: p_float) -> tensor[D,p_float]` | active float `p`; consumes its key and introduces no effect; zero gradient to the template |
 | `key_from_seed` | `(i64) -> key` | [05-OP-69]; non-differentiable |
 | `split_key` | `(key) -> (key, key)` | [05-OP-70]; consumes its key ([04-LIN-9]) |
@@ -496,7 +496,7 @@ native compiler** — `chelis build` emits source + flags; the user runs `gcc`/`
 | `BlasMatmul` | ✓ | ✓ (rocBLAS; bf16/f16 via GemmEx) | ✓ (tiled MSL) |
 | `ReduceWindow` / `ReduceWindowGrad` | ✓ | ✗ rejected | ✗ rejected |
 | `Pad`, `Shrink` | ✓ | ✗ rejected | ✗ rejected |
-| `dropout` | sealed fixed-control plan only; raw DAG rejects | ✗ | ✗ |
+| `dropout` | ✓ (runtime key and rate) | ✗ refuses every draw (#2585) | ✗ |
 | `Gather`/`ScatterAdd`/`Scatter` | ✓ (all precisions) | ✓ **f32 payloads only**, i32/i64 indices, indices must come from `load` (not computed) | ✗ deferred |
 | `f64` | ✓ | ✓ | ✗ **hard-rejected** (Apple Silicon lacks FP64 ALUs) |
 
@@ -504,10 +504,8 @@ Rejections are clean `unsupported_feature` diagnostics at compile time, not sile
 fallbacks (`reject_unsupported_hip_ops` / `reject_unsupported_metal_ops`). Reduce-window
 build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 first).
 
-Source-fixed C dropout entries retain their sealed plan in bare and host-containing
-programs, through Surf and Deep. Adding an unrelated scalar definition does not
-change admission. Runtime-rate entries remain unsupported; the raw-DAG rejection
-does not describe the sealed fixed-control C lane (see #1872).
+A C dropout entry may take its key and its rate as runtime arguments
+([05-OP-37], #2411).
 
 ---
 
