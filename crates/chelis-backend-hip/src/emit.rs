@@ -251,14 +251,22 @@ impl HipEmitter {
     }
 
     /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
-    /// `emit_activation_gate` derives it: a node under an activation whose
-    /// operation checks its operands' values reads every operand through
-    /// the gate, taking [`DagNode::inactive_operand`]'s value for its slot
-    /// where the activation is false. `None` for a node every execution
-    /// checks, or one whose operation checks nothing of its operands.
+    /// `emit_activation_gate` derives it: a gated node
+    /// ([`chelis_ir::dag::Dag::is_activation_gated`]) whose operation checks its
+    /// operands' values reads every operand through the gate, taking
+    /// [`DagNode::inactive_operand`]'s value for its slot where the
+    /// activation is false. `None` for a node that is not gated, and for a
+    /// gated node whose check is not of every operand's values (an extent,
+    /// a bound, an empty axis, an abort's condition beside its fallback),
+    /// which this lane has no gate for: [`Self::begin_node_gate`] refuses it.
     fn activation_gate(node: &DagNode, dag: VerifiedDagView<'_>) -> Option<HipActivationGate> {
+        if !dag.is_activation_gated(node) {
+            return None;
+        }
         let activation = node.owner.activation?;
-        node.inactive_operand(0)?;
+        let inactive = (0..node.inputs.len())
+            .map(|slot| node.inactive_operand(slot))
+            .collect::<Option<Vec<_>>>()?;
         let rank = dag
             .get(activation)
             .expect("verified activation")
@@ -268,14 +276,7 @@ impl HipEmitter {
         Some(HipActivationGate {
             activation,
             per_row: rank <= node.output_type.dims.len(),
-            operands: kernels::OperandGate {
-                inactive: (0..node.inputs.len())
-                    .map(|slot| {
-                        node.inactive_operand(slot)
-                            .expect("a checking operation names each operand's inactive value")
-                    })
-                    .collect(),
-            },
+            operands: kernels::OperandGate { inactive },
         })
     }
 
@@ -309,9 +310,24 @@ impl HipEmitter {
         )
     }
 
-    /// Set [`Self::gate`] for `node` before its emitter runs.
-    fn begin_node_gate(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+    /// Set [`Self::gate`] for `node` before its emitter runs. A gated node
+    /// ([`chelis_ir::dag::Dag::is_activation_gated`], the one declaration every lane
+    /// reads) whose check this lane cannot gate by operand substitution is
+    /// refused here, so a newly gated kind compiles only once its HIP
+    /// emitter takes the gate.
+    fn begin_node_gate(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
         self.gate = Self::activation_gate(node, dag);
+        if dag.is_activation_gated(node) && self.gate.is_none() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "HIP has no activation gate for this kind of check",
+            ));
+        }
+        Ok(())
     }
 
     /// End `node`'s emission: its launch must have consumed the gate.
@@ -2298,7 +2314,7 @@ impl HipEmitter {
         // A checking node under an activation checks nothing where it is
         // false (spec/10 section 3.2): its launch consumes the gate, and
         // `end_node_gate` refuses a node whose emitter did not.
-        self.begin_node_gate(node, dag);
+        self.begin_node_gate(node, dag)?;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).

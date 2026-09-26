@@ -533,17 +533,18 @@ fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<Tens
     where_elementwise(&mask, value, &fill)
 }
 
-/// Replace the operands of a checking `node` whose activation is false, in
-/// the rows where it is false, with values its checks accept
-/// ([`DagNode::inactive_operand`]), so the node computes a value and reports
-/// nothing.
+/// Replace the operands of a gated `node` ([`Dag::is_activation_gated`],
+/// `gated`) whose activation is false, in the rows where it is false, with
+/// values its checks accept ([`DagNode::inactive_operand`]), so the node
+/// computes a value and reports nothing.
 /// Returns the replaced values, which the caller restores once the node has
 /// run: its operands' other consumers read them unchanged.
 fn neutralize_inactive_operands(
     node: &DagNode,
+    gated: bool,
     values: &mut UnordMap<NodeId, TensorValue>,
 ) -> Result<Vec<(NodeId, TensorValue)>, String> {
-    if !node.is_activation_gated() || node.inactive_operand(0).is_none() {
+    if !gated || node.inactive_operand(0).is_none() {
         return Ok(Vec::new());
     }
     let activity = node_activity(node, values)?;
@@ -3567,9 +3568,13 @@ where
         // spec/10 §3.2: a node whose activation holds in no row checks
         // nothing. An operand-value check reads neutral operands below; an
         // extent or bound check is skipped here, since one tensor's rows
-        // share their extents and it runs when any row is active.
-        let inactive = node.is_activation_gated()
-            && matches!(node_activity(node, &values)?, Activity::Inactive);
+        // share their extents and it runs when any row is active. Whether
+        // the node is gated is read from the unbound graph, as the C lane
+        // reads it, since binding renames no node.
+        let gated = dag
+            .get(node.id)
+            .is_some_and(|source| dag.is_activation_gated(source));
+        let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
         if let Some(failure) = movement_failures.remove(&node.id)
             && !inactive
         {
@@ -3696,7 +3701,7 @@ where
 
         // spec/10 §3.2: a node under a false activation computes a value
         // from operands its checks accept, and checks nothing.
-        let inactive_operands = neutralize_inactive_operands(node, &mut values)?;
+        let inactive_operands = neutralize_inactive_operands(node, gated, &mut values)?;
         let mut inactive_value = if inactive {
             inactive_unchecked_value(node, &values, &runtime_dims)?
         } else {
@@ -4669,14 +4674,20 @@ fn inactive_unchecked_value(
             .and_then(|input| values.get(input))
             .ok_or_else(|| format!("node {} reads a missing operand", node.id.0))
     };
-    let zeros = |shape: &[usize]| {
-        let len = admit_result("activation", shape, node.output_type.precision)?;
-        finalize_wide(
-            "activation",
-            node.output_type.precision,
-            shape.to_vec(),
-            vec![0.0; len],
-        )
+    // All-zero bits, the C lane's zero-fill: positive zeros, and at `key`
+    // the key whose bits are zero (`key_from_seed(0)`).
+    let zeros = |shape: &[usize]| -> Result<TensorValue, String> {
+        let prim = node.output_type.precision;
+        let len = admit_result("activation", shape, prim)?;
+        let storage = if prim == Prim::Key {
+            let seed = chelis_types::scalar_from_i64("activation", Prim::Int64, 0)
+                .map_err(|trap| trap.to_string())?;
+            let zero = RandomKey::from_seed(seed).map_err(|error| error.to_string())?;
+            TensorStorage::from_keys(vec![zero; len])
+        } else {
+            zero_storage(prim, len)?
+        };
+        Ok(TensorValue::from_storage(shape.to_vec(), storage))
     };
     match node.runtime_check() {
         RuntimeCheck::MovementBounds => {

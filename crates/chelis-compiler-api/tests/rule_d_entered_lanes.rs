@@ -1360,3 +1360,211 @@ fn an_untaken_arms_integer_chain_checks_nothing_in_the_evaluator_and_c() {
     );
     rows.assert_empty();
 }
+
+const SUM_OVERFLOW: &str = "numeric trap: overflow in sum at i32";
+
+/// One kind of check decisions section 11 gates (spec/10 section 3.2): its
+/// trapping instance in the `then` arm of `selected`'s runtime `if`, whose
+/// `{c}` is the condition. `x` holds `n` ones for the evaluator and the C
+/// driver's `2i - 3`, whose sums (1: -3, 4: 0, 6: 12) stay under 100 like
+/// the evaluator's, so each condition decides the same arm in both lanes. An
+/// `lt` condition keeps `selected` a Tensor-lane root and a C kernel. An
+/// empty reduced axis is a `tensor[0, f32]` input, since the C lane refuses
+/// a runtime-sized `insert` (chelis#600).
+struct GatedKind {
+    name: &'static str,
+    source: &'static str,
+    n: usize,
+    /// `selected` when the arm is not taken, in the evaluator.
+    expected: &'static [f64],
+    /// The evaluator's typed trap when it is.
+    trap: &'static str,
+    /// A fragment of the C lane's trap, or `None` where the selected C
+    /// entry refuses the source: a runtime-extent result (a runtime-bounded
+    /// movement, a computed reshape target) has no C representation in a
+    /// Tensor-lane entry (chelis#600).
+    c_trap: Option<&'static str>,
+}
+
+const TAKEN: &str = "lt(s, 100.0f32)";
+const UNTAKEN: &str = "lt(100.0f32, s)";
+
+/// Every kind the evaluator and the C lane now gate beyond operand values:
+/// an integer reduction (consumed and discarded), an empty reduced axis
+/// (`max_reduce`, `argmax_reduce`), runtime movement bounds (`shrink`,
+/// `stride`, `pad`), the two extent-claim operations (a call's named claim
+/// and a checked `reshape` target), and a guarded abort in a `grad` body
+/// spliced into the arm.
+const GATED_KINDS: [GatedKind; 10] = [
+    GatedKind {
+        name: "consumed integer sum",
+        source: "def selected(x: tensor[1, f32]) -> tensor[i32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(to_tensor([2000000000i32, 2000000000i32]), 0i32) else scalar_to_tensor(7i32)\n}\n",
+        n: 1,
+        expected: &[7.0],
+        trap: SUM_OVERFLOW,
+        c_trap: Some(SUM_OVERFLOW),
+    },
+    GatedKind {
+        name: "discarded integer sum",
+        source: "def selected(x: tensor[1, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  r = if {c} then {\n    dead = sum(to_tensor([2000000000i32, 2000000000i32]), 0i32)\n    sum(&x, 0i32)\n  } else sum(&x, 0i32)\n  sum(x, 0i32)\n}\n",
+        n: 1,
+        expected: &[1.0],
+        trap: SUM_OVERFLOW,
+        c_trap: Some(SUM_OVERFLOW),
+    },
+    GatedKind {
+        name: "empty max_reduce",
+        source: "def selected(x: tensor[1, f32], e: tensor[0, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then max_reduce(e, 0i32) else sum(x, 0i32)\n}\n",
+        n: 1,
+        expected: &[1.0],
+        trap: "numeric trap: domain in max_reduce at f32",
+        c_trap: Some("numeric trap: domain in max_reduce at f32"),
+    },
+    GatedKind {
+        name: "empty argmax_reduce",
+        source: "def selected(x: tensor[1, f32], e: tensor[0, f32]) -> tensor[i64] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then argmax_reduce(e, 0i32) else scalar_to_tensor(7i64)\n}\n",
+        n: 1,
+        expected: &[7.0],
+        trap: "numeric trap: domain in argmax_reduce at i64",
+        c_trap: Some("numeric trap: domain in argmax_reduce at i64"),
+    },
+    GatedKind {
+        name: "shrink past the end",
+        source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(shrink(&x, [[1i64, add(shape(&x, 0i32), 3i64)]]), 0i32) else sum(x, 0i32)\n}\n",
+        n: 4,
+        expected: &[4.0],
+        trap: "numeric trap: domain in shrink at i64",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "stride of zero",
+        source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(stride(&x, sub(shape(&x, 0i32), 4i64)), 0i32) else sum(x, 0i32)\n}\n",
+        n: 4,
+        expected: &[4.0],
+        trap: "numeric trap: domain in stride at i64",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "negative pad",
+        source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(pad(&x, [[sub(shape(&x, 0i32), 5i64), 0i64]], 0.0f32), 0i32) else sum(x, 0i32)\n}\n",
+        n: 4,
+        expected: &[4.0],
+        trap: "must be a non-negative integer",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "call's named extent claim",
+        source: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\ndef selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then g(shrink(&x, [[0i64, sub(shape(&x, 0i32), 1i64)]]), copy(x)) else sum(x, 0i32)\n}\n",
+        n: 4,
+        expected: &[4.0],
+        trap: "numeric trap: domain in load at i64",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "checked reshape claim",
+        source: "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef selected(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
+        n: 6,
+        expected: &[6.0],
+        trap: "numeric trap: domain in reshape at i64",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "guarded fail in a grad body",
+        source: "def loss(x: tensor[1, f32]) -> tensor[f32] = if lt(tensor_to_scalar(sum(&x, 0i32)), 50.0f32) then fail(\"guard tripped\") else sum(x, 0i32)\n\ndef h(x: tensor[1, f32]) -> tensor[1, f32] = {\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if {c} then grad(loss)(x) else x\n}\n\ndef selected(x: tensor[1, f32]) -> tensor[1, f32] = h(x)\n",
+        n: 1,
+        expected: &[1.0],
+        trap: "guard tripped",
+        c_trap: Some("guard tripped"),
+    },
+];
+
+impl GatedKind {
+    fn source(&self, condition: &str) -> String {
+        self.source.replace("{c}", condition)
+    }
+
+    /// `x`, and the empty `e` a source that declares one reads.
+    fn bindings(&self) -> BTreeMap<String, TensorValue> {
+        let mut bindings = BTreeMap::from([("x".into(), f32_input(self.n))]);
+        if self.source.contains("e: tensor[0, f32]") {
+            bindings.insert("e".into(), f32_input(0));
+        }
+        bindings
+    }
+}
+
+/// `outcome` must fail with a message containing `trap`.
+fn fails_with(rows: &mut Rows, row: &str, outcome: Result<EvalResult, CompilerError>, trap: &str) {
+    match outcome {
+        Ok(result) => rows.0.push(format!("{row}: returned {:?}", result.roots)),
+        Err(error)
+            if error
+                .errors
+                .iter()
+                .any(|error| error.message.contains(trap)) => {}
+        Err(error) => rows.0.push(format!(
+            "{row}: expected `{trap}`, got {:?}",
+            error.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        )),
+    }
+}
+
+/// Decisions section 11 for the kinds beyond operand values: in an untaken
+/// arm each checks nothing, through `eval_selected` and the selected C entry,
+/// and the arm's value is the untaken twin's (`lower_if`, and the `grad`
+/// splice for the guarded abort). The lanes agree row by row.
+///
+/// Lane routing is not pinned: at 843422a00 plus this change only the
+/// discarded integer sum and the empty `max_reduce` stay Tensor-lane roots
+/// (the DAG evaluator); `eval_selected` runs the other rows in the Host lane.
+///
+/// Evidentiary status: REGRESSION TEST (fail-first at 224414e1f not yet
+/// recorded per row; see ks5-h2b-handoff.md).
+#[test]
+fn an_untaken_arms_extent_bound_and_reduction_checks_do_nothing_in_the_evaluator_and_c() {
+    let mut rows = Rows::default();
+    for kind in &GATED_KINDS {
+        let source = kind.source(UNTAKEN);
+        rows.returns(
+            &format!("E {}", kind.name),
+            select(&source, "selected", kind.bindings()),
+            "selected",
+            kind.expected,
+            None,
+        );
+        if kind.c_trap.is_some() {
+            rows.c(
+                &format!("C {}", kind.name),
+                run_c(&compile_c(&source, "selected"), "selected", 0),
+                Ok(()),
+            );
+        }
+    }
+    rows.assert_empty();
+}
+
+/// The positive control: taken, each kind traps in both lanes, so the
+/// untaken rows cannot pass by dropping the check.
+///
+/// Evidentiary status: DISPOSITION LOCK (each row traps at 224414e1f).
+#[test]
+fn a_taken_arms_extent_bound_and_reduction_checks_trap_in_the_evaluator_and_c() {
+    let mut rows = Rows::default();
+    for kind in &GATED_KINDS {
+        let source = kind.source(TAKEN);
+        fails_with(
+            &mut rows,
+            &format!("E {}", kind.name),
+            select(&source, "selected", kind.bindings()),
+            kind.trap,
+        );
+        if let Some(c_trap) = kind.c_trap {
+            rows.c(
+                &format!("C {}", kind.name),
+                run_c(&compile_c(&source, "selected"), "selected", 0),
+                Err(c_trap),
+            );
+        }
+    }
+    rows.assert_empty();
+}

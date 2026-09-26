@@ -171,6 +171,12 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.is_root(id)
     }
 
+    /// Whether `node` checks nothing where its activation is false
+    /// ([`crate::dag::Dag::is_activation_gated`], the one gate declaration).
+    pub fn is_activation_gated(self, node: &DagNode) -> bool {
+        self.dag.is_activation_gated(node)
+    }
+
     pub fn topological_order(self) -> Vec<NodeId> {
         self.dag.topological_order()
     }

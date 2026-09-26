@@ -72,11 +72,11 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 }
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible_elementwise(node: &DagNode) -> bool {
+fn is_fusible_elementwise(dag: &Dag, node: &DagNode) -> bool {
     // A checking operation under an activation substitutes operands its
     // checks accept where the activation is false (spec/10 section 3.2);
     // it stays its own kernel, where both lanes substitute them.
-    if node.is_activation_gated() {
+    if dag.is_activation_gated(node) {
         return false;
     }
     // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
@@ -170,7 +170,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node) || is_claim_barrier(node) {
+        if !is_fusible_elementwise(dag, node) || is_claim_barrier(node) {
             continue;
         }
 
@@ -195,7 +195,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 // activation checks under that activation, so it starts its
                 // own chain (spec/10 section 3.2).
                 Some(c)
-                    if is_fusible_elementwise(c)
+                    if is_fusible_elementwise(dag, c)
                         && !is_claim_barrier(c)
                         && c.owner == node.owner =>
                 {

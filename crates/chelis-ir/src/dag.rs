@@ -2205,28 +2205,10 @@ impl DagNode {
         }
     }
 
-    /// Whether this node checks nothing where its activation is false
-    /// (spec/10 section 3.2), by one of the mechanisms
-    /// [`RuntimeCheck`] names: every class except [`RuntimeCheck::Nothing`],
-    /// which has nothing to gate, [`RuntimeCheck::Random`], whose own
-    /// activation operand gates it, and [`RuntimeCheck::Ungated`].
-    pub fn is_activation_gated(&self) -> bool {
-        self.owner.activation.is_some()
-            && match self.runtime_check() {
-                RuntimeCheck::OperandValues
-                | RuntimeCheck::MeanDivisor
-                | RuntimeCheck::EmptyAxis
-                | RuntimeCheck::MovementBounds
-                | RuntimeCheck::ExtentClaims
-                | RuntimeCheck::Abort => true,
-                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
-            }
-    }
-
     /// What this node checks at run time ([`RuntimeCheck`]): the one
     /// exhaustive declaration, with no wildcard arm, from which the trap
     /// seed ([`Dag::is_observable_root`]) and the false-activation behaviour
-    /// ([`Self::inactive_operand`], [`Self::is_activation_gated`]) are both
+    /// ([`Self::inactive_operand`], [`Dag::is_activation_gated`]) are both
     /// read. A new operation does not compile until it states which class
     /// it is in.
     ///
@@ -2396,7 +2378,8 @@ pub enum RuntimeCheck {
     /// ascription's, a reshape target's). Where the activation is false it
     /// compares nothing; its value is unchanged. A seed.
     ExtentClaims,
-    /// A draw or key operation, gated by its own activation operand and
+    /// A draw or key operation, gated by its owner's activation in its own
+    /// emitter (it draws or validates nothing where it is false) and
     /// seeded by the per-guard rule ([`Dag::random_node_may_trap`]).
     Random,
     /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
@@ -2719,15 +2702,63 @@ impl Dag {
         let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
         match node.runtime_check() {
             RuntimeCheck::Abort => true,
-            RuntimeCheck::OperandValues => !synthesized_adjoint,
-            RuntimeCheck::EmptyAxis => !synthesized_adjoint && self.reduced_axis_may_be_empty(node),
-            RuntimeCheck::MovementBounds => {
-                !synthesized_adjoint && self.movement_bounds_may_fail(node)
-            }
-            RuntimeCheck::ExtentClaims => !synthesized_adjoint,
-            RuntimeCheck::Random => self.random_node_may_trap(node),
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
+            RuntimeCheck::Random => self.check_may_fail(node),
             RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
         }
+    }
+
+    /// Whether `node`'s run-time check ([`DagNode::runtime_check`]) can
+    /// fail for some input: its class checks something, and no static fact
+    /// rules the failure out. The facts are per class: a reduced axis of
+    /// nonzero literal extent is not empty
+    /// ([`Self::reduced_axis_may_be_empty`]), movement bounds statically in
+    /// range are in range ([`Self::movement_bounds_may_fail`]), and a random
+    /// node's literal in-range controls pass ([`Self::random_node_may_trap`]).
+    /// The trap seed ([`Self::is_observable_root`]) and the activation gate
+    /// ([`Self::is_activation_gated`]) both read it.
+    pub fn check_may_fail(&self, node: &DagNode) -> bool {
+        match node.runtime_check() {
+            RuntimeCheck::Nothing => false,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::MeanDivisor
+            | RuntimeCheck::ExtentClaims
+            | RuntimeCheck::Abort
+            | RuntimeCheck::Ungated => true,
+            RuntimeCheck::EmptyAxis => self.reduced_axis_may_be_empty(node),
+            RuntimeCheck::MovementBounds => self.movement_bounds_may_fail(node),
+            RuntimeCheck::Random => self.random_node_may_trap(node),
+        }
+    }
+
+    /// Whether `node` checks nothing where its activation is false (spec/10
+    /// section 3.2): it has an activation, its check can fail
+    /// ([`Self::check_may_fail`]; a node whose check no input fails needs
+    /// no gate and computes as usual), and its class is one the lanes gate,
+    /// by one of the mechanisms [`RuntimeCheck`] names: every class but
+    /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
+    /// key-operation emitters read the owner's activation themselves, and
+    /// [`RuntimeCheck::Ungated`].
+    ///
+    /// The one gate declaration every lane reads: the evaluator and the C
+    /// emitter gate exactly these nodes, fusion keeps each in its own
+    /// kernel, and the HIP emitter refuses one whose kernel does not take
+    /// the gate.
+    pub fn is_activation_gated(&self, node: &DagNode) -> bool {
+        node.owner.activation.is_some()
+            && self.check_may_fail(node)
+            && match node.runtime_check() {
+                RuntimeCheck::OperandValues
+                | RuntimeCheck::MeanDivisor
+                | RuntimeCheck::EmptyAxis
+                | RuntimeCheck::MovementBounds
+                | RuntimeCheck::ExtentClaims
+                | RuntimeCheck::Abort => true,
+                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+            }
     }
 
     /// Whether the reduced axis of an [`RuntimeCheck::EmptyAxis`] node can
