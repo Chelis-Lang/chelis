@@ -294,6 +294,10 @@ accumulator. The emitter's accumulator ABI therefore declares only consuming
 entry points, `chelis_list_push_moved` and `chelis_list_extend_moved`, so the
 move cannot be realized as a retaining copy that leaves the moved owner live
 (chelis#2508). A `filter` step releases the item its predicate rejects.
+`filter_step` and `partition_step` read the item after the predicate, so the
+predicate is lowered one scope deeper than the item: no use of the item there
+is its last, and a consuming use, such as a by-value call to a named
+definition, receives its own copy (chelis#2577).
 
 ### Manifested roots
 
