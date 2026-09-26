@@ -1357,16 +1357,18 @@ fn assert_projection_without_origin_fails_explicitly(native: bool) {
                   index(grown, 0i64)\n\
                   }\n\
                   out = choose(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]))\n";
+    // spec/04 section 4.7 (chelis#2598): `append` produces every tensor in
+    // the list it returns, so the projection is attributed to `append`, not
+    // guessed from `index` and not left without provenance.
     let (ok, output) = run(source, native);
     assert!(!ok, "{source}\n{output}");
+    assert_claim(&output, "append", 2);
     assert!(
-        output.contains(
-            "host runtime: pending result claim reached a tensor without producer provenance"
-        ),
+        !output.contains("numeric trap: domain in index"),
         "{output}"
     );
     assert!(
-        !output.contains("numeric trap: domain in index"),
+        !output.contains("without producer provenance"),
         "{output}"
     );
 }
