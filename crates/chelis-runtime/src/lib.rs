@@ -7108,6 +7108,7 @@ unsafe fn value_to_string_inline(value: chelis_value) -> String {
         chelis_value_tag::CHELIS_VALUE_TUPLE => tuple_to_string(value.payload.tuple),
         chelis_value_tag::CHELIS_VALUE_DICT => dict_to_string(value.payload.dict),
         chelis_value_tag::CHELIS_VALUE_ADT => adt_to_string(value.payload.adt),
+        chelis_value_tag::CHELIS_VALUE_OPTION => option_to_string(value.payload.option),
         _ => unreachable!("validate_value rejects unknown tags"),
     }
 }
@@ -7332,6 +7333,15 @@ unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
     }
     out.push(')');
     out
+}
+
+/// An option renders as the constructor it holds, exactly as `chelis eval`
+/// renders `Some` and `None` (chelis#2576).
+unsafe fn option_to_string(option: *const chelis_option) -> String {
+    match (*option).value {
+        Some(value) => format!("Some({})", value_to_string_inline(value)),
+        None => "None".to_owned(),
+    }
 }
 
 /// One tensor element's text per the frozen observation contract
