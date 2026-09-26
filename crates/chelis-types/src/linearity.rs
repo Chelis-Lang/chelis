@@ -2231,7 +2231,8 @@ fn rename_free_vars(
                         let mut binds = bind_kids.to_vec();
                         let mut index = 0;
                         while index + 1 < binds.len() {
-                            binds[index + 1] = rename_free_vars(&bind_kids[index + 1], renames, bound);
+                            binds[index + 1] =
+                                rename_free_vars(&bind_kids[index + 1], renames, bound);
                             if let Some(name) = symbol_name(&bind_kids[index]) {
                                 let_scope.insert(name.to_string());
                             }

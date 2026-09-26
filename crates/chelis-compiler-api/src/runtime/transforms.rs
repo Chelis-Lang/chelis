@@ -432,8 +432,9 @@ impl<'a> EvalContext<'a> {
 
         // Caller closures are bound around the application above, never
         // written into the definition table, where a declaration's own call
-        // of a same-named function would find them (chelis#2588, #2619).
-        let program_defs = self.program.defs().clone();
+        // of a same-named function would find them (chelis#2588, #2619). The
+        // table is therefore the program's own for every application.
+        let program_defs = self.program.defs();
 
         // Fail-closed for host-runtime-only builtins reached through
         // grad/vmap. The IR lowerer doesn't recognize `tensor_scan`
@@ -449,7 +450,7 @@ impl<'a> EvalContext<'a> {
         // unrelated top-level def that calls `tensor_scan` but is not
         // reached from the transform target does NOT trigger a rejection,
         // so a genuinely differentiable program is not falsely blocked.
-        let host_only_hit = find_reachable_host_only_builtin_call(&app_expr, &program_defs);
+        let host_only_hit = find_reachable_host_only_builtin_call(&app_expr, program_defs);
         if let Some(name) = host_only_hit {
             // Keep the verb honest per transform: `grad` differentiates,
             // `vmap` vectorizes. Both fail for the same root cause (no
@@ -476,19 +477,25 @@ impl<'a> EvalContext<'a> {
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,
         // so the result claim still refers to its activation's witness.
-        let lowering = if let Some(session) = &self.session {
-            SubexprLoweringContext::from_checked_program(
-                session.program(),
-                program_defs,
-                self.declared_signatures.clone(),
-            )
-        } else {
-            SubexprLoweringContext::new(
-                self.program.type_env().clone(),
-                program_defs,
-                self.declared_signatures.clone(),
-            )
-        };
+        //
+        // The context is a pure function of the program's fixed tables, so
+        // it is prepared once per evaluation context rather than per
+        // application (chelis#2439).
+        let lowering = self.program.transform_lowering_context(|| {
+            if let Some(session) = &self.session {
+                SubexprLoweringContext::from_checked_program(
+                    session.program(),
+                    program_defs.clone(),
+                    self.declared_signatures.clone(),
+                )
+            } else {
+                SubexprLoweringContext::new(
+                    self.program.type_env().clone(),
+                    program_defs.clone(),
+                    self.declared_signatures.clone(),
+                )
+            }
+        });
         let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context(
             &app_expr,
             scoped_types,
@@ -1147,8 +1154,7 @@ impl FrameCaptures<'_> {
     fn stage(&mut self, value: &RuntimeValue) -> Option<String> {
         let span = self.span;
         let bound = match value {
-            RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_)
-                if !matches!(value, RuntimeValue::Scalar(payload) if payload.dtype().is_integer()) =>
+            RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_) if !matches!(value, RuntimeValue::Scalar(payload) if payload.dtype().is_integer()) =>
             {
                 let (tensor, ty) = runtime_value_to_dag_input_lossy(value, None, 0).ok()?;
                 let placeholder = self.fresh_name();
