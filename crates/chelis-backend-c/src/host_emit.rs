@@ -2026,11 +2026,24 @@ fn host_result_binding_index(bindings: &[HostBinding], body: &HostExpr) -> Optio
     found
 }
 
-/// One declaration's ordered literal axes. Its invocation frame is forwarded
+/// One declaration's ordered result axes. Its invocation frame is forwarded
 /// unchanged through branches and calls; the selected producer supplies `<op>`.
 struct HostResultClaim {
     rank: usize,
-    axes: Vec<(usize, usize)>,
+    axes: Vec<(usize, HostResultRequirement)>,
+}
+
+/// What one declared result axis requires of the returned value.
+enum HostResultRequirement {
+    Literal(usize),
+    /// A binder the invocation's tensor parameter axis witnesses. Its value
+    /// is read once, when the frame is built; the binder and the parameter
+    /// axis are retained for the trap context (spec/04 section 4.7).
+    Named {
+        claim: String,
+        parameter: String,
+        axis: usize,
+    },
 }
 
 impl HostResultClaim {
@@ -2042,30 +2055,54 @@ impl HostResultClaim {
                 .iter()
                 .enumerate()
                 .filter_map(|(axis, dim)| match dim {
-                    DimInfo::Lit(required) => Some((axis, *required)),
+                    DimInfo::Lit(required) => {
+                        Some((axis, HostResultRequirement::Literal(*required)))
+                    }
                     DimInfo::Named(_, _) => None,
                 })
                 .collect(),
         }
     }
 
+    /// A named axis resolves to the binder's first witness among the tensor
+    /// parameters, in signature order: the canonical side of the entry plan's
+    /// comparisons. A binder no tensor parameter declares adds nothing.
     fn of(function: &HostFunction) -> Option<Self> {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
+        };
+        let witness = |binder: &str| {
+            function.params.iter().find_map(|param| {
+                let HostAbiType::Tensor(param_ty) = &param.ty else {
+                    return None;
+                };
+                param_ty.dims.iter().position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
+                    .map(|axis| (param.name.clone(), axis))
+            })
         };
         let axes = ty
             .dims
             .iter()
             .enumerate()
+            .filter(|(axis, _)| {
+                !function.helper_result_claim_axes.contains(&chelis_ir::dag::RtAxis::Lit(
+                    i32::try_from(*axis).expect("rank fits i32"),
+                ))
+            })
             .filter_map(|(axis, dim)| match dim {
-                DimInfo::Lit(required)
-                    if !function.helper_result_claim_axes.contains(
-                        &chelis_ir::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
-                    ) =>
-                {
-                    Some((axis, *required))
+                DimInfo::Lit(required) => Some((axis, HostResultRequirement::Literal(*required))),
+                DimInfo::Named(binder, _) if binder != "*" => {
+                    let (parameter, source_axis) = witness(binder)?;
+                    Some((
+                        axis,
+                        HostResultRequirement::Named {
+                            claim: chelis_ir::lower::extent_binder_label(binder),
+                            parameter,
+                            axis: source_axis,
+                        },
+                    ))
                 }
-                _ => None,
+                DimInfo::Named(_, _) => None,
             })
             .collect::<Vec<_>>();
         (!axes.is_empty()).then_some(Self {
@@ -2083,9 +2120,24 @@ impl HostResultClaim {
         claims_name: Option<&str>,
         outer_claims_first: bool,
     ) -> Vec<String> {
-        let mut lines = vec![format!("{indent}const int64_t {axes_name}[][2] = {{")];
-        for (axis, required) in &self.axes {
-            lines.push(format!("{indent}    {{ {axis}, {required} }},"));
+        let mut lines = vec![format!(
+            "{indent}const __chelis_host_result_axis {axes_name}[] = {{"
+        )];
+        for (axis, requirement) in &self.axes {
+            lines.push(match requirement {
+                HostResultRequirement::Literal(required) => {
+                    format!("{indent}    {{ {axis}, {required}, NULL, NULL, 0 }},")
+                }
+                HostResultRequirement::Named {
+                    claim,
+                    parameter,
+                    axis: source_axis,
+                } => format!(
+                    "{indent}    {{ {axis}, chelis_tensor_shape({parameter}, {source_axis}), {}, {}, {source_axis} }},",
+                    c_string_literal(claim),
+                    c_string_literal(parameter),
+                ),
+            });
         }
         lines.push(format!("{indent}}};"));
         lines.push(format!(
@@ -2101,6 +2153,22 @@ impl HostResultClaim {
         }
         lines
     }
+}
+
+/// A C string literal spelling `text`. Binder labels and parameter names are
+/// identifiers, but the escape keeps any byte a literal cannot hold verbatim.
+fn c_string_literal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for byte in text.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b' '..=b'~' => out.push(char::from(byte)),
+            _ => out.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// This context is translation-unit private. Public wrappers retain their
@@ -2126,11 +2194,22 @@ fn private_host_function_params(params: &str) -> String {
 }
 
 fn append_host_result_claim_support(out: &mut Vec<String>) {
-    out.push(r#"typedef struct __chelis_host_result_claim {
+    out.push(r#"/* One declared result axis. `claim` is NULL for a literal requirement;
+   otherwise it is the authored binder and `source` the parameter whose
+   `source_axis` supplied `required`. */
+typedef struct __chelis_host_result_axis {
+    int64_t axis;
+    int64_t required;
+    const char *claim;
+    const char *source;
+    int64_t source_axis;
+} __chelis_host_result_axis;
+
+typedef struct __chelis_host_result_claim {
     const struct __chelis_host_result_claim *next;
     int64_t rank;
     int64_t count;
-    const int64_t (*axes)[2];
+    const __chelis_host_result_axis *axes;
     int outer_claims_first;
 } __chelis_host_result_claim;
 
@@ -2265,18 +2344,24 @@ static const __chelis_host_result_origin **__chelis_host_result_origin_children(
 
 fn append_host_result_claim_checks(out: &mut Vec<String>) {
     out.push(r#"
+static void __chelis_host_result_claim_trap(const __chelis_host_result_axis *claim, const char *op, int64_t observed_axis, int64_t observed, const char *trap) {
+    if (claim->claim == NULL) {
+        fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)claim->required, (long long)claim->required, op, (long long)observed_axis, (long long)observed);
+    } else {
+        fprintf(stderr, "extent `%s`: %s axis %lld = %lld, %s axis %lld = %lld\n", claim->claim, claim->source, (long long)claim->source_axis, (long long)claim->required, op, (long long)observed_axis, (long long)observed);
+    }
+    chelis_numeric_trap(trap);
+}
+
 static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
     if (claims == NULL) return;
     if (claims->outer_claims_first) __chelis_check_host_result_extent_claims(claims->next, rank, observations, count, op, trap);
     {
         if (rank == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
             for (int64_t j = 0; j < count; ++j) {
-                if (claims->axes[i][0] != observations[j][0]) continue;
-                int64_t required = claims->axes[i][1];
-                int64_t observed = observations[j][2];
-                if (required != observed) {
-                    fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)required, (long long)required, op, (long long)observations[j][1], (long long)observed);
-                    chelis_numeric_trap(trap);
+                if (claims->axes[i].axis != observations[j][0]) continue;
+                if (claims->axes[i].required != observations[j][2]) {
+                    __chelis_host_result_claim_trap(&claims->axes[i], op, observations[j][1], observations[j][2], trap);
                 }
             }
         }
@@ -2289,12 +2374,10 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
     if (claims->outer_claims_first) __chelis_check_host_result_claims(claims->next, value, op, trap);
     {
         if (chelis_tensor_rank(value) == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
-            int64_t axis = claims->axes[i][0];
-            int64_t required = claims->axes[i][1];
+            int64_t axis = claims->axes[i].axis;
             int64_t observed = chelis_tensor_shape(value, axis);
-            if (observed != required) {
-                fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)required, (long long)required, op, (long long)axis, (long long)observed);
-                chelis_numeric_trap(trap);
+            if (observed != claims->axes[i].required) {
+                __chelis_host_result_claim_trap(&claims->axes[i], op, axis, observed, trap);
             }
         }
     }
@@ -2558,12 +2641,10 @@ fn emit_function(
         &delegated_entry_guards,
         Some(&entry_work.body),
     )?);
-    // Entry guards still read parameters the body does not use. Their
-    // verified entry drops run only after those witness reads finish.
-    emitter.emit_entry_terminals(entry, authored)?;
     // A frame belongs to this invocation, not to a selected callee name.
     // The expression spine forwards the frame; branch arms share its immutable
-    // contents and arguments/sibling bindings never inherit it.
+    // contents and arguments/sibling bindings never inherit it. A named axis
+    // reads its witnessing parameter here, before entry drops can release it.
     match HostResultClaim::of(function) {
         Some(claim) => emitter.lines.extend(claim.frame_lines(
             &emitter.indent,
@@ -2575,6 +2656,9 @@ fn emit_function(
         )),
         None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
+    // Entry guards and the frame still read parameters the body does not
+    // use. Their verified entry drops run only after those reads finish.
+    emitter.emit_entry_terminals(entry, authored)?;
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;

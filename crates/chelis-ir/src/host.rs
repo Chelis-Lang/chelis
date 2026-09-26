@@ -5570,12 +5570,26 @@ fn lower_def_body_kernel(
     )))
 }
 
+/// The result axes a whole-body helper's lowering owns: every literal axis,
+/// and every named axis whose binder a tensor parameter witnesses, since the
+/// helper's graph carries that parameter's signature witness. A binder
+/// witnessed only outside the tensor parameters stays with the host frame.
 fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    let witnessed = |binder: &str| {
+        signature.params.iter().any(|param| {
+            matches!(&param.ty, HostTypeTerm::Tensor(ty)
+                if ty.dims.iter().any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder)))
+        })
+    };
     sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
         .into_iter()
         .flat_map(|ty| ty.dims.into_iter().enumerate())
         .filter_map(|(axis, dim)| {
-            matches!(dim, crate::dag::DimInfo::Lit(_)).then(|| {
+            let owned = match &dim {
+                crate::dag::DimInfo::Lit(_) => true,
+                crate::dag::DimInfo::Named(binder, _) => binder != "*" && witnessed(binder),
+            };
+            owned.then(|| {
                 crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits i32"))
             })
         })

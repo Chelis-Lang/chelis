@@ -2564,7 +2564,8 @@ fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
     format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
 }
 
-pub(crate) fn extent_binder_label(binder: &str) -> String {
+/// The printable spelling of a dimension binder in trap context.
+pub fn extent_binder_label(binder: &str) -> String {
     let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
         return binder.to_owned();
     };
@@ -8579,12 +8580,18 @@ impl<'program> LowerCtx<'program> {
                 // literal obligation even outside generic/helper lowering.
                 // Stamping that literal onto the carrier's input would turn
                 // the body's result claim into a signature requirement.
+                // An axis read unchanged from an input the invocation does not
+                // witness has no other owner: without the token, the claim
+                // would be dropped (chelis#2608).
                 if literal
                     && (self.literal_result_claim_ownership
                         == LiteralResultClaimOwnership::AuthoredTensorHelper
                         || (authored_result_claim
                             && (self.same_shape_result_owner_is_admitted(id, axis)
-                                || self.runtime_carrier_result_owner_is_admitted(id, axis))))
+                                || self.runtime_carrier_result_owner_is_admitted(id, axis)
+                                || crate::axis_sources::result_axis_is_unwitnessed_input_axis(
+                                    &self.dag, id, axis,
+                                ))))
                     && self.literal_result_token_owner_is_admitted(id, axis)
                 {
                     let value = match &self.dag.get(required).expect("literal requirement").op {

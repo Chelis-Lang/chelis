@@ -1080,7 +1080,7 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
             continue;
         };
         let line = line.trim();
-        if line == "const int64_t __chelis_result_axes[][2] = {" {
+        if line == "const __chelis_host_result_axis __chelis_result_axes[] = {" {
             reading_axes = true;
             continue;
         }
@@ -1088,14 +1088,29 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
             if line == "};" {
                 reading_axes = false;
             } else {
+                // `{ axis, required, claim, source, source_axis }`: a literal
+                // row has NULL labels; a named row reads its witnessing
+                // parameter axis and names the binder.
                 let row = line
                     .strip_prefix("{ ")
                     .and_then(|s| s.strip_suffix(" },"))
-                    .expect("a declared-result row has two literal integers");
-                let (axis, required) = row.split_once(", ").expect("axis and requirement");
+                    .expect("a declared-result row is one braced initializer");
+                let (axis, rest) = row.split_once(", ").expect("axis and requirement");
                 axis.parse::<usize>().expect("literal axis");
-                required.parse::<usize>().expect("literal requirement");
-                axes.push((axis.to_string(), required.to_string()));
+                let required = match rest.strip_suffix(", NULL, NULL, 0") {
+                    Some(literal) => {
+                        literal.parse::<usize>().expect("literal requirement");
+                        literal.to_string()
+                    }
+                    None => {
+                        let (_, labels) = rest
+                            .split_once("), ")
+                            .expect("a named row reads its witnessing parameter axis");
+                        let (claim, _) = labels.split_once(", ").expect("binder and source");
+                        claim.trim_matches('"').to_string()
+                    }
+                };
+                axes.push((axis.to_string(), required));
             }
             continue;
         }

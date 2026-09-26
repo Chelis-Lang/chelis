@@ -1207,6 +1207,10 @@ impl ExtentOrigin {
 fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
     let mut local: Option<ExtentOrigin> = None;
     let mut literal: Option<ExtentOrigin> = None;
+    // A restating axis claims the name without declaring it; its forwarded
+    // extent is what the name's guard compares. It supplies the value only
+    // when nothing else carries the name, where no class can form.
+    let mut restated: Option<ExtentOrigin> = None;
     for node in dag.nodes() {
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if !matches!(dim, DimInfo::Named(other, _) if other == name) {
@@ -1215,6 +1219,10 @@ fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
             let Some(origin) = resolve_axis_extent(dag, node.id, axis) else {
                 continue;
             };
+            if restamps_input_axis(dag, node.id, axis) {
+                restated = restated.or(Some(origin));
+                continue;
+            }
             match origin {
                 ExtentOrigin::ExternalAxis { .. } => return Some(origin),
                 ExtentOrigin::Literal(_) if literal.is_none() => literal = Some(origin),
@@ -1227,7 +1235,7 @@ fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
             }
         }
     }
-    local.or(literal)
+    local.or(literal).or(restated)
 }
 
 /// The stamped extent claim a class groups by.
@@ -1374,6 +1382,9 @@ impl RuntimeDimClass {
 /// result classes use their output owner's interface observation instead:
 /// an available operand does not turn its consumer into an interface value.
 fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
+    if restamps_input_axis(dag, member.node, member.axis) {
+        return false;
+    }
     match member.source {
         AxisSource::Literal { .. } => true,
         AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
@@ -1433,6 +1444,39 @@ fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
 /// An ANONYMOUS dimension is not a claim: nothing renders it, distinct
 /// runtime extents share the spelling, and grouping by it would identify
 /// unrelated axes, which is the string-matching defect this module removes.
+/// Whether a pass-through output axis restates its input's axis under a
+/// different claim: a same-shape `neg` from `[n]` stamped `[m]`
+/// (chelis#2512). Nothing in the interface relates the two extents; the
+/// equality comes from that operation alone, so spec/04 section 4.7 makes it
+/// a guard the operation owns, at its own source position. A forwarded axis
+/// whose input carries no claim, or the same claim, restates nothing.
+fn restamps_input_axis(dag: &Dag, node: NodeId, axis: usize) -> bool {
+    let Some(owner) = dag.get(node) else {
+        return false;
+    };
+    if sets_axis(&owner.op, axis) {
+        return false;
+    }
+    let Some(claim @ DimClaim::Name(_)) = owner.output_type.dims.get(axis).and_then(axis_claim)
+    else {
+        return false;
+    };
+    let Some(AxisSource::InputAxis {
+        input,
+        axis: RtAxis::Lit(read),
+    }) = output_axis_sources(dag, node).get(axis).cloned()
+    else {
+        return false;
+    };
+    owner
+        .inputs
+        .get(input)
+        .and_then(|input| dag.get(*input))
+        .and_then(|input| input.output_type.dims.get(usize::try_from(read).ok()?))
+        .and_then(axis_claim)
+        .is_some_and(|input_claim| input_claim != claim)
+}
+
 fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
     match dim {
         DimInfo::Lit(value) => Some(DimClaim::Literal(*value)),
@@ -1881,7 +1925,9 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             let Some(source) = sources.get(axis) else {
                 continue;
             };
-            if !is_member(&node.op, axis, &claim, source) {
+            if !is_member(&node.op, axis, &claim, source)
+                && !restamps_input_axis(dag, node.id, axis)
+            {
                 continue;
             }
             let entry = OrderedMember::new(
@@ -3258,6 +3304,19 @@ fn caller_witness_for_axis(
     })
 }
 
+/// Whether `owner`'s `axis` is an ABI input axis read through administrative
+/// carriers only, with no invocation witness observing it. Such an axis has
+/// no body producer: a literal result claim on it is an interface-entry
+/// obligation of that input (spec/04-type-system.md section 4.7), and no other
+/// owner exists to carry it.
+pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, axis: usize) -> bool {
+    matches!(
+        literal_result_interface_observation(dag, owner, axis),
+        Some(observation @ LiteralResultInterfaceObservation::InputAxis { .. })
+            if observation.entry_axis(dag).is_some()
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiteralResultInterfaceObservation {
     Witness(NodeId),
@@ -3699,6 +3758,25 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         },
                         op: crate::grad::risc_op_name(&node.op),
                         observed: LocalGuardObservation::ComputedExtent(observed),
+                        activation: None,
+                    },
+                ));
+                continue;
+            }
+            if restamps_input_axis(dag, member.node, member.axis) {
+                // The restating operation observes the extent it forwards,
+                // before it allocates, and names itself.
+                let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                sites.push((
+                    (site.producer.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        canonical: match resolved {
+                            Some(value) => CanonicalExtent::Resolved(value),
+                            None => CanonicalExtent::Binder(name.clone()),
+                        },
+                        op: site.operation,
+                        observed: site.observation,
                         activation: None,
                     },
                 ));
