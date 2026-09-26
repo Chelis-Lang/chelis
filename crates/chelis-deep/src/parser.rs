@@ -36,6 +36,17 @@ pub enum ParseError {
     #[error("empty list at byte {offset}")]
     EmptyList { offset: usize },
 
+    /// The input nests deeper than the parser's stack segment holds
+    /// (chelis#2425, [`crate::nesting`]). The parser is recursive descent, so
+    /// it refuses the next level while less than
+    /// [`crate::nesting::STACK_RED_ZONE_BYTES`] of its segment remains instead
+    /// of overflowing, and names the byte where it stopped.
+    #[error(
+        "Deep input nests deeper than the parser supports at byte {offset}; \
+         reduce the nesting depth of this expression"
+    )]
+    NestingTooDeep { offset: usize },
+
     /// A `span` metadata value contains a forbidden character per
     /// `spec/03-deep-syntax.md` §1.1.1. Span IDs must not contain ASCII
     /// control characters (U+0000..=U+001F except U+0020) or U+007F (DEL).
@@ -153,7 +164,18 @@ impl<'a> RawParser<'a> {
         Ok(exprs)
     }
 
+    /// Every recursive descent of the parser passes through here, so this is
+    /// the one place the nesting guard needs to stand.
     fn parse_expr(&mut self) -> Result<RawExpr, ParseError> {
+        let Some(_descent) = crate::nesting::Descent::enter() else {
+            return Err(ParseError::NestingTooDeep {
+                offset: self.current_offset(),
+            });
+        };
+        self.parse_expr_unguarded()
+    }
+
+    fn parse_expr_unguarded(&mut self) -> Result<RawExpr, ParseError> {
         let tok = self.peek().ok_or(ParseError::UnexpectedEof {
             offset: self.current_offset(),
         })?;
@@ -475,8 +497,11 @@ fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>
 
 /// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
 /// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
+///
+/// It runs on the parser's own stack segment, so its nesting limit does not
+/// depend on the caller's stack (chelis#2425, [`crate::nesting`]).
 fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExpr>, ParseError> {
-    RawParser::with_source(tokens, source).parse_exprs()
+    crate::nesting::on_parse_segment(|| RawParser::with_source(tokens, source).parse_exprs())
 }
 
 pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
@@ -1010,5 +1035,32 @@ mod tests {
     fn parse_empty_input() {
         let exprs = p("");
         assert!(exprs.is_empty());
+    }
+
+    /// chelis#2425: input nested deeper than the parser's segment is a
+    /// located `NestingTooDeep`, not a stack overflow, and the byte it names
+    /// does not depend on the stack of the thread that calls the parser.
+    #[test]
+    fn nesting_beyond_the_parser_segment_is_located_and_caller_independent() {
+        const DEPTH: usize = 1_000_000;
+        let source = format!("{}x{}", "(a ".repeat(DEPTH), ")".repeat(DEPTH));
+        let offset_on = |stack_bytes: usize| {
+            let source = source.clone();
+            std::thread::Builder::new()
+                .stack_size(stack_bytes)
+                .spawn(move || match parse_raw_str(&source) {
+                    Err(ParseError::NestingTooDeep { offset }) => offset,
+                    other => panic!("expected NestingTooDeep, got {:?}", other.map(|v| v.len())),
+                })
+                .expect("spawn parser thread")
+                .join()
+                .expect("parser thread")
+        };
+        let small_stack = offset_on(256 * 1024);
+        let large_stack = offset_on(64 * 1024 * 1024);
+        assert_eq!(small_stack, large_stack);
+        assert!(small_stack > 0 && small_stack < 3 * DEPTH);
+        // The offset names the token at which the parser declined to descend.
+        assert!(matches!(source.as_bytes()[small_stack], b'(' | b'a'));
     }
 }

@@ -164,6 +164,16 @@ pub(super) fn prove_with_injection(
         }
     };
 
+    // The probe is declared in the module that defines the first opaque
+    // binder's type, since the sampled binder values construct that type.
+    let home_type = binders
+        .iter()
+        .find_map(|binder| match binder {
+            Binder::Opaque { inv, .. } => Some(inv.type_name.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
     let mut rng = crate::opaque::GenRng::new(seed);
     let mut accepted = 0usize;
     let gen_budget = samples_needed.saturating_mul(100).max(200);
@@ -250,7 +260,7 @@ pub(super) fn prove_with_injection(
         // Precondition filter (composed with the injected invariant by the
         // generator already restricting opaque binders).
         if !pre_deep.is_empty() {
-            match eval_bool_in_module(&exprs, &invariants, &bindings, &conjoin(&pre_deep)) {
+            match eval_bool_in_module(&exprs, &home_type, &bindings, &conjoin(&pre_deep)) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => return outcome_error(property_name, seed, e),
@@ -258,7 +268,7 @@ pub(super) fn prove_with_injection(
         }
 
         accepted += 1;
-        match eval_bool_in_module(&exprs, &invariants, &bindings, &body_deep) {
+        match eval_bool_in_module(&exprs, &home_type, &bindings, &body_deep) {
             Ok(true) => {}
             Ok(false) => {
                 let cx = counterexample(&bindings);
@@ -376,19 +386,24 @@ fn injection_assumptions(
     samples: usize,
     seed: u64,
 ) -> Vec<AssumptionRecord> {
+    // A reef-linked program carries linker-format names; the record names
+    // the source spellings so a package property's assumption matches the
+    // same property's assumption as a bare file (chelis#2416).
+    let property_name = chelis_types::demangle_ident(property_name);
     binders
         .iter()
         .filter_map(|binder| match binder {
-            Binder::Opaque { name, inv } => Some(
+            Binder::Opaque { name, inv } => Some({
+                let type_name = chelis_types::demangle_ident(&inv.type_name);
                 AssumptionRecord::new(
-                    format!("invariant:{}:binder:{name}", inv.type_name),
+                    format!("invariant:{type_name}:binder:{name}"),
                     Some(AssumptionDischarge::new(
                         DischargeMethod::Fuzz,
                         serde_json::json!({
                             "status": "validated",
                             "property": property_name,
                             "binder": name,
-                            "source_type": inv.type_name,
+                            "source_type": type_name,
                             "samples": samples,
                             "seed": seed,
                             "tolerance": FUZZ_TOLERANCE,
@@ -401,7 +416,7 @@ fn injection_assumptions(
                         "seed": seed,
                     }))),
                 )
-                .with_source(inv.type_name.clone(), format!("binder:{name}"))
+                .with_source(type_name.clone(), format!("binder:{name}"))
                 // WI-8: stamp the prover-side discharge tier on the
                 // binder-matched (injected) assumption. The injection path is
                 // the fuzz sampler discharging the invariant of an opaque
@@ -409,9 +424,9 @@ fn injection_assumptions(
                 .with_discharge_tier(DischargeTier::new(
                     DischargeMethod::Fuzz.engine(),
                     DischargeMethod::Fuzz,
-                    Some(format!("invariant:{}:binder:{name}", inv.type_name)),
-                )),
-            ),
+                    Some(format!("invariant:{type_name}:binder:{name}")),
+                ))
+            }),
             _ => None,
         })
         .collect()
@@ -461,17 +476,17 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
 }
 
 /// Evaluate a boolean Deep expr with the given binder value bindings,
-/// inside the defining module (so opaque construction/access is legal),
-/// with the invariant metadata stripped (so a `sum`-bearing invariant does
-/// not block IR lowering of the bound module).
+/// inside the module that defines `home_type` (so constructing and
+/// inspecting the binder's opaque values is legal), with the invariant
+/// metadata stripped (so a `sum`-bearing invariant does not block IR lowering
+/// of the bound module).
 fn eval_bool_in_module(
     exprs: &[Expr],
-    invariants: &[crate::opaque::OpaqueInvariant],
+    home_type: &str,
     bindings: &[(String, Expr, serde_json::Value)],
     body: &Expr,
 ) -> Result<bool, String> {
     use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
-    let probe = "__chelis_prop_probe";
     // Bind all binders via a let-chain around the body.
     let mut wrapped = body.clone();
     for (name, value, _) in bindings.iter().rev() {
@@ -480,16 +495,8 @@ fn eval_bool_in_module(
             vec![node("bind", vec![sym(name), value.clone()]), wrapped],
         );
     }
-    let probe_def = node("def", vec![sym(probe), wrapped]);
-    // Inject into the module that defines the first opaque type (any will
-    // do; binders are constructed via that module's ctors). If there are
-    // none, append at top level.
-    let type_name = invariants
-        .first()
-        .map(|i| i.type_name.as_str())
-        .unwrap_or("");
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
-    let program = inject_into_module(&stripped, type_name, probe_def);
+    let (program, probe) = inject_probe_into_defining_module(&stripped, home_type, wrapped);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
@@ -497,7 +504,7 @@ fn eval_bool_in_module(
             source,
             bindings: Default::default(),
         },
-        &[probe.to_string()],
+        &[probe],
     )
     .map_err(|e| {
         e.errors
@@ -739,6 +746,37 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
         out.push(def);
     }
     out
+}
+
+/// Declare `body` as a probe `def` inside the module that defines
+/// `type_name`, returning the program and the probe's binding name.
+///
+/// Module identity has two spellings, and the checker attributes a
+/// declaration to a module through whichever one the program uses
+/// (`chelis_types` `module_key_for_item`). A lexical program nests the
+/// defining module's declarations in a `module` wrapper, so the probe joins
+/// that wrapper. A reef-linked program has no wrappers: every declaration
+/// carries its module in its linker-format name, so the probe takes the
+/// linker-format name of the type's own module (chelis#2416). Deriving the
+/// probe's name from the type's name keeps the two attributions equal by
+/// construction.
+fn inject_probe_into_defining_module(
+    exprs: &[Expr],
+    type_name: &str,
+    body: Expr,
+) -> (Vec<Expr>, String) {
+    match chelis_types::linked_binding_in_module_of(type_name, "chelis_prop_probe") {
+        Some(probe) => {
+            let mut program = exprs.to_vec();
+            program.push(node("def", vec![sym(&probe), body]));
+            (program, probe)
+        }
+        None => {
+            let probe = "__chelis_prop_probe".to_string();
+            let def = node("def", vec![sym(&probe), body]);
+            (inject_into_module(exprs, type_name, def), probe)
+        }
+    }
 }
 
 fn inject_first_module(exprs: &[Expr], def: Expr) -> Vec<Expr> {
