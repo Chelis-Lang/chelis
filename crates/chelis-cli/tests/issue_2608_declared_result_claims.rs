@@ -306,11 +306,12 @@ fn check(case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, 14 of these rows
-// fail: every named trap row except `named_block_body_checks_at_entry` ran to
-// completion (`issue_1900_original` instead trapped on `main`'s literal claim),
-// and so did the two literal pass-through trap rows. `literal_identity`, the
-// entry row and the value rows passed there; they lock the controls.
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 15 of these 25
+// rows fail: every named trap row except `named_block_body_checks_at_entry` ran
+// to completion (`issue_1900_original` instead trapped on `main`'s literal
+// claim), and so did the two literal pass-through trap rows.
+// `literal_identity`, the entry row and the value rows passed there; they lock
+// the controls.
 #[test]
 fn declared_result_claims_are_checked_on_both_lanes() {
     let failures: Vec<String> = CASES.iter().filter_map(|case| check(case).err()).collect();
@@ -460,9 +461,11 @@ fn check_combinator(shape: &Combinator) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, every mismatch
-// below failed with an internal provenance error or an abort on at least one
-// lane, and the agreeing `fold` program aborted on both.
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 10 of these 11
+// fail: every mismatch ended in an internal provenance error, an abort or
+// another primitive's name on at least one lane, and the agreeing tuple `fold`
+// failed on eval. `map_result_in_an_untaken_arm` passed there; it locks the
+// untaken-arm control.
 #[test]
 fn a_combinator_result_is_produced_by_its_combinator() {
     let failures: Vec<String> = COMBINATORS
