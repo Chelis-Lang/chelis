@@ -33,8 +33,34 @@ struct Built {
 fn build(target: &str, source: &str) -> Built {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{STEM}.ch"));
-    let out_dir = dir.path().join(format!("{target}-out"));
     write_file(&path, source);
+    build_file(dir, &path, target, source)
+}
+
+/// The same program through the Deep build dispatch: `chelis deep` prints
+/// the Deep form, and building the `.dp` file takes `cmd_build_deep`.
+fn build_deep(target: &str, source: &str) -> Built {
+    let dir = tempdir().expect("tempdir");
+    let surf = dir.path().join("surf.ch");
+    write_file(&surf, source);
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["deep", surf.to_str().unwrap()])
+        .output()
+        .expect("chelis deep runs");
+    assert!(
+        deep.status.success(),
+        "`chelis deep` rejected:\n{source}\n{}",
+        String::from_utf8_lossy(&deep.stderr)
+    );
+    let path = dir.path().join(format!("{STEM}.dp"));
+    write_file(&path, &String::from_utf8(deep.stdout).expect("utf-8 Deep"));
+    build_file(dir, &path, target, source)
+}
+
+fn build_file(dir: TempDir, path: &Path, target: &str, source: &str) -> Built {
+    let out_dir = dir.path().join(format!("{target}-out"));
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -50,7 +76,8 @@ fn build(target: &str, source: &str) -> Built {
         .expect("chelis build runs");
     assert!(
         output.status.success(),
-        "`--target {target}` rejected:\n{source}\n{}",
+        "`--target {target}` rejected {}:\n{source}\n{}",
+        path.display(),
         String::from_utf8_lossy(&output.stderr)
     );
     Built { _dir: dir, out_dir }
@@ -143,6 +170,22 @@ fn hip_keeps_every_definition_whose_parameter_the_dag_entry_cannot_carry() {
 fn metal_keeps_every_definition_whose_parameter_the_dag_entry_cannot_carry() {
     for (parameter, c_parameter) in PARAMETERS {
         assert_keeps_authored_signature("metal", parameter, c_parameter);
+    }
+}
+
+/// The Deep build dispatch (`cmd_build_deep`) takes the same rule.
+#[test]
+fn the_deep_build_keeps_a_string_parameter_definition_on_both_device_targets() {
+    let source = "def f(s: string) -> tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])\n";
+    for target in ["hip", "metal"] {
+        let built = build_deep(target, source);
+        let declarations = header_declarations(target, &built);
+        let expected = format!(
+            "chelis_tensor* {}(chelis_string s);",
+            authored_c_symbol("f")
+        );
+        assert_eq!(declarations, [expected], "`--target {target}` from `.dp`");
+        compiles_as_object(target, &built);
     }
 }
 
