@@ -263,10 +263,19 @@ impl Rows {
     /// C must end as `expected`: `Ok(values)` returned, `Err(text)` aborted
     /// with stderr containing `text`.
     fn c(&mut self, row: &str, source: &str, inputs: &[Input], expected: Result<&[f64], &str>) {
-        let outcome = run_c(&compile_c(source), inputs);
+        // A build that fails (compiling or linking the generated C) is this
+        // row's failure, not a panic that would hide the rows after it.
+        let outcome =
+            std::panic::catch_unwind(|| run_c(&compile_c(source), inputs)).map_err(|panic| {
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|text| text.to_string()))
+                    .unwrap_or_default()
+            });
         match (&outcome, expected) {
-            (Ok(values), Ok(expected)) if values == expected => {}
-            (Err(stderr), Err(trap)) if stderr.contains(trap) => {}
+            (Ok(Ok(values)), Ok(expected)) if values == expected => {}
+            (Ok(Err(stderr)), Err(trap)) if stderr.contains(trap) => {}
             _ => self
                 .0
                 .push(format!("C {row}: ended {outcome:?}, expected {expected:?}")),
@@ -461,11 +470,10 @@ impl PerRow {
 /// and not when none does, in the evaluator and C, wherever the ascription
 /// sits.
 ///
-/// Evidentiary status: REGRESSION TEST for the no-row rows (at 224414e1f
-/// each traps on the claim in both lanes, or, produced before the arm,
-/// fails the evaluator with the unavailable activation); DISPOSITION LOCK
-/// for the rest, except that the produced-before evaluator rows are also
-/// regression tests.
+/// Evidentiary status: REGRESSION TEST for every no-row row (at 224414e1f
+/// each traps on the claim in both lanes) and every C `ProducedBefore` row
+/// (at 224414e1f the generated C read the arm's activation at the producer,
+/// before declaring it, and did not compile); DISPOSITION LOCK for the rest.
 #[test]
 fn a_vmapped_arms_local_ascription_checks_only_when_a_row_takes_the_arm() {
     let mut rows = Rows::default();
@@ -583,9 +591,11 @@ impl Abort {
 /// fires only where the arm is taken, in the evaluator, whose owner gate
 /// reads the abort's activation (the call site's, per row under `vmap`).
 ///
-/// Evidentiary status: REGRESSION TEST for the untaken, no-row and row-1
-/// rows (at 224414e1f the abort fires, its fire condition conjoining only
-/// the body's own branch path); DISPOSITION LOCK for the taken rows.
+/// Evidentiary status: REGRESSION TEST for the mapped no-row and row-1 rows
+/// (at 224414e1f the abort fires in row 0, its fire condition conjoining
+/// only the body's own branch path); DISPOSITION LOCK for the rest (at
+/// 224414e1f the rank-0 untaken rows already return here, since this lane
+/// does not reach their untaken arm, and the taken rows trap).
 #[test]
 fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_the_evaluator() {
     let mut rows = Rows::default();
@@ -607,7 +617,8 @@ fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_the_
 /// rank-0, or rank-1 when mapped over a batch axis"). The C lane gates a
 /// guarded abort on its owner activation only once `emit_guarded_fail`
 /// emits `if (act && fires)`, the C gate the sibling helper ks5-h2b owns;
-/// until that merges, the untaken, no-row and row-1 rows abort here.
+/// until that merges, the untaken, no-row and row-1 rows abort here, as
+/// they do at 224414e1f (REGRESSION TEST once that gate lands).
 #[test]
 fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_c() {
     let mut rows = Rows::default();
