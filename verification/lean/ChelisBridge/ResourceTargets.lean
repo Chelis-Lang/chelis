@@ -21,7 +21,7 @@ for every target.
 namespace ChelisBridge.Resource
 
 open Aeneas.Std LaCaDiLECore
-open_chelis_effects_model
+open_chelis_model
 
 abbrev Expr := chelis_deep.ast.Expr
 
@@ -76,11 +76,11 @@ theorem first_eq (kids : Slice Expr) :
 theorem first_and_then (kids : Slice Expr) :
     (do
       let o ← core.slice.Slice.first kids
-      chelis_ir.core.option.Option.and_then
+      core.option.Option.and_then
         (BuiltinFnOnce Expr (Option Str)) o chelis_effects.string_literal) =
       literalDevice kids := by
   rw [first_eq, bind_tc_ok]
-  unfold literalDevice chelis_ir.core.option.Option.and_then
+  unfold literalDevice core.option.Option.and_then
   cases kids.val[0]? with
   | none => rfl
   | some e =>

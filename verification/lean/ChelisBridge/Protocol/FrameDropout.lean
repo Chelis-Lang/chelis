@@ -66,14 +66,14 @@ theorem from_residual_err {T E F : Type} {inst : core.convert.From F E}
 /-- `Result::map_err` of an `Err` is an `Err`. -/
 theorem map_err_err {T E F O : Type} {inst : core.ops.function.FnOnce O E F} {e : E} {op : O}
     {r : core.result.Result T F}
-    (h : chelis_ir.core.result.Result.map_err inst (.Err e) op = .ok r) : ∃ f, r = .Err f := by
-  unfold chelis_ir.core.result.Result.map_err at h
+    (h : core.result.Result.map_err inst (.Err e) op = .ok r) : ∃ f, r = .Err f := by
+  unfold core.result.Result.map_err at h
   obtain ⟨⟨m, _⟩, -, h⟩ := bind_ok_elim h
   exact ⟨m, (Result.ok.inj h).symm⟩
 
 theorem map_err_ok {T E F O : Type} {inst : core.ops.function.FnOnce O E F} {t : T} {op : O} :
-    chelis_ir.core.result.Result.map_err inst (.Ok t : core.result.Result T E) op = .ok (.Ok t) := by
-  simp [chelis_ir.core.result.Result.map_err]
+    core.result.Result.map_err inst (.Ok t : core.result.Result T E) op = .ok (.Ok t) := by
+  simp [core.result.Result.map_err]
 
 theorem prim_disc_inj {p q : Prim}
     (h : chelis_types.types.Prim.read_discriminant p = chelis_types.types.Prim.read_discriminant q) :
@@ -318,7 +318,7 @@ theorem cast_raw_float_f64 (rate : F64) :
       .ok (.Ok ⟨.F64 rate⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, chelis_types.dtype_semantics.finalize_scalar,
+    core.result.Result.unwrap_or_else, chelis_types.dtype_semantics.finalize_scalar,
     lift, chelis_types.types.Prim.Insts.CoreCmpPartialEqPrim.eq,
     chelis_types.types.Prim.read_discriminant]
 
@@ -327,7 +327,7 @@ theorem cast_raw_float_f32 (rate : F64) :
       .ok (.Ok ⟨.F32 (F64.toF32 rate)⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, chelis_types.dtype_semantics.finalize_scalar,
+    core.result.Result.unwrap_or_else, chelis_types.dtype_semantics.finalize_scalar,
     lift, chelis_types.types.Prim.Insts.CoreCmpPartialEqPrim.eq,
     chelis_types.types.Prim.read_discriminant]
 

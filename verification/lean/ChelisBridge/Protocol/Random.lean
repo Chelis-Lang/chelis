@@ -305,7 +305,7 @@ theorem enter_replay (F : Frame) (node : chelis_ir.dag.NodeId) (seed : U64)
   simp only [siteOf] at hsite
   simp only [hsite, bind_tc_ok, core.option.Option.ok_or, core.result.TryResult.branch,
     alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize,
-    chelis_ir.core.option.Option.ok_or_else]
+    core.option.Option.ok_or_else]
   simp [hkey]
 
 /-- A replay whose forward draw has not been realized is an error, never an ordinal-0 key. -/
@@ -318,7 +318,7 @@ theorem enter_replay_unrealized (F : Frame) (node : chelis_ir.dag.NodeId) (seed 
   simp only [siteOf] at hsite
   simp only [hsite, bind_tc_ok, core.option.Option.ok_or, core.result.TryResult.branch,
     alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize,
-    chelis_ir.core.option.Option.ok_or_else]
+    core.option.Option.ok_or_else]
   simp [hkey,
     chelis_ir.evaluation.ExecutionFrame.enter.closure.Insts.CoreOpsFunctionFnOnceTupleString.call_once]
   exact ⟨_, _, rfl⟩

@@ -181,7 +181,7 @@ theorem catchLoweringWith_spec {S R T2 : Type}
     obtain ⟨d, hd⟩ := intoDiagnostic_ok e
     have h3' : Result.ok (core.result.Result.Err d, rt₂, st₂) = Result.ok (r₁, rt₁, st₁) := by
       rw [← h3]
-      simp [chelis_ir.core.result.Result.map_err, BuiltinFnOnce, hd]
+      simp [core.result.Result.map_err, BuiltinFnOnce, hd]
     simp only [Result.ok.injEq, Prod.mk.injEq] at h3'
     obtain ⟨rfl, rfl, rfl⟩ := h3'
     refine ⟨.Err e, rt₂, hb', rfl, rfl, fun y => ?_, fun d' => ?_⟩
@@ -286,9 +286,9 @@ theorem withOpacity_spec {R T2 : Type} (inst) (ctx : chelis_types.opacity.Opacit
   unfold chelis_types.session.DiagnosticSink.with_opacity_context
   simp only [opacityLens, restoreExit]
   cases h : inst.call_once b { s with opacity := some ctx } with
-  | ok x => obtain ⟨r, s₁, bk⟩ := x; simp [chelis_ir.core.option.Option.replace, h, okSink]
-  | fail e => simp [chelis_ir.core.option.Option.replace, h, okSink]
-  | div => simp [chelis_ir.core.option.Option.replace, h, okSink]
+  | ok x => obtain ⟨r, s₁, bk⟩ := x; simp [core.option.Option.replace, h, okSink]
+  | fail e => simp [core.option.Option.replace, h, okSink]
+  | div => simp [core.option.Option.replace, h, okSink]
 
 /-- The extracted `with_opacity_context` as a `Scopes.Combinator` (state-transformer bodies). -/
 def opacityComb (ctx : chelis_types.opacity.OpacityContextData) (γ : Type) :
@@ -307,9 +307,9 @@ theorem withOpacity_obligation (ctx : chelis_types.opacity.OpacityContextData) (
   unfold opacityComb chelis_types.session.DiagnosticSink.with_opacity_context
   simp only [opacityLens, restoreExit]
   cases h : body { s with opacity := some ctx } with
-  | ok x => obtain ⟨s₁, r⟩ := x; simp [chelis_ir.core.option.Option.replace, h, okResult]
-  | fail e => simp [chelis_ir.core.option.Option.replace, h, okResult]
-  | div => simp [chelis_ir.core.option.Option.replace, h, okResult]
+  | ok x => obtain ⟨s₁, r⟩ := x; simp [core.option.Option.replace, h, okResult]
+  | fail e => simp [core.option.Option.replace, h, okResult]
+  | div => simp [core.option.Option.replace, h, okResult]
 
 /-- The caller of the active recursive group, if any. -/
 def groupCaller (s : Sink) : Option chelis_types.infer.recursion.Caller :=

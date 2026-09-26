@@ -92,7 +92,7 @@ theorem enter_replay_inv (F : Frame) (node : chelis_ir.dag.NodeId) (seed : U64)
   simp only [siteOf] at hsite
   simp only [hsite, bind_tc_ok, core.option.Option.ok_or, core.result.TryResult.branch,
     alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize, alloc.vec.Vec.getElem?_Nat_eq,
-    chelis_ir.core.option.Option.ok_or_else] at h
+    core.option.Option.ok_or_else] at h
   rcases hkd : F.keys.val[draw.val]? with _ | (_ | k0)
   · simp [hkd] at h
   · simp [hkd,

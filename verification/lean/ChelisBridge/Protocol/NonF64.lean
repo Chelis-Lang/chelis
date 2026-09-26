@@ -91,7 +91,7 @@ theorem cast_raw_zero_f16 (h) :
       .ok (.Ok ⟨.F16 F16.ZERO⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_f16,
+    core.result.Result.unwrap_or_else, prim_eq_i64_f16,
     chelis_types.dtype_semantics.finalize_scalar, lift, f16_from_i64_zero]
 
 theorem cast_raw_one_f16 (h) :
@@ -99,7 +99,7 @@ theorem cast_raw_one_f16 (h) :
       .ok (.Ok ⟨.F16 F16.ONE⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_f16,
+    core.result.Result.unwrap_or_else, prim_eq_i64_f16,
     chelis_types.dtype_semantics.finalize_scalar, lift, f16_from_i64_one]
 
 theorem float_binop_div_f16 (x d : F16) :
@@ -334,7 +334,7 @@ theorem cast_raw_zero_bf16 (h) :
       .ok (.Ok ⟨.Bf16 BF16.ZERO⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_bf16,
+    core.result.Result.unwrap_or_else, prim_eq_i64_bf16,
     chelis_types.dtype_semantics.finalize_scalar, lift, bf16_from_i64_zero]
 
 theorem cast_raw_one_bf16 (h) :
@@ -342,7 +342,7 @@ theorem cast_raw_one_bf16 (h) :
       .ok (.Ok ⟨.Bf16 BF16.ONE⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_bf16,
+    core.result.Result.unwrap_or_else, prim_eq_i64_bf16,
     chelis_types.dtype_semantics.finalize_scalar, lift, bf16_from_i64_one]
 
 theorem float_binop_div_bf16 (x d : BF16) :

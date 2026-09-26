@@ -185,7 +185,7 @@ theorem cast_raw_int_f64 (h) (n : I64) :
       .ok (.Ok ⟨.F64 (F64.ofIScalar n)⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_f64,
+    core.result.Result.unwrap_or_else, prim_eq_i64_f64,
     chelis_types.dtype_semantics.finalize_scalar, lift]
 
 theorem prim_eq_f64_f64 :
@@ -412,7 +412,7 @@ theorem cast_raw_int_f32 (h) (n : I64) :
       .ok (.Ok ⟨.F32 (F32.ofIScalar n)⟩) := by
   simp [chelis_types.dtype_semantics.cast_raw, chelis_types.dtype_semantics.CheckedCastPlan.new,
     chelis_types.dtype_semantics.CheckedCastPlan.cast_raw,
-    chelis_ir.core.result.Result.unwrap_or_else, prim_eq_i64_f32,
+    core.result.Result.unwrap_or_else, prim_eq_i64_f32,
     chelis_types.dtype_semantics.finalize_scalar, lift]
 
 theorem cast_raw_zero_f32 (h) :

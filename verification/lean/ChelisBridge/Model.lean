@@ -1,25 +1,34 @@
-import ChelisIr
+import ChelisModelRoot
 
 /-!
-# The only contact point with the generated model's module and root namespace
+# The only contact point with the generated model's modules and names
 
-Aeneas prefixes every generated item with the **root crate** namespace of the extraction
-and keeps the defining crate as the next segment for foreign items:
+The model is imported through `ChelisModelRoot`, which the lakefile generates from
+`modelRoots`, so this file does not name a model module. The bridge builds unchanged against
+both model layouts:
 
-| extraction root          | `Dag`                                   | `Buf`                                                  |
-| ------------------------ | --------------------------------------- | ------------------------------------------------------ |
-| `chelis_ir` (AD slice)   | `chelis_ir.dag.Dag`                     | `chelis_ir.chelis_types.dtype_semantics.Buf`           |
-| `chelis_pipeline_core`   | `chelis_pipeline_core.chelis_ir.dag.Dag` | `chelis_pipeline_core.chelis_types.dtype_semantics.Buf` |
+| layout                                     | modules                           | `Dag`               | `Buf`                                       | `core::option::Option::replace`      |
+| ------------------------------------------ | --------------------------------- | ------------------- | ------------------------------------------- | ------------------------------------ |
+| combined (`extract.py`, root `chelis_ir`)  | `ChelisIr`                        | `chelis_ir.dag.Dag` | `chelis_ir.chelis_types.dtype_semantics.Buf` | `chelis_ir.core.option.Option.replace` |
+| whole core (`extract_whole.py`, `-canonical-names -split-files -subdir <chunk>`) | `<Chunk>.Types`, `<Chunk>.Funs`, `<Chunk>.FunsPart<i>` | `chelis_ir.dag.Dag` | `chelis_types.dtype_semantics.Buf` | `core.option.Option.replace` |
 
-With the root namespace opened, `<defining_crate>.<path>` (`chelis_ir.dag.Dag`,
-`chelis_types.dtype_semantics.Buf`) resolves in every model. Bridge modules therefore
-refer to generated items only in that form, after `open_chelis_model` (or through the
-abbreviations below). Swapping the model changes exactly two lines here: the `import`
-(the model's root module, matching the lakefile's `modelRoots`) and the namespace opened
-by `open_chelis_model`.
+A combined extraction wraps everything in the root crate's namespace and keeps the defining
+crate as the next segment for foreign items. Canonical names are the full Rust path, crate
+included, at the Lean root, whichever chunk emits the item (`-external` manifests carry
+them to later chunks). With `chelis_ir` opened, `<defining_crate>.<path>` therefore names
+the same declaration in both layouts: `chelis_ir.dag.Dag`, `chelis_types.dtype_semantics.Buf`
+and `core.option.Option.replace` resolve in each. Bridge modules refer to generated items
+only in that form, after `open_chelis_model` (or through the abbreviations below), never
+with the combined layout's `chelis_ir.<foreign crate>` prefix.
+
+Apart from that prefix, the two layouts of the same roots declare the same names, except
+the digest of a specialized instance (`…_specialized_<digest>`), which canonical names take
+from the structural name without LLBC ids. Bridge modules never spell such a name; they
+reach specialized instances only through the types of the extracted functions.
 -/
 
--- `open_chelis_model` opens the configured extraction root namespace (the swap point).
+-- `open_chelis_model` opens the combined layout's root namespace; with canonical names it
+-- is the `chelis_ir` crate namespace, whose items are named by full path anyway.
 set_option hygiene false in
 macro "open_chelis_model" : command => `(open chelis_ir)
 

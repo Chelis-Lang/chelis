@@ -18,7 +18,7 @@ Devices are Lean `String`s; the extracted code sees the model's `str` view
 namespace ChelisBridge.Resource
 
 open Aeneas.Std LaCaDiLECore
-open_chelis_effects_model
+open_chelis_model
 
 theorem ofString_val {s : String} {d : Str} (h : Str.ofString s = .ok d) : d.val = bytesU8 s := by
   unfold Str.ofString at h
