@@ -368,6 +368,7 @@ impl RuntimeValue {
         match self {
             RuntimeValue::Tensor(tensor) => RuntimeValue::Tensor(tensor.clone()),
             RuntimeValue::Scalar(payload) => RuntimeValue::Scalar(*payload),
+            RuntimeValue::Key(key) => RuntimeValue::Key(*key),
             RuntimeValue::Bool(value) => RuntimeValue::Bool(*value),
             RuntimeValue::String(value) => RuntimeValue::String(value.clone()),
             RuntimeValue::MappedFile(bytes) => RuntimeValue::MappedFile(bytes.clone()),

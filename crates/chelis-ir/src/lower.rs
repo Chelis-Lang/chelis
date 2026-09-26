@@ -7238,6 +7238,7 @@ impl<'program> LowerCtx<'program> {
             );
         }
         self.dag.add_node(
+            self.owner(),
             RiscOp::Load { name: name.into() },
             vec![],
             ty,
@@ -7816,6 +7817,7 @@ impl<'program> LowerCtx<'program> {
             .unwrap_or_else(Self::default_type);
         let name = format!("__chelis_capture_{}", rebase.captures.len());
         let load = subctx.dag.add_node(
+            subctx.owner(),
             RiscOp::Load {
                 name: name.as_str().into(),
             },

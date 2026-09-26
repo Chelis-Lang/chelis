@@ -88,7 +88,7 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 57] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
