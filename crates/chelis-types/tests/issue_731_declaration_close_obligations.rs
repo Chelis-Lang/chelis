@@ -298,3 +298,33 @@ fn an_unresolved_axis_is_constrained_to_i32() {
         accepts(&program.replace("0i64)", &format!("{valid})")));
     }
 }
+
+/// REGRESSION TEST (chelis#2584 round 1, P1-2). A recursive group's
+/// in-group reference is typed at the member's provisional type, which its
+/// body determines ([04-INF-5], [04-INF-2]). A declared header with an
+/// inference hole (here the omitted result) quantified the hole, so each
+/// recursive call saw a fresh variable nothing tied to the body, and a
+/// member's obligations were decided when it closed, before a sibling's body
+/// had filled the type they waited on. Both are decided when the group
+/// completes, on the shared hole.
+#[test]
+fn a_recursive_group_decides_its_obligations_on_the_bodies_it_infers() {
+    for program in [
+        // Self-recursion through a tuple, a collection operation, and a field.
+        "def step(n: i32) = if eq(n, 0) then (0i32, 1i32) else {\n  (x, y) = step(n - 1)\n  (y, x + y)\n}\n",
+        "def f(n: i32) = if eq(n, 0) then [1i32] else take(f(n - 1), 1i64)\n",
+        "type Pt =\n  | Pt { x: i32, y: i32 }\ndef walk(n: i32) = if eq(n, 0) then Pt { x: 0i32, y: 0i32 } else {\n  p = walk(n - 1)\n  Pt { x: p.x + 1i32, y: p.y }\n}\n",
+        // Mutual recursion through the omitted result of a sibling inferred
+        // after the reader, in both declaration orders.
+        "def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\ndef b(n: i32) = if a(n) then 0 else 1\n",
+        "def b(n: i32) = if a(n) then 0 else 1\ndef a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\n",
+        "def a(n: i32) -> i32 = if eq(n, 0) then 0i32 else b(n - 1).0\ndef b(n: i32) = (a(n), 1i32)\n",
+    ] {
+        accepts(program);
+    }
+    // The body-determined type decides the access: `step` returns `i32`.
+    rejects_with(
+        "def step(n: i32) = if eq(n, 0) then 5i32 else step(n - 1).0\n",
+        &["expected tuple type, got i32"],
+    );
+}

@@ -39,3 +39,15 @@ these checked with score 1:
   a returned closure whose parameter only the declared type fixes
   ([#2537](https://github.com/Chelis-Lang/chelis/issues/2537)). The binder's
   declared contract is now checked after the last such replay.
+
+Two routes decide on the types a recursive group determines rather than
+before them. A declared header whose result or parameter type is omitted is
+typed, inside its recursive group, at the one type its body determines
+([04-INF-5], [04-INF-2]); each recursive call used to see a fresh variable in
+place of the omitted type, so `def step(n: i32) = ... step(n - 1).0` over an
+`i32` result checked with score 1 and failed in `eval`. And a group member's
+open obligations are decided when the whole group has been inferred, so a
+sibling declared later can still determine the type they wait on. Recursive
+definitions with annotated parameters and an omitted result keep checking when
+they read their own result's tuple or record fields or pass it to `take`,
+and the ill-typed `step(n - 1).0` is rejected with the access's own diagnostic.

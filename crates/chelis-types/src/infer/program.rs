@@ -296,7 +296,7 @@ fn sweep_recursive_collection_contracts(
             }
             close_declaration(
                 &mut scratch,
-                Some(name),
+                CloseScope::Declaration,
                 env,
                 var_gen,
                 subst,
@@ -551,6 +551,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &metadata_prebound_names,
                 &mut env,
                 &mut vg,
+                &subst,
             )
         } else {
             UnordMap::new()
@@ -632,7 +633,7 @@ pub(super) fn infer_program_with_product_in_session(
             // reached.
             close_declaration(
                 &mut product,
-                decl_name,
+                close_scope(cyclic),
                 &env,
                 &mut vg,
                 &mut subst,
@@ -651,6 +652,14 @@ pub(super) fn infer_program_with_product_in_session(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -1607,6 +1616,7 @@ pub(super) fn infer_ir_program_with_state(
                 &metadata_prebound_names,
                 &mut state.env,
                 &mut state.var_gen,
+                &state.subst,
             )
         } else {
             UnordMap::new()
@@ -1692,7 +1702,7 @@ pub(super) fn infer_ir_program_with_state(
             }
             close_declaration(
                 &mut product,
-                top_level_decl_name(expr),
+                close_scope(cyclic),
                 &state.env,
                 &mut state.var_gen,
                 &mut state.subst,
@@ -1712,6 +1722,14 @@ pub(super) fn infer_ir_program_with_state(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -2204,6 +2222,16 @@ pub(super) fn primary_inference_groups_for_schedule(
     groups
 }
 
+/// A cyclic component's members decide their obligations together, when the
+/// component completes (chelis#2584); every other declaration at its own close.
+fn close_scope(cyclic: bool) -> CloseScope {
+    if cyclic {
+        CloseScope::ComponentMember
+    } else {
+        CloseScope::Declaration
+    }
+}
+
 /// Install monomorphic types for the un-signed members of one cyclic
 /// full-reference component. Functions receive arity-shaped function types;
 /// eager values receive one fresh type variable. The component is removed and
@@ -2215,6 +2243,7 @@ pub(super) fn prebind_cyclic_component_schemes(
     metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
+    subst: &Subst,
 ) -> UnordMap<usize, Type> {
     let mut provisional = UnordMap::new();
     for index in indices {
@@ -2225,7 +2254,14 @@ pub(super) fn prebind_cyclic_component_schemes(
         let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
-        if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
+        if metadata_prebound_names.contains(name) {
+            continue;
+        }
+        // A declared header is the member's scheme already, except for its
+        // inference holes ([04-INF-5]), which the group's references share
+        // with the body rather than instantiate afresh (chelis#2584).
+        if declared_signatures.contains_key(name) {
+            env.share_declared_holes(name, vg, subst);
             continue;
         }
         let ty = match tagged_children(body, DeepTag::Fn) {
@@ -2498,6 +2534,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         for (_, ty) in provisional.to_sorted() {
             for var in crate::env::free_tvars(ty) {
@@ -2568,6 +2605,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         super::super::recursion::begin_group(
             ["left", "right"].into_iter().map(|name| (name, false)),

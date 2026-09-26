@@ -80,6 +80,20 @@ impl AuthoredBinderContract {
     }
 }
 
+/// Where a declaration's close falls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloseScope {
+    /// An ordinary declaration: its obligations are decided at its own close.
+    Declaration,
+    /// A member of a recursive group or other cyclic component. Its
+    /// obligations stay on the ledgers, each entry naming its declaration, and
+    /// [`close_component`] decides them when the group completes (chelis#2584).
+    /// A sibling inferred later can still fill a type an obligation waits on:
+    /// [04-INF-5] types an in-group reference at the member's provisional
+    /// type, which only that member's body determines.
+    ComponentMember,
+}
+
 /// Close one top-level declaration: decide or report every obligation its
 /// inference left open, in an order where nothing decided can still change.
 ///
@@ -92,22 +106,83 @@ impl AuthoredBinderContract {
 /// 5. The substitution's own ledgers, which only report: deferred borrows,
 ///    operand-gate failures and never-bound operands (chelis#1489), and
 ///    deferred opaque uses.
+///
+/// A [`CloseScope::ComponentMember`] runs only the ready replay and step 4;
+/// its component's [`close_component`] runs the rest for every member.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn close_declaration(
     product: &mut InferenceProduct,
-    declaration: Option<&str>,
+    scope: CloseScope,
     env: &Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    product.finish_deferred_shape_checks(declaration, env, vg, subst, adt_reg, errors);
-    product.finish_deferred_literal_patterns(declaration, env, subst, adt_reg, errors);
-    if let Some(contract) = product.take_authored_binder_contract() {
+    if scope == CloseScope::ComponentMember {
+        product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        product.finish_root(subst, errors);
+        return;
+    }
+    decide_open_obligations(product, env, vg, subst, adt_reg, errors);
+    product.finish_root(subst, errors);
+    report_substitution_ledgers(env, subst, adt_reg, errors);
+}
+
+/// Decide the obligations every member of a completed cyclic component left
+/// open, once the whole group's bodies have been inferred (chelis#2584).
+///
+/// The members' authored binders are one scope here: a binder variable
+/// belongs to exactly one declaration, so the union of their names lets the
+/// boundary decision recognize each member's binders, and each diagnostic
+/// names the declaration that owns its entry.
+pub(super) fn close_component(
+    product: &mut InferenceProduct,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let mut names = UnordMap::new();
+    let mut bounds = UnordMap::new();
+    for contract in product.pending_authored_binder_contracts() {
+        for (variable, name) in contract.type_names.to_sorted() {
+            names.insert(*variable, name.clone());
+        }
+        for (variable, bound) in contract.dtype_bounds.to_sorted() {
+            bounds.insert(*variable, *bound);
+        }
+    }
+    env.set_active_declared_type_names(names);
+    env.set_active_declared_type_bounds(bounds);
+    decide_open_obligations(product, env, vg, subst, adt_reg, errors);
+    report_substitution_ledgers(env, subst, adt_reg, errors);
+}
+
+/// Steps 1 to 3 of [`close_declaration`], over whatever the ledgers hold.
+fn decide_open_obligations(
+    product: &mut InferenceProduct,
+    env: &Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    product.finish_deferred_shape_checks(env, vg, subst, adt_reg, errors);
+    product.finish_deferred_literal_patterns(env, subst, adt_reg, errors);
+    for contract in product.take_authored_binder_contracts() {
         contract.decide(subst, errors);
     }
-    product.finish_root(subst, errors);
+}
+
+/// Step 5 of [`close_declaration`].
+fn report_substitution_ledgers(
+    env: &Env,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
     // Issue #256 round 2: re-check each deferred borrow against the
     // now-complete substitution. Draining per declaration keeps error
     // attribution local and prevents one declaration's deferrals from leaking

@@ -92,13 +92,19 @@ pub(super) struct InferenceProduct {
     /// checked units may reuse the same byte offsets, so spans alone cannot
     /// identify the declaration that authored a binding.
     active_declaration_name: Option<String>,
-    /// The authored-binder contract of the declaration being inferred,
-    /// decided by `close_declaration` after the last step that can narrow a
-    /// binder (chelis#2537).
-    authored_binder_contract: Option<AuthoredBinderContract>,
+    /// The authored-binder contracts not yet decided: the declaration being
+    /// inferred, or every member of a recursive group inferred so far.
+    /// Decided by the close after the last step that can narrow a binder
+    /// (chelis#2537, chelis#2584).
+    authored_binder_contracts: Vec<AuthoredBinderContract>,
+    /// The declaration that owns the ledger entry being replayed, so an entry
+    /// the replay registers again keeps its owner (chelis#2584).
+    replaying_owner: Option<String>,
 }
 
 struct InferredAdmissionContract {
+    /// The declaration whose inference recorded the contract.
+    owner: Option<String>,
     subject: String,
     variable: TypeVar,
     /// The enclosing declaration's authored type binders. A local hole may
@@ -218,6 +224,10 @@ pub(super) struct PostAppCall<'a> {
 #[derive(Clone)]
 pub(super) struct DeferredShapeCheck {
     id: u64,
+    /// The declaration whose inference registered the entry. A recursive
+    /// group decides its members' entries together, when the group completes
+    /// (chelis#2584), and each diagnostic still names its own declaration.
+    owner: Option<String>,
     rule: DeferredShapeRule,
     arg_exprs: Vec<deep::Expr>,
     arg_tys: Vec<Type>,
@@ -225,6 +235,7 @@ pub(super) struct DeferredShapeCheck {
 }
 
 struct DeferredLiteralPattern {
+    owner: Option<String>,
     pattern: deep::Expr,
     scrutinee_ty: Type,
     scrutinee_name: Option<String>,
@@ -327,10 +338,6 @@ impl InferenceProduct {
             self.active_epoch.is_none(),
             "type-stamp epochs must not overlap"
         );
-        assert!(
-            self.authored_binder_contract.is_none(),
-            "a declaration's authored-binder contract must be decided at its own close"
-        );
         let id = self.next_epoch;
         self.next_epoch += 1;
         let mut epoch = TypeStampEpoch {
@@ -352,11 +359,24 @@ impl InferenceProduct {
     /// Record the declaration's authored-binder contract for
     /// `close_declaration` to decide.
     pub(super) fn record_authored_binder_contract(&mut self, contract: AuthoredBinderContract) {
-        self.authored_binder_contract = Some(contract);
+        self.authored_binder_contracts.push(contract);
     }
 
-    pub(super) fn take_authored_binder_contract(&mut self) -> Option<AuthoredBinderContract> {
-        self.authored_binder_contract.take()
+    pub(super) fn take_authored_binder_contracts(&mut self) -> Vec<AuthoredBinderContract> {
+        std::mem::take(&mut self.authored_binder_contracts)
+    }
+
+    /// The authored-binder contracts still to decide, without taking them.
+    pub(super) fn pending_authored_binder_contracts(&self) -> &[AuthoredBinderContract] {
+        &self.authored_binder_contracts
+    }
+
+    /// The declaration that owns a ledger entry registered now: the one whose
+    /// entry is being replayed, or else the one being inferred.
+    fn entry_owner(&self) -> Option<String> {
+        self.replaying_owner
+            .clone()
+            .or_else(|| self.active_declaration_name.clone())
     }
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
@@ -378,6 +398,7 @@ impl InferenceProduct {
             PatternSite::Other => None,
         };
         self.deferred_literal_patterns.push(DeferredLiteralPattern {
+            owner: self.entry_owner(),
             pattern: pattern.clone(),
             scrutinee_ty: scrutinee_ty.clone(),
             scrutinee_name,
@@ -398,7 +419,6 @@ impl InferenceProduct {
 
     pub(super) fn finish_deferred_literal_patterns(
         &mut self,
-        declaration: Option<&str>,
         env: &Env,
         subst: &Subst,
         adt_reg: &AdtRegistry,
@@ -409,7 +429,7 @@ impl InferenceProduct {
                 &check.pattern,
                 &check.scrutinee_ty,
                 check.scrutinee_name.as_deref(),
-                declaration,
+                check.owner.as_deref(),
                 env,
                 subst,
                 adt_reg,
@@ -449,9 +469,11 @@ impl InferenceProduct {
             .into_iter()
             .map(|(variable, _)| *variable)
             .collect();
+        let owner = self.entry_owner();
         for variable in variables {
             self.inferred_admission_contracts
                 .push(InferredAdmissionContract {
+                    owner: owner.clone(),
                     subject: subject.to_string(),
                     variable,
                     binders: binders.clone(),
@@ -550,12 +572,7 @@ impl InferenceProduct {
             .any(|contract| !contract.unmet_families(subst).is_empty())
     }
 
-    fn finish_admission_contracts(
-        &mut self,
-        declaration: Option<&str>,
-        subst: &Subst,
-        errors: &mut DiagnosticSink<'_>,
-    ) {
+    fn finish_admission_contracts(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
         let mut reported = BTreeSet::new();
         for contract in self.inferred_admission_contracts.drain(..) {
             for (variable, required) in contract.unmet_families(subst) {
@@ -569,7 +586,7 @@ impl InferenceProduct {
                          admission, but its unresolved type `{}` has no sufficient declared \
                          contract at the declaration boundary (spec/04-type-system.md §3.1)",
                         contract.subject,
-                        declaration.unwrap_or("<anonymous>"),
+                        contract.owner.as_deref().unwrap_or("<anonymous>"),
                         required.family_name(),
                         subst.apply(&Type::Var(contract.variable)),
                     ),
@@ -864,8 +881,10 @@ impl InferenceProduct {
     ) {
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
+        let owner = self.entry_owner();
         self.deferred_shape_checks.push(DeferredShapeCheck {
             id,
+            owner,
             rule,
             arg_exprs,
             arg_tys,
@@ -909,6 +928,7 @@ impl InferenceProduct {
         errors: &mut DiagnosticSink<'_>,
     ) {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
+        let prior_owner = self.replaying_owner.take();
         for check in checks {
             if check
                 .arg_tys
@@ -918,6 +938,8 @@ impl InferenceProduct {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
+            // An entry the replay registers again belongs to this one's owner.
+            self.replaying_owner.clone_from(&check.owner);
 
             let resolved = match &check.rule {
                 DeferredShapeRule::Matmul => {
@@ -1033,6 +1055,7 @@ impl InferenceProduct {
             };
             let _ = resolved;
         }
+        self.replaying_owner = prior_owner;
     }
 
     /// Re-decide one suspended `PostApp` call against the operand types
@@ -1104,7 +1127,6 @@ impl InferenceProduct {
     /// dropped (chelis#2518, chelis#2523).
     pub(super) fn finish_deferred_shape_checks(
         &mut self,
-        declaration: Option<&str>,
         env: &Env,
         vg: &mut VarGen,
         subst: &mut Subst,
@@ -1112,7 +1134,7 @@ impl InferenceProduct {
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
-        self.finish_admission_contracts(declaration, subst, errors);
+        self.finish_admission_contracts(subst, errors);
         // Every entry of a shape rule of its own (`sum`, `matmul`, ...) still
         // unresolved here is rejected below, and the dtype replay of the same
         // call waits on the same operand. Deciding that replay too would report
@@ -1167,7 +1189,7 @@ impl InferenceProduct {
                         &check.arg_tys,
                         &check.result_ty,
                         &shape_rule_operands,
-                        declaration,
+                        check.owner.as_deref(),
                         env,
                         vg,
                         subst,
@@ -1182,7 +1204,7 @@ impl InferenceProduct {
                         &check.arg_tys,
                         &check.result_ty,
                         &shape_rule_operands,
-                        declaration,
+                        check.owner.as_deref(),
                         env,
                         vg,
                         subst,

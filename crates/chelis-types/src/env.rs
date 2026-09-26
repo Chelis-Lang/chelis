@@ -629,6 +629,118 @@ impl Env {
         }
     }
 
+    /// chelis#2584, [04-INF-5]: stop quantifying the inference holes of
+    /// `name`'s declared header while its recursive group is inferred.
+    ///
+    /// A hole is not a binder, and [04-INF-5] makes its type whatever the body
+    /// determines: no reference may observe it before the body fills it, and
+    /// an in-group reference is typed at the member's provisional monomorphic
+    /// type, as [04-INF-2] provides for a recursive call. The header scheme
+    /// quantified every variable, holes included, so each in-group call
+    /// instantiated a fresh hole that nothing ever tied to the body:
+    /// `step(n - 1).0` in a `step` whose result is a hole was typed at a
+    /// variable no binding reached. The holes are renamed once here, to fresh
+    /// variables minted inside the component's level, and left free, so the
+    /// member's own body and every in-group reference share them, and the
+    /// component's completion generalizes whatever the bodies leave open. The
+    /// authored binders stay quantified; [04-INF-2] governs their in-group
+    /// instantiations. Returns whether the header had a hole.
+    pub(crate) fn share_declared_holes(
+        &mut self,
+        name: &str,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> bool {
+        let Some(header) = self.lookup(name).cloned() else {
+            return false;
+        };
+        let binders = self.declared_binder_identities.get(name);
+        let binder_tvars = binders
+            .map(|b| {
+                b.type_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let binder_dvars = binders
+            .map(|b| {
+                b.dim_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let binder_rvars = binders
+            .map(|b| {
+                b.rank_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let (binder_t, hole_t): (Vec<TypeVar>, Vec<TypeVar>) =
+            header.tvars.iter().partition(|v| binder_tvars.contains(v));
+        let (binder_d, hole_d): (Vec<DimVar>, Vec<DimVar>) =
+            header.dvars.iter().partition(|v| binder_dvars.contains(v));
+        let (binder_r, hole_r): (Vec<RankVar>, Vec<RankVar>) =
+            header.rvars.iter().partition(|v| binder_rvars.contains(v));
+        if hole_t.is_empty() && hole_d.is_empty() && hole_r.is_empty() {
+            return false;
+        }
+        // The one instantiation mechanism renames the holes and carries any
+        // dtype bound or dimension label to the fresh variable. It records no
+        // obligation, because the header's constraints are not passed to it.
+        let holes_only = Scheme {
+            tvars: hole_t.clone(),
+            tvar_restrictions: header
+                .tvar_restrictions
+                .iter()
+                .filter(|(v, _)| hole_t.contains(v))
+                .copied()
+                .collect(),
+            dvars: hole_d,
+            rvars: hole_r,
+            constraints: Vec::new(),
+            body: header.body.clone(),
+        };
+        let shared = self.instantiate_scheme(&holes_only, var_gen, inference_subst);
+        let mut renaming = Subst::new();
+        for (from, to) in &shared.tvars {
+            renaming
+                .insert_type(*from, to.clone())
+                .expect("a fresh hole renaming is valid");
+        }
+        for (from, to) in &shared.dvars {
+            renaming.insert_dim(*from, Dim::Var(*to));
+        }
+        for (from, to) in &shared.rvars {
+            renaming.insert_rank(*from, vec![Dim::Rank(*to)]);
+        }
+        let scheme = Scheme {
+            tvars: binder_t.clone(),
+            tvar_restrictions: header
+                .tvar_restrictions
+                .iter()
+                .filter(|(v, _)| binder_t.contains(v))
+                .copied()
+                .collect(),
+            dvars: binder_d,
+            rvars: binder_r,
+            constraints: header
+                .constraints
+                .iter()
+                .map(|constraint| constraint.map_types(|ty| renaming.apply(ty)))
+                .collect(),
+            body: shared.ty,
+        };
+        self.bind(name.to_string(), scheme);
+        true
+    }
+
     /// Build the declaration-owned identity object used by every ordinary
     /// annotation resolver and every post-body rigidity check.
     ///
