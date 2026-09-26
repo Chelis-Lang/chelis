@@ -619,6 +619,12 @@ impl PreparedProgram {
     /// retained only when a seeded declaration references their linker-owned
     /// name, transitively. This avoids rechecking an entire installed shell
     /// merely because the entry module imports one symbol.
+    ///
+    /// One reference is implicit (chelis#2416): an export list that exports
+    /// an opaque type references every name it exports. The checker's
+    /// opacity diagnostic names the defining module's exported producers of
+    /// the type, so the selected slice must carry them for a reachable-slice
+    /// check to report what a whole-program check reports.
     pub fn reachable_decls(&self) -> Result<Vec<Decl>, String> {
         let mut names = BTreeMap::<String, Vec<usize>>::new();
         for (index, decl) in self.decls.iter().enumerate() {
@@ -642,9 +648,29 @@ impl PreparedProgram {
             );
         }
 
+        let opaque_types = self
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::TypeDef {
+                    name, opaque: true, ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         while let Some(index) = queue.pop_front() {
             let mut references = BTreeSet::new();
-            collect_decl_references(&self.decls[index], &mut references);
+            match &self.decls[index] {
+                Decl::Export {
+                    names: exported, ..
+                } if exported
+                    .iter()
+                    .any(|name| opaque_types.contains(name.as_str())) =>
+                {
+                    references.extend(exported.iter().cloned());
+                }
+                decl => collect_decl_references(decl, &mut references),
+            }
             for reference in references {
                 if let Some(indices) = names.get(&reference) {
                     for &dependency in indices {

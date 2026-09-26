@@ -96,4 +96,5 @@ pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context
 pub use observation::{ElementRef, format_element};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
+    linked_binding_in_module_of,
 };

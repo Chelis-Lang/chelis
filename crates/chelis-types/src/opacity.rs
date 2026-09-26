@@ -359,6 +359,30 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
     Some(module_part.replace("__", "."))
 }
 
+/// The linker-format name of a lowercase binding `terminal` declared in the
+/// same module as the linker-named type `type_name` (chelis#2416), so that
+/// [`reef_module_stem`] attributes the binding to the type's defining module.
+/// `None` when `type_name` is not in linker format (a lexical program, where
+/// module identity comes from the wrapper instead), or when `terminal` is not
+/// a lowercase identifier free of the `__` separator, which the stem parse
+/// could not recover.
+pub fn linked_binding_in_module_of(type_name: &str, terminal: &str) -> Option<String> {
+    let stem = type_name
+        .strip_prefix("Pkg__")
+        .or_else(|| type_name.strip_prefix("pkg__"))?;
+    let (module_part, _type_terminal) = stem.rsplit_once("__")?;
+    let terminal_parses = terminal
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+        && !terminal.contains("__")
+        && !terminal.ends_with('_');
+    if module_part.is_empty() || !terminal_parses {
+        return None;
+    }
+    Some(format!("pkg__{module_part}__{terminal}"))
+}
+
 // ── De-mangle reef internal names for display (RT-1 F3) ──────────
 
 /// Best-effort de-mangle of a reef internal identifier for display in
@@ -761,6 +785,32 @@ mod tests {
             reef_module_stem("pkg__opq__Demo__Types__probability"),
             Some("opq.Demo.Types".to_string())
         );
+    }
+
+    #[test]
+    fn linked_binding_is_attributed_to_the_type_module() {
+        for type_name in [
+            "Pkg__qpopq__Qpopq__Main__Probability",
+            "Pkg__opq__Demo__Types__Probability",
+            "Pkg__my__lib__Deep__Nested__Mod__Unit",
+        ] {
+            let binding = linked_binding_in_module_of(type_name, "chelis_prop_probe")
+                .expect("linker-format type");
+            assert!(is_linker_format_name(&binding), "{binding}");
+            assert_eq!(reef_module_stem(&binding), reef_module_stem(type_name));
+            assert_eq!(demangle_ident(&binding), "chelis_prop_probe");
+        }
+        assert_eq!(
+            linked_binding_in_module_of("Probability", "chelis_prop_probe"),
+            None
+        );
+        for bad_terminal in ["__probe", "_probe", "probe_", "a__b", "Probe", ""] {
+            assert_eq!(
+                linked_binding_in_module_of("Pkg__opq__Demo__Types__P", bad_terminal),
+                None,
+                "{bad_terminal}"
+            );
+        }
     }
 
     #[test]
