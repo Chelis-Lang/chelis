@@ -16,7 +16,11 @@ constant reachable from the statement or proof of each theorem in
 * `extern` / `implemented_by`: constants whose compiled code differs from their kernel
   definition. Kernel proofs do not use it; it matters only for evaluation-based evidence
   such as `#guard`, which is therefore never counted as proof;
-* per-module-root counts of the reachable declarations.
+* per-module-root counts of the reachable declarations;
+* `discharged`: for every accepted theorem whose statement is exactly a proposition
+  constant (`def P : Prop`), the map `P ↦ theorem`. Aeneas states collection
+  obligations this way (e.g. `<Impl>.size_hint_total`), and the acceptance script
+  requires each emitted obligation to appear here.
 
 The acceptance script compares the result with `verification/trusted_base.json`.
 -/
@@ -77,6 +81,16 @@ def moduleRoot (env : Environment) (decl : Name) : String :=
 def sortedStrings (decls : Array Name) : Array String :=
   (decls.map (·.toString)).qsort (· < ·)
 
+/-- The proposition constant an accepted theorem states, if its statement is exactly one
+(`theorem t : P` with `def P : Prop`); `P ∧ Q`, implications or applied constants do not
+count, so a discharge can never prove a weaker or different statement. -/
+def dischargedProposition (env : Environment) (thm : Name) : Option Name := do
+  let .thmInfo info ← env.find? thm | none
+  let .const proposition _ := info.type.consumeMData | none
+  let .defnInfo defn ← env.find? proposition | none
+  guard (defn.type.consumeMData == .sort .zero)
+  return proposition
+
 def main (args : List String) : IO UInt32 := do
   let [output] := args
     | IO.eprintln "usage: lake env lean --run ClosureAudit.lean <output.json>"; return 2
@@ -105,6 +119,8 @@ def main (args : List String) : IO UInt32 := do
     let root := moduleRoot env decl
     modules := modules.insert root (modules.getD root 0 + 1)
   let moduleCounts := modules.toList.toArray.qsort (fun a b => a.1 < b.1)
+  let discharged := roots.filterMap fun root =>
+    (dischargedProposition env root).map fun proposition => (proposition.toString, toJson root.toString)
   let report := Json.mkObj [
     ("accepted", toJson roots.length),
     ("reachable", toJson reachable.size),
@@ -112,6 +128,7 @@ def main (args : List String) : IO UInt32 := do
     ("opaque", toJson (sortedStrings opaques)),
     ("extern", toJson (sortedStrings (externs ++ implemented))),
     ("modules", Json.mkObj (moduleCounts.toList.map fun (root, count) => (root, toJson count))),
+    ("discharged", Json.mkObj discharged),
     ("witnesses", Json.mkObj ((axioms ++ opaques ++ externs ++ implemented).toList.map fun decl =>
       (decl.toString, toJson (witness parent decl))))
   ]

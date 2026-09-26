@@ -32,6 +32,10 @@ Stages, in order:
                      constants, extern/implemented_by, witness paths).
 10. assumptions      each inventory against the justified trusted base in
                      verification/trusted_base.json; any unmatched name rejects.
+                     Every collection obligation Aeneas emitted for the chain
+                     (e.g. the totality of a crate iterator's own size_hint) must be
+                     discharged by an accepted theorem whose statement is exactly
+                     the obligation's proposition.
 """
 
 import argparse
@@ -68,6 +72,8 @@ JUSTIFIED_UNEMITTED = frozenset({
 # kinds must be unreachable from every extracted (non-shell) item.
 SHELL_BOUNDARY = frozenset({"primitive", "shell_type"})
 SHELL_INTERNAL = frozenset({"shell_state", "shell_entry", "shell_helper"})
+# Kinds of proof obligations Aeneas emits with -emit-collection-obligations.
+OBLIGATION_KINDS = frozenset({"iterator_size_hint_total"})
 
 
 class AcceptanceFailure(RuntimeError):
@@ -142,6 +148,7 @@ class Run:
         self.lean_library: Path | None = None
         self.whole_core: dict[str, Path] = {}
         self.inventories: dict[str, Path] = {}
+        self.obligations: dict[str, list[dict]] = {}
 
     def stage(self, name, function):
         print(f"\n=== {name} ===", flush=True)
@@ -305,9 +312,24 @@ def stage_whole_core(context: Run):
                 raise AcceptanceFailure(f"{chain}: extraction did not use the pinned {tool}")
         fresh(out / "coverage.json", begun)
         fresh(out / "lean", begun)
+        context.obligations[chain] = read_obligations(chain, fresh(out / "obligations.json", begun))
         context.whole_core[chain] = out
         results[chain] = {key: summary.get(key) for key in ("chunks", "declarations", "modules")}
+        results[chain]["obligations"] = len(context.obligations[chain])
     return results
+
+
+def read_obligations(chain: str, path: Path) -> list[dict]:
+    """The merged -emit-collection-obligations output of a chain (possibly empty)."""
+    report = json.loads(path.read_text())
+    if report.get("version") != 1 or not isinstance(report.get("obligations"), list):
+        raise AcceptanceFailure(f"{chain}: malformed obligations report {path}")
+    for obligation in report["obligations"]:
+        if obligation.get("kind") not in OBLIGATION_KINDS:
+            raise AcceptanceFailure(f"{chain}: unknown obligation kind in {obligation}")
+        if not obligation.get("proposition") or not obligation.get("impl"):
+            raise AcceptanceFailure(f"{chain}: incomplete obligation {obligation}")
+    return report["obligations"]
 
 
 def validate_coverage(chain: str, coverage: dict) -> dict:
@@ -419,8 +441,17 @@ def stage_assumptions(context: Run):
                     f"{chain}: unjustified {kind} in the accepted closure: {unexpected[:10]}; "
                     f"witness paths: {paths}"
                 )
+        undischarged = [obligation for obligation in context.obligations[chain]
+                        if obligation["proposition"] not in found.get("discharged", {})]
+        if undischarged:
+            raise AcceptanceFailure(
+                f"{chain}: {len(undischarged)} collection obligations have no accepted theorem "
+                f"stating exactly their proposition: "
+                f"{[(o['impl'], o['proposition']) for o in undischarged[:5]]}"
+            )
         results[chain] = {
             "accepted": found["accepted"], "reachable": found["reachable"],
+            "obligations": len(context.obligations[chain]),
             **{kind: len(found.get(kind, [])) for kind in patterns},
         }
     return results
