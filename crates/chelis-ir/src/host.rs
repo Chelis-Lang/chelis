@@ -247,9 +247,16 @@ fn is_inlining(name: &str) -> bool {
 }
 
 /// Mark `name` as being substituted at `site`, returning whether it was not
-/// already. The binders in scope at `site` are kept while it is lowered.
+/// already. While it is lowered, the frame keeps the binders in scope at
+/// `site` and every binder inside `site`: the call's own actuals are
+/// substituted into the body with it, and can bring their locals along.
 fn push_inlining(name: &str, site: Option<&Expr>) -> bool {
-    let frame = site.and_then(site_binders);
+    let frame = site.and_then(|site| {
+        let outer = site_binders(site)?;
+        let mut inner = UnordMap::new();
+        record_site_binders(site, &outer, &mut inner);
+        Some(Arc::new(binders_anywhere(&inner)))
+    });
     let pushed = INLINING_STACK.with(|stack| stack.borrow_mut().insert(name.to_string()));
     if pushed {
         INLINING_FRAMES.with(|frames| frames.borrow_mut().push(frame));

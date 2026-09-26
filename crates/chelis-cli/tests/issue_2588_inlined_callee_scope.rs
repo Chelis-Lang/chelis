@@ -341,3 +341,15 @@ out = {{\n  a = outer(dbl, to_tensor([1.0f32]))\n  n = to_tensor([10.0f32])\n  a
     );
     assert_both_lanes(&source, "out", "tensor(shape=[1], data=[14.0])");
 }
+
+/// A function literal passed as an actual is substituted with the callee's
+/// body, bringing its own locals: a local it binds must not capture a name a
+/// callee it calls reads.
+#[test]
+fn a_function_literal_actual_local_does_not_capture_inside_a_substitution() {
+    let source = "c = to_tensor([2.0f32])\n\
+def f(x: tensor[1, f32]) -> tensor[1, f32] = add(x, c)\n\
+def apply(h: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = h(x)\n\
+out = apply(fn (v: tensor[1, f32]) -> {\n  c = to_tensor([10.0f32])\n  add(f(v), c)\n}, to_tensor([1.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[13.0])");
+}
