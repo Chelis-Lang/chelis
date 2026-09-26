@@ -8236,7 +8236,9 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
     // The claim is checked under its carrier's owner activation, read from
     // that Bool's storage row by row (any row active runs the guard).
     assert!(
-        generated.c_source.contains("__local_guard_active |= (((const "),
+        generated
+            .c_source
+            .contains("__local_guard_active |= (((const "),
         "the claim's guard reads its carrier's owner activation"
     );
     generated

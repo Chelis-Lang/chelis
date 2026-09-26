@@ -151,7 +151,8 @@ def f(x: tensor[4, f32]) -> tensor[f32] = {
 }
 out = f(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 ";
-const NAMED_RESULT_CLAIM: &str = "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])
+const NAMED_RESULT_CLAIM: &str =
+    "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])
 def f(x: tensor[4, f32]) -> tensor[f32] = {
   s = tensor_to_scalar(sum(&x, 0i32))
   if gt(s, 5.0f32) then sum(g(copy(x)), 0i32) else sum(x, 0i32)
@@ -179,15 +180,51 @@ const SUM_OVERFLOW: &str = "numeric trap: overflow in sum at i32";
 const GATED_SHAPES: [(&str, &str, &str); 11] = [
     ("consumed integer sum", CONSUMED_INTEGER_SUM, SUM_OVERFLOW),
     ("discarded integer sum", DISCARDED_INTEGER_SUM, SUM_OVERFLOW),
-    ("empty max_reduce", EMPTY_MAX_REDUCE, "numeric trap: domain in max_reduce at f32"),
-    ("empty argmax_reduce", EMPTY_ARGMAX_REDUCE, "numeric trap: domain in argmax_reduce at i64"),
-    ("shrink past the end", SHRINK_PAST_THE_END, "numeric trap: domain in shrink at i64"),
-    ("stride of zero", STRIDE_OF_ZERO, "numeric trap: domain in stride at i64"),
-    ("negative pad", NEGATIVE_PAD, "must be a non-negative integer"),
-    ("call's named extent claim", CALL_EXTENT_CLAIM, "numeric trap: domain in load at i64"),
-    ("callee's named result claim", NAMED_RESULT_CLAIM, "numeric trap: domain in shrink at i64"),
-    ("callee's literal result claim", LITERAL_RESULT_CLAIM, "numeric trap: domain in reshape at i64"),
-    ("guarded fail in a grad body", GUARDED_FAIL_UNDER_GRAD, "guard tripped"),
+    (
+        "empty max_reduce",
+        EMPTY_MAX_REDUCE,
+        "numeric trap: domain in max_reduce at f32",
+    ),
+    (
+        "empty argmax_reduce",
+        EMPTY_ARGMAX_REDUCE,
+        "numeric trap: domain in argmax_reduce at i64",
+    ),
+    (
+        "shrink past the end",
+        SHRINK_PAST_THE_END,
+        "numeric trap: domain in shrink at i64",
+    ),
+    (
+        "stride of zero",
+        STRIDE_OF_ZERO,
+        "numeric trap: domain in stride at i64",
+    ),
+    (
+        "negative pad",
+        NEGATIVE_PAD,
+        "must be a non-negative integer",
+    ),
+    (
+        "call's named extent claim",
+        CALL_EXTENT_CLAIM,
+        "numeric trap: domain in load at i64",
+    ),
+    (
+        "callee's named result claim",
+        NAMED_RESULT_CLAIM,
+        "numeric trap: domain in shrink at i64",
+    ),
+    (
+        "callee's literal result claim",
+        LITERAL_RESULT_CLAIM,
+        "numeric trap: domain in reshape at i64",
+    ),
+    (
+        "guarded fail in a grad body",
+        GUARDED_FAIL_UNDER_GRAD,
+        "guard tripped",
+    ),
 ];
 
 /// Every kind the trap seed gained, as a discarded `let` of an entered

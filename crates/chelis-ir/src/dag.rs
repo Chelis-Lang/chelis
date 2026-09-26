@@ -2405,9 +2405,8 @@ pub enum RuntimeCheck {
 /// verifier.
 pub struct TrapSeeds<'dag> {
     dag: &'dag Dag,
-    literal_result_witness_requirements: std::cell::OnceCell<
-        std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>,
-    >,
+    literal_result_witness_requirements:
+        std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
 }
 
 impl TrapSeeds<'_> {
@@ -2496,7 +2495,10 @@ impl TrapSeeds<'_> {
     /// ([`crate::axis_sources::literal_result_witness_requirements`]), in
     /// claim order. The whole graph's are derived on the first call and
     /// shared by every later one.
-    pub fn literal_result_witness_requirements(&self, witness: NodeId) -> &[chelis_types::ScalarValue] {
+    pub fn literal_result_witness_requirements(
+        &self,
+        witness: NodeId,
+    ) -> &[chelis_types::ScalarValue] {
         self.literal_result_witness_requirements
             .get_or_init(|| crate::axis_sources::literal_result_witness_requirements(self.dag))
             .get(&witness)

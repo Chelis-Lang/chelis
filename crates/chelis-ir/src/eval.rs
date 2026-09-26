@@ -6352,7 +6352,8 @@ mod tests {
 
         let (dag, z, g, main) = program(Prim::Int32);
         assert!(
-            dag.trap_seeds().is_observable_root(dag.get(g).expect("node")),
+            dag.trap_seeds()
+                .is_observable_root(dag.get(g).expect("node")),
             "precondition: integer arithmetic must be a trapping node, or this \
              test passes for the wrong reason"
         );

@@ -492,7 +492,10 @@ impl<'a> EvalContext<'a> {
         // can trap) must execute, so a graph that holds one executes even
         // when it has no roots.
         let seeds = dag.trap_seeds();
-        let observes = dag.nodes().iter().any(|node| seeds.is_observable_root(node));
+        let observes = dag
+            .nodes()
+            .iter()
+            .any(|node| seeds.is_observable_root(node));
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
