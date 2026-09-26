@@ -33,7 +33,10 @@ use chelis_compiler_api::schema::{
     CompileRequest, CompileTarget, EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context, eval_in_context_with_bindings};
-use chelis_types::types::Lane;
+use chelis_ir::eval::TensorValue as DagTensor;
+use chelis_types::types::{Lane, Prim};
+use chelis_types::{RawTensor, finalize_tensor};
+use chelis_unord::UnordMap;
 use std::collections::BTreeMap;
 
 const DROPOUT_DOMAIN: &str = "numeric trap: domain in dropout at f32";
@@ -1368,13 +1371,23 @@ const SUM_OVERFLOW: &str = "numeric trap: overflow in sum at i32";
 /// `{c}` is the condition. `x` holds `n` ones for the evaluator and the C
 /// driver's `2i - 3`, whose sums (1: -3, 4: 0, 6: 12) stay under 100 like
 /// the evaluator's, so each condition decides the same arm in both lanes. An
-/// `lt` condition keeps `selected` a Tensor-lane root and a C kernel. An
-/// empty reduced axis is a `tensor[0, f32]` input, since the C lane refuses
-/// a runtime-sized `insert` (chelis#600).
+/// `lt` condition keeps `selected` a Tensor-lane root and a C kernel unless
+/// something else in it routes it to the Host lane: a runtime list (the
+/// bounds of `shrink` and `pad`, a computed `reshape` target) or a `fail`
+/// message string. An empty reduced axis is a `tensor[0, f32]` input, since
+/// the C lane refuses a runtime-sized `insert` (chelis#600); a runtime
+/// integer is the rank-0 `d`.
 struct GatedKind {
     name: &'static str,
     source: &'static str,
     n: usize,
+    /// The rank-0 `i64` input `d`, where the source declares one.
+    d: Option<i64>,
+    /// The lane `eval_selected` runs `selected` in. A Host-lane row runs
+    /// the `if` as control flow, so its untaken arm never reaches the gate;
+    /// [`every_gated_kind_checks_only_in_a_taken_arm_in_the_dag_evaluator`]
+    /// drives the DAG evaluator for every kind.
+    lane: Lane,
     /// `selected` when the arm is not taken, in the evaluator.
     expected: &'static [f64],
     /// The evaluator's typed trap when it is.
@@ -1382,7 +1395,9 @@ struct GatedKind {
     /// A fragment of the C lane's trap, or `None` where the selected C
     /// entry refuses the source: a runtime-extent result (a runtime-bounded
     /// movement, a computed reshape target) has no C representation in a
-    /// Tensor-lane entry (chelis#600).
+    /// Tensor-lane entry (chelis#600). `exec_compile`'s
+    /// `a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_eval_and_c`
+    /// covers those kinds' C gates on hand-built graphs.
     c_trap: Option<&'static str>,
 }
 
@@ -1398,9 +1413,11 @@ const UNTAKEN: &str = "lt(100.0f32, s)";
 const GATED_KINDS: [GatedKind; 10] = [
     GatedKind {
         name: "consumed integer sum",
-        source: "def selected(x: tensor[1, f32]) -> tensor[i32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(to_tensor([2000000000i32, 2000000000i32]), 0i32) else scalar_to_tensor(7i32)\n}\n",
+        source: "def selected(x: tensor[1, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then cast(sum(to_tensor([2000000000i32, 2000000000i32]), 0i32), f32) else sum(x, 0i32)\n}\n",
         n: 1,
-        expected: &[7.0],
+        d: None,
+        lane: Lane::Tensor,
+        expected: &[1.0],
         trap: SUM_OVERFLOW,
         c_trap: Some(SUM_OVERFLOW),
     },
@@ -1408,6 +1425,8 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "discarded integer sum",
         source: "def selected(x: tensor[1, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  r = if {c} then {\n    dead = sum(to_tensor([2000000000i32, 2000000000i32]), 0i32)\n    sum(&x, 0i32)\n  } else sum(&x, 0i32)\n  sum(x, 0i32)\n}\n",
         n: 1,
+        d: None,
+        lane: Lane::Tensor,
         expected: &[1.0],
         trap: SUM_OVERFLOW,
         c_trap: Some(SUM_OVERFLOW),
@@ -1416,15 +1435,19 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "empty max_reduce",
         source: "def selected(x: tensor[1, f32], e: tensor[0, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then max_reduce(e, 0i32) else sum(x, 0i32)\n}\n",
         n: 1,
+        d: None,
+        lane: Lane::Tensor,
         expected: &[1.0],
         trap: "numeric trap: domain in max_reduce at f32",
         c_trap: Some("numeric trap: domain in max_reduce at f32"),
     },
     GatedKind {
         name: "empty argmax_reduce",
-        source: "def selected(x: tensor[1, f32], e: tensor[0, f32]) -> tensor[i64] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then argmax_reduce(e, 0i32) else scalar_to_tensor(7i64)\n}\n",
+        source: "def selected(x: tensor[1, f32], e: tensor[0, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then cast(argmax_reduce(e, 0i32), f32) else sum(x, 0i32)\n}\n",
         n: 1,
-        expected: &[7.0],
+        d: None,
+        lane: Lane::Tensor,
+        expected: &[1.0],
         trap: "numeric trap: domain in argmax_reduce at i64",
         c_trap: Some("numeric trap: domain in argmax_reduce at i64"),
     },
@@ -1432,14 +1455,18 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "shrink past the end",
         source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(shrink(&x, [[1i64, add(shape(&x, 0i32), 3i64)]]), 0i32) else sum(x, 0i32)\n}\n",
         n: 4,
+        d: None,
+        lane: Lane::Host,
         expected: &[4.0],
         trap: "numeric trap: domain in shrink at i64",
         c_trap: None,
     },
     GatedKind {
         name: "stride of zero",
-        source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(stride(&x, sub(shape(&x, 0i32), 4i64)), 0i32) else sum(x, 0i32)\n}\n",
+        source: "def selected(x: tensor[4, f32], d: tensor[i64]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(stride(&x, tensor_to_scalar(d)), 0i32) else sum(x, 0i32)\n}\n",
         n: 4,
+        d: Some(0),
+        lane: Lane::Tensor,
         expected: &[4.0],
         trap: "numeric trap: domain in stride at i64",
         c_trap: None,
@@ -1448,14 +1475,18 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "negative pad",
         source: "def selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(pad(&x, [[sub(shape(&x, 0i32), 5i64), 0i64]], 0.0f32), 0i32) else sum(x, 0i32)\n}\n",
         n: 4,
+        d: None,
+        lane: Lane::Host,
         expected: &[4.0],
         trap: "must be a non-negative integer",
         c_trap: None,
     },
     GatedKind {
         name: "call's named extent claim",
-        source: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\ndef selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then g(shrink(&x, [[0i64, sub(shape(&x, 0i32), 1i64)]]), copy(x)) else sum(x, 0i32)\n}\n",
+        source: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\ndef selected(x: tensor[4, f32], d: tensor[i64]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then g(stride(&x, tensor_to_scalar(d)), copy(x)) else sum(x, 0i32)\n}\n",
         n: 4,
+        d: Some(2),
+        lane: Lane::Tensor,
         expected: &[4.0],
         trap: "numeric trap: domain in load at i64",
         c_trap: None,
@@ -1464,6 +1495,8 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "checked reshape claim",
         source: "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef selected(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
         n: 6,
+        d: None,
+        lane: Lane::Host,
         expected: &[6.0],
         trap: "numeric trap: domain in reshape at i64",
         c_trap: None,
@@ -1472,6 +1505,8 @@ const GATED_KINDS: [GatedKind; 10] = [
         name: "guarded fail in a grad body",
         source: "def loss(x: tensor[1, f32]) -> tensor[f32] = if lt(tensor_to_scalar(sum(&x, 0i32)), 50.0f32) then fail(\"guard tripped\") else sum(x, 0i32)\n\ndef h(x: tensor[1, f32]) -> tensor[1, f32] = {\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if {c} then grad(loss)(x) else x\n}\n\ndef selected(x: tensor[1, f32]) -> tensor[1, f32] = h(x)\n",
         n: 1,
+        d: None,
+        lane: Lane::Host,
         expected: &[1.0],
         trap: "guard tripped",
         c_trap: Some("guard tripped"),
@@ -1483,14 +1518,69 @@ impl GatedKind {
         self.source.replace("{c}", condition)
     }
 
-    /// `x`, and the empty `e` a source that declares one reads.
+    /// `x`, the empty `e` and the rank-0 `d` the source declares.
     fn bindings(&self) -> BTreeMap<String, TensorValue> {
         let mut bindings = BTreeMap::from([("x".into(), f32_input(self.n))]);
         if self.source.contains("e: tensor[0, f32]") {
             bindings.insert("e".into(), f32_input(0));
         }
+        if let Some(d) = self.d {
+            bindings.insert(
+                "d".into(),
+                TensorValue {
+                    shape: vec![],
+                    data: serde_json::from_value(
+                        serde_json::json!({"dtype": "int64", "values": [d]}),
+                    )
+                    .unwrap(),
+                },
+            );
+        }
         bindings
     }
+
+    /// [`Self::bindings`] as the DAG evaluator's inputs.
+    fn dag_inputs(&self) -> UnordMap<String, DagTensor> {
+        let f32s = |count: usize| {
+            DagTensor::from_storage(
+                vec![count],
+                finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; count])).unwrap(),
+            )
+        };
+        let mut inputs = UnordMap::new();
+        inputs.insert("x".to_string(), f32s(self.n));
+        if self.source.contains("e: tensor[0, f32]") {
+            inputs.insert("e".to_string(), f32s(0));
+        }
+        if let Some(d) = self.d {
+            inputs.insert(
+                "d".to_string(),
+                DagTensor::from_storage(
+                    vec![],
+                    finalize_tensor("d", Prim::Int64, RawTensor::Int(vec![d])).unwrap(),
+                ),
+            );
+        }
+        inputs
+    }
+}
+
+/// `selected` of `source` lowered as a tensor entry (the lowering the host
+/// lane's kernels and `--target hip` use), whatever lane the router would
+/// give it, and evaluated by the DAG evaluator: the root's values, or the
+/// evaluator's error.
+fn dag_evaluator(source: &str, inputs: &UnordMap<String, DagTensor>) -> Result<Vec<f64>, String> {
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse");
+    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("check: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity");
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "selected")
+        .unwrap_or_else(|| panic!("`selected` lowers as a tensor entry:\n{source}"));
+    let root = *dag.roots().last().expect("a root");
+    let values = chelis_ir::eval::eval_tensor(&dag, inputs)?;
+    Ok(values[&root].to_f64_lossy_vec())
 }
 
 /// `outcome` must fail with a message containing `trap`.
@@ -1514,12 +1604,12 @@ fn fails_with(rows: &mut Rows, row: &str, outcome: Result<EvalResult, CompilerEr
 /// and the arm's value is the untaken twin's (`lower_if`, and the `grad`
 /// splice for the guarded abort). The lanes agree row by row.
 ///
-/// Lane routing is not pinned: at 843422a00 plus this change only the
-/// discarded integer sum and the empty `max_reduce` stay Tensor-lane roots
-/// (the DAG evaluator); `eval_selected` runs the other rows in the Host lane.
+/// Each row's lane is pinned ([`GatedKind::lane`]): the Tensor-lane rows
+/// reach the DAG evaluator and a Tensor-lane C kernel, whose `if` is a
+/// `Where` under activations; a Host-lane row runs its `if` as control flow.
 ///
-/// Evidentiary status: REGRESSION TEST (fail-first at 224414e1f not yet
-/// recorded per row; see ks5-h2b-handoff.md).
+/// Evidentiary status: per row, see the report of ks5-h2e (REGRESSION TEST
+/// where the row fails at 224414e1f, DISPOSITION LOCK where it passes).
 #[test]
 fn an_untaken_arms_extent_bound_and_reduction_checks_do_nothing_in_the_evaluator_and_c() {
     let mut rows = Rows::default();
@@ -1530,7 +1620,7 @@ fn an_untaken_arms_extent_bound_and_reduction_checks_do_nothing_in_the_evaluator
             select(&source, "selected", kind.bindings()),
             "selected",
             kind.expected,
-            None,
+            Some(kind.lane),
         );
         if kind.c_trap.is_some() {
             rows.c(
@@ -1567,4 +1657,198 @@ fn a_taken_arms_extent_bound_and_reduction_checks_trap_in_the_evaluator_and_c() 
         }
     }
     rows.assert_empty();
+}
+
+/// The DAG evaluator for every gated kind, the Host-lane ones included:
+/// `selected` lowered as a tensor entry (its `if` a `Where` under the arm's
+/// activation, `lower_if`, and the `grad` splice for the guarded abort) and
+/// evaluated directly. Untaken, each kind returns the `else` value; taken,
+/// it traps with the kind's trap. `chelis-cli`'s
+/// `issue_2563_untaken_arm_eval_file` has the `chelis eval --file` rows.
+///
+/// Evidentiary status: at 224414e1f the untaken rows of every kind but the
+/// discarded integer sum and the negative pad trap (REGRESSION TEST), and
+/// the taken discarded integer sum returns 1.0 (REGRESSION TEST: it was not
+/// a seed); the other rows are a disposition lock. The checked reshape
+/// row lowers here to a literal result claim over a folded target, not a
+/// `CheckedReshapeExtent`, and its untaken row traps at this head and at
+/// 224414e1f through the result-claim guard (see ks5-h2e-handoff.md).
+#[test]
+fn every_gated_kind_checks_only_in_a_taken_arm_in_the_dag_evaluator() {
+    let mut failures = Vec::new();
+    for kind in &GATED_KINDS {
+        let inputs = kind.dag_inputs();
+        match dag_evaluator(&kind.source(UNTAKEN), &inputs) {
+            Ok(values) if values == kind.expected => {}
+            outcome => failures.push(format!("untaken {}: {outcome:?}", kind.name)),
+        }
+        match dag_evaluator(&kind.source(TAKEN), &inputs) {
+            Err(error) if error.contains(kind.trap) => {}
+            outcome => failures.push(format!("taken {}: {outcome:?}", kind.name)),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// A vmapped row's arm over `rows` rows whose checking node is an integer
+/// `sum`: the row scaled by 7e8 cast to `i32`, inserted twice along a new
+/// axis and summed. Row -3.0 overflows the sum (and not the cast); rows
+/// -1.0 and 1.0 fit. A `gt` condition keeps the entry in the Host lane,
+/// whose C entry the driver runs on the one row `[-3.0]`.
+fn vmapped_sum_arm(condition: &str, rows: usize) -> String {
+    format!(
+        "def row(x: tensor[f32]) -> tensor[f32] = {{\n  s = tensor_to_scalar(copy(x))\n  if {condition} then cast(sum(insert(cast(mul(&x, scalar_to_tensor(700000000.0f32)), i32), 0i32, 2i64), 0i32), f32) else x\n}}\n\ndef selected(xs: tensor[{rows}, f32]) -> tensor[{rows}, f32] = vmap(row)(xs)\n"
+    )
+}
+
+/// The vmap batching pass for an integer reduction (spec/10 §3.2): each row
+/// of a vmapped arm's `sum` checks only where that row takes the arm. Row
+/// -3.0 does not take it and would overflow; rows -1.0 and 1.0 take it and
+/// sum to -1.4e9 and 1.4e9, in the evaluator; the C entry runs the one row
+/// -3.0 and returns its `else` value. The taken twin (row -3.0 taking the
+/// arm) traps in both lanes.
+///
+/// Evidentiary status: DISPOSITION LOCK (every row passes at 224414e1f).
+#[test]
+fn a_vmapped_arms_integer_sum_checks_only_in_the_rows_that_take_it_in_the_evaluator_and_c() {
+    let mut rows = Rows::default();
+    let untaken = vmapped_sum_arm("gt(s, -2.0f32)", 3);
+    rows.returns(
+        "E untaken row",
+        select(&untaken, "selected", xs(&[-3.0, -1.0, 1.0])),
+        "selected",
+        &[-3.0, -1_400_000_000.0, 1_400_000_000.0],
+        None,
+    );
+    rows.c(
+        "C untaken row",
+        run_c(
+            &compile_c(&vmapped_sum_arm("gt(s, -2.0f32)", 1), "selected"),
+            "selected",
+            0,
+        ),
+        Ok(()),
+    );
+    let taken = "gt(-2.0f32, s)";
+    rows.traps(
+        "E taken row",
+        select(
+            &vmapped_sum_arm(taken, 3),
+            "selected",
+            xs(&[-3.0, -1.0, 1.0]),
+        ),
+        SUM_OVERFLOW,
+    );
+    rows.c(
+        "C taken row",
+        run_c(
+            &compile_c(&vmapped_sum_arm(taken, 1), "selected"),
+            "selected",
+            0,
+        ),
+        Err(SUM_OVERFLOW),
+    );
+    rows.assert_empty();
+}
+
+/// Every per-row activation gate in `source`'s C: the gated node's id, the
+/// activation tensor it reads, and its row loop's text.
+fn per_row_gates(source: &str) -> Vec<(String, String, String)> {
+    let mut gates = Vec::new();
+    for line in source.lines() {
+        let Some(rest) = line.trim().strip_prefix("const int __act_row_") else {
+            continue;
+        };
+        let (id, rest) = rest.split_once(" = (((const uint8_t*)").expect(line);
+        let (mask, rest) = rest.split_once("_data)[").expect(line);
+        assert_eq!(rest, format!("__row_{id}] != 0);"), "{line}");
+        let header = format!("for (int64_t __row_{id} = 0;");
+        let start = source.find(&header).expect(&header);
+        let mut depth = 0usize;
+        let mut end = start;
+        for (offset, character) in source[start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + offset + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        gates.push((
+            id.to_string(),
+            mask.to_string(),
+            source[start..end].to_string(),
+        ));
+    }
+    gates
+}
+
+/// One activation read per row (decisions section 11): under `vmap` a
+/// checking node's activation is one bool per row, and its C kernel reads
+/// each row's byte once, in its row loop, never once per element. For the
+/// vmapped `cast` and integer `sum` arms, every per-row gate's loop reads
+/// the activation tensor exactly once (`[__row_N]`), and every element it
+/// checks reads `__act_row_N` instead. The only other read of the mask for
+/// that node is the any-row reduction, also one byte per row.
+///
+/// Evidentiary status: REGRESSION TEST. At 224414e1f the C lane has no
+/// per-row gate for these nodes (no `__act_row_` in either kernel).
+#[test]
+fn a_vmapped_arms_c_kernel_reads_each_rows_activation_once() {
+    for (kind, source, checked) in [
+        (
+            "cast",
+            vmapped_arm("gt(s, -2.0f32)", 3),
+            "(int32_t)((int64_t)((double)(((__act_row_",
+        ),
+        (
+            "integer sum",
+            vmapped_sum_arm("gt(s, -2.0f32)", 3),
+            "__sum_level_",
+        ),
+    ] {
+        let artifact = compile_c(&source, "selected");
+        let stem = &artifact.compile_result.entry_name;
+        let c = &artifact
+            .compile_result
+            .files
+            .iter()
+            .find(|file| file.path == format!("{stem}.c"))
+            .expect("generated C")
+            .contents;
+        let gates = per_row_gates(c);
+        assert!(
+            gates.iter().any(|(_, _, body)| body.contains(checked)),
+            "{kind}: no per-row gate around its check:\n{c}"
+        );
+        for (id, mask, body) in &gates {
+            let read = format!("{mask}_data)[");
+            assert_eq!(
+                body.matches(&read).count(),
+                1,
+                "{kind}: node {id}'s row loop reads the mask once per row:\n{body}"
+            );
+            let (row_read, elements) = body
+                .split_once(&format!("_data)[__row_{id}] != 0);"))
+                .expect("the row read opens the row loop");
+            assert!(row_read.ends_with(mask), "{kind}: {body}");
+            assert!(
+                elements.contains(&format!("__act_row_{id}")),
+                "{kind}: node {id}'s elements read the row's flag:\n{body}"
+            );
+            assert_eq!(
+                c.matches(&format!(
+                    "__act_{id} |= (((const uint8_t*){read}__r] != 0);"
+                ))
+                .count(),
+                1,
+                "{kind}: node {id}'s any-row reduction:\n{c}"
+            );
+        }
+    }
 }

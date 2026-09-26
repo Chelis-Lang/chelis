@@ -365,3 +365,55 @@ fn a_vmap_in_an_untaken_arm_reads_the_expanded_activation_through_its_strides() 
     }
     assert!(launch.contains(&gate_arguments(id, act, 2)), "{launch}");
 }
+
+/// Fail-closed for the kinds whose check HIP cannot gate (decisions section
+/// 11; `Dag::is_activation_gated`): an integer reduction's overflow check
+/// (HIP's one integer `sum`, the `i16` sum promoted to `i32`) and an extreme reduction's empty-axis check under an untaken arm's
+/// activation are refused, with the gate's `unimplemented chelis#2413`
+/// rejection, rather than launched with a check that would run where the
+/// activation is false. The same reduction every execution runs has no
+/// activation and compiles.
+///
+/// Evidentiary status: REGRESSION TEST for the refusals. At 224414e1f HIP
+/// launches both arms' reductions ungated. The unconditional twins are a
+/// disposition lock (they compile at 224414e1f).
+#[test]
+fn an_untaken_arms_reduction_check_is_refused_and_its_unconditional_twin_compiles() {
+    for (kind, arm, unconditional) in [
+        (
+            "integer sum",
+            "def main(x: tensor[4, i16], y: tensor[i32], s: tensor[f32]) -> tensor[i32] = if lt(tensor_to_scalar(s), 0.0f32) then sum(x, 0i32) else y\n",
+            "def main(x: tensor[4, i16]) -> tensor[i32] = sum(x, 0i32)\n",
+        ),
+        (
+            "empty-axis max_reduce",
+            "def main(e: tensor[0, f32], y: tensor[f32], s: tensor[f32]) -> tensor[f32] = if lt(tensor_to_scalar(s), 0.0f32) then max_reduce(e, 0i32) else y\n",
+            "def main(e: tensor[0, f32]) -> tensor[f32] = max_reduce(e, 0i32)\n",
+        ),
+    ] {
+        let dag = lowered(arm);
+        let gated = dag
+            .nodes()
+            .iter()
+            .filter(|node| dag.is_activation_gated(node))
+            .map(|node| chelis_ir::grad::risc_op_name(&node.op))
+            .collect::<Vec<_>>();
+        assert!(
+            gated
+                .iter()
+                .any(|op| op.contains("sum") || op.contains("max")),
+            "{kind}: the arm's reduction is gated: {gated:?}"
+        );
+        let error = support::codegen_hip(&dag, "gated")
+            .map(|result| result.c_source)
+            .expect_err(kind);
+        let message = error.to_string();
+        assert!(
+            message.contains("a checking operation under an activation")
+                && message.contains("2413"),
+            "{kind}: {message}"
+        );
+        emit(unconditional)
+            .unwrap_or_else(|error| panic!("{kind}: the unconditional twin: {error}"));
+    }
+}
