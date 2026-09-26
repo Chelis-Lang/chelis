@@ -421,23 +421,17 @@ impl InferenceProduct {
     /// the same way in every order. Waiting on it instead would let the
     /// caller's own use of the reference choose the instance, which is how a
     /// generic function is instantiated.
+    ///
+    /// A variable anywhere inside a provisional type qualifies, not only the
+    /// whole type of a parameter or result: a tuple component, a list element
+    /// or a tensor's precision is shared by every reference just the same.
     pub(super) fn awaits_group_completion(&self, ty: &Type, subst: &Subst) -> bool {
         let Type::Var(var) = subst.apply(ty) else {
             return false;
         };
-        self.group_provisional_types.iter().any(|provisional| {
-            // `Subst::apply` resolves a binding as it was recorded, so repeat
-            // it until nothing changes, as `group_link::resolved` does.
-            let mut current = subst.apply(provisional);
-            loop {
-                let next = subst.apply(&current);
-                if next == current {
-                    break;
-                }
-                current = next;
-            }
-            crate::env::free_tvars(&current).contains(&var)
-        })
+        self.group_provisional_types
+            .iter()
+            .any(|provisional| crate::env::free_tvars(&resolved(provisional, subst)).contains(&var))
     }
 
     /// The component's in-group references and member types, taken for its
@@ -1089,20 +1083,32 @@ impl InferenceProduct {
                     )
                 }
                 DeferredShapeRule::Derivation(derivation) => {
-                    let decided = resolve_type_derivation(
+                    let product: &Self = self;
+                    let step = resolve_type_derivation(
                         derivation,
                         &check.arg_tys[0],
                         &check.result_ty,
+                        &|ty, subst| product.awaits_group_completion(ty, subst),
                         vg,
                         subst,
                         adt_reg,
                         errors,
                     );
-                    // The readiness test above already waits on a variable
-                    // target, so this keeps an undecided entry only in
-                    // principle; an entry is never dropped undecided.
-                    if !decided {
-                        self.deferred_shape_checks.push(check);
+                    match step {
+                        DerivationStep::Decided => {}
+                        // The readiness test above already waits on a variable
+                        // target, so this keeps an undecided entry only in
+                        // principle; an entry is never dropped undecided.
+                        DerivationStep::Pending => self.deferred_shape_checks.push(check),
+                        DerivationStep::Awaits {
+                            derivation,
+                            operands,
+                        } => {
+                            let mut check = check;
+                            check.rule = DeferredShapeRule::Derivation(derivation);
+                            check.arg_tys = operands;
+                            self.deferred_shape_checks.push(check);
+                        }
                     }
                     continue;
                 }
@@ -1284,22 +1290,26 @@ impl InferenceProduct {
                 }
                 DeferredShapeRule::Derivation(ref derivation) => {
                     // chelis#2626: a `grad` waits only on types its recursive
-                    // group determines, and the group is complete here, so it
-                    // is decided on the types the group left, as the call
-                    // decides them. Replaying it at every instantiation of a
-                    // variable left would admit `grad` of a generic function,
-                    // which the compiled lanes do not implement. Only an
-                    // operand that is still a variable goes to the boundary's
-                    // instantiations, where it is rejected.
+                    // group determines, and the group is complete here, so
+                    // nothing waits: it is decided on the types the group
+                    // left, as the call decides them. Replaying it at every
+                    // instantiation of a variable left would admit `grad` of a
+                    // generic function, which the compiled lanes do not
+                    // implement. Only an operand that is still a variable goes
+                    // to the boundary's instantiations, where it is rejected.
                     if matches!(derivation, TypeDerivation::Grad { .. })
-                        && resolve_type_derivation(
-                            derivation,
-                            &check.arg_tys[0],
-                            &check.result_ty,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
+                        && matches!(
+                            resolve_type_derivation(
+                                derivation,
+                                &check.arg_tys[0],
+                                &check.result_ty,
+                                &|_, _| false,
+                                vg,
+                                subst,
+                                adt_reg,
+                                errors,
+                            ),
+                            DerivationStep::Decided
                         )
                     {
                         continue;

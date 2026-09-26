@@ -105,7 +105,7 @@ fn resolve(variable: Variable, subst: &Subst) -> Resolved {
 /// variable to its binding as the binding was recorded, and a binding
 /// recorded before one of its own variables was bound still names that
 /// variable, so the application is repeated until nothing changes.
-fn resolved(ty: &Type, subst: &Subst) -> Type {
+pub(super) fn resolved(ty: &Type, subst: &Subst) -> Type {
     let mut current = subst.apply(ty);
     loop {
         let next = subst.apply(&current);

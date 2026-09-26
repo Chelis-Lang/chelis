@@ -839,6 +839,101 @@ fn grad_waits_on_no_type_outside_a_provisional_group_type() {
     }
 }
 
+/// Round 4's `tup`, `ten` and `lst`: `h` determines a variable nested in the
+/// type of `f`'s first parameter, a tuple component, a tensor's precision or
+/// a list element, and `g` differentiates `f`.
+const GRAD_OF_NESTED: [&str; 3] = [
+    "def fst2[a](p: (a, i32)) -> a = p.0\n\n\
+     def f(x, n) = {\n  k = fst2(x)\n  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))\n}\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  d = grad(f)\n  r = d((2.0f32, 1i32), 0i32)\n  r.0\n}\n\n\
+     def h(n: i32) -> f32 = f((2.0f32, 1i32), n)\n\n\
+     def main() -> f32 = g(1)\n",
+    "def first3[p](t: tensor[3, p]) -> tensor[3, p] = t\n\n\
+     def f(x, n) = {\n  k = first3(x)\n  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))\n}\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  d = grad(f)\n  r = d(to_tensor([1.0f32, 2.0f32, 3.0f32]), 0i32)\n  tensor_to_scalar(sum(r, 0))\n}\n\n\
+     def h(n: i32) -> f32 = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), n)\n\n\
+     def main() -> f32 = g(1)\n",
+    "def firstl[a](xs: List[a]) -> List[a] = xs\n\n\
+     def f(x, n) = {\n  k = firstl(x)\n  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))\n}\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  d = grad(f)\n  r = d([1.0f32], 0i32)\n  index(r, 0i64)\n}\n\n\
+     def h(n: i32) -> f32 = f([2.0f32], n)\n\n\
+     def main() -> f32 = g(1)\n",
+];
+
+/// REGRESSION TEST (fails on `main` and `448018919`, which rejected every
+/// program with `f`, `g` and `h` declared in that order: `grad` read the
+/// variable nested in `f`'s parameter before `h` had determined it, decided
+/// the parameter was not differentiable, and published `()` for its
+/// gradient). chelis#2626: `grad` waits on a variable of the group anywhere in
+/// a type it reads, so each program is accepted in every order, both where
+/// `grad` is applied to `f` and to a lambda over it. `chelis eval` gives the
+/// lambda forms 0.0 in every order and `chelis build --target c` builds the
+/// tensor one and prints 0.0; the forms that apply `grad` to `f` itself run
+/// out of memory in `chelis eval` in every order, as the typed `grad` of a
+/// group member does on `main`.
+#[test]
+fn grad_waits_on_a_group_variable_nested_in_a_parameter() {
+    for program in GRAD_OF_NESTED {
+        let over_lambda = program.replace("grad(f)", "grad(fn (z) -> f(z, 0i32))");
+        let over_lambda = over_lambda
+            .replace("d((2.0f32, 1i32), 0i32)", "d((2.0f32, 1i32))")
+            .replace(
+                "d(to_tensor([1.0f32, 2.0f32, 3.0f32]), 0i32)",
+                "d(to_tensor([1.0f32, 2.0f32, 3.0f32]))",
+            )
+            .replace("d([1.0f32], 0i32)", "d([1.0f32])");
+        for source in [program, over_lambda.as_str()] {
+            for order in declaration_orders(source) {
+                accepts(&order);
+            }
+        }
+    }
+}
+
+/// `g` differentiates a lambda whose parameter `p` holds a variable of the
+/// group, `f`'s parameter type, beside `b`, which no sibling determines and
+/// which the application after `grad` binds to `f32`.
+const GRAD_BESIDE_A_LOCAL_VARIABLE: &str = "def fst2b[a, b](p: (a, b)) -> a = p.0\n\n\
+     def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  d = grad(fn (p) -> f(fst2b(p), 0i32))\n  r = d((2.0f32, 3.0f32))\n  r.0\n}\n\n\
+     def h(n: i32) -> f32 = f(2.0f32, n)\n\n\
+     def main() -> f32 = g(1)\n";
+
+/// `w`'s type is a variable no sibling determines, and the application
+/// binds it to the component that `f`'s parameter type, a variable of the
+/// group, resolves to.
+const GRAD_BESIDE_A_LINKED_VARIABLE: &str = "def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  d = grad(fn (z, w) -> f(z, 0i32))\n  k = fn (u) -> d((u, 1i32), u)\n  r = k(2.0f32)\n  r.0\n}\n\n\
+     def h(n: i32) -> f32 = f((2.0f32, 1i32), n)\n\n\
+     def main() -> f32 = g(1)\n";
+
+/// REGRESSION TEST (fails on `main` and `448018919`: with `f`, `g`, `h` in
+/// that order both reject the `r.0` programs; `448018919` accepts the first
+/// `add(r.0, r.1)` program with `g` before `h`). A variable that no sibling
+/// determines is decided where `grad` is inferred, as a variable, however long
+/// the rule then waits on a variable of the group beside it: so the gradient
+/// of `p`'s second component, and of `w`, is `()` in every order, although the
+/// application after `grad` binds both to `f32`. In the second program `w`'s
+/// variable is also the one `f`'s parameter type resolves to, and there it is
+/// resolved. `r.0` is therefore accepted in every order, and a use of `r.1` as
+/// `f32` is rejected in every order.
+#[test]
+fn grad_decides_a_local_variable_where_it_is_inferred_beside_a_group_variable() {
+    for program in [GRAD_BESIDE_A_LOCAL_VARIABLE, GRAD_BESIDE_A_LINKED_VARIABLE] {
+        let orders = declaration_orders(program);
+        for order in &orders {
+            accepts(order);
+        }
+        let uses_both = program.replace("\n  r.0\n}", "\n  add(r.0, r.1)\n}");
+        let orders = declaration_orders(&uses_both);
+        let first = outcome(&orders[0]);
+        for order in &orders {
+            rejects_with(order, &["TypeMismatch", "()"]);
+            assert_eq!(outcome(order), first, "{order}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The order-independence oracle.
 

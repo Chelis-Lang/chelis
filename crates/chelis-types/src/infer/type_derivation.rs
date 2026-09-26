@@ -7,7 +7,8 @@
 //! row-polymorphic tuple or record to bind the target to, so the access
 //! publishes a fresh variable and records the derivation that ties it to the
 //! target. `infer_grad` cannot name the gradient's type, or decide whether the
-//! operand admits one, before those types are known, so it does the same. The derivation is an entry of the deferred shape ledger
+//! operand admits one, before those types are known, so it does the same. The
+//! derivation is an entry of the deferred shape ledger
 //! (`DeferredShapeRule::Derivation`), so the ledger's three guarantees hold for
 //! it as for a suspended call: it is decided once the target binds, a
 //! `let`-bound lambda carrying one stays monomorphic until its first
@@ -26,12 +27,12 @@ pub(super) enum TypeDerivation {
         field: String,
     },
     /// `grad` of the target, differentiating the parameters `wrt` selects, or
-    /// every parameter without it, except the `frozen` ones the call decided
-    /// were not differentiable ([`decide_grad`]). The projected type is the
-    /// type the call published: the gradient's function type.
+    /// every parameter without it, reading the `frozen` variables as the call
+    /// saw them ([`decide_grad`]). The projected type is the type the call
+    /// published: the gradient's function type.
     Grad {
         wrt: Option<Vec<usize>>,
-        frozen: Vec<usize>,
+        frozen: Vec<TypeVar>,
     },
 }
 
@@ -58,12 +59,31 @@ impl TypeDerivation {
     }
 }
 
+/// What deciding a derivation did.
+pub(super) enum DerivationStep {
+    /// The target is still a variable, so nothing was decided.
+    Pending,
+    /// `projected` is bound to the projected type or to a rejection's witness.
+    Decided,
+    /// A `grad` whose types revealed further variables that its recursive
+    /// group determines (chelis#2626). It is to be carried again as this
+    /// derivation over these operands: the operand's type as it was read,
+    /// then each awaited variable.
+    Awaits {
+        derivation: TypeDerivation,
+        operands: Vec<Type>,
+    },
+}
+
 /// Decide one derivation against its target's current type.
 ///
-/// Returns `false`, deciding nothing, while the target is still a variable.
-/// Otherwise binds `projected` to the projected type, or reports why the
-/// target has none and binds `projected` to that report's witness, and
-/// returns `true`.
+/// Returns [`DerivationStep::Pending`], deciding nothing, while the target is
+/// still a variable. Otherwise binds `projected` to the projected type, or
+/// reports why the target has none and binds `projected` to that report's
+/// witness, and returns [`DerivationStep::Decided`]. A `grad` waits again on a
+/// variable `awaits_group` says its recursive group still determines
+/// ([`DerivationStep::Awaits`]); where nothing can wait any more, the caller
+/// passes an `awaits_group` that is always false.
 ///
 /// The diagnostics are the access rule's own for every shape `infer_access`
 /// and `infer_tuple_get` reject once the target is known: this runs on a target
@@ -78,15 +98,17 @@ impl TypeDerivation {
 /// suppression); this pass has to do it by unification, because a route
 /// waiting on `projected` is suspended on the same ledger and reads the
 /// variable rather than a return value.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_type_derivation(
     derivation: &TypeDerivation,
     source: &Type,
     projected: &Type,
+    awaits_group: &dyn Fn(&Type, &Subst) -> bool,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) -> bool {
+) -> DerivationStep {
     let target = subst.apply(source);
     // One `match` with an explicit `Type::Var` arm, not an `if matches!`
     // guard: `unresolved_operand_census.rs` enumerates this site by that arm's
@@ -95,13 +117,13 @@ pub(super) fn resolve_type_derivation(
     let resolved: Result<Type, Box<CheckError>> = match (&target, derivation) {
         // Still unbound: the ledger carries the entry to the next pass, and
         // the declaration boundary decides it if nothing ever binds it.
-        (Type::Var(_), _) => return false,
+        (Type::Var(_), _) => return DerivationStep::Pending,
         // The target's own rejection was already reported; the access
         // inherits its witness and stays silent (§C3).
         (Type::Error(witness), _) => {
             let slot = derivation.witness_slot(projected, subst);
             let _ = unify(&slot, &propagate(witness), subst);
-            return true;
+            return DerivationStep::Decided;
         }
         (Type::Tuple(elements), TypeDerivation::TupleProjection { index }) => {
             match elements.get(*index) {
@@ -134,8 +156,9 @@ pub(super) fn resolve_type_derivation(
         ))),
         // The rule `infer_grad` runs on an operand it knows, so a `grad`
         // decided here and one decided at the call cannot disagree. What the
-        // call waited on has bound or its group has completed, so nothing is
-        // waited on again: a variable left is decided as the call decides one.
+        // call waited on has bound, or its group has completed and nothing
+        // waits any more. A bound variable can resolve to a type that holds
+        // another variable of the group, which the rule waits on again.
         (Type::Fn(args, _), TypeDerivation::Grad { wrt, frozen }) => {
             // An operand that was a variable at the call published a variable
             // for the gradient, which applications since may have constrained.
@@ -147,13 +170,25 @@ pub(super) fn resolve_type_derivation(
                 let witness = report(errors, error.into());
                 let slot = derivation.witness_slot(projected, subst);
                 let _ = unify(&slot, &witness, subst);
-                return true;
+                return DerivationStep::Decided;
             }
-            match subst.apply(&target) {
-                Type::Fn(args, ret) => {
-                    grad_function_type(&args, &ret, wrt.as_deref(), frozen, adt_reg)
+            match decide_grad(source, wrt.as_deref(), frozen, awaits_group, adt_reg, subst) {
+                GradDecision::Decided(decided) => decided,
+                GradDecision::Awaits {
+                    operand,
+                    awaited,
+                    frozen,
+                } => {
+                    let mut operands = vec![operand];
+                    operands.extend(awaited);
+                    return DerivationStep::Awaits {
+                        derivation: TypeDerivation::Grad {
+                            wrt: wrt.clone(),
+                            frozen,
+                        },
+                        operands,
+                    };
                 }
-                other => Err(grad_expects_a_function(&other)),
             }
         }
         (other, TypeDerivation::Grad { .. }) => Err(grad_expects_a_function(other)),
@@ -170,7 +205,7 @@ pub(super) fn resolve_type_derivation(
             let _ = unify(&slot, &witness, subst);
         }
     }
-    true
+    DerivationStep::Decided
 }
 
 /// The type of `field` on a value of the ADT `adt_name`, instantiated at

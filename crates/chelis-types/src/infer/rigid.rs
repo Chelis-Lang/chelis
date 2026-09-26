@@ -27,7 +27,7 @@ use chelis_unord::UnordMap;
 
 use super::checked::{InferenceProduct, PostAppCall, PostAppReplay};
 use super::expr_pattern::family_members;
-use super::type_derivation::{TypeDerivation, resolve_type_derivation};
+use super::type_derivation::{DerivationStep, TypeDerivation, resolve_type_derivation};
 use crate::adt::AdtRegistry;
 use crate::env::Env;
 use crate::env::{free_dvars, free_rvars, free_tvars};
@@ -555,14 +555,18 @@ fn replay_at_instantiation(
             );
             trial_product.has_post_app_checks()
         }
-        BoundaryObligation::Derivation(derivation) => !resolve_type_derivation(
-            derivation,
-            &settled[0],
-            result_ty,
-            &mut trial_vg,
-            &mut trial_subst,
-            adt_reg,
-            errors,
+        BoundaryObligation::Derivation(derivation) => !matches!(
+            resolve_type_derivation(
+                derivation,
+                &settled[0],
+                result_ty,
+                &|_, _| false,
+                &mut trial_vg,
+                &mut trial_subst,
+                adt_reg,
+                errors,
+            ),
+            DerivationStep::Decided
         ),
     };
     let rejections: Vec<CheckError> = errors.iter_since(checkpoint).cloned().collect();
