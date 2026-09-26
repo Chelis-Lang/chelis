@@ -1240,9 +1240,11 @@ fn vmap_never_broadcasts_a_key() {
     ] {
         let errors = rejects(name, &source, CheckErrorKind::KeyReuse);
         assert!(
-            errors.iter().any(|error| error.message.contains("`vmap` broadcasts argument 0")
-                && error.message.contains("[04-LIN-9]")
-                && error.suggestions.join(" ").contains("split_keys")),
+            errors.iter().any(
+                |error| error.message.contains("`vmap` broadcasts argument 0")
+                    && error.message.contains("[04-LIN-9]")
+                    && error.suggestions.join(" ").contains("split_keys")
+            ),
             "{name}: expected the broadcast diagnostic: {errors:?}"
         );
     }
@@ -1264,4 +1266,42 @@ fn vmap_never_broadcasts_a_key() {
     ] {
         accepts(name, &source);
     }
+}
+
+/// [04-LIN-9]: no signature declares a borrowed key-carrying parameter,
+/// however the type is spelled: through a type alias, through a `sig`, or as
+/// an aliased tuple that holds a key. An alias of a type with no key stays
+/// borrowable.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` the three aliased
+/// negatives checked: the rule read the annotation, which a `sig` leaves
+/// untyped and which carries the alias unresolved.
+#[test]
+fn a_borrowed_key_parameter_is_refused_through_an_alias() {
+    for (name, source) in [
+        (
+            "an aliased key",
+            "type K = key\ndef bad(k: &K) -> i64 = 0i64\n",
+        ),
+        (
+            "an aliased key in a sig",
+            "type K = key\nsig bad: &K -> i64\ndef bad(k) = 0i64\n",
+        ),
+        (
+            "an aliased tuple holding a key",
+            "type KP = (key, tensor[2, f32])\ndef bad(p: &KP) -> i64 = 0i64\n",
+        ),
+    ] {
+        let errors = rejects(name, source, CheckErrorKind::KeyReuse);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("borrows a key-carrying type")),
+            "{name}: expected the borrowed-parameter diagnostic: {errors:?}"
+        );
+    }
+    accepts(
+        "an aliased tensor stays borrowable",
+        "type T = tensor[2, f32]\ndef good(t: &T) -> tensor[2, f32] = neg(t)\n",
+    );
 }

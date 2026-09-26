@@ -1462,10 +1462,14 @@ impl Checker {
         if let Some(params) = tagged_children(&children[0], DeepTag::Params) {
             for (index, param) in params.iter().enumerate() {
                 if let Some((name, ty)) = param_name_and_type(param) {
-                    if let Some(ty) = ty {
-                        self.reject_borrowed_key_parameter(expr, name, ty);
-                    }
                     let checked = checked_fn_type.and_then(|fn_ty| type_expr_fn_arg(fn_ty, index));
+                    // The checked type, not the annotation: a `sig` declares
+                    // the parameter's type away from the parameter, and an
+                    // alias (`type K = key; def f(k: &K)`) reaches the
+                    // annotation unresolved.
+                    if let Some(declared) = checked.or(ty) {
+                        self.reject_borrowed_key_parameter(expr, name, declared);
+                    }
                     let id = inner_scope.declare(name, checked.or(ty).cloned());
                     pushed.push((name.to_string(), id));
                 }
