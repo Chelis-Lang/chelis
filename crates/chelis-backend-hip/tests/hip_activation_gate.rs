@@ -225,32 +225,41 @@ fn an_unconditional_integer_sub_guard_reads_its_operands_directly() {
     assert!(source.contains("chelis_record_numeric_failure"), "{source}");
 }
 
-/// A cast into an integer width in an untaken arm: HIP compiles no cast
-/// into an integer width (chelis#689's f32/f64 cast family), gated or not,
-/// so the arm is refused as the unconditional cast is. A cast HIP compiles,
-/// `f32` to `f64`, is gated in the arm and ungated outside it.
+/// A cast checks its operand only when its target is an integer or `bool`
+/// width (`DagNode::runtime_check`), and HIP compiles no such cast, gated or
+/// not: its cast kernels cover exactly `f32` and `f64` (chelis#689), and a
+/// cast into `bool` needs the one-byte family HIP lacks (chelis#1364). So no
+/// cast that can trap reaches a HIP kernel, and each is refused in an arm as
+/// it is unconditionally. The one cast family HIP compiles, `f32` to and from
+/// `f64`, checks nothing, so an arm launches the same ungated kernel as the
+/// unconditional cast (a node with nothing to check takes no gate).
 ///
-/// Evidentiary status: the refusals are a DISPOSITION LOCK (both refused at
-/// 224414e1f); the gated `f32` to `f64` cast is a REGRESSION TEST (ungated
-/// at 224414e1f).
+/// Evidentiary status: DISPOSITION LOCK throughout. By code read of
+/// 224414e1f, which has the same `f32`/`f64` and `bool` rejections and no
+/// HIP activation gate, every row holds there too.
 #[test]
-fn an_untaken_arms_cast_is_gated_where_hip_compiles_it() {
-    let integer_arm = "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, i32]) -> tensor[4, i32] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, i32) else y\n";
-    let integer_unconditional = "def main(x: tensor[4, f32]) -> tensor[4, i32] = cast(x, i32)\n";
-    for source in [integer_arm, integer_unconditional] {
-        let error = emit(source).expect_err("HIP refuses a cast into i32");
-        assert!(
-            error.to_string().contains("int32") || error.to_string().contains("i32"),
-            "{error}"
+fn no_cast_hip_compiles_can_trap_so_an_arms_cast_launches_ungated() {
+    for (target, refusal) in [("i32", "chelis#689"), ("bool", "chelis#1364")] {
+        let in_arm = format!(
+            "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, {target}]) -> tensor[4, {target}] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, {target}) else y\n"
         );
+        let unconditional =
+            format!("def main(x: tensor[4, f32]) -> tensor[4, {target}] = cast(x, {target})\n");
+        for source in [in_arm, unconditional] {
+            let error = emit(&source).expect_err("HIP refuses a cast that can trap");
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("dtype `{target}`")) && error.contains(refusal),
+                "{error}"
+            );
+        }
     }
     let widening_arm = "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, f64]) -> tensor[4, f64] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, f64) else y\n";
     let host = emit(widening_arm).expect("HIP compiles the widening arm");
-    let source = kernel(&host, "kernel_cast_f32_to_f64_gated_0");
-    assert_eq!(
-        line_with(&source, "out[i] ="),
-        "  out[i] = (double)(chelis_active ? a[idx] : (float)(0LL));"
-    );
+    let source = kernel(&host, "kernel_cast_f32_to_f64");
+    assert!(!source.contains("chelis_act"), "{source}");
+    assert_eq!(line_with(&source, "out[i] ="), "  out[i] = (double)a[idx];");
+    assert!(!host.contains("_gated"), "{host}");
     let host = emit("def main(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n")
         .expect("HIP compiles the widening cast");
     let source = kernel(&host, "kernel_cast_f32_to_f64");
