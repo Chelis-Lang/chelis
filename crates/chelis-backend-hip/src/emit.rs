@@ -3158,7 +3158,9 @@ impl HipEmitter {
                 ),
             )
         };
-        if node.inputs.len() != 4 {
+        // Whether a draw under an activation draws is decided when the graph
+        // runs, which this lane does not do yet.
+        if node.owner.activation.is_some() {
             return Err(unsupported());
         }
         let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
@@ -6101,9 +6103,9 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            decl,
+            chelis_ir::dag::Owner::new(decl, Some(active)),
             RiscOp::UniformLike,
-            vec![like, low, high, key, active],
+            vec![like, low, high, key],
             vec_f32(8),
             None,
         );

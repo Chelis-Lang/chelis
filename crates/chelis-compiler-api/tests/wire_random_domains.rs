@@ -320,23 +320,20 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     assert!(WireDag::from_validated_json(&text).is_err(), "{text}");
 }
 
-/// The input slot where a draw, a replay or a key-consuming key operation
-/// reads its own activation (spec/10 section 3.2), which is also its node's
-/// `activation`.
-fn own_activation_slot(op: &Value) -> Option<usize> {
-    match op["kind"].as_str()? {
-        "dropout" | "dropout_replay" | "uniform_bound_adjoint" => Some(3),
-        "uniform_like" => Some(4),
-        "split" => Some(1),
-        "fold_in" => Some(2),
-        "split_n" if op["count"]["bound"] == json!("lit") => Some(1),
-        "split_n" => Some(2),
-        _ => None,
-    }
+fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
+    wire_node_under(id, op, inputs, dims, precision, None)
 }
 
-fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    let activation = own_activation_slot(&op).and_then(|slot| inputs.get(slot).copied());
+/// A node under `activation`, its own (spec/10 section 3.2): no input
+/// carries it.
+fn wire_node_under(
+    id: usize,
+    op: Value,
+    inputs: &[usize],
+    dims: &[u64],
+    precision: &str,
+    activation: Option<usize>,
+) -> Value {
     json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":activation,"id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
@@ -413,6 +410,9 @@ fn prepend(graph: &mut Value, op: Value, dims: &[u64], precision: &str) -> usize
         for dependency in node["shape_deps"].as_array_mut().unwrap() {
             shift(dependency);
         }
+        if !node["activation"].is_null() {
+            shift(&mut node["activation"]);
+        }
     }
     for root in graph["roots"].as_array_mut().unwrap() {
         shift(root);
@@ -425,9 +425,21 @@ fn prepend(graph: &mut Value, op: Value, dims: &[u64], precision: &str) -> usize
 }
 
 fn push(graph: &mut Value, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> usize {
+    push_under(graph, op, inputs, dims, precision, None)
+}
+
+/// [`push`] under `activation`, the node's own.
+fn push_under(
+    graph: &mut Value,
+    op: Value,
+    inputs: &[usize],
+    dims: &[u64],
+    precision: &str,
+    activation: Option<usize>,
+) -> usize {
     let nodes = graph["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
-    nodes.push(wire_node(id, op, inputs, dims, precision));
+    nodes.push(wire_node_under(id, op, inputs, dims, precision, activation));
     id
 }
 
@@ -721,19 +733,21 @@ fn the_codec_admits_exclusive_arms_and_rejects_overlapping_ones() {
             &[4],
             "f32",
         );
-        let first = push(
+        let first = push_under(
             &mut graph,
             json!({"kind":"dropout"}),
-            &[x, 8, 11, condition],
+            &[x, 8, 11],
             &[4],
             "f32",
+            Some(condition),
         );
-        let second = push(
+        let second = push_under(
             &mut graph,
             json!({"kind":"dropout"}),
-            &[x, 8, 11, other],
+            &[x, 8, 11],
             &[4],
             "f32",
+            Some(other),
         );
         graph["roots"] = json!([9, first, second]);
         graph
@@ -810,6 +824,86 @@ fn the_codec_admits_a_join_of_two_arms_and_rejects_overlapping_ones() {
     );
 }
 
+/// One carrier for a join's enclosing activation on the wire (spec/10
+/// §3.2): its two slot activations are its own activation conjoined with a
+/// condition and with that condition's negation. The decoder runs the IR
+/// verifier's rule, so a join whose arms sit under an enclosing activation
+/// its own does not name is rejected.
+///
+/// Evidentiary status: REGRESSION TEST. At 224414e1f the untied payload
+/// decodes.
+#[test]
+fn the_codec_ties_a_joins_arms_to_its_own_activation() {
+    let joined_under = |own: bool| {
+        let mut graph = json!({
+            "schema_version": WIRE_DAG_SCHEMA_VERSION,
+            "declarations": ["entry"],
+            "nodes": [],
+            "roots": [],
+        });
+        let load = |graph: &mut Value, name: &str, dims: &[u64], precision: &str| {
+            push(
+                graph,
+                json!({"kind":"load","name":name}),
+                &[],
+                dims,
+                precision,
+            )
+        };
+        let then_key = load(&mut graph, "a", &[], "key");
+        let else_key = load(&mut graph, "b", &[], "key");
+        let enclosing = load(&mut graph, "q", &[], "bool");
+        let condition = load(&mut graph, "c", &[], "bool");
+        let negated = push(
+            &mut graph,
+            json!({"kind":"logical","logical":"not"}),
+            &[condition],
+            &[],
+            "bool",
+        );
+        let and = json!({"kind":"logical","logical":"and"});
+        let then_arm = push(
+            &mut graph,
+            and.clone(),
+            &[enclosing, condition],
+            &[],
+            "bool",
+        );
+        let else_arm = push(&mut graph, and, &[enclosing, negated], &[], "bool");
+        let joined = push_under(
+            &mut graph,
+            json!({"kind":"key_select"}),
+            &[then_key, else_key, then_arm, else_arm],
+            &[],
+            "key",
+            own.then_some(enclosing),
+        );
+        let x = load(&mut graph, "x", &[4], "f32");
+        let rate = push(
+            &mut graph,
+            json!({"kind":"const","value":{"dtype":"f32","bits":"3f000000"}}),
+            &[],
+            &[],
+            "f32",
+        );
+        let drawn = push_under(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, rate, joined],
+            &[4],
+            "f32",
+            Some(enclosing),
+        );
+        graph["roots"] = json!([drawn]);
+        graph
+    };
+    accepts(&joined_under(true));
+    rejects_domain(
+        &joined_under(false),
+        "joins keys under two arms that are not its own activation conjoined with a condition and with its negation",
+    );
+}
+
 /// Rule V3 on the wire after constant folding: an activation that is the
 /// `bool` constant `false` never draws, so it is exclusive with any other
 /// activation; two `true` constants are not.
@@ -834,19 +928,21 @@ fn the_codec_admits_a_constant_false_arm_and_rejects_two_true_ones() {
             &[4],
             "f32",
         );
-        let a = push(
+        let a = push_under(
             &mut graph,
             json!({"kind":"dropout"}),
-            &[x, 8, 11, first],
+            &[x, 8, 11],
             &[4],
             "f32",
+            Some(first),
         );
-        let b = push(
+        let b = push_under(
             &mut graph,
             json!({"kind":"dropout"}),
-            &[x, 8, 11, second],
+            &[x, 8, 11],
             &[4],
             "f32",
+            Some(second),
         );
         graph["roots"] = json!([9, a, b]);
         graph
@@ -870,8 +966,9 @@ enum GatedSplit {
     Overlapping,
     /// An `int64` activation.
     IntegerActivation,
-    /// Two activations after the operands.
-    TwoActivations,
+    /// The split's own activation also spelled as a trailing operand, as
+    /// before a draw's and a key operation's activation became its node's.
+    StaleOperand,
 }
 
 /// chelis#2413 B3 (spec/10 §3.2): in the v19 key chain, `fold_in(R, 9)` is
@@ -900,20 +997,21 @@ fn gated_split_chain(form: GatedSplit) -> Value {
         &[],
         "int64",
     );
-    let split_active: &[usize] = match form {
-        GatedSplit::IntegerActivation => &[integer],
-        GatedSplit::TwoActivations => &[condition, condition],
-        _ => &[condition],
+    let split_active = match form {
+        GatedSplit::IntegerActivation => integer,
+        _ => condition,
     };
-    let split_inputs = std::iter::once(11)
-        .chain(split_active.iter().copied())
-        .collect::<Vec<_>>();
-    let split = push(
+    let split_inputs: &[usize] = match form {
+        GatedSplit::StaleOperand => &[11, condition],
+        _ => &[11],
+    };
+    let split = push_under(
         &mut graph,
         json!({"kind":"split_n","count":{"bound":"lit","value":2}}),
-        &split_inputs,
+        split_inputs,
         &[2],
         "key",
+        Some(split_active),
     );
     let rows = push(
         &mut graph,
@@ -922,16 +1020,17 @@ fn gated_split_chain(form: GatedSplit) -> Value {
         &[2, 4],
         "f32",
     );
-    let split_draw_inputs: &[usize] = match form {
-        GatedSplit::Escaping => &[rows, 8, split],
-        _ => &[rows, 8, split, condition],
+    let split_draw_active = match form {
+        GatedSplit::Escaping => None,
+        _ => Some(condition),
     };
-    let batched = push(
+    let batched = push_under(
         &mut graph,
         json!({"kind":"dropout"}),
-        split_draw_inputs,
+        &[rows, 8, split],
         &[2, 4],
         "f32",
+        split_draw_active,
     );
     let y = push(
         &mut graph,
@@ -944,12 +1043,13 @@ fn gated_split_chain(form: GatedSplit) -> Value {
         GatedSplit::Overlapping => condition,
         _ => other,
     };
-    let drawn = push(
+    let drawn = push_under(
         &mut graph,
         json!({"kind":"dropout"}),
-        &[y, 8, 11, draw_active],
+        &[y, 8, 11],
         &[4],
         "f32",
+        Some(draw_active),
     );
     graph["roots"] = match form {
         GatedSplit::Rooted => json!([9, split, drawn, integer]),
@@ -958,11 +1058,12 @@ fn gated_split_chain(form: GatedSplit) -> Value {
     graph
 }
 
-/// chelis#2413 B3: v19's key operations take an optional activation operand.
-/// The codec round-trips it, admits a key shared by a key operation and a
-/// draw under exclusive activations, and applies the IR verifier's operand,
-/// V3 and confinement rules to it. Regression test: at the base the codec
-/// refuses the admitted payload by the split's arity.
+/// chelis#2413 B3: v19's key operations consume their key under their node's
+/// own activation. The codec round-trips it, admits a key shared by a key
+/// operation and a draw under exclusive activations, and applies the IR
+/// verifier's operand, V3 and confinement rules to it; a stale trailing
+/// activation operand is an arity error. Regression test: at the base the
+/// codec refuses the admitted payload by the split's arity.
 #[test]
 fn the_codec_admits_a_gated_key_operation_and_confines_its_keys() {
     accepts(&gated_split_chain(GatedSplit::Exclusive));
@@ -977,9 +1078,82 @@ fn the_codec_admits_a_gated_key_operation_and_confines_its_keys() {
             GatedSplit::IntegerActivation,
             "activation must be an earlier bool node",
         ),
-        (GatedSplit::TwoActivations, "wrong number of inputs"),
+        (GatedSplit::StaleOperand, "wrong number of inputs"),
     ] {
         rejects_domain(&gated_split_chain(form), reason);
+    }
+}
+
+/// spec/10 §3.2: a draw's, a replay's and a key operation's activation is
+/// its node's own. The codec admits each of them under an activation (a
+/// replay with its forward draw) and rejects the same node with that
+/// activation spelled also as a trailing input, the spelling before the
+/// owner carried it, by arity.
+///
+/// Evidentiary status: REGRESSION TEST. At 224414e1f every stale payload
+/// below decodes: the trailing operand was the activation's carrier.
+#[test]
+fn a_trailing_activation_operand_is_an_arity_error() {
+    let key_op = "key operation has the wrong number of inputs";
+    let random = "random operation has the wrong number of inputs";
+    let keyed = lower(KEYED, "sample");
+    let uniform = first(&keyed, "uniform_like");
+    let replayed = lower(
+        concat!(
+            "def loss(k: key, x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(dropout(k, x, 0.5f32), 0i32))\n",
+            "def sample(g: key, x: tensor[4, f32]) -> tensor[4, f32] = grad(loss, wrt=x)(g, x)\n"
+        ),
+        "sample",
+    );
+    let replay = first(&replayed, "dropout_replay");
+    let dropout = replayed["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|node| {
+            node["op"]["kind"] == "dropout"
+                && node["inputs"][2] == replayed["nodes"][replay]["inputs"][2]
+        })
+        .expect("the replay's forward dropout");
+    let adjoint = wire_of(&adjoint_over(5));
+    let (forward, bound) = (
+        first(&adjoint, "uniform_like"),
+        first(&adjoint, "uniform_bound_adjoint"),
+    );
+    // `key_chain`'s split_n with a runtime count, its input 1.
+    let mut runtime_split = key_chain();
+    runtime_split["nodes"][6]["op"] = json!({"kind":"split_n","count":{"bound":"node","input":1}});
+    runtime_split["nodes"][6]["inputs"] = json!([5, 4]);
+    // Each case: a graph, the nodes put under one activation, the node whose
+    // inputs gain it as a stale operand, and the arity sentence.
+    let cases: [(&Value, &[usize], usize, &str); 8] = [
+        (&key_chain(), &[2], 2, key_op),
+        (&key_chain(), &[5], 5, key_op),
+        (&key_chain(), &[6], 6, key_op),
+        (&runtime_split, &[6], 6, key_op),
+        (&key_chain(), &[9], 9, random),
+        (&keyed, &[uniform], uniform, random),
+        (&replayed, &[dropout, replay], replay, random),
+        (&adjoint, &[forward, bound], bound, random),
+    ];
+    for (graph, under, stale_node, reason) in cases {
+        let mut graph = graph.clone();
+        let active = prepend(
+            &mut graph,
+            json!({"kind":"load","name":"active"}),
+            &[],
+            "bool",
+        );
+        for node in under {
+            graph["nodes"][node + 1]["activation"] = json!(active);
+        }
+        accepts(&graph);
+        let mut stale = graph.clone();
+        stale["nodes"][stale_node + 1]["inputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(active));
+        rejects_domain(&stale, reason);
     }
 }
 
@@ -1134,13 +1308,16 @@ fn gradient_random_lowering_admits_only_a_scalar_bool_activation() {
         &[],
         "bool",
     );
-    active["nodes"][uniform + 1]["inputs"]
+    // The activation is the draw's own (spec/10 section 3.2).
+    active["nodes"][uniform + 1]["activation"] = json!(activation);
+    accepts(&active);
+    // Spelled also as a trailing operand, it is an arity error.
+    let mut stale = active.clone();
+    stale["nodes"][uniform + 1]["inputs"]
         .as_array_mut()
         .unwrap()
         .push(json!(activation));
-    // The operand is the draw's own activation (spec/10 section 3.2).
-    active["nodes"][uniform + 1]["activation"] = json!(activation);
-    accepts(&active);
+    rejects_domain(&stale, "random operation has the wrong number of inputs");
 
     // A non-Bool activation fails the node's own activation rule, which
     // every node's activation meets before the draw's operand rules run.
@@ -1506,12 +1683,13 @@ fn exclusive_splits_of_one_key_may_not_return_their_halves() {
     let mut roots = Vec::new();
     for activation in [condition, other] {
         for branch in ["left", "right"] {
-            roots.push(json!(push(
+            roots.push(json!(push_under(
                 &mut graph,
                 json!({"kind":"split","branch":branch}),
-                &[key, activation],
+                &[key],
                 &[],
                 "key",
+                Some(activation),
             )));
         }
     }
