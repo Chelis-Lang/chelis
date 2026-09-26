@@ -1976,7 +1976,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     execution: &crate::evaluation::RandomExecutionContext,
-    options: SubexprLoweringOptions<'_>,
+    mut options: SubexprLoweringOptions<'_>,
     runtime: &mut LoweringRuntime,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
@@ -1996,13 +1996,11 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         .fatal()));
     }
     let state = execution.state();
-    // The options borrow invocation state across this catch: the trace
-    // collector is discarded with the whole attempt on failure, and the
-    // native services stay valid across an unwind (relaxed cancellation
-    // loads; frame depth resets at the next outermost check entry).
-    let options = std::panic::AssertUnwindSafe(options);
-    Ok(runtime.catch_lowering(move |runtime| {
-        let options = options;
+    // The options borrow invocation state, so they are the catch's explicit
+    // state: the trace collector is discarded with the whole attempt on
+    // failure, and the native services stay valid across an unwind (relaxed
+    // cancellation loads; frame depth resets at the next outermost check entry).
+    let plan = runtime.catch_lowering_with(&mut options, move |runtime, options| {
         let mut metadata = None;
         let (dag, _, _, _) = lower_subexpr_program_inner_impl(
             expr,
@@ -2010,7 +2008,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             context,
             result_claim,
             state,
-            options.0,
+            options.reborrow(),
             Some(&mut metadata),
             runtime,
         )?;
@@ -2026,7 +2024,8 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
                 runtime,
             )
         })
-    }))
+    });
+    Ok(plan)
 }
 
 /// Definition scope for subexpression lowering. Checked value types and
@@ -2605,7 +2604,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
-    options: SubexprLoweringOptions<'_>,
+    mut options: SubexprLoweringOptions<'_>,
     runtime: &mut LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
@@ -2619,18 +2618,17 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     // exactly what this change removed.
     let folded = chelis_deep::pipe::fold_pipes(expr);
     let expr = &folded;
-    // As above, a failed attempt owns and discards its complete collector,
-    // and the native services stay valid across an unwind.
-    let options = std::panic::AssertUnwindSafe(options);
-    runtime.catch_lowering(move |runtime| {
-        let options = options;
+    // As above, the options are the catch's explicit state: a failed attempt
+    // owns and discards its complete collector, and the native services stay
+    // valid across an unwind.
+    runtime.catch_lowering_with(&mut options, move |runtime, options| {
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
             expr,
             scoped_bindings,
             context,
             result_claim,
             random,
-            options.0,
+            options.reborrow(),
             None,
             runtime,
         )?;
@@ -2667,13 +2665,12 @@ pub(crate) fn try_lower_staged_host_region(
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
     options: StagedHostRegionLoweringOptions,
-    mut execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
+    execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<
     crate::host::staged::StagingAttempt<(Dag, crate::host::staged::HostStagedPlan)>,
     LowerDiagnostic,
 > {
     use crate::host::staged::{StagingAttempt, StagingStatus};
-    let mut status = StagingStatus::Searching;
     let crate::host::HostCx {
         checked,
         state,
@@ -2681,19 +2678,18 @@ pub(crate) fn try_lower_staged_host_region(
         native,
     } = program;
     let checked: &CheckedProgram = checked;
-    // The region borrows host invocation state, native services, its status
-    // and its output across this catch. Every host state scope exits on
-    // unwind (`scoped`), the status is written before the raise it explains,
-    // and the native services stay valid across an unwind.
-    let borrowed = std::panic::AssertUnwindSafe((
+    // The region's explicit state: host invocation state, native services,
+    // its status and its output. Every host state scope exits on unwind
+    // (`scoped`), the status is written before the raise it explains, and the
+    // native services stay valid across an unwind.
+    let mut region_state = (
         &mut **state,
         &mut **native,
-        &mut status,
-        &mut execution_out,
-    ));
-    let result = runtime.catch_lowering(move |runtime| {
-        let borrowed = borrowed;
-        let (host_state, native, status, execution_out) = borrowed.0;
+        StagingStatus::Searching,
+        execution_out,
+    );
+    let result = runtime.catch_lowering_with(&mut region_state, move |runtime, region_state| {
+        let (host_state, native, status, execution_out) = region_state;
         let mut ctx = LowerCtx::new(
             context.program_types.clone(),
             context.program_defs.clone(),
@@ -2811,7 +2807,7 @@ pub(crate) fn try_lower_staged_host_region(
         }
         Ok(Some((ctx.dag, plan)))
     });
-    match (result, status) {
+    match (result, region_state.2) {
         (Err(_), StagingStatus::HostControlBoundary) => Ok(StagingAttempt::HostControlBoundary),
         (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
         (result, _) => result.map(|region| match region {
@@ -2837,6 +2833,22 @@ struct SubexprLoweringOptions<'a> {
     literal_result_claim_ownership: LiteralResultClaimOwnership,
     #[cfg(feature = "lowering-trace")]
     trace: Option<&'a mut crate::lowering_trace::Collector>,
+}
+
+impl SubexprLoweringOptions<'_> {
+    /// These options for one lowering attempt, reborrowing the native
+    /// services and trace collector.
+    fn reborrow(&mut self) -> SubexprLoweringOptions<'_> {
+        SubexprLoweringOptions {
+            native: &mut *self.native,
+            include_list_controls: self.include_list_controls,
+            authored_signature: self.authored_signature,
+            resource_policy: self.resource_policy,
+            literal_result_claim_ownership: self.literal_result_claim_ownership,
+            #[cfg(feature = "lowering-trace")]
+            trace: self.trace.as_deref_mut(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

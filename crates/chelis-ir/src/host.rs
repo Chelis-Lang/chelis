@@ -365,27 +365,32 @@ pub(crate) struct HostCx<'a> {
 }
 
 impl HostCx<'_> {
-    /// [`LoweringRuntime::catch_lowering`] around host lowering that keeps
-    /// using this context afterwards. Every scope that mutates host state
-    /// exits on unwind ([`scoped`]), memo entries are installed only after
-    /// their computation finishes, and the native services stay valid across
-    /// an unwind, so the state is consistent after a caught unwind.
+    /// [`LoweringRuntime::catch_lowering_with`] around host lowering that
+    /// keeps using this context afterwards, with the session state and the
+    /// native services as the catch's explicit state. Every scope that
+    /// mutates host state exits on unwind ([`scoped`]), memo entries are
+    /// installed only after their computation finishes, and the native
+    /// services stay valid across an unwind, so the state is consistent after
+    /// a caught unwind. `body`'s own captures are its caller's.
     fn catch_lowering<R>(
         &mut self,
         body: impl FnOnce(&mut HostCx<'_>) -> LowerResult<R>,
     ) -> Result<R, crate::lower::LowerDiagnostic> {
         let checked = self.checked;
-        let borrowed = std::panic::AssertUnwindSafe((&mut *self.state, &mut *self.native, body));
-        self.runtime.catch_lowering(move |runtime| {
-            let borrowed = borrowed;
-            let (state, native, body) = borrowed.0;
-            body(&mut HostCx {
-                checked,
-                state,
-                runtime,
-                native,
-            })
-        })
+        let body = std::panic::AssertUnwindSafe(body);
+        self.runtime.catch_lowering_with(
+            &mut (&mut *self.state, &mut *self.native),
+            move |runtime, (state, native)| {
+                // Move the whole wrapper; a field access would capture `body`.
+                let body = body;
+                (body.0)(&mut HostCx {
+                    checked,
+                    state,
+                    runtime,
+                    native,
+                })
+            },
+        )
     }
 }
 
@@ -21393,6 +21398,39 @@ mod tests {
                 outer_id,
                 &outer.cx(runtime, &mut native)
             ));
+        })
+    }
+
+    /// A staged host region records its status inside its lowering catch,
+    /// and the region's outcome is read from that status after the catch. A
+    /// Random handler inside the region is a host control boundary: the
+    /// definition must keep its host control flow, not have the boundary's
+    /// rejection taken as an ordinary failure to stage.
+    ///
+    /// Evidentiary status: REGRESSION TEST for the region's explicit catch
+    /// state. Reading the status as its initial `Searching` after the catch
+    /// turned this region `NotApplicable`, and no other test noticed.
+    #[test]
+    fn staged_region_reports_the_host_control_boundary_recorded_inside_its_catch() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/staged_region_host_control_boundary.deep"
+            ));
+            let mut native = chelis_types::NativeServices::new(None);
+            let mut session = HostLoweringSession::new(&checked);
+            let program = &mut session.cx(runtime, &mut native);
+            let (name, body) =
+                find_top_level_def_named(program.checked.exprs(), "f").expect("f is defined");
+            let signature = host_def_signature(name, body, None, program)
+                .expect("the signature lowers")
+                .expect("f has a host signature");
+            let outcome = match staged_def_kernel_product(program, &signature, None, None) {
+                Ok(staged::StagingAttempt::HostControlBoundary) => "host control boundary",
+                Ok(staged::StagingAttempt::NotApplicable) => "not applicable",
+                Ok(staged::StagingAttempt::Ready(_)) => "ready",
+                Err(_) => "error",
+            };
+            assert_eq!(outcome, "host control boundary");
         })
     }
 

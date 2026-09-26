@@ -1,0 +1,21 @@
+(defsig {}
+  f
+  (m n)
+  (t-fn {}
+    (t-tensor {} (d-var {} m) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-name {} *) (t-prim {} f32))))
+
+(def {}
+  f
+  (fn {}
+    (params {} (source {type: (t-var {} _)}) (x {type: (t-var {} _)}))
+    (handle-effect {effect: random}
+      (lit {type: (t-prim {} i64)} 7)
+      (app {}
+        (var {} reshape)
+        (var {} x)
+        (app {}
+          (var {} Cons)
+          (app {} (var {} numel) (var {} source))
+          (var {} Nil))))))
