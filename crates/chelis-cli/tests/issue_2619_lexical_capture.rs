@@ -25,7 +25,11 @@ mod common;
 fn eval(source: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("capture.ch");
-    fs::write(&path, chelis_surf::format::format_source(source).expect("format")).expect("source");
+    fs::write(
+        &path,
+        chelis_surf::format::format_source(source).expect("format"),
+    )
+    .expect("source");
     let output = Command::cargo_bin("chelis")
         .expect("chelis")
         .env_remove("CHELIS_STYLE_GATE_DISABLE")
