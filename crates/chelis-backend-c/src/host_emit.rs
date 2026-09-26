@@ -2133,7 +2133,8 @@ impl HostResultClaim {
                     parameter,
                     axis: source_axis,
                 } => format!(
-                    "{indent}    {{ {axis}, chelis_tensor_shape({parameter}, {source_axis}), {}, {}, {source_axis} }},",
+                    "{indent}    {{ {axis}, chelis_tensor_shape({}, {source_axis}), {}, {}, {source_axis} }},",
+                    c_ident(parameter),
                     c_string_literal(claim),
                     c_string_literal(parameter),
                 ),

@@ -117,6 +117,27 @@ const CASES: &[Case] = &[
             "numeric trap: domain in load at i64",
         ),
     },
+    // The generated C reads a parameter whose name is a C keyword through its
+    // mapped identifier; the context keeps the authored name.
+    Case {
+        name: "named_source_spelled_as_a_c_keyword",
+        source: "def f[n](int: tensor[n, f32], t0: tensor[*, f32]) -> tensor[n, f32] = t0\n\
+                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]))\n",
+        expect: Expect::Trap(
+            "extent `n`: int axis 0 = 2, load axis 0 = 3",
+            "numeric trap: domain in load at i64",
+        ),
+    },
+    // Each recursive invocation builds its own frame from its own witness.
+    Case {
+        name: "named_through_recursion",
+        source: "def f[n](a: tensor[n, f32], t0: tensor[*, f32], k: i64) -> tensor[n, f32] = if k > 0i64 then f(a, t0, k - 1i64) else t0\n\
+                 out = f(to_tensor([1.0, 2.0]), to_tensor([4.0, 5.0, 6.0]), 2i64)\n",
+        expect: Expect::Trap(
+            "extent `n`: a axis 0 = 2, load axis 0 = 3",
+            "numeric trap: domain in load at i64",
+        ),
+    },
     // chelis#1900's original reproducer, its isolated forms and an agreeing
     // control. The body's `append` keeps `concat` on the host lane.
     Case {
@@ -250,7 +271,7 @@ fn check(case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, 12 of these rows
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 14 of these rows
 // fail: every named trap row except `named_block_body_checks_at_entry` ran to
 // completion (`issue_1900_original` instead trapped on `main`'s literal claim),
 // and so did the two literal pass-through trap rows. `literal_identity`, the
