@@ -2806,6 +2806,49 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
         ),
+        # chelis#2608 and chelis#1900: a named host result claim reads its
+        # binder's first tensor-parameter witness, and a literal claim on an
+        # unwitnessed wildcard pass-through keeps its token. Both executed
+        # the wrong extent at exit 0 on `7807ca4ff`.
+        _row(
+            "claim.named.host_result.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.named.host_result.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.unwitnessed_pass_through.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.unwitnessed_pass_through.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        # chelis#2512: a pass-through axis restamped under another binder is
+        # guarded by the restamping operation. At base the lanes failed
+        # untyped, differently, at the later consumer.
+        _row(
+            "claim.restamped_axis.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        ),
+        _row(
+            "claim.restamped_axis.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        ),
         # Independent named binders retain separate C declarations per scope.
         _row(
             "entry.merged_scopes.declaration.c",

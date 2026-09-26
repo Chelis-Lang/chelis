@@ -570,6 +570,20 @@
     },
     {
       "phase": "b",
+      "id": "cli_issue_2608_result_claims",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2608_declared_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "declared_result_claims_are_checked_on_both_lanes"
+      ],
+      "note": "#2608/#1900 Eval and generated-C compile-link-run receipts: named host result claims resolved from the first tensor-parameter witness with binder and source in context, literal claims on an unwitnessed wildcard pass-through, untaken arms, and agreeing controls."
+    },
+    {
+      "phase": "b",
       "id": "surf_issue_2110_local_ascription_provenance",
       "package": "chelis-surf",
       "kind": "test",
@@ -774,6 +788,9 @@
         "issue_1767_symbolic_actual_axes_are_read_for_each_execution",
         "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
+        "issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        "issue_2512_an_agreeing_restamped_axis_runs",
+        "issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard",
         "local_reshape_guards_follow_declaration_order",
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
