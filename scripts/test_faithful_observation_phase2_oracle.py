@@ -452,6 +452,18 @@ class ObservationDecodeTableTests(unittest.TestCase):
         violations = oracle.observation_decode_violations(source)
         self.assertTrue(any("I16" in v for v in violations), violations)
 
+    def test_a_key_arm_on_a_narrower_view_is_a_violation(self) -> None:
+        shipped = "RuntimeDType::Key => format_key_bits(*(tensor_data(t) as *const u64).add(i)),"
+        runtime = self._runtime()
+        self.assertIn(shipped, runtime)
+        source = runtime.replace(
+            shipped,
+            "RuntimeDType::Key => format_key_bits(u64::from(*(tensor_data(t) as *const u32).add(i))),",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("Key" in v for v in violations), violations)
+
     def test_no_dtype_has_an_untyped_f32_view_exception(self) -> None:
         exceptions = [
             name

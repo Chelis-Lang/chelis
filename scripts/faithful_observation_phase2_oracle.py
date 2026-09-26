@@ -324,10 +324,11 @@ OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "Key",
-        'runtime_fail!("Domain: tensor formatting: a key has no text form")',
-        "no pointer view: a random key has no text form (spec/04 section 1.1; "
-        "[05-OP-25] admits only the data element dtypes), so the arm reads no "
-        "element and traps Domain",
+        "*const u64",
+        "raw 8-byte read: a key element is its 64-bit key word, the same "
+        "`chelis_key.bits` the C lane's generated `chelis_key_at` reads, and "
+        "[05-OBS-2] prints it as `key(` plus 16 hexadecimal digits "
+        "(`format_key_bits`); no key type has a `TensorElement` impl",
     ),
 )
 
