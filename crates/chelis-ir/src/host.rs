@@ -22618,11 +22618,38 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 
+    /// chelis#1754 (#2390), moved to check by chelis#2518: a `to_tensor([])`
+    /// whose element type nothing determines is rejected by the checker, so
+    /// no checked program exists for lowering or code generation to receive,
+    /// and no dtype can be chosen for it downstream.
     #[test]
-    fn unresolved_empty_to_tensor_rejects_before_concrete_resolution() {
-        let checked = surf_check("result = numel(to_tensor([]))\n");
+    fn unresolved_empty_to_tensor_is_rejected_at_check_before_lowering() {
+        let decls = chelis_surf::parser::parse_str("result = numel(to_tensor([]))\n")
+            .expect("surf parse failed");
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        let rejected = chelis_types::check_ir_program(&deep)
+            .expect_err("an empty tensor without a checked dtype must be rejected before lowering");
+        assert!(
+            rejected.errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("`to_tensor` admits only some operand types")
+                    && error.message.contains("never determined within `result`")
+            }),
+            "{:?}",
+            rejected.errors
+        );
+    }
+
+    /// The code-generation boundary still rejects a checked program whose host
+    /// type never resolved: an empty list nothing gives an element type
+    /// passes check and must not reach codegen with an invented type.
+    #[test]
+    fn unresolved_empty_list_rejects_at_the_code_generation_boundary() {
+        let checked = surf_check("values = []\n");
         let error = try_lower_compiled_program(&checked)
-            .expect_err("an empty tensor without a checked dtype must not reach codegen");
+            .expect_err("a host type that never resolved must not reach codegen");
         assert!(
             error
                 .message
