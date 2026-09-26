@@ -851,7 +851,7 @@ impl<'a> EvalContext<'a> {
             },
         );
         self.commit_random_frame(&frame);
-        let values = result?;
+        let values = self.mark_numeric_trap_from_trusted_result(result)?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
         self.result_producer = result_producer;
         Ok(value)
@@ -957,7 +957,7 @@ impl<'a> EvalContext<'a> {
                         |input| inputs.get(input).cloned(),
                     );
                     self.commit_random_frame(&frame);
-                    let computed = computed?;
+                    let computed = self.mark_numeric_trap_from_trusted_result(computed)?;
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)
@@ -1678,9 +1678,25 @@ impl<'a> EvalContext<'a> {
             }
             let builtin_result =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
-            let trusted_numeric_source = name == "floor_div"
-                || (name == "concat"
-                    && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
+            // The checked builtin catalog owns the numeric operation set.
+            // Mixed-domain equality is trusted only for numeric arguments;
+            // recursive container comparison can include authored strings.
+            let trusted_numeric_source = chelis_types::builtin_decl(name).is_some_and(|decl| {
+                decl.capability.domains == [chelis_types::BuiltinSemanticDomain::Numeric]
+                    || (decl
+                        .capability
+                        .domains
+                        .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                        && args.iter().all(|arg| {
+                            matches!(
+                                arg,
+                                RuntimeValue::Scalar(_)
+                                    | RuntimeValue::Tensor(_)
+                                    | RuntimeValue::Bool(_)
+                            )
+                        }))
+            }) || (name == "concat"
+                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
             let value = if trusted_numeric_source {
                 self.mark_numeric_trap_from_trusted_result(builtin_result)?
             } else {
@@ -2262,7 +2278,7 @@ impl<'a> EvalContext<'a> {
                 prepared.get(name).cloned()
             });
         self.commit_random_frame(&frame);
-        let values = values?;
+        let values = self.mark_numeric_trap_from_trusted_result(values)?;
         let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
         for claim in inherited_result_claims {
             claim.verdict(&value, producer_operation)?;
@@ -2804,7 +2820,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn mark_numeric_trap_from_trusted_result<T>(
+    pub(super) fn mark_numeric_trap_from_trusted_result<T>(
         &mut self,
         result: Result<T, String>,
     ) -> Result<T, String> {

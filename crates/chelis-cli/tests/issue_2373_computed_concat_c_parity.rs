@@ -51,6 +51,35 @@ fn user_authored_trap_line_is_an_ordinary_eval_failure() {
     }
 }
 
+#[test]
+fn registered_numeric_builtins_keep_canonical_eval_trap_lines() {
+    for (source, expected) in [
+        (
+            "add(9223372036854775807i64, 1i64)",
+            "numeric trap: overflow in add at i64\n",
+        ),
+        (
+            "trunc_div(-9223372036854775808i64, -1i64)",
+            "numeric trap: overflow in trunc_div at i64\n",
+        ),
+    ] {
+        for json in [false, true] {
+            let mut command = Command::cargo_bin("chelis").expect("binary");
+            command.env("CHELIS_STYLE_GATE_DISABLE", "1").arg("eval");
+            if json {
+                command.arg("--json");
+            }
+            let output = command.arg(source).output().expect("eval");
+            assert!(!output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                expected,
+                "source={source:?}, json={json}"
+            );
+        }
+    }
+}
+
 fn program(producer: &str) -> String {
     let binding = match producer {
         "direct" => "scores = x",

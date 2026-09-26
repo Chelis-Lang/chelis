@@ -4694,12 +4694,10 @@ const OVERSHOOT_CLAIMS: [&str; 3] = ["2", "6", "k"];
 const OVERSHOOT_RENDERING: &str =
     "Domain: shrink bounds outside input extent\nnumeric trap: domain in shrink at i64\n";
 
-/// The same two lines under the eval lane's reporter, which prefixes `error: `
-/// to the first line of every diagnostic it raises. That prefix is the only
-/// difference between the lanes, and it is the same prefix the extent guard's
-/// [04-NUM-9] line already carries on this lane.
+/// The Eval reporter preserves the same canonical trap line as linked C;
+/// context stays on its own preceding line in both lanes.
 fn overshoot_eval_rendering() -> String {
-    format!("error: {OVERSHOOT_RENDERING}")
+    OVERSHOOT_RENDERING.to_owned()
 }
 
 /// Run a fixture under `chelis eval` and return its exit code with its combined
