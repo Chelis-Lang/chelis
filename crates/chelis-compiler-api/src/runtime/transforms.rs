@@ -1162,9 +1162,11 @@ impl FrameCaptures<'_> {
     /// against its own environment, so it reads what it closed over rather
     /// than whatever the caller's frame binds under the same spelling.
     ///
-    /// A name `env` binds to a value this lowering cannot carry is an error:
-    /// left spelled as written, it would be read as a same-named top-level
-    /// declaration instead.
+    /// A name `env` binds to a value this lowering cannot carry (a string,
+    /// a unit, a dictionary) is respelled to a fresh name bound to nothing:
+    /// left spelled as written it would be read as a same-named top-level
+    /// declaration, while unbound a read the graph never uses stays dead and
+    /// a read it does use fails as a missing input.
     fn convert(&mut self, expr: &Expr, env: &Frame) -> Result<Expr, String> {
         let mut renames = BTreeMap::new();
         for name in chelis_types::linearity::free_runtime_variables(expr) {
@@ -1175,12 +1177,10 @@ impl FrameCaptures<'_> {
             let fresh = match self.staged.get(&key) {
                 Some(fresh) => fresh.clone(),
                 None => {
-                    let fresh = self.stage(value)?.ok_or_else(|| {
-                        format!(
-                            "host runtime: a `grad` or `vmap` target reads the local `{name}`, \
-                             whose value this lowering cannot carry (chelis#2619)"
-                        )
-                    })?;
+                    let fresh = match self.stage(value)? {
+                        Some(fresh) => fresh,
+                        None => self.fresh_name(),
+                    };
                     self.staged.insert(key, fresh.clone());
                     fresh
                 }

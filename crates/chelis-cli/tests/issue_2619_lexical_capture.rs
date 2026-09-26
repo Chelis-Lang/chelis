@@ -205,3 +205,12 @@ out = {\n  g = grad(loss)\n  vmap(fn (x: tensor[2, f32]) -> g(x))(to_tensor([[1.
         "tensor(shape=[2, 2], data=[2.0, 4.0, 6.0, 8.0])",
     );
 }
+
+/// A local with no lowered form that the target passes along but never uses
+/// stays harmless.
+#[test]
+fn an_unused_string_local_the_target_reads_is_harmless() {
+    let source = "def loss(x: tensor[2, f32], label: string) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+out = {\n  s = \"run-1\"\n  grad(fn (x: tensor[2, f32]) -> loss(x, s))(to_tensor([1.0f32, 2.0f32]))\n}\n";
+    assert_eval(source, "out", "tensor(shape=[2], data=[2.0, 4.0])");
+}
