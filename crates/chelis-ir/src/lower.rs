@@ -6508,6 +6508,9 @@ struct TrappingInitializer {
     scope: LexicalScope,
 }
 
+/// The map [`LowerCtx::program_value_verdicts`] holds.
+type ProgramValueVerdicts = UnordMap<String, Option<Arc<TrappingInitializer>>>;
+
 /// The top-level value declaration a reference inlines
 /// ([`TrappingInitializer`]).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -7105,7 +7108,7 @@ struct LowerCtx<'program> {
     lowers_declarations: bool,
     /// [`Self::inline_program_value`]'s verdicts, by definition name: the
     /// initializer to inline, or `None` for a total or unlowerable one.
-    program_value_verdicts: UnordMap<String, Option<Arc<TrappingInitializer>>>,
+    program_value_verdicts: ProgramValueVerdicts,
     /// The copies of trapping initializers this context has lowered, one per
     /// site ([`InlinedValueSite`]). A second reference at a site reads the
     /// first one's copy, and so does a reference from inside another value's
@@ -8489,10 +8492,7 @@ impl<'program> LowerCtx<'program> {
     fn program_value_verdict(
         &self,
         name: &str,
-    ) -> (
-        Option<Arc<TrappingInitializer>>,
-        UnordMap<String, Option<Arc<TrappingInitializer>>>,
-    ) {
+    ) -> (Option<Arc<TrappingInitializer>>, ProgramValueVerdicts) {
         let Some(initializer) = self.program_defs.get(name) else {
             return (None, UnordMap::new());
         };
