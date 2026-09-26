@@ -3623,8 +3623,11 @@ path even though bare `round` under `grad` remains a structural
 > result. A batched condition aborts when any mapped element is true; the
 > message does not identify the element. The abort is observable under
 > spec/06 section 5.2 and may not be removed or reordered with respect to
-> another observable effect (this rule is not fully implemented for every
-> trapping operation: chelis#2440). The fallback is an ordinary operand and
+> another observable effect (this rule is not fully implemented: an unused
+> float `mean` over an empty axis, and an unused runtime `reshape` or
+> `expand` target or `gather`, `scatter`, `scatter_add`, `scatter_elements`
+> or `one_hot` index, may be removed, and the latter kinds also check in an
+> untaken branch: chelis#2440). The fallback is an ordinary operand and
 > is evaluated under the usual rules, so an operand that traps on its own
 > may trap before the guard reports; the guard orders aborts, it does not
 > suppress its operand's.
