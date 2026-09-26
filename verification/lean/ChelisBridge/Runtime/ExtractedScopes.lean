@@ -43,10 +43,8 @@ body (a native unwind is outside the modeled domain) makes the combinator fail t
 `*_obligation` theorems instantiate the `Scopes` obligations literally, with bodies given as
 state transformers through one canonical instance.
 
-The host lowering scopes (`with_host_invocation`, `with_mono_probe`, `with_inlining`) are in
-`Runtime/ExtractedHostScopes.lean`. Not yet in the model (not extraction roots of the bridge
-model): `host::with_type_subst` (`ActiveTypeSubstGuard`, an `InstallRestoreObligation`) and
-`host::with_preflight` (`PreflightObligation`).
+The host lowering scopes (`with_host_invocation`, `with_mono_probe`, `with_inlining`,
+`with_type_subst`, `with_preflight`) are in `Runtime/ExtractedHostScopes.lean`.
 -/
 
 open Aeneas.Std

@@ -24,8 +24,8 @@ s body` (adapting argument order / the backward-function pair convention through
 `ScopeSpecOn` below) with a `Lens` onto the relevant field, and proves the obligations against
 the extracted definitions: the suppression and install/restore obligations for the lowering
 runtime and the checker's diagnostic sink; `Runtime/ExtractedHostScopes.lean` those of the host
-scopes (`with_host_invocation`, `with_mono_probe`, and `with_inlining` in the restricted form
-`InliningObligationUnder`, with a counterexample to the unrestricted one).
+scopes (`with_host_invocation`, `with_mono_probe`, `with_type_subst`, and `with_inlining` in the
+restricted form `InliningObligationUnder`, with a counterexample to the unrestricted one).
 
 `scope_obligations_are_satisfiable` shows the obligations are not vacuous, `restore_ne_clear`
 records why restore and clear-to-false must stay separate obligations, and the `model_*`
@@ -135,6 +135,33 @@ def InliningObligationUnder {M : Type → Type} {σ S α γ : Type} (ok : M (σ 
 def PreflightObligation {M : Type → Type} {σ F γ : Type} (ok : M (σ × γ) → Option (σ × γ)) (L : Lens σ (List F))
     (facts : F) (comb : Combinator M σ γ) : Prop :=
   ScopeSpec ok (fun s => L.set (facts :: L.get s) s) (fun _ s₁ => L.set (L.get s₁).tail s₁) comb
+
+/-- `PreflightObligation` with the frame computed at entry, on bodies that leave a frame. An
+entry step `pre` gives the state the scope pushes on and the frame it pushes (`none`: the entry
+failed, and then so does the scope); the exit pops the top frame of the body's final state,
+which the body must leave (`L.get s₁ ≠ []`). This is the target statement for the production
+`with_preflight` (not extracted yet, E30; `Runtime/ExtractedHostScopes.lean`): in the Rust
+source its entry allocates the frame id from the runtime's supply and fills the program's
+summary cache, so it changes more than the stack, and its pop panics when the body leaves no
+frame, so the literal obligation, the special case of a constant entry step
+(`PreflightObligation.from_const`), is too strong for it. -/
+def PreflightObligationFrom {M : Type → Type} {σ F γ : Type} (ok : M (σ × γ) → Option (σ × γ))
+    (L : Lens σ (List F)) (pre : σ → Option (σ × F)) (comb : Combinator M σ γ) : Prop :=
+  ∀ body s s₀ fr, pre s = some (s₀, fr) →
+    (∀ s₁ r, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) → L.get s₁ ≠ []) →
+    ok (comb body s) =
+      (ok (body (L.set (fr :: L.get s₀) s₀))).map (fun x => (L.set (L.get x.1).tail x.1, x.2))
+
+/-- The literal `PreflightObligation` is `PreflightObligationFrom` with the constant entry step
+that pushes `facts` on the unchanged state. -/
+theorem PreflightObligation.from_const {M : Type → Type} {σ F γ : Type}
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)} {facts : F} {comb : Combinator M σ γ}
+    (h : PreflightObligation ok L facts comb) :
+    PreflightObligationFrom ok L (fun s => some (s, facts)) comb := by
+  intro body s s₀ fr hpre _
+  simp only [Option.some.injEq, Prod.mk.injEq] at hpre
+  obtain ⟨rfl, rfl⟩ := hpre
+  exact h body s
 
 /-- Suppression scopes (`with_suppress_unrepresentable_panic`, `catch_lowering`'s output guard):
 set at entry, CLEAR to `false` at exit. -/

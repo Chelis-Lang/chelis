@@ -5,7 +5,7 @@ import ChelisBridge.StrOrder
 /-!
 # E. The host lowering scopes on the extracted production combinators
 
-The three scopes of host lowering (`chelis_ir::host`) change the invocation state of a
+The host lowering scopes (`chelis_ir::host`) change the invocation state of a
 `HostCx` (`program.state.invocation`) through the native shell `scoped` (hard-opaque, modeled by
 `Aeneas/Std/ChelisNative.lean`: `enter; body; exit`, a failing body propagates). Their `HostCx`
 state holds mutable borrows, so the extracted instance threads the backward function of those
@@ -19,6 +19,10 @@ borrows beside the state; the successful-exit view `okHost` keeps the state and 
   state to its entry snapshot at exit (`withMonoProbe_spec`, `withMonoProbe_obligation`: the
   literal `MonoProbeObligation`); the snapshot is `MonoSpecializationState::clone`, the identity
   (`CloneId.cid_host_MonoSpecializationState`);
+* `with_type_subst(subst)` runs the body with `subst` as the active type substitution,
+  replacing (not extending) the caller's, and RESTORES the caller's substitution at exit
+  (`withTypeSubst_spec`, `withTypeSubst_obligation`: the literal `InstallRestoreObligation` of
+  `ActiveTypeSubstGuard`);
 * `with_inlining(name)` inserts `name` into the inlining set at entry and, at exit, removes it
   only if this scope inserted it (`withInlining_spec`, `withInlining_obligation`:
   `InliningObligationUnder`); without a name it is the body itself (`withInlining_none`).
@@ -35,6 +39,12 @@ exit's `remove` fails while the body succeeded.
 Every statement quantifies over every closure type and `FnOnce` instance (every body the
 production code can pass), covers `Ok` and `Err` results alike (the result type is arbitrary),
 and a failing or diverging body makes the combinator fail too.
+
+Not in the model: `host::with_preflight`. Its entry computes the program's
+`cached_dynamic_to_tensor_def_summaries`, which strict Aeneas does not translate yet (E30), so
+it is not an extraction root. Its target statement is `Scopes.PreflightObligationFrom` (the
+frame is computed at entry from the runtime's frame-id supply and the summary cache, and the
+exit pops the body's top frame, which must exist), not the literal `PreflightObligation`.
 -/
 
 open Aeneas.Std
@@ -204,6 +214,54 @@ theorem withMonoProbe_restores {R T1 : Type} (inst) (b : T1) (s s' : HCx) (r : R
     (h : okHost (chelis_ir.host.with_mono_probe inst s b) = some (s', r)) :
     s'.state.invocation.mono = s.state.invocation.mono :=
   restores_of_specOn monoLens_lawful (withMonoProbe_spec inst) b s s' r h
+
+/-! ## `with_type_subst` -/
+
+/-- The active type substitution of the context. -/
+def typeSubstLens : Lens HCx (chelis_unord.UnordMap String chelis_ir.host_type_state.HostTypeTerm) :=
+  { get := (·.state.invocation.type_subst),
+    set := fun v s => { s with state := { s.state with invocation := { s.state.invocation with type_subst := v } } } }
+
+theorem typeSubstLens_lawful : typeSubstLens.Lawful := ⟨fun _ _ => rfl, fun _ => rfl, fun _ _ _ => rfl⟩
+
+/-- **`with_type_subst(subst)`, every instance**: the body runs with `subst` as the active
+substitution, replacing (not extending) the caller's, and the caller's substitution is restored
+at exit (the body's other effects are kept). -/
+theorem withTypeSubst_spec {R T1 : Type} (inst)
+    (subst : chelis_unord.UnordMap String chelis_ir.host_type_state.HostTypeTerm) :
+    ScopeSpecOn (fun (b : T1) s => okHost (γ := R) (inst.call_once b s))
+      (fun b s => okHost (chelis_ir.host.with_type_subst inst subst s b))
+      (typeSubstLens.set subst) (restoreExit typeSubstLens) id := by
+  intro b s
+  simp only [chelis_ir.host.with_type_subst]
+  unfold_specialized
+  simp only [Aeneas.Std.chelis_ir.lowering_runtime.scoped, core.ops.function.FnOnceMutArg.thread,
+    core.ops.function.FnOnceMutArgPair.thread, core.mem.replace, typeSubstLens, restoreExit]
+  cases h : inst.call_once b
+      { s with state := { s.state with invocation := { s.state.invocation with type_subst := subst } } } with
+  | ok x => obtain ⟨r, s₁, bk⟩ := x; simp [h, okHost]
+  | fail e => simp [h, okHost]
+  | div => simp [h, okHost]
+
+/-- The extracted `with_type_subst` as a `Scopes.Combinator` (state-transformer bodies). -/
+def typeSubstComb (subst : chelis_unord.UnordMap String chelis_ir.host_type_state.HostTypeTerm)
+    (γ : Type) : Combinator Result HCx γ :=
+  asComb fun body s =>
+    chelis_ir.host.with_type_subst (R := γ) (T1 := HCx → Result (HCx × γ)) ⟨stCall⟩ subst s body
+
+/-- **The literal Section E `InstallRestoreObligation`** (`ActiveTypeSubstGuard`) for the
+extracted `with_type_subst`. -/
+theorem withTypeSubst_obligation
+    (subst : chelis_unord.UnordMap String chelis_ir.host_type_state.HostTypeTerm) (γ : Type) :
+    InstallRestoreObligation okResult typeSubstLens subst (typeSubstComb subst γ) :=
+  scopeSpec_asComb _ (withTypeSubst_spec _ _)
+
+/-- The caller's substitution is restored on every successful exit (`Ok` and `Err`). -/
+theorem withTypeSubst_restores {R T1 : Type} (inst)
+    (subst : chelis_unord.UnordMap String chelis_ir.host_type_state.HostTypeTerm) (b : T1)
+    (s s' : HCx) (r : R) (h : okHost (chelis_ir.host.with_type_subst inst subst s b) = some (s', r)) :
+    s'.state.invocation.type_subst = s.state.invocation.type_subst :=
+  restores_of_specOn typeSubstLens_lawful (withTypeSubst_spec inst subst) b s s' r h
 
 /-! ## `with_inlining` -/
 

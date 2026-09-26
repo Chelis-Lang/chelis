@@ -27,6 +27,9 @@ Stages, in order:
 8. coverage          independent re-validation of each chain's coverage report.
 9. correspondence    the Lean bridge (ChelisBridge + Audit) built against each
                      chain's whole-core model; Audit fails on disallowed axioms.
+                     Model-generated bridge modules (Runtime/CloneId.lean) must be
+                     exactly what verification/lean/gen_clone_id.py generates from
+                     that chain's fresh model; a stale module rejects the run.
                      verification/lean/ClosureAudit.lean then inventories the
                      transitive closure of every accepted theorem (axioms, opaque
                      constants, extern/implemented_by, witness paths).
@@ -407,6 +410,11 @@ def stage_correspondence(context: Run):
         model = context.whole_core[chain] / "lean"
         summary = json.loads((context.whole_core[chain] / "summary.json").read_text())
         roots = ",".join(summary["modules"])
+        # The clone-identity theorems are generated from a model: this chain's fresh model
+        # must generate exactly the committed module (checked, never regenerated here).
+        clone_id = context.directory / f"clone-id-{chain}.log"
+        run([sys.executable, bridge / "gen_clone_id.py", "--check", model, roots,
+             bridge / "ChelisBridge" / "Runtime" / "CloneId.lean"], cwd=bridge, log=clone_id)
         log = context.directory / f"bridge-{chain}.log"
         begun = time.time()
         run([
@@ -419,7 +427,7 @@ def stage_correspondence(context: Run):
         run(["lake", "env", "lean", "--run", "ClosureAudit.lean", inventory],
             cwd=bridge, log=context.directory / f"assumptions-{chain}.log")
         context.inventories[chain] = fresh(inventory, begun)
-        results[chain] = {"log": str(log), "inventory": str(inventory)}
+        results[chain] = {"log": str(log), "inventory": str(inventory), "clone_id": str(clone_id)}
     return results
 
 
