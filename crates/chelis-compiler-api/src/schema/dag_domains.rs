@@ -571,35 +571,6 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 ));
             }
         }
-        let owns_local_ascription = node.shape_deps.iter().any(|dependency| {
-            dag.nodes
-                .get(*dependency as usize)
-                .is_some_and(|dependency| {
-                    matches!(
-                        dependency.op,
-                        WireRiscOp::ExtentWitness {
-                            site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
-                            ..
-                        }
-                    )
-                })
-        });
-        if owns_local_ascription {
-            let activation_count = node
-                .shape_deps
-                .iter()
-                .filter_map(|dependency| dag.nodes.get(*dependency as usize))
-                .filter(|dependency| {
-                    dependency.output_type.dims.is_empty()
-                        && dependency.output_type.precision == "bool"
-                })
-                .count();
-            if activation_count > 1 {
-                return Err(reject(
-                    "local ascription owner has multiple runtime branch activations",
-                ));
-            }
-        }
         i32::try_from(node.output_type.dims.len())
             .map_err(|_| reject("tensor rank exceeds int32"))?;
         for dim in &node.output_type.dims {

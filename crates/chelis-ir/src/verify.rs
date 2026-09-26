@@ -2663,13 +2663,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     .iter()
                     .filter(|owner| owner.shape_deps.contains(&node.id))
                     .collect::<Vec<_>>();
-                if let [owner] = owners.as_slice()
-                    && let Err(reason) = crate::axis_sources::local_ascription_guard_activation(
-                        dag, owner.id, node.id,
-                    )
-                {
-                    errors.push(reason);
-                }
                 let literal = node.inputs.is_empty()
                     && node.shape_deps.is_empty()
                     && matches!(&node.op, RiscOp::ExtentWitness { parameter, .. } if parameter.is_empty())

@@ -3501,7 +3501,14 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                 let axis = usize::try_from(*axis)
                     .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
                 let site = checked_result_extent_site(dag, node.id, axis)?;
-                let (producer, observed) = if required.0 < site.producer.0 {
+                let activation = local_ascription_guard_activation(dag, node.id)?;
+                // The guard runs at the producer only when the producer can
+                // read both the claim and the activation; a value produced
+                // before either (before its arm, say) is checked at the
+                // carrier, which reads the same extent from its input.
+                let (producer, observed) = if required.0 < site.producer.0
+                    && activation.is_none_or(|activation| activation.0 < site.producer.0)
+                {
                     (site.producer, site.observation)
                 } else {
                     (
@@ -3519,7 +3526,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: local_ascription_guard_activation(dag, node.id, *required)?,
+                        activation,
                     },
                 ));
                 continue;
@@ -3819,39 +3826,20 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
     Ok(sites)
 }
 
-/// The one scalar Bool dependency that activates a path-local ascription.
+/// The activation a path-local ascription's claims are checked under: the
+/// owner activation of the node carrying them (spec/10 section 3.2, a node
+/// whose activation is false checks nothing).
 ///
-/// Claim tokens and ordinary shape sources share `shape_deps`; the activation
-/// is structurally distinct because it is rank-0 Bool. More than one such
-/// dependency is ambiguous and therefore malformed rather than ordered or
-/// guessed.
-pub(crate) fn local_ascription_guard_activation(
-    dag: &Dag,
-    owner: NodeId,
-    claim: NodeId,
-) -> Result<Option<NodeId>, String> {
-    let owner = dag
-        .get(owner)
-        .ok_or_else(|| "local ascription owner is missing".to_string())?;
-    let activations = owner
-        .shape_deps
-        .iter()
-        .copied()
-        .filter(|dependency| *dependency != claim)
-        .filter(|dependency| {
-            dag.get(*dependency).is_some_and(|node| {
-                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
-            })
-        })
-        .collect::<Vec<_>>();
-    match activations.as_slice() {
-        [] => Ok(None),
-        [activation] => Ok(Some(*activation)),
-        _ => Err(format!(
-            "local ascription owner {} has multiple runtime branch activations",
-            owner.id.0
-        )),
-    }
+/// It is the carrier's [`crate::dag::Owner`], not a second record, so it
+/// cannot disagree with the activation the node itself runs under. Lowering
+/// stamps the carrier with the ascription's position, which inside a `grad`
+/// or `vmap` body spliced into a runtime `if` arm is the call site's
+/// activation; `vmap` batches it per row, and an extent every row shares is
+/// checked when any row is active.
+fn local_ascription_guard_activation(dag: &Dag, carrier: NodeId) -> Result<Option<NodeId>, String> {
+    dag.get(carrier)
+        .map(|carrier| carrier.owner.activation)
+        .ok_or_else(|| "local ascription owner is missing".to_string())
 }
 
 #[cfg(test)]
