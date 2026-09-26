@@ -1,4 +1,4 @@
-import ChelisBridge.Validation
+import ChelisBridge.ExtractedOwnership
 
 /-!
 # Executable smoke checks on concrete generated values
@@ -14,7 +14,7 @@ namespace ChelisBridge.Examples
 
 open Aeneas.Std LaCaDiLECore ChelisBridge
 open ChelisBridge.Model (usize slice vec load mkNode mkDag tensorType constTensorF64)
-open ChelisBridge.Ownership (Directive PlanMirror)
+open ChelisBridge.Ownership (Directive PlanMirror OwnershipPlan)
 
 def node (id : Nat) (op : Model.RiscOp) (inputs : List Nat) (dims : List Nat) :
     Model.DagNode :=
@@ -175,77 +175,82 @@ def disconnected : Model.Dag :=
   pure ((GradArtifact.grad r 1).join.isNone && !needs p 1 && needs p 0)) == some true
 #guard acceptsExtracted disconnected 3 [0, 1]
 
-/-! ## Ownership plans
+/-! ## Ownership plans returned by the extracted production lowering
 
-`mimicPlan` reproduces the Rust `DagOwnershipPlan::lower` directive order for tests only
-(the extracted lowering is not yet in the model); `decodeOwned` and `OwnedCode.check` are
-the checked path. -/
+`lowered` runs the extracted `chelis_ir::ownership::lower_dag_ownership` (with an oracle
+supply of capacity identities) and reads its actual returned plan; `decodeOwned` and
+`OwnedCode.check` are the checked path. -/
 
-def mimicPlan (dag : Model.Dag) : List Directive :=
-  let nodes := dag.nodes.val
-  let (ds, live, borrowed) := nodes.foldl
-    (fun (acc : List Directive × List Nat × List Nat) n =>
-      let (ds, live, borrowed) := acc
-      let id := n.id.val
-      let ins := n.inputs.val.map (·.val)
-      match n.op with
-      | .Load _ => (ds ++ [.borrowLoad id], live, borrowed ++ [id])
-      | .Copy => (ds ++ [.clone id (ins.headD 0)], live ++ [id], borrowed)
-      | .Drop =>
-          let src := ins.headD 0
-          if borrowed.contains src then (ds ++ [.borrowedDrop id src], live, borrowed)
-          else (ds ++ [.ownedDrop id src], live.erase src, borrowed)
-      | _ => (ds ++ [.produce id (Ownership.expectedBorrows n)], live ++ [id], borrowed))
-    ([], [], [])
-  let (ds, live) := (dag.roots.val.map (·.val)).foldl
-    (fun (acc : List Directive × List Nat) r =>
-      if acc.2.contains r then (acc.1 ++ [.root r], acc.2.erase r)
-      else if borrowed.contains r then (acc.1 ++ [.rootClone r], acc.2)
-      else (acc.1 ++ [.root r], acc.2))
-    (ds, live)
-  ds ++ (live.mergeSort (· ≤ ·)).map Directive.scopeDrop
+/-- Capacity identities `0, 1, 2, …` (the lowering draws one per plan). -/
+def supply : Model.CapacityScopeSupply := Model.supplyOf fun n => some (Model.u64 n)
 
-/-- Combined acceptance of the source, the extracted AD artifact and a final plan over the
-artifact's own DAG (`checkGradient_bridge`). -/
-def acceptsPlan (forward : Model.Dag) (output : Nat) (wrt : List Nat)
-    (planFor : Model.Dag → List Directive) : Bool :=
+def lowered (dag : Model.Dag) : Option ExtractedOwnership.LoweredPlan :=
+  ExtractedOwnership.loweredPlan dag supply
+
+def loweredDirectives (dag : Model.Dag) : Option (List Directive) :=
+  (lowered dag).map OwnershipPlan.directives
+
+/-- Combined acceptance of the actual production pipeline (`acceptLowered_sound`): the
+extracted AD, the extracted ownership lowering of its returned DAG, the decoders and the
+reference checks; the witnesses are searched outside the trusted base. -/
+def acceptsLowered (forward : Model.Dag) (output : Nat) (wrt : List Nat) : Bool :=
   match extractedResult (Model.gradDagChecked forward (usize output) (slice (wrt.map usize))),
       decodeSource .f64 forward wrt output with
   | some r, some ⟨Γ, p⟩ =>
-      let plan : PlanMirror := ⟨r.dag, planFor r.dag⟩
-      match decodeArtifact .f64 forward wrt p r, decodeArtifactRoots .f64 forward wrt p r with
-      | some actual, some ⟨Ω, rc⟩ =>
+      match lowered r.dag, decodeArtifact .f64 forward wrt p r,
+          decodeArtifactRoots .f64 forward wrt p r with
+      | some plan, some actual, some ⟨Ω, rc⟩ =>
           match (Validation.planEntryIds forward wrt plan).bind
               (fun ids => Ownership.decodeOwned .f64 ids Γ Ω plan) with
           | some final =>
-              Validation.acceptPlan .f64 forward wrt output r plan
+              ExtractedOwnership.acceptLowered .f64 forward (usize output)
+                (slice (wrt.map usize)) supply
                 (witnessBetween p.compileGrad actual)
                 (witnessBetween rc.inlineCopies final.circuit.inlineCopies)
           | none => false
-      | _, _ => false
+      | _, _, _ => false
   | _, _ => false
 
-#guard acceptsPlan square 2 [0] mimicPlan
-#guard acceptsPlan withConst 4 [0] mimicPlan
-#guard acceptsPlan disconnected 3 [0, 1] mimicPlan
+#guard acceptsLowered square 2 [0]
+#guard acceptsLowered withConst 4 [0]
+#guard acceptsLowered disconnected 3 [0, 1]
+
+-- `mul(x, x)`: both (equal) ports are borrowed by the product, which the root moves.
+#guard loweredDirectives (mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [1]) ==
+  some [.borrowLoad 0, .produce 1 [0, 0], .root 1]
+
+-- A repeated owned root is rejected by the production lowering (`DagDuplicateTerminal`).
+#guard match Model.lowerDagOwnership
+    (mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [1, 1]) supply with
+  | .ok (.Err (.DagDuplicateTerminal owner), _) => owner.val == 1
+  | _ => false
 
 /-- A graph whose roots are the borrowed entry itself (twice) and an owned value. -/
 def rootsDag : Model.Dag :=
   mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [0, 1, 0]
 
-def rootsPlan : PlanMirror := ⟨rootsDag, mimicPlan rootsDag⟩
-
 -- `RootClone` of a borrowed entry is expanded into an explicit copy and its transfer, and
 -- the independent reference ownership check accepts the original plan.
-#guard mimicPlan rootsDag ==
-  [.borrowLoad 0, .produce 1 [0, 0], .rootClone 0, .root 1, .rootClone 0]
-#guard (Ownership.ownedSyntax .f64 [some 0] [[2]] rootsPlan).map (·.1) ==
+#guard loweredDirectives rootsDag ==
+  some [.borrowLoad 0, .produce 1 [0, 0], .rootClone 0, .root 1, .rootClone 0]
+#guard ((lowered rootsDag).bind (Ownership.ownedSyntax .f64 [some 0] [[2]])).map (·.1) ==
   some (.bind (.mul [2] 0 0) (.bind (.copy [2] 1) (.yield [2] 0 (.yield [2] 1
     (.bind (.copy [2] 2) (.yield [2] 0 .done))))))
-#guard (Ownership.decodeOwned .f64 [some 0] [[2]] [[2], [2], [2]] rootsPlan).map
+#guard ((lowered rootsDag).bind (Ownership.decodeOwned .f64 [some 0] [[2]] [[2], [2], [2]])).map
   (fun c => c.check (LaCaDiLECore.Ownership.initial 1)) == some true
 
--- A repeated owned-root transfer is rejected by the decoder.
+/-- A borrowed `Drop` is a non-consuming logical discard (Rust `BorrowedDrop`); the entry is
+still readable afterwards. -/
+def discardDag : Model.Dag :=
+  mkDag [node 0 (load "x") [] [2], node 1 .Drop [0] [2], node 2 .Copy [0] [2]] [2]
+
+#guard loweredDirectives discardDag ==
+  some [.borrowLoad 0, .borrowedDrop 1 0, .clone 2 0, .root 2]
+#guard ((lowered discardDag).bind (Ownership.decodeOwned .f64 [some 0] [[2]] [[2]])).map
+  (fun c => c.check (LaCaDiLECore.Ownership.initial 1)) == some true
+
+-- Hand-written plans exercise the decoder's own rejections. A repeated owned-root transfer
+-- is rejected by the decoder.
 #guard (Ownership.decodeOwned .f64 [some 0] [[2]] [[2], [2]]
   (⟨mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [1, 1],
     [.borrowLoad 0, .produce 1 [0, 0], .root 1, .root 1]⟩ : PlanMirror)).isNone

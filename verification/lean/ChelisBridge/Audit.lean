@@ -3,6 +3,7 @@ import ChelisBridge.Tensor
 import ChelisBridge.Model
 import ChelisBridge.Decode
 import ChelisBridge.Ownership
+import ChelisBridge.ExtractedOwnership
 import ChelisBridge.Validation
 import ChelisBridge.Examples
 import ChelisBridge.Runtime.Cancellation
@@ -27,9 +28,11 @@ import ChelisBridge.Protocol.F16Widen
 import ChelisBridge.Protocol.BF16Widen
 import ChelisBridge.Protocol.NonF64
 import ChelisBridge.Protocol.RandomRun
+import ChelisBridge.Protocol.FrameDropout
 import ChelisBridge.EffectsModel
 import ChelisBridge.StartsWith
 import ChelisBridge.Resource
+import ChelisBridge.ResourceTargets
 import Lean.Util.CollectAxioms
 
 /-!
@@ -145,6 +148,12 @@ def accepted : List Name := [
   ``ChelisBridge.Ownership.runScopeDrops_transfer,
   ``ChelisBridge.Ownership.planInstrs_transfers_nodup,
   ``ChelisBridge.Ownership.decodeOwned_sound,
+  -- Extracted ownership lowering (OwnershipBridge)
+  ``ChelisBridge.Model.lowerDagOwnership_ok,
+  ``ChelisBridge.ExtractedOwnership.loweredPlan_spec,
+  ``ChelisBridge.ExtractedOwnership.loweredPlan_of_ok,
+  ``ChelisBridge.ExtractedOwnership.lowerDagOwnership_sound,
+  ``ChelisBridge.ExtractedOwnership.acceptLowered_sound,
   -- Validation
   ``ChelisBridge.opReads_iff,
   ``ChelisBridge.Var.get_zero,
@@ -523,7 +532,50 @@ def accepted : List Name := [
   ``ChelisBridge.Random.apply_bf16,
   ``ChelisBridge.Random.mask_agrees_bf16,
   ``ChelisBridge.Random.value_halfBF16,
-  ``ChelisBridge.Random.bf16_naive_counterexample
+  ``ChelisBridge.Random.bf16_naive_counterexample,
+  -- Composed ExecutionFrame::dropout (BridgeIntegrate)
+  ``ChelisBridge.Protocol.value_le_of_le,
+  ``ChelisBridge.Random.bind_ok_elim,
+  ``ChelisBridge.Random.map_ok_elim,
+  ``ChelisBridge.Random.from_residual_err,
+  ``ChelisBridge.Random.map_err_err,
+  ``ChelisBridge.Random.map_err_ok,
+  ``ChelisBridge.Random.prim_disc_inj,
+  ``ChelisBridge.Random.realize_f64_zero_bits,
+  ``ChelisBridge.Random.realize_f64_one_bits,
+  ``ChelisBridge.Random.new_ok_inv,
+  ``ChelisBridge.Random.from_storage_ok,
+  ``ChelisBridge.Random.clone_usize_vec,
+  ``ChelisBridge.Random.dropout_ok_inv,
+  ``ChelisBridge.Random.dropout_enter,
+  ``ChelisBridge.Random.dropout_forward_simulates,
+  ``ChelisBridge.Random.cast_raw_float_f64,
+  ``ChelisBridge.Random.cast_raw_float_f32,
+  ``ChelisBridge.Random.sv_prim_f16,
+  ``ChelisBridge.Random.sv_prim_bf16,
+  ``ChelisBridge.Random.nonf64_step,
+  ``ChelisBridge.Random.dropout_f64,
+  ``ChelisBridge.Random.dropout_f32,
+  ``ChelisBridge.Random.dropout_f16,
+  ``ChelisBridge.Random.dropout_bf16,
+  ``ChelisBridge.Random.dropout_forward_f64,
+  -- Resource: every target of `validate_build_target_handler` (ResourceTargets)
+  ``ChelisBridge.Resource.str_eq_lit,
+  ``ChelisBridge.Resource.starts_with_gpu,
+  ``ChelisBridge.Resource.is_c_eq',
+  ``ChelisBridge.Resource.first_eq,
+  ``ChelisBridge.Resource.first_and_then,
+  ``ChelisBridge.Resource.push_ne,
+  ``ChelisBridge.Resource.bind_push_ne,
+  ``ChelisBridge.Resource.ite_reject_iff,
+  ``ChelisBridge.Resource.resource_accepts_iff,
+  ``ChelisBridge.Resource.gpu_targets_equivalent,
+  ``ChelisBridge.Resource.c_target_iff,
+  ``ChelisBridge.Resource.c_target_implies_reference,
+  ``ChelisBridge.Resource.c_target_reference_not_implies,
+  ``ChelisBridge.Resource.unknown_target_accepts_all,
+  ``ChelisBridge.Resource.non_literal_device_unchecked,
+  ``ChelisBridge.Resource.random_and_decode_error_unchecked
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]

@@ -39,7 +39,7 @@ converted zero when the arithmetic unit is below the widened rate and the succes
 `input[k] / denominator` otherwise. -/
 theorem body_step (self : chelis_types.dtype_semantics.PreparedDropout)
     (dp : chelis_types.dtype_semantics.DropoutParameters) (seed ordinal : U64) (prim : Prim)
-    (wr : F64) (zero den : SV) (output : alloc.vec.Vec SV) (k n : Usize) (ts ts1 ts2 : Storage)
+    (wr : F64) (zero den : SV) (output : alloc.vec.Vec SV) (k n : Usize)
     (hk : k.val < n.val) (hlen : output.val.length < Usize.max) (x : SV)
     (hx : (F64.lt (arithUnit prim (unitAt seed ordinal k.val)) wr = true ∧ x = zero) ∨
       (F64.lt (arithUnit prim (unitAt seed ordinal k.val)) wr = false ∧
@@ -47,9 +47,9 @@ theorem body_step (self : chelis_types.dtype_semantics.PreparedDropout)
           chelis_types.dtype_semantics.float_binop .Div sv den = .ok (.Ok x))) :
     ∃ (k' : Usize) (out' : alloc.vec.Vec SV), k'.val = k.val + 1 ∧
       out'.val = output.val ++ [x] ∧
-      chelis_types.dtype_semantics.PreparedDropout.apply_loop.body self dp seed ordinal prim wr
-          zero den output ⟨k, n⟩ ts ts1 ts2 =
-        .ok (.cont (dp, seed, ordinal, prim, wr, zero, den, out', ⟨k', n⟩, ts, ts1, ts2)) := by
+      chelis_types.dtype_semantics.PreparedDropout.apply_loop.body self ⟨k, n⟩ dp seed ordinal
+          prim wr zero den output =
+        .ok (.cont (⟨k', n⟩, dp, seed, ordinal, prim, wr, zero, den, out')) := by
   obtain ⟨k', hk', hnext⟩ := range_next_lt k n hk
   have hpush : ∀ y, ∃ o, alloc.vec.Vec.push output y = .ok o ∧ o.val = output.val ++ [y] := by
     intro y
@@ -80,7 +80,7 @@ per-index values `v k, …, v (n-1)` and finishes with `tensor_from_scalars prim
 output, provided every index takes one of the two branches with value `v i`. -/
 theorem apply_loop_spec (self : chelis_types.dtype_semantics.PreparedDropout)
     (dp : chelis_types.dtype_semantics.DropoutParameters) (seed ordinal : U64) (prim : Prim)
-    (wr : F64) (zero den : SV) (n : Usize) (ts ts1 ts2 : Storage) (v : ℕ → SV)
+    (wr : F64) (zero den : SV) (n : Usize) (v : ℕ → SV)
     (hv : ∀ idx : Usize, idx.val < n.val →
       (F64.lt (arithUnit prim (unitAt seed ordinal idx.val)) wr = true ∧ v idx.val = zero) ∨
       (F64.lt (arithUnit prim (unitAt seed ordinal idx.val)) wr = false ∧
@@ -89,8 +89,8 @@ theorem apply_loop_spec (self : chelis_types.dtype_semantics.PreparedDropout)
     ∀ (m : ℕ) (k : Usize) (output : alloc.vec.Vec SV), n.val - k.val = m → k.val ≤ n.val →
       output.val.length = k.val →
       ∃ out : alloc.vec.Vec SV, out.val = output.val ++ (List.range' k.val m).map v ∧
-        chelis_types.dtype_semantics.PreparedDropout.apply_loop self dp seed ordinal prim wr zero
-            den output ⟨k, n⟩ ts ts1 ts2 =
+        chelis_types.dtype_semantics.PreparedDropout.apply_loop self ⟨k, n⟩ dp seed ordinal prim wr
+            zero den output =
           (do
             let t ← chelis_types.dtype_semantics.tensor_from_scalars prim
               (alloc.vec.Vec.deref out)
@@ -111,7 +111,7 @@ theorem apply_loop_spec (self : chelis_types.dtype_semantics.PreparedDropout)
     intro k output hm hkn hlen
     have hk : k.val < n.val := by omega
     obtain ⟨k', out', hk', hout', hbody⟩ :=
-      body_step self dp seed ordinal prim wr zero den output k n ts ts1 ts2 hk
+      body_step self dp seed ordinal prim wr zero den output k n hk
         (by have := n.hBounds; scalar_tac) (v k.val) (hv k hk)
     obtain ⟨out, hout, hloop⟩ := ih k' out' (by omega) (by omega)
       (by rw [hout', List.length_append, hlen, hk']; rfl)
@@ -264,7 +264,7 @@ theorem apply_f64 (xs : alloc.vec.Vec F64) (w : F64) (seed ordinal : U64) :
   obtain ⟨out, hout, hloop⟩ :=
     apply_loop_spec { input := ⟨.F64 xs⟩, «parameters» := ⟨⟨.F64 w⟩⟩ } ⟨⟨.F64 w⟩⟩ seed ordinal
       .F64 w ⟨.F64 zero64⟩ ⟨.F64 (F64.sub one64 w)⟩ (alloc.vec.Vec.len xs)
-      ⟨.F64 xs⟩ ⟨.F64 xs⟩ ⟨.F64 xs⟩ (fun i => ⟨.F64 (keptF64 xs w seed ordinal i)⟩)
+      (fun i => ⟨.F64 (keptF64 xs w seed ordinal i)⟩)
       (step_f64 xs w seed ordinal) xs.val.length 0#usize
       (alloc.vec.Vec.with_capacity SV (alloc.vec.Vec.len xs)) (by simp) (by simp)
       (by simp [alloc.vec.Vec.with_capacity])
@@ -529,7 +529,7 @@ theorem apply_f32 (xs : alloc.vec.Vec F32) (w : F32) (seed ordinal : U64) :
   obtain ⟨out, hout, hloop⟩ :=
     apply_loop_spec { input := ⟨.F32 xs⟩, «parameters» := ⟨⟨.F32 w⟩⟩ } ⟨⟨.F32 w⟩⟩ seed ordinal
       .F32 (F32.toF64 w) ⟨.F32 zero32⟩ ⟨.F32 (F32.sub one32 w)⟩ (alloc.vec.Vec.len xs)
-      ⟨.F32 xs⟩ ⟨.F32 xs⟩ ⟨.F32 xs⟩ (fun i => ⟨.F32 (keptF32 xs w seed ordinal i)⟩)
+      (fun i => ⟨.F32 (keptF32 xs w seed ordinal i)⟩)
       (step_f32 xs w seed ordinal) xs.val.length 0#usize
       (alloc.vec.Vec.with_capacity SV (alloc.vec.Vec.len xs)) (by simp) (by simp)
       (by simp [alloc.vec.Vec.with_capacity])

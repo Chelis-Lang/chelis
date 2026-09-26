@@ -219,7 +219,7 @@ theorem apply_f16 (xs : alloc.vec.Vec F16) (w : F16) (seed ordinal : U64) :
   obtain ⟨out, hout, hloop⟩ :=
     apply_loop_spec { input := ⟨.F16 xs⟩, «parameters» := ⟨⟨.F16 w⟩⟩ } ⟨⟨.F16 w⟩⟩ seed ordinal
       .F16 (f16To64 w) ⟨.F16 F16.ZERO⟩ ⟨.F16 (f16Sub F16.ONE w)⟩ (alloc.vec.Vec.len xs)
-      ⟨.F16 xs⟩ ⟨.F16 xs⟩ ⟨.F16 xs⟩ (fun i => ⟨.F16 (keptF16 xs w seed ordinal i)⟩)
+      (fun i => ⟨.F16 (keptF16 xs w seed ordinal i)⟩)
       (step_f16 xs w seed ordinal) xs.val.length 0#usize
       (alloc.vec.Vec.with_capacity SV (alloc.vec.Vec.len xs)) (by simp) (by simp)
       (by simp [alloc.vec.Vec.with_capacity])
@@ -462,7 +462,7 @@ theorem apply_bf16 (xs : alloc.vec.Vec BF16) (w : BF16) (seed ordinal : U64) :
   obtain ⟨out, hout, hloop⟩ :=
     apply_loop_spec { input := ⟨.Bf16 xs⟩, «parameters» := ⟨⟨.Bf16 w⟩⟩ } ⟨⟨.Bf16 w⟩⟩ seed ordinal
       .Bf16 (bf16To64 w) ⟨.Bf16 BF16.ZERO⟩ ⟨.Bf16 (bf16Sub BF16.ONE w)⟩ (alloc.vec.Vec.len xs)
-      ⟨.Bf16 xs⟩ ⟨.Bf16 xs⟩ ⟨.Bf16 xs⟩ (fun i => ⟨.Bf16 (keptBF16 xs w seed ordinal i)⟩)
+      (fun i => ⟨.Bf16 (keptBF16 xs w seed ordinal i)⟩)
       (step_bf16 xs w seed ordinal) xs.val.length 0#usize
       (alloc.vec.Vec.with_capacity SV (alloc.vec.Vec.len xs)) (by simp) (by simp)
       (by simp [alloc.vec.Vec.with_capacity])

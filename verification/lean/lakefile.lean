@@ -13,8 +13,8 @@ Configuration (all optional, `lake -K key=value ...`):
   `prepare_bridge.py --aeneas-lean-dir <dir>` (writes the override) or
   `lake -K aeneas=<dir> update aeneas`.
 * `model`: directory holding the generated model sources (default: the `model` symlink).
-* `modelRoots`: comma-separated root module(s) of the generated model (default
-  `ChelisIr,ChelisEffects`: the IR slice and the effects slice).
+* `modelRoots`: comma-separated root module(s) of the generated model (default `ChelisIr`:
+  one extraction whose roots include the IR and the `chelis_effects` entry points).
   `ChelisBridge/Model.lean` is the only Lean file naming generated declarations.
 
 LaCaDiLE is pinned by URL and revision in `lake-manifest.json`. The repository is not
@@ -29,7 +29,7 @@ def aeneasDir : System.FilePath :=
 def modelDir : System.FilePath := (get_config? model).getD "model"
 
 def modelRoots : Array Lean.Name :=
-  (((get_config? modelRoots).getD "ChelisIr,ChelisEffects").splitOn ",").toArray.map String.toName
+  (((get_config? modelRoots).getD "ChelisIr").splitOn ",").toArray.map String.toName
 
 package chelis_bridge
 

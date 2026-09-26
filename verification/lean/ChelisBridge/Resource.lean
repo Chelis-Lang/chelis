@@ -43,7 +43,7 @@ theorem bytesU8_inj {s t : String} (h : bytesU8 s = bytesU8 t) : s = t := by
 theorem is_c_eq (s : String) (d : Str) (h : Str.ofString s = .ok d) :
     EffectsModel.isCHostDeviceDesignator d = .ok (decide (s = "cpu")) := by
   unfold EffectsModel.isCHostDeviceDesignator chelis_effects.is_c_host_device_designator
-  simp only [core.cmp.impls.PartialEqShared.eq, core.str.traits.PartialEqStr.eq]
+  simp only [core.str.traits.PartialEqStr.eq]
   rw [ofString_val h, toStr_val]
   congr 1
   by_cases hs : s = "cpu"

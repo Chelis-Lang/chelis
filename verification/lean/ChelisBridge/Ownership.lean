@@ -7,9 +7,9 @@ import LaCaDiLECore.GradientValidation
 The Rust DAG ownership plan (`chelis_ir::ownership::DagOwnershipPlan`) is a list of
 `DagDirective`s: one per DAG node in node order, then one per root in root order, then the
 implicit scope-exit drops. `Directive` mirrors that enum constructor for constructor; the
-`OwnershipPlan` class is the only link to the generated carrier (the extracted AD slice
-does not contain the ownership lowering yet, so the instance for the generated
-`DagOwnershipProgram` is one constructor-by-constructor map once it is extracted).
+`OwnershipPlan` class is the only link to the generated carrier (`ExtractedOwnership`
+instantiates it with the payload DAG and directive vector actually returned by the
+extracted `lower_dag_ownership`).
 
 `decodeOwned` reads the plan into reference owned syntax `GraphSyntax.Owned ℚ`:
 

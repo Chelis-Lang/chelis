@@ -4,5 +4,6 @@ import ChelisBridge.Model
 import ChelisBridge.Decode
 import ChelisBridge.Ownership
 import ChelisBridge.Validation
+import ChelisBridge.ExtractedOwnership
 import ChelisBridge.Examples
 import ChelisBridge.Audit

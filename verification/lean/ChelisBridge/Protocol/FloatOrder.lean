@@ -156,6 +156,24 @@ theorem lt_eq_decide {x y : BinaryFloat f} (hx : x.isFinite = true) (hy : y.isFi
     · symm; rw [decide_eq_true_iff]; rcases hpos with h | h <;> linarith
     · exact decide_eq_decide.mpr (by rw [neg_lt_neg_iff]; exact uval_lt_iff.symm)
 
+/-- **IEEE `<=` on finite encodings implies exact rational `≤`** (equal encodings or two
+zeros of either sign, else IEEE `<`). -/
+theorem value_le_of_le {x y : BinaryFloat f} (hx : x.isFinite = true) (hy : y.isFinite = true)
+    (h : BinaryFloat.le x y = true) : value x ≤ value y := by
+  unfold BinaryFloat.le at h
+  rcases Bool.or_eq_true_iff.mp h with he | hl
+  · unfold BinaryFloat.eq at he
+    simp only [Bool.and_eq_true, Bool.not_eq_true', Bool.or_eq_true, beq_iff_eq] at he
+    rcases he.2 with ⟨hzx, hzy⟩ | hb
+    · simp only [BinaryFloat.isZero, beq_iff_eq] at hzx hzy
+      rw [value_eq_uval, value_eq_uval, (uval_eq_zero_iff x).mpr hzx,
+        (uval_eq_zero_iff y).mpr hzy]
+      simp
+    · have hxy : x = y := by cases x; cases y; simp_all
+      rw [hxy]
+  · rw [lt_eq_decide hx hy] at hl
+    exact le_of_lt (of_decide_eq_true hl)
+
 theorem abs_value (x : BinaryFloat f) : |value x| = uval x := by
   rw [value_eq_uval]; split
   · rw [abs_neg, abs_of_nonneg (uval_nonneg x)]
