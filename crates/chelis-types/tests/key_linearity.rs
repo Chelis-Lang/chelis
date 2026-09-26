@@ -1196,3 +1196,72 @@ fn a_guard_consumes_its_keys_on_every_later_arm() {
         accepts(name, &source);
     }
 }
+
+/// [04-LIN-9] and spec/06 section 3.6: `vmap` broadcasts an argument that is
+/// not a tensor to every row, so a key-carrying one would be used by each row.
+/// Keys reach the rows only as a mapped `tensor[n, key]`; a broadcast
+/// argument with no key stays legal.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` the option, record,
+/// list and key-tensor-in-a-list negatives checked.
+#[test]
+fn vmap_never_broadcasts_a_key() {
+    let holder = "type Holder =\n  | Holder { k: key, n: i64 }\n";
+    for (name, source) in [
+        (
+            "an option holding a key",
+            "def row(o: Option[key], x: tensor[2, f32]) -> tensor[2, f32] = match o with {\n  | \
+             Some(k) => dropout(k, x, 0.5f32)\n  | None => x\n}\ndef bad(k: key, xs: tensor[3, 2, \
+             f32]) -> tensor[3, 2, f32] = vmap(row)(Some(k), xs)\n"
+                .to_string(),
+        ),
+        (
+            "a record with a key field",
+            format!(
+                "{holder}def row(h: Holder, x: tensor[2, f32]) -> tensor[2, f32] = match h with \
+                 {{\n  | Holder {{ k, n }} => dropout(k, x, 0.5f32)\n}}\ndef bad(h: Holder, xs: \
+                 tensor[3, 2, f32]) -> tensor[3, 2, f32] = vmap(row)(h, xs)\n"
+            ),
+        ),
+        (
+            "a list of keys",
+            "def row(ks: List[key], x: tensor[2, f32]) -> tensor[2, f32] = match ks with {\n  | \
+             Cons(k, rest) => dropout(k, x, 0.5f32)\n  | Nil => x\n}\ndef bad(k: key, xs: \
+             tensor[3, 2, f32]) -> tensor[3, 2, f32] = vmap(row)([k], xs)\n"
+                .to_string(),
+        ),
+        (
+            "a list of key tensors",
+            "def row(ks: List[tensor[3, key]], x: tensor[2, f32]) -> tensor[2, f32] = x\ndef \
+             bad(k: key, xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = vmap(row)([split_keys(k, \
+             3i64)], xs)\n"
+                .to_string(),
+        ),
+    ] {
+        let errors = rejects(name, &source, CheckErrorKind::KeyReuse);
+        assert!(
+            errors.iter().any(|error| error.message.contains("`vmap` broadcasts argument 0")
+                && error.message.contains("[04-LIN-9]")
+                && error.suggestions.join(" ").contains("split_keys")),
+            "{name}: expected the broadcast diagnostic: {errors:?}"
+        );
+    }
+    let row = "def row(k: key, x: tensor[2, f32]) -> tensor[2, f32] = dropout(k, x, 0.5f32)\n";
+    for (name, source) in [
+        (
+            "split_keys feeding a key formal",
+            format!(
+                "{row}def good(k: key, xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = \
+                 vmap(row)(split_keys(k, 3i64), xs)\n"
+            ),
+        ),
+        (
+            "a broadcast option with no key",
+            "def row(o: Option[i64], x: tensor[2, f32]) -> tensor[2, f32] = x\ndef good(xs: \
+             tensor[3, 2, f32]) -> tensor[3, 2, f32] = vmap(row)(Some(1i64), xs)\n"
+                .to_string(),
+        ),
+    ] {
+        accepts(name, &source);
+    }
+}

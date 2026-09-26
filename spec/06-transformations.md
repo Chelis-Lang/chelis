@@ -545,7 +545,7 @@ These two are distinct concepts:
 
 - `axis_out_of_bounds`: The integer axis is out of bounds for one of the vmapped tensor
   arguments or results.
-- If `f` has non-tensor arguments other than scalar `key` formals, those arguments are broadcast (shared across the batch). They are not vmapped. A scalar `key` formal is always mapped (§3.2).
+- If `f` has non-tensor arguments other than scalar `key` formals, those arguments are broadcast (shared across the batch). They are not vmapped. A scalar `key` formal is always mapped (§3.2). A broadcast argument that carries a key (spec/04 §8.4.1) is a type error, because every row would use its keys (spec/04 [04-LIN-9]); keys reach the rows only as a mapped `tensor[n, key]`.
 
 ### 3.7 Runtime Extents
 

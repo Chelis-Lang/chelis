@@ -1116,6 +1116,12 @@ impl Checker {
         let observational = children
             .first()
             .is_some_and(callee_is_observational_higher_order);
+        if children
+            .first()
+            .is_some_and(|callee| get_tag_expr(callee) == Some(DeepTag::Vmap))
+        {
+            self.reject_broadcast_keys(&children[1..], scope);
+        }
         for (index, arg) in children.iter().enumerate().skip(1) {
             if let Some(borrowed) = borrow_inner(arg) {
                 self.check_borrow_arg(arg, borrowed, scope);
@@ -2428,6 +2434,39 @@ impl Checker {
                     ],
                 ));
             }
+        }
+    }
+
+    /// [04-LIN-9] and spec/06 section 3.6: `vmap` maps tensor arguments and
+    /// broadcasts every other argument to all rows, so a key-carrying
+    /// argument that is not a tensor would be used by every row. Keys reach
+    /// the rows only as a mapped `tensor[n, key]`.
+    fn reject_broadcast_keys(&mut self, args: &[Expr], scope: &LinearScope) {
+        for (index, arg) in args.iter().enumerate() {
+            let operand = borrow_inner(arg).unwrap_or(arg);
+            let Some(ty) = self.value_type(operand, scope) else {
+                continue;
+            };
+            if !self.type_holds_key(&ty) || get_tag_expr(&ty) == Some(DeepTag::TTensor) {
+                continue;
+            }
+            self.push_diagnostic(CheckError::new(
+                CheckErrorKind::KeyReuse,
+                with_macro_provenance(
+                    arg,
+                    format!(
+                        "`vmap` broadcasts argument {index} {}, which carries a key and is not a \
+                         tensor, to every row, so each row would use its keys again ([04-LIN-9]; \
+                         spec/06-transformations.md section 3.6)",
+                        diag_site(arg)
+                    ),
+                ),
+                vec![
+                    "Map keys instead of broadcasting them: give the function a `key` formal and \
+                     pass `split_keys(k, n)`, one key per row"
+                        .to_string(),
+                ],
+            ));
         }
     }
 
