@@ -1,5 +1,7 @@
-//! chelis#2576: compiled C renders an `Option` nested inside a list, tuple or
-//! data-type value exactly as `chelis eval` does.
+//! chelis#2576: compiled C renders an `Option` nested inside a list or a
+//! data-type value, directly or through a nested tuple, exactly as `chelis
+//! eval` does. A root's own tuple components are printed one per line by the
+//! manifested-root path, which has no `Option` case; that is chelis#2597.
 //!
 //! The runtime's recursive value renderer had no arm for the `Option` value
 //! tag, so a root such as `map(fn (x: string) -> Some(x), xs)` built, printed
@@ -7,8 +9,9 @@
 //! `validate_value rejects unknown tags`, although the tag is valid and the
 //! list was well formed. The values themselves were always boxed correctly.
 //!
-//! The corpus puts an option inside every container a compiled root renders
-//! recursively, with every payload kind. Oracle: the compiled program runs
+//! The corpus puts an option inside a list, a data-type value, a tuple held
+//! by a list, and another option, with scalar, string, list and tensor
+//! payloads. Oracle: the compiled program runs
 //! against the `ownership-ledger` runtime, every allocation must be finalized
 //! with no live owner left, and stdout must equal the in-process evaluator's
 //! rendering of the same roots. Every case runs before the test reports, so
