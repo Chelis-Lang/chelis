@@ -476,10 +476,11 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
                     caller = occ.caller,
                     callee = occ.callee,
                 ),
+                // A helper that made the call would itself call into the
+                // group and be called from it, so it would join the group:
+                // no helper escapes the rule.
                 vec![format!(
-                    "hoist the call to `{callee}` into a separate non-recursive helper `def`, \
-                     or give `{caller}` matching type parameters",
-                    callee = occ.callee,
+                    "give `{caller}` matching type parameters",
                     caller = occ.caller,
                 )],
             )
@@ -493,12 +494,7 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
                     caller = occ.caller,
                     callee = occ.callee,
                 ),
-                vec![
-                    "make the recursive call reuse the caller's own type parameters".to_string(),
-                    "hoist the changed-instantiation call into a separate non-recursive helper \
-                     `def`"
-                        .to_string(),
-                ],
+                vec!["make the recursive call reuse the caller's own type parameters".to_string()],
             )
         };
         let mut err = CheckError::new(CheckErrorKind::TypeMismatch, message, suggestions);

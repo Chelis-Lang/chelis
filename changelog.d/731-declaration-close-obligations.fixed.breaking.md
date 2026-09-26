@@ -48,8 +48,10 @@ reference takes its own instance of each omitted type. When the group
 completes, each reference is typed at the type the member's body determines,
 which it never narrows: an instance of an omitted type must be that type
 itself or a fully concrete type, and anything else is polymorphic recursion
-([04-INF-3]), reported at the reference with both types. A use that disagrees
-with the body-determined type is also reported at the reference. Previously
+([04-INF-3]), reported at the reference with both types. The verdict is
+decided on the group's solved types, so it is the same in every declaration
+order. A use that disagrees with the body-determined type is also reported at
+the reference. Previously
 each recursive call saw a fresh variable that nothing tied to the body, so
 `def step(n: i32) = ... step(n - 1).0` over an `i32` result checked with score
 1 and failed in `eval`. A group member's open obligations are decided when the
@@ -75,13 +77,26 @@ completes.
   in `eval`; others, such as a swapped `swap[a, b]` with its result omitted,
   checked and ran. A member whose every type is written is still referenced at
   its declared scheme.
-- Now rejected: an in-group reference that instantiates an omitted type at
-  another of the member's own omitted types, or at a type containing a
-  variable ([04-INF-3]), such as `swap(y, x, n - 1)` in
-  `def swap(x, y, n: i32)`, or two calls `f(x, n)` and `f(y, n)` that would
-  give one member's two omitted types one type. `main` checked and ran some
-  of these; their twins with the types written as authored binders check. A
-  call at a concrete type whose result the body returns makes the body itself
+- Now rejected, in every declaration order: in-group calls that swap or merge
+  two of a member's omitted types ([04-INF-2], [04-INF-3]), since a published
+  signature is never narrowed to fit an in-group use. The call can do it
+  directly, as `swap(y, x, n - 1)` in `def swap(x, y, n: i32)` or
+  `f(x, x, n - 1)` in `def f(x, y, n: i32)`, or through a sibling, as the two
+  calls `f(x, n)` and `f(y, n)` to a sibling that calls back with one type for
+  both, or `g(x, y, n - 1)` to a sibling whose body gives its two parameters
+  one type. The diagnostic tells the author to write the member's signature
+  with explicit type binders. `main` checked and ran these. The fully written
+  twin of the swap, `def swap[a, b](x: a, y: b, n: i32) -> (a, b)`, still
+  checks. `main` already rejected a pair whose calls swap the omitted types
+  around the group, such as `b(y, x, n - 1)` inside `def a(x, y, n: i32)` with
+  `b` calling `a(u, v, n - 1)`, and it stays rejected in every order.
+- Now rejected: a group whose omitted types would grow with every in-group
+  call, such as `def f(n: i32) = if eq(n, 0) then [] else [f(n - 1)]`, as
+  polymorphic recursion ([04-INF-3]); `main` checked it. The
+  polymorphic-recursion diagnostics no longer suggest moving the call into a
+  separate non-recursive helper `def`: that helper would call into the group
+  and be called from it, so it would join the group.
+- A call at a concrete type whose result the body returns makes the body itself
   determine that type: after
   `def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)`,
   `pick("s", 2)` is rejected, where it checked with score 1 and failed in

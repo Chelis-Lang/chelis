@@ -5,15 +5,22 @@
 //! caller's own, and each omitted type is instantiated afresh. When the group
 //! completes, each instance must be the member's own type (it unified with it,
 //! or stayed unconstrained and is chosen as it) or a fully concrete type;
-//! anything else is [04-INF-3]'s polymorphic recursion. The reference is typed
-//! at the type the member's body determines, which it never narrows, and the
-//! member's omitted types generalize once the group completes.
+//! anything else is [04-INF-3]'s polymorphic recursion, and so is an in-group
+//! call that swaps or merges two of a member's omitted types. The reference
+//! is typed at the type the member's body determines, which it never narrows,
+//! and the member's omitted types generalize once the group completes. The
+//! verdict is decided on the group's solved types, so it is the same in every
+//! declaration order.
 //!
 //! Each test is labelled with the heads it fails on: `main` (`a116a9e10`, the
 //! pull request's base, which instantiated every omitted type afresh and never
-//! tied the instance to the body) or the round-3 head `c2ec7adca` (which typed every in-group
-//! reference at one monomorphic instantiation). A fixture that fails on
-//! neither is a lock, and says so.
+//! tied the instance to the body), the round-3 head `c2ec7adca` (which typed
+//! every in-group reference at one monomorphic instantiation), or the round-4
+//! candidate `375598343` (which decided each reference as it linked it, so
+//! the verdict depended on the declaration order). A fixture that fails on
+//! none is a lock, and says so.
+
+use std::collections::BTreeSet;
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
@@ -431,4 +438,643 @@ fn omitted_types_generalize_after_the_group_completes() {
             assert_eq!(published(&order, member), "(?0, i32) -> ?0", "{order}");
         }
     }
+}
+
+/// The `a`/`b` pair whose calls swap `a`'s two omitted types: round 3's `tw`
+/// (with a use) and `two` (without one).
+const TWO: &str = "def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)\n\n\
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else a(u, v, n - 1)\n\n\
+def main() -> i32 = 0i32\n";
+/// Round 3's `nm3`: the swap around a three-member ring.
+const THREE: &str = "def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)\n\n\
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else c(u, v, n - 1)\n\n\
+def c(p, q, n: i32) = if eq(n, 0) then (p, q) else a(p, q, n - 1)\n\n\
+def main() -> i32 = 0i32\n";
+
+/// The repair a merge or swap of omitted types names.
+fn names_the_binders_repair(program: &str, member: &str) -> bool {
+    let repair = format!("write `{member}`'s signature with explicit type binders");
+    match check_typed_program(&desugared(program)) {
+        Ok(_) => false,
+        Err(result) => result
+            .errors
+            .iter()
+            .flat_map(|error| error.suggestions.iter())
+            .any(|suggestion| suggestion.contains(&repair)),
+    }
+}
+
+/// REGRESSION TEST (fails on `375598343`, which accepted `tw` and `bad3` with
+/// `a`'s two omitted types merged in some declaration orders and rejected
+/// them in others; and on `main` and `c2ec7adca` for `swh` and `gxy2`, which
+/// they accepted). An in-group call that swaps or merges two of a member's
+/// omitted types is rejected in every declaration order ([04-INF-2],
+/// [04-INF-3]), and the diagnostic names the repair: write the binders. A
+/// published signature is never narrowed by an in-group use, so `a` is not
+/// published with `x` and `y` at one type.
+#[test]
+fn swapped_or_merged_omitted_types_are_rejected_in_every_order() {
+    let with_use = |program: &str, main: &str| program.replace("def main() -> i32 = 0i32", main);
+    for (program, member) in [
+        // `two` and `tw`.
+        (TWO.to_string(), "a"),
+        (
+            with_use(TWO, "def main() -> (i32, i32) = a(1i32, 2i32, 3)"),
+            "a",
+        ),
+        // `nm3` and `bad3`.
+        (THREE.to_string(), "a"),
+        (
+            with_use(THREE, "def main() -> (i32, string) = a(1i32, \"s\", 3)"),
+            "a",
+        ),
+        // `swh`: one member swaps its own omitted types.
+        (
+            "def swap(x, y, n: i32) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n\n\
+             def main() -> (i32, string) = swap(3i32, \"s\", 2)\n"
+                .to_string(),
+            "swap",
+        ),
+        // `gxy2`: a sibling's call gives `g`'s two omitted types one type.
+        (
+            "def g(x, y, n: i32) = if eq(n, 0) then (x, y) else (f(x, n), f(y, n))\n\n\
+             def f(z, n: i32) = if eq(n, 0) then z else g(z, z, n - 1).0\n\n\
+             def main() -> (i32, i32) = g(1i32, 2i32, 2)\n"
+                .to_string(),
+            "g",
+        ),
+        // Round 3's `s9`: the call passes `x` for `y`.
+        (
+            "def f(x, y, n: i32) = if eq(n, 0) then y else f(x, x, n - 1)\n\n\
+             def main() -> (i32, string) = (f(1i32, 2i32, 2), f(\"a\", \"b\", 1))\n"
+                .to_string(),
+            "f",
+        ),
+        // A sibling whose body gives its own two types one type.
+        (
+            "def f(x, y, n: i32) = if eq(n, 0) then x else g(x, y, n - 1)\n\n\
+             def g(u, v, n: i32) = if eq(n, 0) then u else if eq(n, 1) then v else f(u, v, n - 1)\n\n\
+             def main() -> i32 = f(1i32, 2i32, 3)\n"
+                .to_string(),
+            "f",
+        ),
+        // Two omitted element types of a result, swapped by a sibling.
+        (
+            "def f(n: i32) = if eq(n, 0) then ([], []) else g(n)\n\n\
+             def g(n: i32) = {\n  (p, q) = f(n - 1)\n  (q, p)\n}\n\n\
+             def main() -> i32 = 0i32\n"
+                .to_string(),
+            "f",
+        ),
+        // An omitted type given an authored binder's type.
+        (
+            "def f[a](x: a, y, n: i32) = if eq(n, 0) then (x, y) else {\n  k = f(x, x, n - 1)\n  (x, y)\n}\n\n\
+             def main() -> i32 = 0i32\n"
+                .to_string(),
+            "f",
+        ),
+    ] {
+        for order in declaration_orders(&program) {
+            rejects_with(
+                &order,
+                &["polymorphic recursion", "[04-INF-2]", "[04-INF-3]"],
+            );
+            assert!(
+                names_the_binders_repair(&order, member),
+                "the rejection must tell the author to write `{member}`'s binders:\n{order}"
+            );
+        }
+    }
+}
+
+/// REGRESSION TEST (`fwd`, `dup` and `step` fail on `375598343`; `tw`-like
+/// orders there accepted too much). A member's type that only an in-group
+/// call determines is determined by it, not merged: a member that forwards a
+/// sibling's result, or reads it twice, is accepted in every order, and round
+/// 3's `ok3`, `sig3`, `s3`, `s4`, `s7` and `s8` publish main's generic
+/// signatures. `s4`'s `h` is published at the type its call to `f` gives it,
+/// `(i32, i32) -> i32`, where `main` published an unrelated result variable.
+#[test]
+fn determined_group_types_check_with_generic_signatures_in_every_order() {
+    let generic = "(?0, i32) -> ?0";
+    for (program, signatures) in [
+        (
+            "def f(x, n: i32) = g(x, n)\n\n\
+             def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)\n\n\
+             def main() -> (i32, string) = (f(1i32, 2), g(\"s\", 1))\n",
+            vec![("f", generic), ("g", generic)],
+        ),
+        (
+            "def f(x, n: i32) = if eq(n, 0) then g(x, n) else g(x, n - 1)\n\n\
+             def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)\n\n\
+             def main() -> (i32, string) = (f(1i32, 2), g(\"s\", 1))\n",
+            vec![("f", generic), ("g", generic)],
+        ),
+        (
+            "def f(n: i32) = {\n  (p, q) = g(n)\n  (p, q)\n}\n\n\
+             def g(n: i32) = if eq(n, 0) then (fn (e) -> (e, e))([]) else f(n - 1)\n\n\
+             def main() -> i32 = 0i32\n",
+            vec![
+                ("f", "(i32) -> (List ?0, List ?0)"),
+                ("g", "(i32) -> (List ?0, List ?0)"),
+            ],
+        ),
+        (
+            "def f(n: i32) = (g(n), g(n))\n\n\
+             def g(n: i32) = if eq(n, 0) then 1i32 else f(n - 1).0\n\n\
+             def main() -> (i32, i32) = f(2)\n",
+            vec![("f", "(i32) -> (i32, i32)"), ("g", "(i32) -> i32")],
+        ),
+        // `ok3`.
+        (
+            "def a(x, n: i32) = if eq(n, 0) then x else {\n  k = c(3i32, n - 1)\n  b(x, n - 1)\n}\n\n\
+             def b(y, n: i32) = if eq(n, 0) then y else c(y, n - 1)\n\n\
+             def c(z, n: i32) = if eq(n, 0) then z else a(z, n - 1)\n\n\
+             def main() -> (string, f32) = (a(\"s\", 3), c(1.5f32, 2))\n",
+            vec![("a", generic), ("b", generic), ("c", generic)],
+        ),
+        // `sig3`.
+        (
+            "sig a: _ -> i32 -> _\ndef a(x, n) = if eq(n, 0) then x else {\n  k = b(2.5f32, n - 1)\n  x\n}\n\n\
+             def b(y, n: i32) = if eq(n, 0) then y else {\n  k = a(y, n - 1)\n  y\n}\n\n\
+             def main() -> (string, i32) = (a(\"s\", 2), b(4i32, 1))\n",
+            vec![("a", generic), ("b", generic)],
+        ),
+        // `s3`.
+        (
+            "def f(x, n: i32) = if eq(n, 0) then x else {\n  k = f(to_tensor([1.0f32]), n - 1)\n  x\n}\n\n\
+             def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 2)\n",
+            vec![("f", generic)],
+        ),
+        // `s4`: the group closes through a top-level value.
+        (
+            "def f(x, n: i32) = if eq(n, 0) then x else {\n  k = h(3i32, n - 1)\n  x\n}\n\n\
+             h = fn (y, m) -> f(y, m)\n\n\
+             def main() -> (string, i32) = (f(\"s\", 2), h(4i32, 1))\n",
+            vec![("f", generic), ("h", "(i32, i32) -> i32")],
+        ),
+        // `s7`.
+        (
+            "def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)\n\n\
+             def f(x, n: i32) = if eq(n, 0) then x else {\n  k = g(3i32, n - 1)\n  g(x, n - 1)\n}\n\n\
+             def main() -> (string, f32) = (f(\"s\", 3), g(1.5f32, 2))\n",
+            vec![("f", generic), ("g", generic)],
+        ),
+        // `s8`.
+        (
+            "def f(x, n: i32) = if eq(n, 0) then x else g(x, n - 1)\n\n\
+             def g(y, n: i32) = if eq(n, 0) then y else {\n  k = f(y, n - 1)\n  j = f(2.5f32, n - 1)\n  y\n}\n\n\
+             def main() -> (string, i32) = (f(\"s\", 3), g(1i32, 2))\n",
+            vec![("f", generic), ("g", generic)],
+        ),
+    ] {
+        for order in reorderings(program) {
+            accepts(&order);
+            for (name, signature) in &signatures {
+                assert_eq!(published(&order, name), *signature, "`{name}` in:\n{order}");
+            }
+        }
+    }
+}
+
+/// REGRESSION TEST (fails on `c2ec7adca` and `375598343`, which reported
+/// these as an instance neither own nor concrete, and on `main`, which
+/// reported them as a recursive call at another instantiation). A group
+/// whose types grow with every link never reaches a solution, and the bound
+/// on linking rounds reports it as [04-INF-3] polymorphic recursion. This is
+/// the test that reaches that bound.
+#[test]
+fn a_group_whose_types_grow_without_bound_reaches_the_round_bound() {
+    for program in [
+        "def f(n: i32) = if eq(n, 0) then [] else [f(n - 1)]\n\n\
+         def main() -> i64 = len(f(2))\n",
+        "def f(n: i32) = if eq(n, 0) then [] else [g(n - 1)]\n\n\
+         def g(n: i32) = if eq(n, 0) then [] else [f(n - 1)]\n\n\
+         def main() -> i64 = len(f(2))\n",
+    ] {
+        for order in declaration_orders(program) {
+            rejects_with(&order, &["grows without bound", "[04-INF-2]", "[04-INF-3]"]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The order-independence oracle.
+
+/// What the oracle compares across declaration orders: the verdict, each
+/// diagnostic's kind with the atoms its message cites, and every published
+/// signature, on both checker ingresses. Spans and messages are left out:
+/// they name positions and declarations, which move with the order.
+#[derive(Debug, PartialEq)]
+struct Outcome {
+    typed: Result<Vec<(String, String)>, Vec<Kind>>,
+    ir: Result<(), Vec<Kind>>,
+}
+
+/// A diagnostic's kind and the atoms its message cites.
+type Kind = (String, Vec<String>);
+
+/// The spec atoms (`[04-INF-3]`) a message cites, in order.
+fn atoms(message: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (start, _) in message.match_indices('[') {
+        let rest = &message[start + 1..];
+        let Some(end) = rest.find(']') else {
+            continue;
+        };
+        let candidate = &rest[..end];
+        let parts: Vec<&str> = candidate.split('-').collect();
+        if let [chapter, family, number] = parts.as_slice()
+            && chapter.len() == 2
+            && chapter.chars().all(|c| c.is_ascii_digit())
+            && !family.is_empty()
+            && family.chars().all(|c| c.is_ascii_uppercase())
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit())
+        {
+            found.push(candidate.to_string());
+        }
+    }
+    found
+}
+
+fn kinds(errors: &[CheckError]) -> Vec<Kind> {
+    let mut kinds = errors
+        .iter()
+        .map(|error| (format!("{:?}", error.kind), atoms(&error.message)))
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds
+}
+
+fn outcome(source: &str) -> Outcome {
+    let desugared = desugared(source);
+    let typed = match check_typed_program(&desugared) {
+        Ok(checked) => {
+            let mut signatures = checked
+                .signature_inference()
+                .functions
+                .values()
+                .map(|function| {
+                    (
+                        function.name.clone(),
+                        normalized(&function.checked_signature.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            signatures.sort();
+            Ok(signatures)
+        }
+        Err(result) => Err(kinds(&result.errors)),
+    };
+    let ir = match check_ir_program(&expanded(source)) {
+        Ok(_) => Ok(()),
+        Err(result) => Err(kinds(&result.errors)),
+    };
+    Outcome { typed, ir }
+}
+
+/// A program's top-level declarations, split at every line that starts in
+/// the first column other than a closing bracket. A `sig` travels with the
+/// `def` after it.
+fn top_level_declarations(program: &str) -> Vec<String> {
+    let mut declarations: Vec<String> = Vec::new();
+    let mut signature: Option<String> = None;
+    for line in program.lines() {
+        let starts = line
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && !matches!(c, '}' | ')' | ']'));
+        if starts {
+            if let Some(last) = declarations.last()
+                && last.starts_with("sig ")
+                && !last.contains('\n')
+                && line.starts_with("def ")
+            {
+                signature = declarations.pop();
+            }
+            let mut declaration = signature.take().map(|sig| sig + "\n").unwrap_or_default();
+            declaration.push_str(line);
+            declarations.push(declaration);
+        } else if let Some(last) = declarations.last_mut() {
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+    declarations
+        .into_iter()
+        .map(|declaration| declaration.trim_end().to_string())
+        .filter(|declaration| !declaration.is_empty())
+        .collect()
+}
+
+/// The name a top-level declaration binds, and the text after its header.
+fn binding(declaration: &str) -> Option<(String, &str)> {
+    let header = declaration.lines().find(|line| !line.starts_with("sig "))?;
+    let offset = declaration.find(header)?;
+    let text = &declaration[offset..];
+    let name_start = if let Some(rest) = header.strip_prefix("def ") {
+        header.len() - rest.len()
+    } else if header.starts_with("type ") || header.starts_with("import ") {
+        return None;
+    } else {
+        0
+    };
+    let name: String = header[name_start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let body = text.find(" = ").map(|at| &text[at + 3..])?;
+    (!name.is_empty()).then_some((name, body))
+}
+
+/// Whether `text` mentions the identifier `name`, not as part of a longer
+/// identifier or as a field.
+fn mentions(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + name.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// The top-level declarations that lie on a reference cycle: the members of
+/// the program's recursive groups, including a component closed through a
+/// value.
+fn cycle_members(declarations: &[String]) -> BTreeSet<usize> {
+    let bindings = declarations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, declaration)| {
+            binding(declaration).map(|(name, body)| (index, name, body.to_string()))
+        })
+        .collect::<Vec<_>>();
+    let edges = bindings
+        .iter()
+        .map(|(_, _, body)| {
+            bindings
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, name, _))| mentions(body, name))
+                .map(|(to, _)| to)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    (0..bindings.len())
+        .filter(|start| {
+            let mut seen = BTreeSet::new();
+            let mut stack = edges[*start].clone();
+            while let Some(next) = stack.pop() {
+                if next == *start {
+                    return true;
+                }
+                if seen.insert(next) {
+                    stack.extend(&edges[next]);
+                }
+            }
+            false
+        })
+        .map(|member| bindings[member].0)
+        .collect()
+}
+
+fn has_recursive_group(program: &str) -> bool {
+    !cycle_members(&top_level_declarations(program)).is_empty()
+}
+
+/// Every order the oracle checks a program in: the `def`s on a reference
+/// cycle are permuted among their own positions, every permutation of up to
+/// four and every rotation and the reversal of more, and every other
+/// declaration keeps its place. A value keeps its place because it is
+/// visible only after its declaration ([04-INF-4]).
+fn reorderings(program: &str) -> Vec<String> {
+    let declarations = top_level_declarations(program);
+    let members = cycle_members(&declarations)
+        .into_iter()
+        .filter(|index| {
+            declarations[*index]
+                .lines()
+                .find(|line| !line.starts_with("sig "))
+                .is_some_and(|line| line.starts_with("def "))
+        })
+        .collect::<Vec<_>>();
+    let movable = members
+        .iter()
+        .map(|index| declarations[*index].as_str())
+        .collect::<Vec<_>>();
+    let mut orders = Vec::new();
+    if movable.len() <= 4 {
+        permute(&movable, &mut Vec::new(), &mut orders);
+    } else {
+        for rotation in 0..movable.len() {
+            let mut order = movable.clone();
+            order.rotate_left(rotation);
+            orders.push(order);
+        }
+        orders.push(movable.iter().rev().copied().collect());
+    }
+    orders
+        .into_iter()
+        .map(|order| {
+            let mut placed = declarations.iter().map(String::as_str).collect::<Vec<_>>();
+            for (slot, declaration) in members.iter().zip(order) {
+                placed[*slot] = declaration;
+            }
+            placed.join("\n\n") + "\n"
+        })
+        .collect()
+}
+
+/// The contents of every string literal in a Rust source file, unescaped.
+/// Comments, character literals and lifetimes are skipped.
+fn string_literals(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut literals = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        match chars[at] {
+            '/' if chars.get(at + 1) == Some(&'/') => {
+                while at < chars.len() && chars[at] != '\n' {
+                    at += 1;
+                }
+            }
+            '\'' => {
+                // A character literal is `'x'` or an escape `'\..'`; anything
+                // else is a lifetime.
+                if chars.get(at + 1) == Some(&'\\') {
+                    at += 2;
+                    while at < chars.len() && chars[at] != '\'' {
+                        at += 1;
+                    }
+                    at += 1;
+                } else if chars.get(at + 2) == Some(&'\'') {
+                    at += 3;
+                } else {
+                    at += 1;
+                }
+            }
+            '"' => {
+                let mut literal = String::new();
+                at += 1;
+                while at < chars.len() && chars[at] != '"' {
+                    if chars[at] == '\\' {
+                        at += 1;
+                        match chars.get(at) {
+                            Some('n') => literal.push('\n'),
+                            Some('t') => literal.push('\t'),
+                            Some('0') => literal.push('\0'),
+                            Some('\n') => {
+                                while chars.get(at + 1).is_some_and(|c| c.is_whitespace()) {
+                                    at += 1;
+                                }
+                            }
+                            Some('u') => {
+                                let close = chars[at..]
+                                    .iter()
+                                    .position(|c| *c == '}')
+                                    .map_or(at, |offset| at + offset);
+                                let digits: String = chars[at + 2..close].iter().collect();
+                                if let Some(c) = u32::from_str_radix(&digits, 16)
+                                    .ok()
+                                    .and_then(char::from_u32)
+                                {
+                                    literal.push(c);
+                                }
+                                at = close;
+                            }
+                            Some(other) => literal.push(*other),
+                            None => {}
+                        }
+                    } else {
+                        literal.push(chars[at]);
+                    }
+                    at += 1;
+                }
+                literals.push(literal);
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    literals
+}
+
+/// Every recursive-group fixture the oracle can find: the programs written in
+/// this file and in `issue_731_declaration_close_obligations.rs`, and the
+/// review rounds' group probes in `fixtures/recursive_group_orders.txt`, each
+/// named for where it came from.
+fn group_fixtures() -> Vec<(String, String)> {
+    let mut fixtures = Vec::new();
+    for (file, source) in [
+        (
+            "issue_2590_recursive_group_holes.rs",
+            include_str!("issue_2590_recursive_group_holes.rs"),
+        ),
+        (
+            "issue_731_declaration_close_obligations.rs",
+            include_str!("issue_731_declaration_close_obligations.rs"),
+        ),
+    ] {
+        for (index, literal) in string_literals(source).into_iter().enumerate() {
+            let program = literal.trim_start();
+            if (program.starts_with("def ")
+                || program.starts_with("type ")
+                || program.starts_with("sig "))
+                && parse_surf(program).is_ok()
+                && has_recursive_group(program)
+            {
+                fixtures.push((format!("{file} literal {index}"), program.to_string()));
+            }
+        }
+    }
+    let probes = include_str!("fixtures/recursive_group_orders.txt");
+    for section in probes.split("==== ").filter(|section| !section.is_empty()) {
+        let (name, program) = section
+            .split_once('\n')
+            .expect("a fixture is a `==== name` line and a program");
+        assert!(
+            parse_surf(program).is_ok() && has_recursive_group(program),
+            "fixture `{name}` must parse and hold a recursive group:\n{program}"
+        );
+        fixtures.push((name.to_string(), program.to_string()));
+    }
+    fixtures
+}
+
+/// Fixtures whose outcome depends on the declaration order for a cause
+/// outside the recursive-group rule, each with that cause. The oracle
+/// asserts that each still diverges, so an entry must leave the list when
+/// its cause is repaired, and the list cannot hide a new divergence.
+const ORDER_DEPENDENT_ELSEWHERE: &[(&str, &str)] = &[(
+    "round3/o1",
+    "`grad` decides whether its function's output is a scalar float when it is \
+     inferred (`infer_grad`), before a group sibling's body has determined that \
+     output; `main` behaves the same",
+)];
+
+/// ORACLE (fails on `375598343` for round 3's `tw`, `bad3` and `nm3`, which it
+/// accepted in some declaration orders and rejected in others). Every
+/// recursive-group fixture gets one outcome in every declaration order: the
+/// same verdict, the same diagnostic kinds citing the same atoms, and the same
+/// published signatures, on both checker ingresses. The exceptions in
+/// [`ORDER_DEPENDENT_ELSEWHERE`] must still diverge.
+#[test]
+fn every_group_fixture_has_one_outcome_in_every_declaration_order() {
+    let fixtures = group_fixtures();
+    assert!(
+        fixtures.len() > 200,
+        "the oracle must find the fixtures it runs over; it found {}",
+        fixtures.len()
+    );
+    let mut divergent = Vec::new();
+    let mut exempt = Vec::new();
+    let mut reordered = 0;
+    for (name, program) in &fixtures {
+        let orders = reorderings(program);
+        assert!(
+            orders.iter().all(|order| parse_surf(order).is_ok()),
+            "`{name}`: every reordering of a fixture must parse:\n{program}"
+        );
+        reordered += usize::from(orders.len() > 1);
+        let first = outcome(&orders[0]);
+        let divergence = orders[1..]
+            .iter()
+            .map(|order| (order, outcome(order)))
+            .find(|(_, other)| *other != first);
+        if ORDER_DEPENDENT_ELSEWHERE
+            .iter()
+            .any(|(exception, _)| exception == name)
+        {
+            assert!(
+                divergence.is_some(),
+                "`{name}` no longer depends on the declaration order: remove it from \
+                 ORDER_DEPENDENT_ELSEWHERE"
+            );
+            exempt.push(name.as_str());
+        } else if let Some((order, other)) = divergence {
+            divergent.push(format!(
+                "`{name}`:\n{}\n  {first:?}\nversus\n{order}\n  {other:?}",
+                orders[0]
+            ));
+        }
+    }
+    assert_eq!(
+        exempt.len(),
+        ORDER_DEPENDENT_ELSEWHERE.len(),
+        "every exception names a fixture the oracle found"
+    );
+    // A self-recursive fixture has one order; the oracle's force is in the
+    // groups of two or more members.
+    assert!(
+        reordered > 100,
+        "the oracle must reorder the groups it finds; it reordered {reordered}"
+    );
+    assert!(
+        divergent.is_empty(),
+        "{} of {} group fixtures get a different outcome in another declaration order:\n\n{}",
+        divergent.len(),
+        fixtures.len(),
+        divergent.join("\n\n")
+    );
 }
