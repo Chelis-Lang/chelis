@@ -1770,13 +1770,15 @@ guarded extent: for an interface guard, the
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
 movement operation; for a declared-result guard, the primitive that produced
 the returned value, whether the return expression names it directly or reaches
-it through a block tail, a binding, or a callee. A tensor that the list
-combinator `map`, `flat_map`, `filter`, `scan`, `fold` or `append` returns, or
-that is nested in the aggregate one of them returns, has that combinator as
-the producing primitive named by [04-NUM-9]'s `<op>` slot, whichever element,
-callback result, seed or iteration supplied it; projecting the tensor out of
-that aggregate, by index or by pattern, does not change its producer. Its
-`<prim>` slot is `i64`, because the result this
+it through a block tail, a binding, or a callee. A tensor held, at any depth,
+in the List, tuple or other aggregate that a List operation of [05-OP-54] or
+[05-OP-55] returns has that operation as the producing primitive named by
+[04-NUM-9]'s `<op>` slot, whichever element, callback result, seed or
+iteration supplied it, and so does a tensor that `fold` returns as its final
+state. The selections `index`, `take` and `skip` are projections rather than
+producers: like a pattern, each returns part of its input unchanged, and a
+tensor projected by any of them keeps its producer. The guard's `<prim>` slot
+is `i64`, because the result this
 guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
 complete user-facing line is therefore
 `numeric trap: domain in <op> at i64`, and [04-NUM-9] permits it no prefix
