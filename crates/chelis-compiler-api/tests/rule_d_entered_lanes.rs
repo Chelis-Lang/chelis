@@ -597,6 +597,103 @@ fn an_untaken_arms_dead_reference_to_a_value_declaration_runs_nothing_in_the_hos
     rows.assert_empty();
 }
 
+/// `chained`, which reads `sampled` twice, beside `sampled` itself.
+fn chained(kind: Kind, traps: bool) -> String {
+    format!(
+        "{}chained = add(copy(sampled), copy(sampled))\n",
+        kind.sampled(false, traps)
+    )
+}
+
+/// `selected(x)`, whose runtime `if` reads `chained` and `sampled` in dead
+/// bindings of its `then` arm and, when `both`, `chained` in its `else` arm;
+/// the `then` arm runs exactly when `then_taken`.
+fn chained_arm_def(then_taken: bool, both: bool) -> String {
+    let condition = if then_taken {
+        "lt(0.0f32, s)"
+    } else {
+        "lt(s, 0.0f32)"
+    };
+    let otherwise = if both {
+        "{\n    other = chained\n    x\n  }"
+    } else {
+        "x"
+    };
+    format!(
+        "def selected(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if {condition} then {{\n    first = chained\n    second = sampled\n    x\n  }} else {otherwise}\n}}\n"
+    )
+}
+
+/// Round 1b's P1-1 repair keeps the trap on every reference path. Every
+/// reference to `sampled` in one arm, the one inside `chained`'s copy
+/// included, reads one copy under that arm's activation, and each arm that
+/// reads it has its own. So the taken arm traps whichever arm it is, and an
+/// arm that is not taken checks nothing, in the DAG evaluator and in C.
+///
+/// Evidentiary status: DISPOSITION LOCK (every row holds at b47fdd7d3, where
+/// each reference lowered its own copy). It fails if the copies are shared
+/// across arms: keying a copy on its declaration alone makes the `else`
+/// arm read the `then` arm's copy, gated by the `then` arm's activation, so
+/// the taken `else` arm's rows return instead of trapping.
+#[test]
+fn a_chain_of_trapping_values_traps_on_each_taken_path_and_checks_nothing_on_an_untaken_one() {
+    let mut rows = Rows::default();
+    for kind in KINDS {
+        for (then_taken, both, traps) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let row = format!("{kind:?} then_taken={then_taken} both={both}");
+            let evaluate = |valid: bool| {
+                select(
+                    &format!(
+                        "{}{}",
+                        chained(kind, !valid),
+                        chained_arm_def(then_taken, both)
+                    ),
+                    "selected",
+                    x32(),
+                )
+            };
+            rows.returns(
+                &format!("E {row} valid twin"),
+                evaluate(true),
+                "selected",
+                &[1.0; 32],
+                Some(Lane::Tensor),
+            );
+            if traps {
+                rows.traps(&format!("E {row}"), evaluate(false), kind.trap());
+            } else {
+                rows.returns(
+                    &format!("E {row}"),
+                    evaluate(false),
+                    "selected",
+                    &[1.0; 32],
+                    None,
+                );
+            }
+            for context in &dependency_contexts(&format!(
+                "module Mylib.Math\nexport (sampled, chained)\n\n{}",
+                chained(kind, true)
+            )) {
+                let client = format!(
+                    "module App.Eval\nimport Mylib.Math (sampled, chained)\n\n{}",
+                    chained_arm_def(then_taken, both)
+                );
+                let artifact = compile_c_in(context, &client, "selected");
+                rows.c(
+                    &format!("C {row}"),
+                    run_c(&artifact, "selected", 0),
+                    if traps { Err(kind.trap()) } else { Ok(()) },
+                );
+            }
+        }
+    }
+    rows.assert_empty();
+}
+
 /// `f`, a function whose body names `sampled` in a dead binding.
 const F: &str = "def f(v: tensor[32, f32]) -> tensor[32, f32] = {\n  dead = sampled\n  v\n}\n";
 
