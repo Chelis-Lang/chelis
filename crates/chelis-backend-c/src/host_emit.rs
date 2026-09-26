@@ -4021,20 +4021,54 @@ impl<'a> HostEmitter<'a> {
     /// than ahead of every block action, makes that order the schedule's
     /// (chelis#2508).
     ///
-    /// The step's result is the accumulator in `target`. Any other value the
-    /// block defines is the callback's result, which the loop wrote into
-    /// `callback_result`: a named callback's call is an action of this block,
-    /// and binding its result to `target` made the copy `scan` pushes retain
-    /// the output list instead of the state (chelis#2578).
+    /// The step's result is the accumulator in `target`. The callback's
+    /// result is the owner `callback_result` locates in the verified block,
+    /// bound to the C variable the loop wrote it into: a named callback's
+    /// call is an action of this block, and binding its result to `target`
+    /// made the copy `scan` pushes retain the output list (chelis#2578). Any
+    /// other value the block defines has no C variable here, so it is
+    /// refused rather than bound by elimination.
     fn emit_loop_step_block_actions(
         &mut self,
         site: &ProjectedHostSite<'a>,
         block: VerifiedBlockId,
         target: &str,
-        callback_result: &str,
+        callback_result: LoopCallbackResult<'_>,
         step: &str,
         emit_step: impl FnOnce(&mut Self) -> Result<(), Unsupported>,
     ) -> Result<(), Unsupported> {
+        let result_owner = site
+            .directives
+            .iter()
+            .find_map(|action| match (action, callback_result) {
+                (
+                    VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                        block: owner_block,
+                        label,
+                        args,
+                        ..
+                    }),
+                    LoopCallbackResult::StepArgument(_, index),
+                ) if *owner_block == block && *label == step => {
+                    args.get(index).map(|operand| operand.owner().id())
+                }
+                (
+                    VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                        block: owner_block,
+                        edge,
+                    }),
+                    LoopCallbackResult::BackEdgeArgument(_, index),
+                ) if *owner_block == block => {
+                    edge.args().get(index).map(|operand| operand.owner().id())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("verified `{step}` loop body has no {callback_result:?} operand"),
+                    "verified C host ownership emission",
+                )
+            })?;
         let mut emit_step = Some(emit_step);
         for action in &site.directives {
             let binding = match action {
@@ -4053,11 +4087,25 @@ impl<'a> HostEmitter<'a> {
                     target
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                    dest: Some(_),
+                    block: owner_block,
+                    dest: Some(dest),
                     ..
                 })
-                | VerifiedHostAction::Operation(VerifiedHostOperation::Define { .. }) => {
-                    callback_result
+                | VerifiedHostAction::Operation(VerifiedHostOperation::Define {
+                    block: owner_block,
+                    dest,
+                    ..
+                }) if *owner_block == block => {
+                    if dest.id() != result_owner {
+                        return Err(invalid_abi_shape(
+                            format!(
+                                "verified `{step}` loop body defines {:?}, which is neither its step nor its callback's result",
+                                dest.id()
+                            ),
+                            "verified C host ownership emission",
+                        ));
+                    }
+                    callback_result.variable()
                 }
                 _ => target,
             };
@@ -8583,7 +8631,7 @@ impl<'a> HostEmitter<'a> {
             site,
             body_block,
             target,
-            &result_var,
+            LoopCallbackResult::StepArgument(&result_var, 1),
             "list_push",
             |this| {
                 this.lines.push(format!(
@@ -8652,7 +8700,7 @@ impl<'a> HostEmitter<'a> {
             site,
             body_block,
             target,
-            &keep_var,
+            LoopCallbackResult::StepArgument(&keep_var, 2),
             "filter_step",
             |this| {
                 let indent = &this.indent;
@@ -8890,7 +8938,7 @@ impl<'a> HostEmitter<'a> {
             site,
             body_block,
             target,
-            &acc_var,
+            LoopCallbackResult::BackEdgeArgument(&acc_var, 0),
             "list_push",
             |this| {
                 this.lines.push(format!(
@@ -8998,7 +9046,7 @@ impl<'a> HostEmitter<'a> {
             site,
             body_block,
             target,
-            &keep_var,
+            LoopCallbackResult::StepArgument(&keep_var, 2),
             "partition_step",
             |this| {
                 let indent = &this.indent;
@@ -9092,7 +9140,7 @@ impl<'a> HostEmitter<'a> {
             site,
             body_block,
             target,
-            &result_var,
+            LoopCallbackResult::StepArgument(&result_var, 1),
             "list_extend",
             |this| {
                 this.lines.push(format!(
@@ -10205,6 +10253,24 @@ fn checked_cast_plan_error(detail: String) -> Unsupported {
              no identity fallback is permitted"
         ),
     )
+}
+
+/// Where a list loop's verified body hands on its callback's result, with
+/// the C variable the loop wrote that result into.
+#[derive(Clone, Copy, Debug)]
+enum LoopCallbackResult<'v> {
+    /// The step consumes it as its argument at this index.
+    StepArgument(&'v str, usize),
+    /// The back-edge carries it into the loop state at this index (`scan`).
+    BackEdgeArgument(&'v str, usize),
+}
+
+impl LoopCallbackResult<'_> {
+    fn variable(&self) -> &str {
+        match self {
+            Self::StepArgument(variable, _) | Self::BackEdgeArgument(variable, _) => variable,
+        }
+    }
 }
 
 fn callback_params(callback: &HostCallback) -> &[HostParam] {
