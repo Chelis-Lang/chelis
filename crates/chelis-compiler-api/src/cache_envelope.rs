@@ -120,7 +120,14 @@ impl CachePayload for crate::StdLibContext {
     // library's draw and key-operation inputs change meaning while their
     // bincode shape does not. V33 was an intermediate state of the same
     // change and never shipped.
-    const FORMAT_VERSION: u32 = 34;
+    // V35 (chelis#2413): a local ascription's claims are carried on a node
+    // owned by the ascription's position and checked under that owner's
+    // activation, where the activation had been a Bool shape dependency, and
+    // a potentially trapping integer reduction, empty reduced axis, runtime
+    // movement bound or extent claim is a trap seed, so a cached lowered
+    // library's claim carriers and retained dead nodes change meaning while
+    // their bincode shape does not.
+    const FORMAT_VERSION: u32 = 35;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
