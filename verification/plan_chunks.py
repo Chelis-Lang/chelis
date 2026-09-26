@@ -330,7 +330,8 @@ def main() -> None:
                         help="a unit costing more is its own chunk")
     parser.add_argument("--target-dir", default=str(ROOT / "target" / "agents" / "wholecore"))
     parser.add_argument("--min-free-percent", type=int, default=20)
-    parser.add_argument("--rss-cap-mb", type=int, default=7000)
+    parser.add_argument("--memory-cap-mb", type=int, default=7000,
+                        help="kill a dump whose process group's physical footprint exceeds this (0 = no cap)")
     parser.add_argument("--allow-charon-errors", action="store_true",
                         help="diagnostic plan: dump past Charon translation errors (the extractor "
                              "refuses such a plan unless --diagnostic)")
@@ -370,7 +371,7 @@ def main() -> None:
         if reused:
             stamp["reused_dumps"] = reused
     else:
-        runner = Runner(min_free=args.min_free_percent, max_wait=3600, rss_cap=args.rss_cap_mb << 20, nice=5,
+        runner = Runner(min_free=args.min_free_percent, max_wait=3600, memory_cap=args.memory_cap_mb << 20, nice=5,
                         wrapper=[args.heavy] if args.heavy else None)
         target = Path(args.target_dir).resolve()
         prepare_target(target, charon)
@@ -404,7 +405,7 @@ def main() -> None:
         else:
             dumps[crate], step, errors = dump_crate(crate, work, args, runner, target, chain)
             measurements[crate] = {key: step[key] for key in ("status", "wall_seconds", "peak_rss_bytes",
-                                                              "peak_tree_rss_bytes")}
+                                                              "peak_tree_footprint_bytes")}
             if errors:
                 dump_errors[crate] = errors
     if args.from_dumps:

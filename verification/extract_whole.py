@@ -7,7 +7,7 @@ declared in their bodies kept transparent (`--include`), then Aeneas with
 canonical names, every earlier manifest as `-external`, and `-emit-manifest`.
 All chunks write into one Lean source root, compiled unmodified by one Lake
 package that requires the Aeneas Lean library, one module at a time (imports
-first) so that one Lean process runs at a time under the RSS cap.
+first) so that one Lean process runs at a time under the memory cap.
 
     python verification/extract_whole.py --plan PLAN --out FRESH_DIR \
         --charon BIN --aeneas BIN --aeneas-lean-dir BUILT_LIB [--diagnostic]
@@ -41,12 +41,13 @@ Outputs under --out:
                   "complete"} | null}], "declarations", "modules": [Lean module
                   names], "aeneas_diagnostic_options": [options],
                   "lake": {"status", "built", "failed", "blocked", "wall_seconds",
-                  "peak_rss_bytes", "modules": {module: STEP | {"status":
+                  "peak_footprint_bytes", "modules": {module: STEP | {"status":
                   "blocked", "missing_imports", "failed_imports"}}} | null}
                  STEP = {"status": "ok"|"failed"|"skipped", "returncode",
                   "wall_seconds", "peak_rss_bytes" (largest single process, from
-                  wait4), "peak_tree_rss_bytes" (sampled sum over the process
-                  group), "log"}
+                  wait4), "peak_tree_footprint_bytes" (sampled sum over the process
+                  group of the physical footprint: resident plus compressed and
+                  swapped pages), "memory_cap_killed", "log"}
   coverage.json  schema "chelis-wholecore-coverage" version 2 (re-validated by
                  verification/accept.py; keep stable):
                  {"crates": {crate: {"local_items", "emitted", "unemitted":
@@ -87,6 +88,8 @@ Outputs under --out:
 
 import argparse
 import collections
+import ctypes
+import ctypes.util
 import gzip
 import hashlib
 import json
@@ -235,22 +238,47 @@ def wait_for_memory(min_free: int, max_wait: int) -> None:
         waited += 30
 
 
-def process_group_rss(pgid: int) -> int:
-    out = subprocess.run([shutil.which("ps") or "/bin/ps", "-A", "-o", "pgid=,rss="], capture_output=True, text=True).stdout
+_LIBPROC = None
+
+
+def physical_footprint(pid: int) -> int | None:
+    """macOS phys_footprint of a process (libproc proc_pid_rusage, RUSAGE_INFO_V2):
+    resident plus compressed and swapped pages. RSS alone misses the compressed
+    memory, so a process can exhaust memory while its RSS stays small."""
+    global _LIBPROC
+    if _LIBPROC is None:
+        try:
+            _LIBPROC = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+        except OSError:
+            _LIBPROC = False
+    if not _LIBPROC:
+        return None
+    info = (ctypes.c_uint64 * 20)()  # struct rusage_info_v2: 16-byte uuid, then uint64 fields
+    if _LIBPROC.proc_pid_rusage(ctypes.c_int(pid), ctypes.c_int(2), ctypes.byref(info)) != 0:
+        return None
+    return int(info[9])  # ri_phys_footprint
+
+
+def process_group_footprint(pgid: int) -> int:
+    """Memory of a process group: the sum of its processes' physical footprints (their
+    RSS where the footprint is unavailable, e.g. off macOS)."""
+    out = subprocess.run([shutil.which("ps") or "/bin/ps", "-A", "-o", "pid=,pgid=,rss="],
+                         capture_output=True, text=True).stdout
     total = 0
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[0] == str(pgid):
-            total += int(parts[1]) * 1024
+        if len(parts) == 3 and parts[1] == str(pgid):
+            footprint = physical_footprint(int(parts[0]))
+            total += footprint if footprint is not None else int(parts[2]) * 1024
     return total
 
 
 class Runner:
-    def __init__(self, *, min_free: int, max_wait: int, rss_cap: int, nice: int,
+    def __init__(self, *, min_free: int, max_wait: int, memory_cap: int, nice: int,
                  wrapper: list[str] | None = None):
         self.min_free = min_free
         self.max_wait = max_wait
-        self.rss_cap = rss_cap
+        self.memory_cap = memory_cap
         self.nice = nice
         # A slot limiter shared with other users of the machine (e.g. .work/bin/heavy):
         # it blocks until a heavy slot is free, then runs the command as its child.
@@ -280,16 +308,16 @@ class Runner:
                 pid, status, usage = os.wait4(process.pid, os.WNOHANG)
                 if pid:
                     break
-                peak_tree = max(peak_tree, process_group_rss(process.pid))
-                if self.rss_cap and peak_tree > self.rss_cap and not capped:
+                peak_tree = max(peak_tree, process_group_footprint(process.pid))
+                if self.memory_cap and peak_tree > self.memory_cap and not capped:
                     capped = True
-                    print(f"  RSS cap exceeded ({peak_tree >> 20} MB); killing", flush=True)
+                    print(f"  memory cap exceeded ({peak_tree >> 20} MB footprint); killing", flush=True)
                     os.killpg(process.pid, 9)
                 time.sleep(1)
             process.returncode = os.waitstatus_to_exitcode(status)
         if capped:
             with open(log, "a") as handle:
-                handle.write(f"\n[extract_whole] killed: process group RSS exceeded {self.rss_cap} bytes\n")
+                handle.write(f"\n[extract_whole] killed: process group footprint exceeded {self.memory_cap} bytes\n")
         # Darwin reports ru_maxrss in bytes; it covers reaped descendants.
         peak = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
         result = {
@@ -297,13 +325,13 @@ class Runner:
             "returncode": process.returncode,
             "wall_seconds": round(time.time() - started, 2),
             "peak_rss_bytes": peak,
-            "peak_tree_rss_bytes": max(peak_tree, peak),
-            "rss_cap_killed": capped,
+            "peak_tree_footprint_bytes": max(peak_tree, peak),
+            "memory_cap_killed": capped,
             "log": str(log),
             "started": started,
         }
         print(f"  -> {result['status']} rc={process.returncode} {result['wall_seconds']}s "
-              f"peak {peak >> 20} MB (tree {result['peak_tree_rss_bytes'] >> 20} MB)", flush=True)
+              f"peak {peak >> 20} MB (tree footprint {result['peak_tree_footprint_bytes'] >> 20} MB)", flush=True)
         return result
 
 
@@ -865,7 +893,7 @@ LEAN_IMPORT = re.compile(r"^import\s+(\S+)", re.M)
 def lean_build(lean: Path, runner: Runner, diagnostic: bool, modules: list[str],
                chunk_modules: set[str]) -> tuple[dict, list[dict]]:
     """Build the generated modules one at a time, imports first (`lake build +M`),
-    so that one Lean process runs at a time under the RSS cap (a package-wide
+    so that one Lean process runs at a time under the memory cap (a package-wide
     `lake build` elaborates modules in parallel). A module importing a module that
     failed, or that was not generated (the FunsExternal of a chunk with unknown
     externals), is not built: "blocked" (diagnostic runs only; accepting runs stop
@@ -920,7 +948,7 @@ def lean_build(lean: Path, runner: Runner, diagnostic: bool, modules: list[str],
             if not diagnostic:
                 raise ExtractionFailure(f"lake build of {module} failed; log: {log}")
             if not any(error["module"] == module for error in found):
-                reason = ("killed at the RSS cap" if step["rss_cap_killed"]
+                reason = ("killed at the memory cap" if step["memory_cap_killed"]
                           else f"exit status {step['returncode']}")
                 found.append({"level": "error", "module": module, "source": None, "compiler": "lake",
                               "message": f"lake build failed without a Lean error ({reason}); log: {log}"})
@@ -929,7 +957,8 @@ def lean_build(lean: Path, runner: Runner, diagnostic: bool, modules: list[str],
     return {"status": "ok" if counts["ok"] == len(order) else "failed", "built": counts["ok"],
             "failed": counts["failed"], "blocked": counts["blocked"],
             "wall_seconds": round(sum(step.get("wall_seconds", 0) for step in steps.values()), 2),
-            "peak_rss_bytes": max((step.get("peak_tree_rss_bytes", 0) for step in steps.values()), default=0),
+            "peak_footprint_bytes": max((step.get("peak_tree_footprint_bytes", 0) for step in steps.values()),
+                                        default=0),
             "modules": {module: steps[module] for module in order}}, errors
 
 
@@ -1227,7 +1256,7 @@ def write_blockers(report: dict, results: list[dict], lake: dict | None, lean_er
     if lake and "modules" in lake:
         lines += ["", f"Lake build (one module at a time): {lake['built']} built, {lake['failed']} failed, "
                       f"{lake['blocked']} blocked (import failed or not generated); "
-                      f"{lake['wall_seconds']} s, peak {lake['peak_rss_bytes'] >> 20} MB", "",
+                      f"{lake['wall_seconds']} s, peak footprint {lake['peak_footprint_bytes'] >> 20} MB", "",
                   "| module | status | wall s | peak MB | first error / blocked by |", "|---|---|---:|---:|---|"]
         first_lean: dict[str, dict] = {}
         for error in lean_errors:
@@ -1239,8 +1268,8 @@ def write_blockers(report: dict, results: list[dict], lake: dict | None, lean_er
                 continue
             example = first_lean.get(module)
             detail = (f"`{example['source']}`: {example['message'][:160]}" if example else "-").replace("|", "\\|")
-            lines.append(f"| {module} | {step['status']}{' (RSS cap)' if step.get('rss_cap_killed') else ''} "
-                         f"| {step['wall_seconds']} | {step['peak_tree_rss_bytes'] >> 20} | {detail} |")
+            lines.append(f"| {module} | {step['status']}{' (memory cap)' if step.get('memory_cap_killed') else ''} "
+                         f"| {step['wall_seconds']} | {step['peak_tree_footprint_bytes'] >> 20} | {detail} |")
     else:
         lines += ["", f"Lake build: {fmt_step(lake)}"]
     lines += ["", "## Counts per class", "",
@@ -1288,8 +1317,8 @@ def main() -> None:
     parser.add_argument("--funs-chunk-bytes", type=int, default=2_000_000)
     parser.add_argument("--min-free-percent", type=int, default=20)
     parser.add_argument("--max-memory-wait", type=int, default=3600)
-    parser.add_argument("--rss-cap-mb", type=int, default=7000,
-                        help="kill a step whose process group exceeds this RSS (0 = no cap)")
+    parser.add_argument("--memory-cap-mb", type=int, default=7000,
+                        help="kill a step whose process group's physical footprint exceeds this (0 = no cap)")
     parser.add_argument("--heavy", default=os.environ.get("HEAVY_WRAPPER"),
                         help="slot limiter prefixed to every heavy step (default: $HEAVY_WRAPPER)")
     parser.add_argument("--no-lean", action="store_true", help="diagnostic only: skip lake build")
@@ -1311,7 +1340,7 @@ def main() -> None:
     plan = load_plan(args.plan)
     out.mkdir(parents=True)
     runner = Runner(min_free=args.min_free_percent, max_wait=args.max_memory_wait,
-                    rss_cap=args.rss_cap_mb << 20, nice=5, wrapper=[args.heavy] if args.heavy else None)
+                    memory_cap=args.memory_cap_mb << 20, nice=5, wrapper=[args.heavy] if args.heavy else None)
     charon = tool_identity(args.charon, ["version"])
     aeneas = tool_identity(args.aeneas, ["-version"])
     inputs = plan["inputs"]
