@@ -7,9 +7,9 @@
 //! local, a parameter or its own top-level declaration under one of those
 //! names must not change that: the library's names are the library's.
 //! These are disposition locks, not regression tests: each case already gave
-//! `2x` at the pre-fix base `d029224fd`, because the composed program names
-//! the library's declarations by their module path. They keep the scoping
-//! change from making a library body resolve new code's names.
+//! `2x` at the pre-fix base `d029224fd`; this file does not establish why.
+//! They keep the scoping change from letting a library body resolve new
+//! code's names.
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::compiler::{check_in_context, prepare_eval_in_context};
