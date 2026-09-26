@@ -2966,8 +2966,26 @@ pub fn required_load_names(dag: &Dag, roots: &[NodeId]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether an evaluation of `roots` runs a node none of their values reads:
+/// an observable root ([`crate::dag::TrapSeeds::is_observable_root`]) of a
+/// declaration the selection enters that sits outside every root's value
+/// graph, such as the trap of a discarded `let` (spec/06 §5.2, spec/03
+/// §4.4), or a node only such a root reads. It compares the evaluator's own
+/// live set ([`live_mask_for_roots`]) with the roots' value graphs.
+///
+/// A lane that implements a graph by its roots' values alone, returning a
+/// parameter unchanged or calling one runtime routine for a recognized root
+/// operation, agrees with the evaluator exactly when this is false; where it
+/// is true that lane would drop the discarded work, and with it the trap.
+pub fn runs_discarded_work(dag: &Dag, roots: &[NodeId]) -> bool {
+    let live = live_mask_for_roots(dag, roots);
+    let values = dependency_closure(dag, roots.to_vec());
+    live.iter()
+        .zip(&values)
+        .any(|(live, value)| *live && !*value)
+}
+
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
-    let mut live = vec![false; dag.len()];
     // chelis#2368: effect nodes are live because they are effects, not
     // because a value reaches them; chelis#2440 and chelis#2413: so is a
     // potentially trapping node, numeric or random. One predicate names the
@@ -2987,6 +3005,12 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
             .filter(|node| seeds.is_observable_root(node) && !unselected[node.id.0])
             .map(|node| node.id),
     );
+    dependency_closure(dag, stack)
+}
+
+/// The nodes `stack` reaches through everything a node reads to run.
+fn dependency_closure(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
+    let mut live = vec![false; dag.len()];
     while let Some(id) = stack.pop() {
         if live[id.0] {
             continue;
@@ -6414,6 +6438,49 @@ mod tests {
         assert!(
             live[discarded.0] && live[y.0],
             "nothing was deselected, so the trap seed still reaches it"
+        );
+    }
+
+    /// chelis#2413: a graph returning its parameter `v` beside a discarded
+    /// integer `add(v, v)` runs discarded work, so no lane may implement it
+    /// by its root's value alone. The float twin cannot trap and runs none,
+    /// and neither does a trapping node the root's value reads.
+    #[test]
+    fn a_discarded_trapping_node_is_work_beyond_the_root_values() {
+        let returns_parameter_beside = |precision: Prim, reads_the_add: bool| {
+            let mut dag = Dag::new();
+            let decl = dag.declare("g");
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision,
+            };
+            let v = dag.add_node(
+                decl,
+                RiscOp::Load { name: "v".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let sum = dag.add_node(decl, RiscOp::Add, vec![v, v], ty.clone(), None);
+            let root = if reads_the_add {
+                sum
+            } else {
+                dag.add_node(decl, RiscOp::Copy, vec![v], ty, None)
+            };
+            dag.add_root(root);
+            dag
+        };
+        let integer = returns_parameter_beside(Prim::Int32, false);
+        assert!(runs_discarded_work(&integer, integer.roots()));
+        let float = returns_parameter_beside(Prim::F32, false);
+        assert!(
+            !runs_discarded_work(&float, float.roots()),
+            "control: a float add cannot trap, so nothing beyond the root runs"
+        );
+        let read = returns_parameter_beside(Prim::Int32, true);
+        assert!(
+            !runs_discarded_work(&read, read.roots()),
+            "control: a trapping node the root reads is the root's own work"
         );
     }
 

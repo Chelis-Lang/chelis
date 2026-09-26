@@ -1302,6 +1302,31 @@ pub struct HostTensorHelper {
     pub summary_rejection: Option<HelperSummaryRejection>,
 }
 
+impl HostTensorHelper {
+    /// The input this helper returns unchanged, or `None` when it computes
+    /// anything: its one value root is a `Load` of its one input at the
+    /// helper's output type, and an evaluation of that root runs nothing
+    /// else ([`crate::eval::runs_discarded_work`]). A discarded trapping node
+    /// beside the returned parameter (`dead = add(copy(v), copy(v))` then
+    /// `v`) is work the evaluator runs, so such a helper is a kernel.
+    ///
+    /// Ownership lowering, its verifier and the C emitter all read this one
+    /// definition, so no helper can be an alias of its argument in one of
+    /// them and a kernel with a fresh result in another.
+    pub fn identity_input(&self) -> Option<&HostTensorInput> {
+        let ([root], [input]) = (self.dag.roots(), self.inputs.as_slice()) else {
+            return None;
+        };
+        let node = self.dag.get(*root)?;
+        let returns_input = matches!(
+            &node.op,
+            RiscOp::Load { name } if node.output_type == self.output && input.name == *name
+        );
+        (returns_input && !crate::eval::runs_discarded_work(&self.dag, self.dag.roots()))
+            .then_some(input)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HostTensorInput {
     pub name: String,
@@ -6567,21 +6592,26 @@ fn finish_tensor_helper_product(
         _ => HostTypeTerm::Tuple(root_tys),
     };
     let args = tensor_helper_args(&inputs, scope);
+    // A summary runs the helper's root operation and nothing else, so a
+    // helper whose evaluation runs discarded work, such as a trapping `let`
+    // nothing reads, is not a summary candidate: the summary would drop that
+    // work and its trap ([`crate::eval::runs_discarded_work`]).
+    let summarizable = !crate::eval::runs_discarded_work(&dag, dag.roots());
     let (sparse_specialization, sparse_rejection) =
-        match try_summarize_sparse_helper(&dag, &inputs, &output) {
-            Ok(spec) => (Some(spec), None),
-            Err(SparseSummaryAttempt::NotEligible) => (None, None),
-            Err(SparseSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        match summarizable.then(|| try_summarize_sparse_helper(&dag, &inputs, &output)) {
+            Some(Ok(spec)) => (Some(spec), None),
+            None | Some(Err(SparseSummaryAttempt::NotEligible)) => (None, None),
+            Some(Err(SparseSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
     // W6 Task A — drive the BLAS recognizer through the structured
     // entry point so a BLAS-near rejection threads through to
     // `summary_rejection` as a `Blas*` `SummaryRejection` (rather
     // than the prior silent `Option::None` drop).
     let (blas_specialization, blas_rejection) =
-        match try_summarize_blas_helper(&dag, &inputs, &output) {
-            Ok(spec) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
-            Err(BlasSummaryAttempt::NotEligible) => (None, None),
-            Err(BlasSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        match summarizable.then(|| try_summarize_blas_helper(&dag, &inputs, &output)) {
+            Some(Ok(spec)) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
+            None | Some(Err(BlasSummaryAttempt::NotEligible)) => (None, None),
+            Some(Err(BlasSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
     let specialization = blas_specialization.or(sparse_specialization);
     // Reconcile sparse vs BLAS rejections:

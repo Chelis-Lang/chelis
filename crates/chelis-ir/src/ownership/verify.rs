@@ -824,7 +824,7 @@ fn census_host_expr<'a>(
                     detail: format!("payload names missing tensor helper {helper}"),
                 });
             };
-            if independent_identity_helper(helper) && args.len() == 1 {
+            if helper.identity_input().is_some() && args.len() == 1 {
                 census_host_expr(&args[0], helpers, unit, sites)?;
             } else {
                 for arg in args {
@@ -868,20 +868,6 @@ fn census_host_callback<'a>(
             census_host_expr(body, helpers, unit, sites)
         }
     }
-}
-
-fn independent_identity_helper(helper: &HostTensorHelper) -> bool {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return false;
-    }
-    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
-        return false;
-    };
-    matches!(
-        &node.op,
-        crate::dag::RiscOp::Load { name }
-            if node.output_type == helper.output && helper.inputs[0].name == *name
-    )
 }
 
 fn verify_materialized_roots(
