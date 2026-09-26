@@ -37,7 +37,7 @@ fn relu_lowering_remains_one_identity_until_ad() {
         ty.clone(),
         None,
     );
-    let relu = tier2::lower_relu(decl, &mut dag, x, &ty, Some("relu.expr"));
+    let relu = tier2::lower_relu(decl.into(), &mut dag, x, &ty, Some("relu.expr"));
 
     assert_eq!(dag.len(), 2);
     assert_eq!(dag.get(relu).unwrap().op, RiscOp::Relu);

@@ -23,6 +23,87 @@ pub struct NodeId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DeclId(pub u32);
 
+/// A node's owner (spec/10 section 3.2): the declaration it belongs to and the
+/// activation it runs under.
+///
+/// The activation is the scalar or per-row Bool node that holds exactly when
+/// the source position of this node is entered: the conjunction of the
+/// enclosing runtime `if` arms' predicates (and of a `grad` or `vmap` body's
+/// call-site activation), or `None` where every execution of the graph
+/// enters the node. A node whose activation is false is still computed, since
+/// a `Where` may read its value, but checks nothing: no trap fires, no draw
+/// validates, no count is read.
+///
+/// Every node carries one, supplied at construction ([`Dag::add_node`]). The
+/// activation is a dependency like [`DagNode::shape_deps`]: a pass that
+/// rebuilds a graph carries it through its node map ([`Owner::remap`]), which
+/// panics on an activation the map does not cover rather than dropping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Owner {
+    /// The declaration this node belongs to, an index into
+    /// [`Dag::declarations`].
+    pub decl: DeclId,
+    /// The Bool node under which this node runs, or `None` when it runs on
+    /// every execution of its declaration.
+    pub activation: Option<NodeId>,
+}
+
+impl Owner {
+    /// An owner in `decl` under `activation`.
+    pub const fn new(decl: DeclId, activation: Option<NodeId>) -> Self {
+        Self { decl, activation }
+    }
+
+    /// An owner in `decl` that every execution of `decl` enters.
+    pub const fn unconditional(decl: DeclId) -> Self {
+        Self {
+            decl,
+            activation: None,
+        }
+    }
+
+    /// This owner in a rebuilt graph, its activation carried through `map`
+    /// (old node to new node). An activation `map` does not cover is a defect
+    /// of the rebuilding pass, never a reason to drop the activation: it
+    /// panics.
+    pub fn remap_with(self, map: impl FnOnce(NodeId) -> Option<NodeId>) -> Self {
+        self.try_remap_with(map)
+            .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    /// [`Self::remap_with`] through a node map.
+    pub fn remap(self, map: &UnordMap<NodeId, NodeId>) -> Self {
+        self.remap_with(|old| map.get(&old).copied())
+    }
+
+    /// [`Self::remap_with`], reporting an unmapped activation instead of
+    /// panicking, for a pass with a recoverable error channel.
+    pub fn try_remap_with(
+        self,
+        map: impl FnOnce(NodeId) -> Option<NodeId>,
+    ) -> Result<Self, String> {
+        let activation = match self.activation {
+            Some(old) => Some(map(old).ok_or_else(|| {
+                format!("node activation {old:?} has no node in the rebuilt graph")
+            })?),
+            None => None,
+        };
+        Ok(Self {
+            decl: self.decl,
+            activation,
+        })
+    }
+}
+
+/// A bare declaration owns its nodes unconditionally: a graph built outside
+/// program lowering (a backend helper kernel, a runtime transform, a test)
+/// has no runtime branch to activate them under.
+impl From<DeclId> for Owner {
+    fn from(decl: DeclId) -> Self {
+        Self::unconditional(decl)
+    }
+}
+
 /// One declaration of a graph (chelis#2476, #2413).
 ///
 /// A lowered program holds every top-level declaration's activation in one
@@ -1409,6 +1490,21 @@ impl RiscOp {
         }
     }
 
+    /// The input slot where a draw, a draw's replay or a key-consuming key
+    /// operation reads its own activation when it has one, after its
+    /// operands; `None` for any other operation. A join's two activations are
+    /// its keys' consumption activations, not its own, so it has none.
+    pub fn own_activation_slot(&self) -> Option<usize> {
+        match self {
+            Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint { .. } => Some(3),
+            Self::UniformLike => Some(4),
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => {
+                self.key_operation_operand_count()
+            }
+            _ => None,
+        }
+    }
+
     /// The batch layout of a key-operand random primitive, or `None` for any
     /// other operation.
     pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
@@ -2056,14 +2152,52 @@ pub struct DagNode {
     /// until this producer discharges the obligation.
     #[serde(default)]
     pub result_claim_deps: Vec<NodeId>,
-    /// The declaration this node belongs to, an index into
-    /// [`Dag::declarations`]. Required: lowering supplies the declaration it
-    /// is lowering, a rebuilding pass the source node's, and a node a pass
-    /// synthesizes the declaration of the node it derives from.
-    pub decl: DeclId,
+    /// The node's owner: its declaration and its activation ([`Owner`]).
+    /// Required: lowering supplies the declaration it is lowering and the
+    /// path activation of the position it lowers, a rebuilding pass the
+    /// source node's owner carried through its node map, and a node a pass
+    /// synthesizes the owner of the node it derives from.
+    pub owner: Owner,
 }
 
 impl DagNode {
+    /// Every node this node reads, in every dependency lane: its value
+    /// inputs, its shape-only and result-claim dependencies, and its
+    /// activation ([`Owner::activation`]). A liveness walk or a partition
+    /// that follows these keeps everything the node needs to run.
+    pub fn dependencies(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.inputs
+            .iter()
+            .chain(&self.shape_deps)
+            .chain(&self.result_claim_deps)
+            .copied()
+            .chain(self.owner.activation)
+    }
+
+    /// The value operand `slot` takes where this node's activation is false
+    /// ([`Owner::activation`]): one no check of the operation rejects, so the
+    /// node computes a value and reports nothing (spec/10 section 3.2).
+    /// `None` for an operation that checks nothing of its operands' values.
+    /// The evaluator and the C lane substitute exactly these values.
+    pub fn inactive_operand(&self, slot: usize) -> Option<i64> {
+        match &self.op {
+            RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs
+                if self.output_type.precision.is_integer() =>
+            {
+                Some(0)
+            }
+            // A zero divisor, an integer `MIN / -1`, and an empty `mean`'s
+            // count: zero divided by one rejects none of them.
+            RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
+                Some(i64::from(slot == 1))
+            }
+            // Zero converts to every dtype: no domain or range check rejects
+            // it.
+            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => Some(0),
+            _ => None,
+        }
+    }
+
     /// chelis#2440: whether executing this numeric node can raise a
     /// [`NumericTrap`]. Deliberately conservative: over-retaining costs dead
     /// code, under-retaining loses a trap. `spec/06-transformations.md`
@@ -2123,11 +2257,13 @@ impl Dag {
     /// natural source region in S2 — S3 will populate spans on those
     /// per pass-specific rules.
     ///
-    /// `decl` is required for the same reason: every node belongs to a
-    /// declaration this graph registered ([`Self::declare`]).
+    /// `owner` is required for the same reason: every node belongs to a
+    /// declaration this graph registered ([`Self::declare`]) and runs under
+    /// an activation, an earlier node of this graph or none. A bare
+    /// [`DeclId`] is an unconditional owner.
     pub fn add_node(
         &mut self,
-        decl: DeclId,
+        owner: impl Into<Owner>,
         op: RiscOp,
         inputs: Vec<NodeId>,
         output_type: TensorType,
@@ -2171,12 +2307,36 @@ impl Dag {
         } else {
             Vec::new()
         };
+        let mut owner = owner.into();
+        // One fact, one carrier (spec/10 section 3.2): the activation a draw
+        // or key operation reads after its operands is the node's own, so the
+        // owner takes it, and an owner that names another one is a defect of
+        // the constructing pass.
+        if let Some(slot) = op.own_activation_slot() {
+            let operand = inputs.get(slot).copied();
+            match (owner.activation, operand) {
+                (None, Some(activation)) => owner.activation = Some(activation),
+                (own, operand) => assert!(
+                    own == operand,
+                    "a {op:?} node's activation operand {operand:?} is not its own activation {own:?}"
+                ),
+            }
+        }
+        let decl = owner.decl;
         assert!(
             (decl.0 as usize) < self.declarations.len(),
             "node declaration {decl:?} is not registered in this graph ({} declarations)",
             self.declarations.len()
         );
         let id = NodeId(self.nodes.len());
+        // The verifier also requires the activation to be a Bool; a graph
+        // lowered without type checking may hold another scalar there.
+        if let Some(activation) = owner.activation {
+            assert!(
+                activation.0 < id.0,
+                "node {id:?}'s activation {activation:?} is not an earlier node of this graph"
+            );
+        }
         self.nodes.push(DagNode {
             id,
             op,
@@ -2187,7 +2347,7 @@ impl Dag {
             merged_spans: Vec::new(),
             shape_deps: Vec::new(),
             result_claim_deps: Vec::new(),
-            decl,
+            owner,
         });
         for (target, source) in inferred_where_shape_deps {
             self.add_shape_dep(target, source);
@@ -2542,7 +2702,7 @@ impl Dag {
         let Some(node) = self.get(id) else {
             return format!("node {}", id.0);
         };
-        let owner = self.describe_declaration(node.decl);
+        let owner = self.describe_declaration(node.owner.decl);
         match &node.op {
             RiscOp::Load { name } => format!("parameter `{}` of {owner}", name.as_str()),
             _ => format!("node {} of {owner}", id.0),
@@ -2572,7 +2732,7 @@ impl Dag {
         let mut entered = vec![false; self.declarations.len()];
         let mut pending = Vec::new();
         for root in selected {
-            let decl = self.nodes[root.0].decl;
+            let decl = self.nodes[root.0].owner.decl;
             if !entered[decl.0 as usize] {
                 entered[decl.0 as usize] = true;
                 pending.push(decl);
@@ -2614,7 +2774,7 @@ impl Dag {
         let entered = self.entered_declarations(selected);
         self.nodes
             .iter()
-            .map(|node| !entered[node.decl.0 as usize])
+            .map(|node| !entered[node.owner.decl.0 as usize])
             .collect()
     }
 
@@ -3193,8 +3353,9 @@ pub fn bind_symbolic_dims(
     for node in dag.nodes() {
         let (output_type, op) =
             map_node_symbolic_bindings(node, &mut resolve, &mut |message| Err(message.to_owned()))?;
+        // Binding keeps every node id, so the owner's activation stands.
         let new_id = rebound.add_node(
-            node.decl,
+            node.owner,
             op.unwrap_or_else(|| node.op.clone()),
             node.inputs.clone(),
             output_type,

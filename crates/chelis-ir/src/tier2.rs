@@ -21,7 +21,7 @@
 use chelis_types::types::Prim;
 
 use crate::dag::{
-    ComparisonKind, Dag, DeclId, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis, RtDim,
+    ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis, RtDim,
     TensorType,
 };
 
@@ -35,7 +35,7 @@ pub const TIER2_SYNTH_MARKER: &str = "__synthesized_tier2__";
 /// Tier 2 helpers route their `add_node` calls through this so the
 /// rule is applied uniformly.
 fn add_synth(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     op: RiscOp,
     inputs: Vec<NodeId>,
@@ -46,32 +46,32 @@ fn add_synth(
         Some(s) => Some(s.to_owned()),
         None => Some(TIER2_SYNTH_MARKER.to_owned()),
     };
-    dag.add_node(decl, op, inputs, output_type, span_id)
+    dag.add_node(owner, op, inputs, output_type, span_id)
 }
 
 /// Direct checked `sub(a, b)` identity ([05-OP-41]).
 pub fn lower_sub(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    add_synth(decl, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)
+    add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)
 }
 
 /// Preserve the [05-OP-43] `relu` identity through AD. Its forward value is
 /// `max_elem(x, const(0))`, but MaxElem's first-operand tie adjoint is not the
 /// ReLU convention at zero.
 pub fn lower_relu(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    add_synth(decl, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
+    add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
 }
 
 /// `sigmoid(x)` = `1 / (1 + exp(-x))`
@@ -82,16 +82,23 @@ pub fn lower_relu(
 /// NaN-from-log that an `exp(neg(log(_)))` decomposition would
 /// produce on non-positive inputs.
 pub fn lower_sigmoid(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let neg_x = add_synth(decl, dag, RiscOp::Neg, vec![x], ty.clone(), parent_span);
-    let exp_neg = add_synth(decl, dag, RiscOp::Exp, vec![neg_x], ty.clone(), parent_span);
+    let neg_x = add_synth(owner, dag, RiscOp::Neg, vec![x], ty.clone(), parent_span);
+    let exp_neg = add_synth(
+        owner,
+        dag,
+        RiscOp::Exp,
+        vec![neg_x],
+        ty.clone(),
+        parent_span,
+    );
     let one = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 1.0),
         vec![],
@@ -99,14 +106,21 @@ pub fn lower_sigmoid(
         parent_span,
     );
     let sum = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![one, exp_neg],
         ty.clone(),
         parent_span,
     );
-    add_synth(decl, dag, RiscOp::Recip, vec![sum], ty.clone(), parent_span)
+    add_synth(
+        owner,
+        dag,
+        RiscOp::Recip,
+        vec![sum],
+        ty.clone(),
+        parent_span,
+    )
 }
 
 /// `tanh(x)` = `2 * sigmoid(2*x) - 1`
@@ -116,14 +130,14 @@ pub fn lower_sigmoid(
 /// the host-runtime helper `chelis_host_tanh_f32` to f32 ulp tolerance
 /// (both routes ultimately go through `expf`).
 pub fn lower_tanh(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
     let two = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 2.0),
         vec![],
@@ -131,16 +145,16 @@ pub fn lower_tanh(
         parent_span,
     );
     let two_x = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![two, x],
         ty.clone(),
         parent_span,
     );
-    let sig_2x = lower_sigmoid(decl, dag, two_x, ty, parent_span);
+    let sig_2x = lower_sigmoid(owner, dag, two_x, ty, parent_span);
     let two_again = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 2.0),
         vec![],
@@ -148,7 +162,7 @@ pub fn lower_tanh(
         parent_span,
     );
     let two_sig = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![two_again, sig_2x],
@@ -156,7 +170,7 @@ pub fn lower_tanh(
         parent_span,
     );
     let neg_one = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, -1.0),
         vec![],
@@ -164,7 +178,7 @@ pub fn lower_tanh(
         parent_span,
     );
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![two_sig, neg_one],
@@ -175,15 +189,15 @@ pub fn lower_tanh(
 
 /// `silu(x)` = `x * sigmoid(x)` (a.k.a. swish).
 pub fn lower_silu(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let sig_x = lower_sigmoid(decl, dag, x, ty, parent_span);
+    let sig_x = lower_sigmoid(owner, dag, x, ty, parent_span);
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![x, sig_x],
@@ -200,7 +214,7 @@ pub fn lower_silu(
 /// `activation_gelu_f32`. If/when an `Erf` RISC op lands, the
 /// erf-exact form can replace this — both lanes must move together.
 pub fn lower_gelu(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     ty: &TensorType,
@@ -208,7 +222,7 @@ pub fn lower_gelu(
 ) -> NodeId {
     // c = sqrt(2/pi)
     let c = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 0.7978845608028654),
         vec![],
@@ -216,7 +230,7 @@ pub fn lower_gelu(
         parent_span,
     );
     let k = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 0.044715),
         vec![],
@@ -224,9 +238,9 @@ pub fn lower_gelu(
         parent_span,
     );
     // x^3 = x * x * x
-    let x_sq = add_synth(decl, dag, RiscOp::Mul, vec![x, x], ty.clone(), parent_span);
+    let x_sq = add_synth(owner, dag, RiscOp::Mul, vec![x, x], ty.clone(), parent_span);
     let x_cu = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![x_sq, x],
@@ -235,7 +249,7 @@ pub fn lower_gelu(
     );
     // k * x^3
     let k_x_cu = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![k, x_cu],
@@ -244,7 +258,7 @@ pub fn lower_gelu(
     );
     // x + k * x^3
     let sum_inner = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![x, k_x_cu],
@@ -253,17 +267,17 @@ pub fn lower_gelu(
     );
     // c * (x + k * x^3)
     let inner = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![c, sum_inner],
         ty.clone(),
         parent_span,
     );
-    let tanh_inner = lower_tanh(decl, dag, inner, ty, parent_span);
+    let tanh_inner = lower_tanh(owner, dag, inner, ty, parent_span);
     // 1 + tanh(inner)
     let one = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 1.0),
         vec![],
@@ -271,7 +285,7 @@ pub fn lower_gelu(
         parent_span,
     );
     let one_plus_tanh = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![one, tanh_inner],
@@ -280,7 +294,7 @@ pub fn lower_gelu(
     );
     // x * (1 + tanh(inner))
     let x_mul = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![x, one_plus_tanh],
@@ -289,7 +303,7 @@ pub fn lower_gelu(
     );
     // 0.5 * x * (1 + tanh(inner))
     let half = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::synth_const(ty.precision, 0.5),
         vec![],
@@ -297,7 +311,7 @@ pub fn lower_gelu(
         parent_span,
     );
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![half, x_mul],
@@ -314,14 +328,14 @@ pub fn lower_gelu(
 /// primitive delegates to native IEEE `/` on every supported
 /// target.
 pub fn lower_div(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    add_synth(decl, dag, RiscOp::Div, vec![a, b], ty.clone(), parent_span)
+    add_synth(owner, dag, RiscOp::Div, vec![a, b], ty.clone(), parent_span)
 }
 
 /// `floor_div(a, b)` — floor division (round quotient toward −∞).
@@ -329,7 +343,7 @@ pub fn lower_div(
 /// Lowers directly to [`RiscOp::FloorDiv`] (chelis#178). Integer
 /// operands round toward −∞; float operands compute `floor(a / b)`.
 pub fn lower_floor_div(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -337,7 +351,7 @@ pub fn lower_floor_div(
     parent_span: Option<&str>,
 ) -> NodeId {
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::FloorDiv,
         vec![a, b],
@@ -351,7 +365,7 @@ pub fn lower_floor_div(
 /// Lowers directly to [`RiscOp::TruncDiv`] (chelis#178). Integer
 /// operands only; the C/Rust integer `/` quotient.
 pub fn lower_trunc_div(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -359,7 +373,7 @@ pub fn lower_trunc_div(
     parent_span: Option<&str>,
 ) -> NodeId {
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::TruncDiv,
         vec![a, b],
@@ -369,7 +383,7 @@ pub fn lower_trunc_div(
 }
 
 fn lower_comparison(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     kind: ComparisonKind,
     a: NodeId,
@@ -390,7 +404,7 @@ fn lower_comparison(
         precision: Prim::Bool,
     };
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Compare(kind),
         vec![a, b],
@@ -400,85 +414,85 @@ fn lower_comparison(
 }
 
 pub fn lower_cmplt(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::CmpLt, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::CmpLt, a, b, ty, parent_span)
 }
 
 pub fn lower_lt(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Lt, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Lt, a, b, ty, parent_span)
 }
 
 pub fn lower_gt(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Gt, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Gt, a, b, ty, parent_span)
 }
 
 pub fn lower_gte(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Gte, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Gte, a, b, ty, parent_span)
 }
 
 pub fn lower_lte(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Lte, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Lte, a, b, ty, parent_span)
 }
 
 pub fn lower_eq(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Eq, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Eq, a, b, ty, parent_span)
 }
 
 pub fn lower_neq(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    lower_comparison(decl, dag, ComparisonKind::Neq, a, b, ty, parent_span)
+    lower_comparison(owner, dag, ComparisonKind::Neq, a, b, ty, parent_span)
 }
 
 /// Direct stored-bit `min_elem(a, b)` selection identity ([05-OP-40]).
 pub fn lower_min_elem(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -486,7 +500,7 @@ pub fn lower_min_elem(
     parent_span: Option<&str>,
 ) -> NodeId {
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::MinElem,
         vec![a, b],
@@ -496,7 +510,7 @@ pub fn lower_min_elem(
 }
 
 pub fn lower_and(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -508,7 +522,7 @@ pub fn lower_and(
         precision: Prim::Bool,
     };
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Logical(LogicalKind::And),
         vec![a, b],
@@ -518,7 +532,7 @@ pub fn lower_and(
 }
 
 pub fn lower_or(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -530,7 +544,7 @@ pub fn lower_or(
         precision: Prim::Bool,
     };
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Logical(LogicalKind::Or),
         vec![a, b],
@@ -540,7 +554,7 @@ pub fn lower_or(
 }
 
 pub fn lower_not(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     ty: &TensorType,
@@ -551,7 +565,7 @@ pub fn lower_not(
         precision: Prim::Bool,
     };
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Logical(LogicalKind::Not),
         vec![a],
@@ -634,7 +648,7 @@ fn require_axis_size(ty: &TensorType, axis: usize, context: &str) -> usize {
 }
 
 fn expand_to_match(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     mut node: NodeId,
     mut ty: TensorType,
@@ -660,7 +674,7 @@ fn expand_to_match(
             precision: ty.precision,
         };
         node = add_synth(
-            decl,
+            owner,
             dag,
             RiscOp::Expand {
                 axis: insert_at,
@@ -693,7 +707,7 @@ fn expand_to_match(
 ///   5. Sum over the j dimension -> [..., i, k].
 ///
 pub fn lower_matmul(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     a: NodeId,
     b: NodeId,
@@ -749,7 +763,7 @@ pub fn lower_matmul(
     };
 
     let a_aligned = align_matmul_operand(
-        decl,
+        owner,
         dag,
         a,
         a_ty,
@@ -759,7 +773,7 @@ pub fn lower_matmul(
         parent_span,
     );
     let a_expanded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis: lead_len + 2,
@@ -775,7 +789,7 @@ pub fn lower_matmul(
     );
 
     let b_aligned = align_matmul_operand(
-        decl,
+        owner,
         dag,
         b,
         b_ty,
@@ -785,7 +799,7 @@ pub fn lower_matmul(
         parent_span,
     );
     let b_with_i = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis: lead_len,
@@ -801,7 +815,7 @@ pub fn lower_matmul(
     );
 
     let product = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![a_expanded, b_with_i],
@@ -816,7 +830,7 @@ pub fn lower_matmul(
         precision: accumulator,
     };
     let sum = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Sum {
             axis: lead_len + 1,
@@ -833,7 +847,7 @@ pub fn lower_matmul(
         sum
     } else {
         add_synth(
-            decl,
+            owner,
             dag,
             RiscOp::Cast {
                 new_precision: a_ty.precision,
@@ -870,7 +884,7 @@ fn is_one_dim(dim: &DimInfo) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn align_matmul_operand(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     node: NodeId,
     ty: &TensorType,
@@ -902,7 +916,7 @@ fn align_matmul_operand(
             precision: ty.precision,
         };
         current = add_synth(
-            decl,
+            owner,
             dag,
             RiscOp::Expand {
                 axis,
@@ -937,7 +951,7 @@ fn align_matmul_operand(
                 },
             };
             current = add_synth(
-                decl,
+                owner,
                 dag,
                 RiscOp::Expand {
                     axis: lead_axis,
@@ -992,7 +1006,7 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
 /// Keep the reduction result at its accumulator dtype, then explicitly
 /// finalize into the enclosing float composition's storage dtype (§5.7.1).
 fn lower_sum_to_storage(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     axis: usize,
@@ -1002,7 +1016,7 @@ fn lower_sum_to_storage(
     let accumulator = RiscOp::default_reduce_sum_accumulator(result_ty.precision)
         .expect("checked reduction dtype");
     let sum = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Sum { axis, accumulator },
         vec![x],
@@ -1016,7 +1030,7 @@ fn lower_sum_to_storage(
         sum
     } else {
         add_synth(
-            decl,
+            owner,
             dag,
             RiscOp::Cast {
                 new_precision: result_ty.precision,
@@ -1032,7 +1046,7 @@ fn lower_sum_to_storage(
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     axis: usize,
@@ -1051,7 +1065,7 @@ pub fn lower_softmax(
 
     // 1. max_reduce(x, axis)
     let max_val = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::MaxReduce { axis },
         vec![x],
@@ -1061,7 +1075,7 @@ pub fn lower_softmax(
 
     // 2. expand max back to original shape
     let max_expanded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis,
@@ -1077,11 +1091,11 @@ pub fn lower_softmax(
     );
 
     // 3. shifted = x - max (numerical stability)
-    let shifted = lower_sub(decl, dag, x, max_expanded, ty, parent_span);
+    let shifted = lower_sub(owner, dag, x, max_expanded, ty, parent_span);
 
     // 4. exp(shifted)
     let exp_shifted = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Exp,
         vec![shifted],
@@ -1090,11 +1104,11 @@ pub fn lower_softmax(
     );
 
     // 5. sum(exp, axis)
-    let sum_exp = lower_sum_to_storage(decl, dag, exp_shifted, axis, &red_ty, parent_span);
+    let sum_exp = lower_sum_to_storage(owner, dag, exp_shifted, axis, &red_ty, parent_span);
 
     // 6. expand sum back to original shape
     let sum_expanded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis,
@@ -1110,14 +1124,14 @@ pub fn lower_softmax(
     );
 
     // 7. exp / sum
-    lower_div(decl, dag, exp_shifted, sum_expanded, ty, parent_span)
+    lower_div(owner, dag, exp_shifted, sum_expanded, ty, parent_span)
 }
 
 /// mean(x, axis) = sum(x, axis) / dim_size
 ///
 /// Lowering (spec §3.4): sum then divide by the axis size.
 pub fn lower_mean(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     axis: usize,
@@ -1127,7 +1141,7 @@ pub fn lower_mean(
     let red_ty = reduced_type(ty, axis);
 
     // sum(x, axis)
-    let sum_node = lower_sum_to_storage(decl, dag, x, axis, &red_ty, parent_span);
+    let sum_node = lower_sum_to_storage(owner, dag, x, axis, &red_ty, parent_span);
 
     // The divisor is the reduced-axis extent. When that extent is a
     // concrete literal the divisor is a compile-time `Const` (the simple
@@ -1144,7 +1158,7 @@ pub fn lower_mean(
     let divisor = match dim_size(ty, axis) {
         Some(dim_size_val) => {
             let count = add_synth(
-                decl,
+                owner,
                 dag,
                 RiscOp::synth_const(red_ty.precision, dim_size_val as f64),
                 vec![],
@@ -1162,7 +1176,7 @@ pub fn lower_mean(
         None => {
             // ones shaped exactly like the operand `x` (same symbolic dims).
             let ones = add_synth(
-                decl,
+                owner,
                 dag,
                 RiscOp::synth_const(ty.precision, 1.0),
                 vec![],
@@ -1171,18 +1185,18 @@ pub fn lower_mean(
             );
             dag.add_shape_dep(ones, x);
             // sum the ones over `axis` -> the runtime extent, reduced shape.
-            lower_sum_to_storage(decl, dag, ones, axis, &red_ty, parent_span)
+            lower_sum_to_storage(owner, dag, ones, axis, &red_ty, parent_span)
         }
     };
 
     // sum / extent
-    lower_div(decl, dag, sum_node, divisor, &red_ty, parent_span)
+    lower_div(owner, dag, sum_node, divisor, &red_ty, parent_span)
 }
 
 /// layer_norm(x, gamma, beta, epsilon) over the last axis.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_layer_norm(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     x: NodeId,
     gamma: NodeId,
@@ -1195,9 +1209,9 @@ pub fn lower_layer_norm(
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
     let axis_size = RtDim::Lit(require_axis_size(x_ty, axis, "layer_norm"));
-    let mean = lower_mean(decl, dag, x, axis, x_ty, parent_span);
+    let mean = lower_mean(owner, dag, x, axis, x_ty, parent_span);
     let mean_expanded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis,
@@ -1207,18 +1221,18 @@ pub fn lower_layer_norm(
         x_ty.clone(),
         parent_span,
     );
-    let centered = lower_sub(decl, dag, x, mean_expanded, x_ty, parent_span);
+    let centered = lower_sub(owner, dag, x, mean_expanded, x_ty, parent_span);
     let squared = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![centered, centered],
         x_ty.clone(),
         parent_span,
     );
-    let var = lower_mean(decl, dag, squared, axis, x_ty, parent_span);
+    let var = lower_mean(owner, dag, squared, axis, x_ty, parent_span);
     let var_expanded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Expand {
             axis,
@@ -1233,9 +1247,9 @@ pub fn lower_layer_norm(
         precision: x_ty.precision,
     };
     let epsilon_expanded =
-        expand_to_match(decl, dag, epsilon, epsilon_ty, x, &x_ty.dims, parent_span);
+        expand_to_match(owner, dag, epsilon, epsilon_ty, x, &x_ty.dims, parent_span);
     let denom_sq = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![var_expanded, epsilon_expanded],
@@ -1243,17 +1257,17 @@ pub fn lower_layer_norm(
         parent_span,
     );
     let denom = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Sqrt,
         vec![denom_sq],
         x_ty.clone(),
         parent_span,
     );
-    let normed = lower_div(decl, dag, centered, denom, x_ty, parent_span);
+    let normed = lower_div(owner, dag, centered, denom, x_ty, parent_span);
 
     let gamma_node = expand_to_match(
-        decl,
+        owner,
         dag,
         gamma,
         gamma_ty.clone(),
@@ -1261,9 +1275,17 @@ pub fn lower_layer_norm(
         &x_ty.dims,
         parent_span,
     );
-    let beta_node = expand_to_match(decl, dag, beta, beta_ty.clone(), x, &x_ty.dims, parent_span);
+    let beta_node = expand_to_match(
+        owner,
+        dag,
+        beta,
+        beta_ty.clone(),
+        x,
+        &x_ty.dims,
+        parent_span,
+    );
     let scaled = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Mul,
         vec![normed, gamma_node],
@@ -1271,7 +1293,7 @@ pub fn lower_layer_norm(
         parent_span,
     );
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Add,
         vec![scaled, beta_node],
@@ -1285,7 +1307,7 @@ pub fn lower_layer_norm(
 /// One matrix contraction owns accumulation across that entire axis.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_conv(
-    decl: DeclId,
+    owner: Owner,
     dag: &mut Dag,
     input: NodeId,
     kernel: NodeId,
@@ -1374,7 +1396,7 @@ pub fn lower_conv(
             .map(|&(low, high)| (RtDim::Lit(low), RtDim::Lit(high))),
     );
     let padded = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::zero_pad(precision, pad),
         vec![input],
@@ -1383,7 +1405,7 @@ pub fn lower_conv(
     );
     let padded_len = product(&padded_shape);
     let flat = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Lit(padded_len)],
@@ -1433,7 +1455,7 @@ pub fn lower_conv(
     }
     let matrix_shape = [contracted, columns];
     let index_node = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::ConstTensor {
             data: chelis_types::tensor_from_scalars(Prim::Int64, &indices),
@@ -1443,7 +1465,7 @@ pub fn lower_conv(
         parent_span,
     );
     let windows = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Gather { axis: 0 },
         vec![flat, index_node],
@@ -1452,7 +1474,7 @@ pub fn lower_conv(
     );
     let kernel_matrix_shape = [kernel_shape[0], contracted];
     let kernel_matrix = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Reshape {
             new_shape: kernel_matrix_shape.iter().map(|&n| RtDim::Lit(n)).collect(),
@@ -1462,7 +1484,7 @@ pub fn lower_conv(
         parent_span,
     );
     let contracted_node = lower_matmul(
-        decl,
+        owner,
         dag,
         kernel_matrix,
         windows,
@@ -1473,7 +1495,7 @@ pub fn lower_conv(
     let mut reshaped = vec![kernel_shape[0], input_shape[0]];
     reshaped.extend(&output_shape[2..]);
     let result = add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Reshape {
             new_shape: reshaped.iter().map(|&n| RtDim::Lit(n)).collect(),
@@ -1485,7 +1507,7 @@ pub fn lower_conv(
     let mut axes: Vec<_> = (0..output_shape.len()).collect();
     axes.swap(0, 1);
     add_synth(
-        decl,
+        owner,
         dag,
         RiscOp::Permute { axes },
         vec![result],
@@ -1507,22 +1529,22 @@ mod tests {
     #[test]
     fn sub_produces_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_sub(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_sub(owner, &mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
         assert_eq!(dag.len(), 3);
@@ -1534,15 +1556,15 @@ mod tests {
     #[test]
     fn relu_produces_dedicated_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, -1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_relu(decl, &mut dag, x, &scalar_f32(), None);
+        let result = lower_relu(owner, &mut dag, x, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
         assert_eq!(dag.len(), 2);
@@ -1554,15 +1576,15 @@ mod tests {
     #[test]
     fn sigmoid_produces_correct_chain() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_sigmoid(decl, &mut dag, x, &scalar_f32(), None);
+        let result = lower_sigmoid(owner, &mut dag, x, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
         // sigmoid(x) = recip(1 + exp(-x)). Chain: x, neg(x),
@@ -1611,22 +1633,22 @@ mod tests {
     #[test]
     fn lower_div_emits_single_div_node() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 6.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_div(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_div(owner, &mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
         // lower_div emits a single `RiscOp::Div(a, b)` node
@@ -1663,22 +1685,22 @@ mod tests {
     #[test]
     fn gt_preserves_direct_identity_and_argument_order() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_gt(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_gt(owner, &mut dag, a, b, &scalar_f32(), None);
 
         let node = dag.get(result).unwrap();
         assert_eq!(node.op, RiscOp::Compare(ComparisonKind::Gt));
@@ -1689,22 +1711,22 @@ mod tests {
     #[test]
     fn gte_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_gte(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_gte(owner, &mut dag, a, b, &scalar_f32(), None);
 
         assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
@@ -1715,22 +1737,22 @@ mod tests {
     #[test]
     fn lte_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_lte(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_lte(owner, &mut dag, a, b, &scalar_f32(), None);
 
         assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
@@ -1741,22 +1763,22 @@ mod tests {
     #[test]
     fn eq_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_eq(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_eq(owner, &mut dag, a, b, &scalar_f32(), None);
 
         assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
@@ -1767,22 +1789,22 @@ mod tests {
     #[test]
     fn neq_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_neq(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_neq(owner, &mut dag, a, b, &scalar_f32(), None);
 
         assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
@@ -1793,22 +1815,22 @@ mod tests {
     #[test]
     fn min_elem_produces_direct_selection() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let result = lower_min_elem(decl, &mut dag, a, b, &scalar_f32(), None);
+        let result = lower_min_elem(owner, &mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
         assert_eq!(dag.len(), 3);
@@ -1822,22 +1844,22 @@ mod tests {
     #[test]
     fn and_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_bool().precision, 1.0),
             vec![],
             scalar_bool(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_bool().precision, 0.0),
             vec![],
             scalar_bool(),
             None,
         );
-        let result = lower_and(decl, &mut dag, a, b, &scalar_bool(), None);
+        let result = lower_and(owner, &mut dag, a, b, &scalar_bool(), None);
 
         let node = dag.get(result).unwrap();
         assert_eq!(node.op, RiscOp::Logical(LogicalKind::And));
@@ -1847,22 +1869,22 @@ mod tests {
     #[test]
     fn or_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_bool().precision, 0.0),
             vec![],
             scalar_bool(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_bool().precision, 1.0),
             vec![],
             scalar_bool(),
             None,
         );
-        let result = lower_or(decl, &mut dag, a, b, &scalar_bool(), None);
+        let result = lower_or(owner, &mut dag, a, b, &scalar_bool(), None);
 
         let node = dag.get(result).unwrap();
         assert_eq!(node.op, RiscOp::Logical(LogicalKind::Or));
@@ -1872,15 +1894,15 @@ mod tests {
     #[test]
     fn not_preserves_direct_identity() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_bool().precision, 1.0),
             vec![],
             scalar_bool(),
             None,
         );
-        let result = lower_not(decl, &mut dag, a, &scalar_bool(), None);
+        let result = lower_not(owner, &mut dag, a, &scalar_bool(), None);
 
         assert_eq!(dag.len(), 2);
         let node = dag.get(result).unwrap();
@@ -1914,24 +1936,24 @@ mod tests {
     #[test]
     fn matmul_produces_expand_mul_sum() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a_ty = matrix_2x3();
         let b_ty = matrix_3x4();
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "A".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "B".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let result = lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let result = lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, None);
 
         // A, B, Expand(A), Expand(B), Mul, Sum
         assert_eq!(dag.len(), 6);
@@ -1963,7 +1985,7 @@ mod tests {
     #[test]
     fn batched_matmul_rank4_produces_batched_sum_axis() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a_ty = TensorType {
             dims: vec![
                 DimInfo::Lit(2),
@@ -1983,20 +2005,20 @@ mod tests {
             precision: Prim::F32,
         };
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "A".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "B".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let result = lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let result = lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, None);
         let result_node = dag.get(result).unwrap();
         assert_eq!(
             result_node.output_type.dims,
@@ -2013,16 +2035,16 @@ mod tests {
     #[test]
     fn softmax_produces_maxreduce_sub_exp_sum_div() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let ty = vec_5();
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let result = lower_softmax(decl, &mut dag, x, 0, &ty, None);
+        let result = lower_softmax(owner, &mut dag, x, 0, &ty, None);
 
         // Check the chain of ops produced.
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -2061,16 +2083,16 @@ mod tests {
     #[test]
     fn mean_produces_sum_div() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let ty = vec_5();
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let result = lower_mean(decl, &mut dag, x, 0, &ty, None);
+        let result = lower_mean(owner, &mut dag, x, 0, &ty, None);
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
         // Should have Sum
@@ -2101,7 +2123,7 @@ mod tests {
     #[test]
     fn layer_norm_produces_mean_variance_and_affine_ops() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
             precision: Prim::F32,
@@ -2111,14 +2133,14 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             x_ty.clone(),
             None,
         );
         let gamma = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "gamma".into(),
             },
@@ -2127,7 +2149,7 @@ mod tests {
             None,
         );
         let beta = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "beta".into(),
             },
@@ -2136,14 +2158,14 @@ mod tests {
             None,
         );
         let epsilon = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(Prim::F32, 1e-5),
             vec![],
             scalar_f32(),
             None,
         );
         let result = lower_layer_norm(
-            decl, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
+            owner, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -2171,7 +2193,7 @@ mod tests {
     #[test]
     fn layer_norm_expands_rank3_suffix_correctly() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
@@ -2181,14 +2203,14 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             x_ty.clone(),
             None,
         );
         let gamma = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "gamma".into(),
             },
@@ -2197,7 +2219,7 @@ mod tests {
             None,
         );
         let beta = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "beta".into(),
             },
@@ -2206,14 +2228,14 @@ mod tests {
             None,
         );
         let epsilon = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(Prim::F32, 1e-5),
             vec![],
             scalar_f32(),
             None,
         );
         let _ = lower_layer_norm(
-            decl, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
+            owner, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
         assert!(
             dag.nodes().iter().any(|node| {
@@ -2228,7 +2250,7 @@ mod tests {
     #[test]
     fn conv_produces_im2col_style_sequence() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let input_ty = TensorType {
             dims: vec![
                 DimInfo::Lit(1),
@@ -2257,21 +2279,21 @@ mod tests {
             precision: Prim::F32,
         };
         let input = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             input_ty.clone(),
             None,
         );
         let kernel = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "w".into() },
             vec![],
             kernel_ty.clone(),
             None,
         );
         let result = lower_conv(
-            decl,
+            owner,
             &mut dag,
             input,
             kernel,
@@ -2303,19 +2325,19 @@ mod tests {
     #[test]
     fn softmax_accepts_symbolic_axis_extent() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let ty = TensorType {
             dims: vec![DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let out = lower_softmax(decl, &mut dag, x, 0, &ty, None);
+        let out = lower_softmax(owner, &mut dag, x, 0, &ty, None);
         let expand_sizes: Vec<_> = dag
             .nodes()
             .iter()
@@ -2343,7 +2365,7 @@ mod tests {
     #[should_panic(expected = "layer_norm requires a concrete extent")]
     fn layer_norm_rejects_symbolic_normalized_axis_extent() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x_ty = TensorType {
             dims: vec![DimInfo::Named("hidden".into(), None)],
             precision: Prim::F32,
@@ -2353,14 +2375,14 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             x_ty.clone(),
             None,
         );
         let gamma = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "gamma".into(),
             },
@@ -2369,7 +2391,7 @@ mod tests {
             None,
         );
         let beta = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "beta".into(),
             },
@@ -2378,14 +2400,14 @@ mod tests {
             None,
         );
         let epsilon = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(Prim::F32, 1e-5),
             vec![],
             scalar_f32(),
             None,
         );
         let _ = lower_layer_norm(
-            decl, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
+            owner, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
     }
 
@@ -2393,7 +2415,7 @@ mod tests {
     #[should_panic(expected = "conv shape arithmetic exceeds i64")]
     fn conv_rejects_extent_product_overflow_before_materializing_windows() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let extent = usize::try_from(i64::MAX).expect("64-bit target");
         let ty = |dims: &[usize]| TensorType {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
@@ -2403,21 +2425,21 @@ mod tests {
         let kernel_ty = ty(&[1, 2, 1]);
         let output_ty = ty(&[1, 1, extent]);
         let input = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             input_ty.clone(),
             None,
         );
         let kernel = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "k".into() },
             vec![],
             kernel_ty.clone(),
             None,
         );
         lower_conv(
-            decl,
+            owner,
             &mut dag,
             input,
             kernel,
@@ -2434,7 +2456,7 @@ mod tests {
     #[should_panic(expected = "conv output rank mismatch")]
     fn conv_rejects_missing_output_shape() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let input_ty = TensorType {
             dims: vec![
                 DimInfo::Lit(1),
@@ -2458,21 +2480,21 @@ mod tests {
             precision: Prim::F32,
         };
         let input = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             input_ty.clone(),
             None,
         );
         let kernel = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "w".into() },
             vec![],
             kernel_ty.clone(),
             None,
         );
         let _ = lower_conv(
-            decl,
+            owner,
             &mut dag,
             input,
             kernel,

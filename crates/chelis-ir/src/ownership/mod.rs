@@ -1963,7 +1963,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -2175,7 +2176,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -2348,13 +2350,8 @@ fn require_dag_arity(
 }
 
 fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
-    for input in node
-        .inputs
-        .iter()
-        .chain(&node.shape_deps)
-        .chain(&node.result_claim_deps)
-    {
-        if input.0 >= node.id.0 || dag.get(*input).is_none() {
+    for input in node.dependencies() {
+        if input.0 >= node.id.0 || dag.get(input).is_none() {
             return Err(OwnershipError::DagInput {
                 node: node.id.0,
                 input: input.0,
@@ -2369,6 +2366,7 @@ fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
         node.inputs.contains(&owner)
             || node.shape_deps.contains(&owner)
             || node.result_claim_deps.contains(&owner)
+            || node.owner.activation == Some(owner)
     }) || dag.roots().contains(&owner)
 }
 

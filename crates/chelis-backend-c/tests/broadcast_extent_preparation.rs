@@ -177,7 +177,7 @@ fn an_unread_named_claim_keeps_its_existing_rejection_path() {
         vec![named("*"), named("claimed"), named("*")],
         source(),
     );
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     dag.add_node(
         decl,
         RiscOp::Load {

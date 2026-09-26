@@ -410,7 +410,7 @@ fn assert_rejected(dag: &Dag, needle: &str) {
 #[test]
 fn the_verifier_accepts_a_consumed_key_and_its_replays() {
     let (mut dag, _, rate, key, out) = dropout_graph();
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
     let replay = dag.add_node(
         decl,
@@ -435,7 +435,7 @@ fn the_verifier_accepts_a_consumed_key_and_its_replays() {
 #[test]
 fn the_verifier_rejects_a_double_consume() {
     let (mut dag, x, rate, key, out) = dropout_graph();
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     let twice = dag.add_node(
         decl,
         RiscOp::Dropout,
@@ -451,7 +451,7 @@ fn the_verifier_rejects_a_double_consume() {
 #[test]
 fn the_verifier_rejects_a_key_fed_to_another_operation() {
     let (mut dag, _, _, key, out) = dropout_graph();
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     let added = dag.add_node(decl, RiscOp::Add, vec![key, key], scalar(Prim::Key), None);
     dag.add_root(out);
     dag.add_root(added);
@@ -470,7 +470,7 @@ fn the_verifier_rejects_a_key_fed_to_another_operation() {
 #[test]
 fn the_verifier_rejects_a_replay_that_changes_the_mask_contract() {
     let (mut dag, _, _, key, out) = dropout_graph();
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
     let other_rate = constant(&mut dag, decl, Prim::F32, 0.25);
     let replay = dag.add_node(

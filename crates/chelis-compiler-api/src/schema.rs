@@ -3644,6 +3644,12 @@ pub struct WireDagNode {
     /// and its name (spec/10 section 3.2); two declarations that share a name
     /// stay two.
     pub declaration: u64,
+    /// The node's activation (spec/10 section 3.2): an earlier `bool` node
+    /// under which the node runs, explicitly null when every execution of its
+    /// declaration enters it. A node whose activation is false checks
+    /// nothing.
+    #[serde(deserialize_with = "require_explicit_activation")]
+    pub activation: Option<u64>,
     pub id: u64,
     pub op: WireRiscOp,
     pub inputs: Vec<u64>,
@@ -3654,6 +3660,12 @@ fn require_explicit_span<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
+}
+
+fn require_explicit_activation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4251,7 +4263,7 @@ mod tests {
             "nodes": [{
                 "shape_deps": [],
                 "span_id": null,
-                "merged_spans": [], "declaration": 0,
+                "merged_spans": [], "declaration": 0, "activation": null,
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
                 "inputs": [],
@@ -4338,6 +4350,7 @@ mod tests {
             declarations: vec!["entry".to_owned()],
             nodes: vec![WireDagNode {
                 declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -4499,6 +4512,7 @@ mod tests {
         };
         let load = |id, precision: &str, size| WireDagNode {
             declaration: 0,
+            activation: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -4518,6 +4532,7 @@ mod tests {
                     load(1, "f32", 4),
                     WireDagNode {
                         declaration: 0,
+                        activation: None,
                         shape_deps: vec![],
                         span_id: None,
                         merged_spans: vec![],

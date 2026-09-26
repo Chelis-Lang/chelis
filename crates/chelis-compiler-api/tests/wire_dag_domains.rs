@@ -3,10 +3,10 @@ use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag};
 use serde_json::{Value, json};
 
 fn load() -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
 }
 fn graph(op: Value) -> Value {
-    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
+    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
     if value["nodes"][1]["op"]["kind"] == "shape" {
         value["nodes"][1]["output_type"] = json!({"dims":[],"precision":"int64"});
     }
@@ -106,7 +106,7 @@ fn typed_load(id: u64, name: &str, sizes: &[i64], dtype: &str) -> Value {
         .iter()
         .map(|size| json!({"kind":"lit","size":size}))
         .collect::<Vec<_>>();
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,
         "id":id,"op":{"kind":"load","name":name},"inputs":[],
         "output_type":{"dims":dims,"precision":dtype}})
 }

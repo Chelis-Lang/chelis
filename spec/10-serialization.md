@@ -110,6 +110,22 @@ table: one row per declaration, holding its name. `WireDagNode.declaration` is
 the row of the declaration the node belongs to (§3.4). Two rows may hold one
 name, so a name never identifies a declaration. Every row is the declaration of
 at least one node; a row that no node names is an encoding and decoding error.
+`WireDagNode.activation` is mandatory too, explicitly null when absent. It is
+the node's activation: an earlier node of `bool` dtype that holds exactly where
+the node's source position is entered, the conjunction of the runtime branch
+predicates enclosing it, or null where every execution of its declaration
+enters it. An activation is rank zero, or under a batched branch shaped like
+the node's leading axes, one element per row. A node and its activation form
+its owner, with the declaration. A node whose activation is false is still
+computed, since a `Where` may read its value, but checks nothing: no numeric
+trap, draw validation, count or extent check fires for it, and it computes its
+value from operands its checks accept. The activation operand a `Dropout`,
+`UniformLike`, `DropoutReplay`, `UniformBoundAdjoint`, `Split`, `FoldIn` or
+`SplitN` reads after its operands is its node's activation, and it has one
+exactly when its node does; a `KeySelect`'s two activations are its keys'
+consumption activations, not its own. An activation that is not an earlier
+`bool` node, and an activation operand that is not its node's activation, are
+encoding and decoding errors.
 
 `WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
 It has exactly two earlier input nodes, each with its output's integer dtype
@@ -396,6 +412,7 @@ specifies u32. A decoder never narrows a reference to fit a host index.
 |---|---|
 | `WireDagNode.id`, `WireDagNode.inputs`, `WireDagNode.shape_deps`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs and shape dependencies refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. Shape dependencies identify nodes, not extents. |
 | `WireDagNode.declaration` | Zero-based row of the owning DAG's `declarations` table. The row, not the name it holds, is the declaration's identity; every row is some node's declaration. |
+| `WireDagNode.activation` | Null, or the ID of an earlier node of the owning DAG whose dtype is `bool`. |
 | `LowerResult.named_roots`, `GradResult.output_node`, `GradResult.grad_nodes_by_name`, `GradResult.forward_nodes_by_name` | IDs select nodes in that result's DAG; a name never changes the owning DAG. |
 | `EvaluatedRoot.node_id` | Identity in the evaluated graph associated with that result; without that graph it remains an opaque result identity and cannot be dereferenced. |
 | `WireFusedInput.External.index` | Zero-based slot in the owning fused node's external inputs. |

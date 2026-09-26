@@ -503,7 +503,7 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     // Reduce the first gradient to a scalar so the second grad is well
     // defined, then differentiate the backward DAG with respect to `x`.
     let mut g2dag = first.dag.clone();
-    let g2dag_decl = g2dag.nodes()[0].decl;
+    let g2dag_decl = g2dag.nodes()[0].owner.decl;
     let sum_grad = g2dag.add_node(
         g2dag_decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),

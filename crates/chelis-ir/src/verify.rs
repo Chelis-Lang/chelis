@@ -677,6 +677,7 @@ pub(crate) fn verify_mapped_gradient_closure(
 /// decoder's, each naming its node.
 pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     for node in 0..graph.node_count() {
+        own_activation_operand(graph, node, errors);
         match graph.role(node) {
             role @ (KeyRole::KeyFromSeed
             | KeyRole::Split { .. }
@@ -689,6 +690,47 @@ pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             KeyRole::KeySelect => key_select_operands(graph, node, errors),
             _ => {}
         }
+    }
+}
+
+/// The input slot where a draw, a draw's replay or a key-consuming key
+/// operation may read an activation after its operands, or `None` for a
+/// node that reads none. A join's two activations are the consumption
+/// activations of its two keys, not its own, so it has no such slot.
+fn own_activation_slot(graph: &impl KeyGraph, node: usize) -> Option<usize> {
+    match graph.role(node) {
+        KeyRole::Dropout | KeyRole::DropoutReplay | KeyRole::UniformBoundAdjoint => Some(3),
+        KeyRole::UniformLike => Some(4),
+        KeyRole::Split { .. }
+        | KeyRole::SplitN {
+            count: SplitCount::Lit(_) | SplitCount::Other,
+        } => Some(1),
+        KeyRole::FoldIn
+        | KeyRole::SplitN {
+            count: SplitCount::Input(_),
+        } => Some(2),
+        _ => None,
+    }
+}
+
+/// One carrier for a node's activation (spec/10 §3.2): the activation
+/// operand a draw, its replay or a key operation reads is exactly the
+/// node's own activation, and it has one exactly when the node does. A
+/// replay's activation is its forward draw's, which is also the owner the
+/// replay inherits.
+fn own_activation_operand(graph: &impl KeyGraph, node: usize, errors: &mut Vec<String>) {
+    let Some(slot) = own_activation_slot(graph, node) else {
+        return;
+    };
+    let operand = graph.input(node, slot);
+    let own = graph.activation(node);
+    if operand != own {
+        errors.push(format!(
+            "{}'s activation operand {} is not its own activation {}",
+            graph.describe_node(node),
+            operand.map_or_else(|| "(none)".to_owned(), |id| format!("node {id}")),
+            own.map_or_else(|| "(none)".to_owned(), |id| format!("node {id}")),
+        ));
     }
 }
 
@@ -1091,6 +1133,8 @@ pub trait KeyGraph {
     fn input(&self, node: usize, slot: usize) -> Option<usize>;
     /// The nodes `node` depends on without reading their values.
     fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_;
+    /// `node`'s own activation (spec/10 §3.2), if it has one.
+    fn activation(&self, node: usize) -> Option<usize>;
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
     /// The parameter a `Load` at `node` reads, or `None` for any other node.
     fn load_name(&self, node: usize) -> Option<&str>;
@@ -1188,6 +1232,10 @@ impl KeyGraph for Dag {
             .map(|dependency| dependency.0)
     }
 
+    fn activation(&self, node: usize) -> Option<usize> {
+        Some(self.get(NodeId(node))?.owner.activation?.0)
+    }
+
     fn roots(&self) -> impl Iterator<Item = usize> + '_ {
         Dag::roots(self).iter().map(|root| root.0)
     }
@@ -1200,11 +1248,11 @@ impl KeyGraph for Dag {
     }
 
     fn declaration(&self, node: usize) -> &str {
-        &self.declaration(self.nodes()[node].decl).name
+        &self.declaration(self.nodes()[node].owner.decl).name
     }
 
     fn same_declaration(&self, left: usize, right: usize) -> bool {
-        self.nodes()[left].decl == self.nodes()[right].decl
+        self.nodes()[left].owner.decl == self.nodes()[right].owner.decl
     }
 
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
@@ -1695,10 +1743,31 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 consumers[dep.0] += 1;
             }
         }
+        // spec/10 section 3.2: a node's activation is an earlier Bool node of
+        // the graph, and the node reads it to decide whether it checks.
+        if let Some(activation) = node.owner.activation {
+            match dag.get(activation) {
+                Some(source) if activation < node.id => {
+                    consumers[activation.0] += 1;
+                    if source.output_type.precision != chelis_types::types::Prim::Bool {
+                        errors.push(format!(
+                            "{}'s activation {} is not a Bool",
+                            dag.describe_node(node.id),
+                            dag.describe_node(activation)
+                        ));
+                    }
+                }
+                _ => errors.push(format!(
+                    "{}'s activation {} is not an earlier node of the graph",
+                    dag.describe_node(node.id),
+                    activation.0
+                )),
+            }
+        }
 
         if let RiscOp::Load { name } = &node.op {
             let prev_ty = *load_types
-                .entry((node.decl, name.as_str().to_string()))
+                .entry((node.owner.decl, name.as_str().to_string()))
                 .or_insert(&node.output_type);
             if prev_ty != &node.output_type {
                 errors.push(format!(

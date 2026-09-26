@@ -143,7 +143,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let nodes = foreign["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
     nodes.push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -166,7 +166,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -288,7 +288,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut loaded = dag.clone();
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -312,7 +312,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut constant = dag.clone();
     let id = constant["nodes"].as_array().unwrap().len();
     constant["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -320,8 +320,24 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     assert!(WireDag::from_validated_json(&text).is_err(), "{text}");
 }
 
+/// The input slot where a draw, a replay or a key-consuming key operation
+/// reads its own activation (spec/10 section 3.2), which is also its node's
+/// `activation`.
+fn own_activation_slot(op: &Value) -> Option<usize> {
+    match op["kind"].as_str()? {
+        "dropout" | "dropout_replay" | "uniform_bound_adjoint" => Some(3),
+        "uniform_like" => Some(4),
+        "split" => Some(1),
+        "fold_in" => Some(2),
+        "split_n" if op["count"]["bound"] == json!("lit") => Some(1),
+        "split_n" => Some(2),
+        _ => None,
+    }
+}
+
 fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,"op":op,
+    let activation = own_activation_slot(&op).and_then(|slot| inputs.get(slot).copied());
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":activation,"id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
         "precision":precision}})
@@ -959,7 +975,7 @@ fn the_codec_admits_a_gated_key_operation_and_confines_its_keys() {
         ),
         (
             GatedSplit::IntegerActivation,
-            "exactly one Bool activation, shaped like a leading part",
+            "activation must be an earlier bool node",
         ),
         (GatedSplit::TwoActivations, "wrong number of inputs"),
     ] {
@@ -1122,11 +1138,15 @@ fn gradient_random_lowering_admits_only_a_scalar_bool_activation() {
         .as_array_mut()
         .unwrap()
         .push(json!(activation));
+    // The operand is the draw's own activation (spec/10 section 3.2).
+    active["nodes"][uniform + 1]["activation"] = json!(activation);
     accepts(&active);
 
+    // A non-Bool activation fails the node's own activation rule, which
+    // every node's activation meets before the draw's operand rules run.
     let mut malformed = active.clone();
     malformed["nodes"][activation]["output_type"]["precision"] = json!("f32");
-    rejects_domain(&malformed, "exactly one Bool activation");
+    rejects_domain(&malformed, "activation must be an earlier bool node");
 }
 
 // ---- one operand rule on both sides of the codec ----
@@ -1166,7 +1186,7 @@ fn wire_of(dag: &Dag) -> Value {
     let used = dag
         .nodes()
         .iter()
-        .map(|node| node.decl)
+        .map(|node| node.owner.decl)
         .collect::<std::collections::BTreeSet<_>>();
     let row_of = used
         .iter()
@@ -1212,8 +1232,9 @@ fn wire_of(dag: &Dag) -> Value {
                     other => panic!("no wire form here for {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            let declaration = row_of[&node.decl];
-            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"id":node.id.0,"op":op,
+            let declaration = row_of[&node.owner.decl];
+            let activation = node.owner.activation.map(|activation| activation.0);
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"activation":activation,"id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
         })

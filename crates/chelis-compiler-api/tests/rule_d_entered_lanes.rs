@@ -1138,3 +1138,152 @@ fn a_dead_let_on_a_parameter_read_nowhere_else_traps_in_the_evaluator() {
     );
     rows.assert_empty();
 }
+
+/// `xs` holding `values`: the C driver's `input(n)` holds `2i - 3`, so a
+/// one-row `xs` is `[-3.0]` in both lanes.
+fn xs(values: &[f32]) -> BTreeMap<String, TensorValue> {
+    BTreeMap::from([(
+        "xs".into(),
+        TensorValue {
+            shape: vec![values.len() as i64],
+            data: wire_values::storage_f32(values.to_vec()),
+        },
+    )])
+}
+
+/// A vmapped row's arm over `rows` rows: the cast of a row scaled by 1e9
+/// overflows `i32` for -3.0 and fits for -1.0. A `gt` condition keeps the
+/// entry in the Host lane, whose C entry the driver runs.
+fn vmapped_arm(condition: &str, rows: usize) -> String {
+    format!(
+        "def row(x: tensor[f32]) -> tensor[f32] = {{\n  s = tensor_to_scalar(copy(x))\n  if {condition} then cast(cast(mul(&x, scalar_to_tensor(1000000000.0f32)), i32), f32) else x\n}}\n\ndef selected(xs: tensor[{rows}, f32]) -> tensor[{rows}, f32] = vmap(row)(xs)\n"
+    )
+}
+
+/// The vmap batching pass (spec/10 §3): an `if` over a vmapped row gives each
+/// row its own activation, so a row whose arm is not taken checks nothing
+/// while a taken row checks. In the evaluator row 0 (-3.0) is untaken and
+/// would overflow while row 1 (-1.0) is taken and fits; the C entry runs the
+/// one row -3.0. The taken twin takes -3.0 and traps.
+///
+/// Evidentiary status: REGRESSION TEST. At eb608d063 the untaken row's cast
+/// traps in both lanes.
+#[test]
+fn a_vmapped_arm_checks_only_in_the_rows_that_take_it_in_the_evaluator_and_c() {
+    let mut rows = Rows::default();
+    let untaken = "gt(s, -2.0f32)";
+    rows.returns(
+        "E untaken row",
+        select(&vmapped_arm(untaken, 2), "selected", xs(&[-3.0, -1.0])),
+        "selected",
+        &[-3.0, -1_000_000_000.0],
+        None,
+    );
+    rows.c(
+        "C untaken row",
+        run_c(
+            &compile_c(&vmapped_arm(untaken, 1), "selected"),
+            "selected",
+            0,
+        ),
+        Ok(()),
+    );
+    let taken = "gt(-2.0f32, s)";
+    rows.traps(
+        "E taken row",
+        select(&vmapped_arm(taken, 2), "selected", xs(&[-3.0, -1.0])),
+        CAST_OVERFLOW,
+    );
+    rows.c(
+        "C taken row",
+        run_c(
+            &compile_c(&vmapped_arm(taken, 1), "selected"),
+            "selected",
+            0,
+        ),
+        Err(CAST_OVERFLOW),
+    );
+    rows.assert_empty();
+}
+
+/// A vmap call in a runtime `if` arm over `xs = [-3.0]`: the row's cast of
+/// the row scaled by 1e9 overflows.
+fn vmap_in_arm(condition: &str) -> String {
+    format!(
+        "def row(x: tensor[f32]) -> tensor[f32] = cast(cast(mul(&x, scalar_to_tensor(1000000000.0f32)), i32), f32)\n\ndef selected(xs: tensor[1, f32]) -> tensor[1, f32] = {{\n  s = tensor_to_scalar(sum(copy(xs), 0i32))\n  if {condition} then vmap(row)(xs) else xs\n}}\n"
+    )
+}
+
+/// The vmap batching pass at its call site (spec/10 §3): a vmapped body
+/// spliced into an arm runs under the arm's activation, so when the arm is
+/// not taken no row checks. The taken twin traps. The compiled-execution
+/// lane refuses a transform entry (chelis#1138), so this is the evaluator's.
+///
+/// Evidentiary status: REGRESSION TEST. At eb608d063 the untaken arm's
+/// vmapped cast traps.
+#[test]
+fn a_vmap_in_an_untaken_arm_checks_nothing_in_the_evaluator() {
+    let mut rows = Rows::default();
+    rows.returns(
+        "E untaken arm",
+        select(&vmap_in_arm("gt(s, 0.0f32)"), "selected", xs(&[-3.0])),
+        "selected",
+        &[-3.0],
+        None,
+    );
+    rows.traps(
+        "E taken arm",
+        select(&vmap_in_arm("gt(s, -5.0f32)"), "selected", xs(&[-3.0])),
+        CAST_OVERFLOW,
+    );
+    rows.assert_empty();
+}
+
+/// An integer chain the fusion pass would join, `add(mul(d, d), d)`, in a
+/// runtime `if` arm: `d = 100000` overflows `mul` at `i32`.
+fn integer_chain_arm(condition: &str) -> String {
+    format!(
+        "def selected(x: tensor[1, f32], d: tensor[1, i32]) -> tensor[i32] = {{\n  s = tensor_to_scalar(sum(&d, 0i32))\n  r = if {condition} then add(mul(&d, &d), &d) else d\n  sum(r, 0i32)\n}}\n"
+    )
+}
+
+/// The fusion pass (spec/10 §3): a fused kernel runs under one owner, and a
+/// checking operation under an activation keeps its own kernel, so an
+/// untaken arm's integer chain checks nothing. The taken twin traps.
+///
+/// Evidentiary status: REGRESSION TEST. At eb608d063 the untaken arm's
+/// `mul` traps in both lanes.
+#[test]
+fn an_untaken_arms_integer_chain_checks_nothing_in_the_evaluator_and_c() {
+    let bindings = || {
+        let mut bindings = x1();
+        bindings.insert("d".into(), i32_input(100_000));
+        bindings
+    };
+    let mut rows = Rows::default();
+    let untaken = integer_chain_arm("gt(s, 200000i32)");
+    rows.returns(
+        "E untaken arm",
+        select(&untaken, "selected", bindings()),
+        "selected",
+        &[100_000.0],
+        None,
+    );
+    rows.c(
+        "C untaken arm",
+        run_c(&compile_c(&untaken, "selected"), "selected", 100_000),
+        Ok(()),
+    );
+    let taken = integer_chain_arm("gt(s, 0i32)");
+    rows.traps(
+        "E taken arm",
+        select(&taken, "selected", bindings()),
+        MUL_OVERFLOW,
+    );
+    rows.c(
+        "C taken arm",
+        run_c(&compile_c(&taken, "selected"), "selected", 100_000),
+        Err(MUL_OVERFLOW),
+    );
+    rows.assert_empty();
+}

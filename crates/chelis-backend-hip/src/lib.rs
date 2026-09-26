@@ -184,7 +184,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
                 *input = *materialized.entry(*input).or_insert_with(|| {
                     let source = out.get(*input).unwrap().clone();
                     let realized = out.add_node(
-                        source.decl,
+                        source.owner,
                         RiscOp::Realize,
                         vec![*input],
                         source.output_type,
@@ -203,7 +203,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
                 .unwrap_or(remap[&old])
         });
         let id = out.add_node(
-            node.decl,
+            node.owner.remap(&remap),
             node.op.clone(),
             inputs,
             node.output_type.clone(),

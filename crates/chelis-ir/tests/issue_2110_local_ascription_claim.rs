@@ -537,7 +537,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     assert!(chelis_ir::verify::verify(&direct).is_empty());
     for mutation in 0..8 {
         let mut dag = direct.clone();
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         match mutation {
             0 => {
                 let RiscOp::ExtentWitness {

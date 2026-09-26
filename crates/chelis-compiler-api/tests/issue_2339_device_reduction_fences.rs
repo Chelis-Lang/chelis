@@ -30,7 +30,7 @@ fn mean_dag() -> Dag {
         Some("surf:mean".into()),
     );
     let output = lower_mean(
-        decl,
+        decl.into(),
         &mut dag,
         input,
         0,

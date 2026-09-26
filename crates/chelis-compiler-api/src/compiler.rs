@@ -5200,7 +5200,7 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_shrink_bound() {
         let (mut dag, x, m) = dag_with_scalar();
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
             decl,
             RiscOp::Shrink {
@@ -5220,7 +5220,7 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
             decl,
             RiscOp::Reshape {
@@ -5312,7 +5312,7 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
         let (mut dag, x, size) = dag_with_scalar();
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
             decl,
             RiscOp::Expand {
@@ -6608,7 +6608,7 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     // table whatever its passes removed.
     let mut used = vec![false; dag.declarations().len()];
     for node in dag.nodes() {
-        used[node.decl.0 as usize] = true;
+        used[node.owner.decl.0 as usize] = true;
     }
     let mut declarations = Vec::new();
     let mut rows = vec![None; used.len()];
@@ -6625,7 +6625,8 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
             .nodes()
             .iter()
             .map(|node| {
-                let row = rows[node.decl.0 as usize].expect("every node's declaration has a row");
+                let row =
+                    rows[node.owner.decl.0 as usize].expect("every node's declaration has a row");
                 wire_dag_node(node, row)
             })
             .collect::<WireResult<_>>()?,
@@ -6645,6 +6646,10 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
 fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
         declaration,
+        activation: node
+            .owner
+            .activation
+            .map(|id| crate::schema::host_index(id.0)),
         shape_deps: node
             .shape_deps
             .iter()

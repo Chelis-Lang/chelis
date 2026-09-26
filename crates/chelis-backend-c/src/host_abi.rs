@@ -402,7 +402,7 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
     {
         // The metadata graph restates the helper's identity Load, so it
         // belongs to a declaration of the helper's name.
-        let decl = dag.declare(verified.declaration(node.decl).name.clone());
+        let decl = dag.declare(verified.declaration(node.owner.decl).name.clone());
         let root = dag.add_node(
             decl,
             chelis_ir::dag::RiscOp::Load { name: name.clone() },

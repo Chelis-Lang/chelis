@@ -201,6 +201,7 @@ def dag_cases():
                 "span_id": None,
                 "merged_spans": [],
                 "declaration": 0,
+                "activation": None,
                 "id": 0,
                 "op": {"kind": "const", "value": scalar},
                 "inputs": [],
@@ -224,6 +225,7 @@ def dag_cases():
         "span_id": None,
         "merged_spans": [],
         "declaration": 0,
+        "activation": None,
         "id": 0,
         "op": {"kind": "load", "name": "x"},
         "inputs": [],
@@ -241,6 +243,7 @@ def dag_cases():
                     "span_id": None,
                     "merged_spans": [],
                     "declaration": 0,
+                    "activation": None,
                     "id": 1,
                     "op": op,
                     "inputs": [0],
@@ -263,7 +266,38 @@ def dag_cases():
     bad = copy.deepcopy(good)
     bad["roots"] = [2]
     add("root-owner", bad, False)
-    for field in ("shape_deps", "span_id", "merged_spans", "declaration"):
+    # spec/10 section 3.2: a node's activation is an earlier bool node, or
+    # explicitly null.
+    activated = copy.deepcopy(good)
+    activated["nodes"].insert(
+        1,
+        {
+            "shape_deps": [],
+            "span_id": None,
+            "merged_spans": [],
+            "declaration": 0,
+            "activation": None,
+            "id": 1,
+            "op": {"kind": "load", "name": "c"},
+            "inputs": [],
+            "output_type": {"dims": [], "precision": "bool"},
+        },
+    )
+    activated["nodes"][2]["id"] = 2
+    activated["nodes"][2]["activation"] = 1
+    activated["roots"] = [2]
+    add("activated-reference", activated, True)
+    for name, target in (
+        ("self", 2),
+        ("large", 18446744073709551615),
+        ("negative", -1),
+        ("float", 1.0),
+        ("not-bool", 0),
+    ):
+        bad = copy.deepcopy(activated)
+        bad["nodes"][2]["activation"] = target
+        add("activation-" + name, bad, False)
+    for field in ("shape_deps", "span_id", "merged_spans", "declaration", "activation"):
         bad = copy.deepcopy(good)
         del bad["nodes"][1][field]
         add("missing-node-" + field, bad, False, "missing field")
@@ -334,6 +368,7 @@ def dag_cases():
                 "span_id": None,
                 "merged_spans": [],
                 "declaration": 0,
+                "activation": None,
                 "id": 2,
                 "op": {
                     "kind": "expand",
@@ -438,6 +473,7 @@ def dag_cases():
                 "span_id": "call-f",
                 "merged_spans": ["inlined-g"],
                 "declaration": 0,
+                "activation": None,
                 "id": 1,
                 "op": {
                     "kind": "extent_witness",
@@ -455,6 +491,7 @@ def dag_cases():
                 "span_id": None,
                 "merged_spans": [],
                 "declaration": 0,
+                "activation": None,
                 "id": 2,
                 "op": {
                     "kind": "const",
@@ -690,6 +727,7 @@ def result_reference_cases():
                 "span_id": None,
                 "merged_spans": [],
                 "declaration": 0,
+                "activation": None,
                 "id": 0,
                 "inputs": [],
                 "op": {"kind": "load", "name": "x"},

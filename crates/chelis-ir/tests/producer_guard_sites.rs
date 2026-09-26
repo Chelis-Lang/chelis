@@ -134,7 +134,7 @@ fn forwarded_axis_observation_and_physical_claim_keep_their_owners() {
     use chelis_ir::axis_sources::{LocalGuardObservation, result_extent_sites};
     for token in [false, true] {
         let mut dag = graph(1);
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         let inner = dag.roots()[0];
         let claim = dag.node_mut(inner).unwrap().shape_deps.remove(0);
         if !token {

@@ -208,6 +208,12 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             other => other.clone(),
         };
 
+        // The activation maps like a value input: an `if` over a row makes
+        // it the row's Bool, so a batched node checks row by row.
+        let owner = node
+            .owner
+            .try_remap_with(|activation| mapped_ids.get(activation.0).copied())
+            .map_err(|message| format!("vmap node {}: {message}", node.id.0))?;
         let bound_slots = bound_input_slots(&node.op);
         let batch_witness = node
             .inputs
@@ -249,7 +255,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     }
                 };
                 let expanded = out.add_node(
-                    node.decl,
+                    owner,
                     RiscOp::Expand { axis: 0, size },
                     expand_inputs,
                     prepend_batch_type(&dag.get(input).unwrap().output_type, &batch_dim),
@@ -269,7 +275,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shape operations.
         if !shared && captured_load {
             let raw = out.add_node(
-                node.decl,
+                owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -302,7 +308,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
-                node.decl,
+                owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -331,7 +337,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // longer matches its declared type (chelis#1932).
         if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
             let raw = out.add_node(
-                node.decl,
+                owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -359,7 +365,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
-                node.decl,
+                owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -384,7 +390,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
-        let new_id = out.add_node(node.decl, op, inputs, output_type, node.span_id.clone());
+        let new_id = out.add_node(owner, op, inputs, output_type, node.span_id.clone());
         mapped_ids.push(new_id);
         let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
         let remapped_result_claims =
@@ -440,8 +446,13 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     )
                 }
             };
+            let root_owner = dag
+                .get(*root)
+                .unwrap()
+                .owner
+                .try_remap_with(|activation| mapped_ids.get(activation.0).copied())?;
             let expanded = out.add_node(
-                dag.get(*root).unwrap().decl,
+                root_owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 prepend_batch_type(&dag.get(*root).unwrap().output_type, &batch_dim),

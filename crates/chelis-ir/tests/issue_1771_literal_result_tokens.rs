@@ -125,7 +125,7 @@ fn literal_role_rejects_observations_entry_claims_and_malformed_requirements() {
         "multiple-owners",
     ] {
         let mut dag = fixture(2, 2, false);
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         match mutation {
             "input" => dag.node_mut(NodeId(1)).unwrap().inputs.push(NodeId(0)),
             "dependency" => dag.add_shape_dep(NodeId(1), NodeId(0)),

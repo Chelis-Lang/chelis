@@ -88,6 +88,22 @@ pub struct CEmitter {
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
     write_nodes: chelis_unord::UnordSet<usize>,
+    /// The activation gate of the checking node being emitted, if it has an
+    /// activation (spec/10 section 3.2): where it is false the node checks
+    /// nothing, so each operand element it reads takes a value its checks
+    /// accept ([`chelis_ir::dag::DagNode::inactive_operand`]).
+    gate: Option<ActivationGate>,
+}
+
+/// How the node being emitted reads its activation.
+#[derive(Debug, Clone)]
+struct ActivationGate {
+    /// Whether any row is active, hoisted before the node's loops.
+    any: String,
+    /// Whether output element `i`'s row is active, inside an element loop.
+    element: String,
+    /// The value each operand slot takes where the element's row is inactive.
+    neutrals: Vec<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +428,7 @@ impl CEmitter {
                 .and_then(|id| dag.get(*id))
                 .map(|node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
+            gate: None,
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -1231,8 +1248,73 @@ impl CEmitter {
         }
     }
 
+    /// Hoist the activation of a checking `node` (spec/10 section 3.2)
+    /// before its loops and record how its element loops read it. A rank-0
+    /// activation is read once; a per-row activation (a `vmap`ped `if`),
+    /// shaped like the node's leading axes, once per output element's row;
+    /// one the node's rank cannot index (a shared scalar under a per-row
+    /// activation) decides as "some row is active".
+    fn emit_activation_gate(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.gate = None;
+        let Some(activation) = node.owner.activation else {
+            return;
+        };
+        if node.inactive_operand(0).is_none() {
+            return;
+        }
+        let id = node.id.0;
+        let act = activation.0;
+        let bool_et = Self::prim_elem_type(Prim::Bool);
+        let rank = dag
+            .get(activation)
+            .expect("verified activation")
+            .output_type
+            .dims
+            .len();
+        let any = format!("__act_{id}");
+        let element = if rank == 0 {
+            self.line(&format!(
+                "const int {any} = (((const {bool_et}*)t{act}_data)[0] != 0);"
+            ));
+            any.clone()
+        } else {
+            self.line(&format!("int {any} = 0;"));
+            self.line(&format!(
+                "for (int64_t __r = 0; __r < chelis_tensor_numel(t{act}); ++__r) {any} |= (((const {bool_et}*)t{act}_data)[__r] != 0);"
+            ));
+            if rank <= node.output_type.dims.len() {
+                format!(
+                    "(((const {bool_et}*)t{act}_data)[i / (t{id}_size / chelis_tensor_numel(t{act}))] != 0)"
+                )
+            } else {
+                any.clone()
+            }
+        };
+        self.gate = Some(ActivationGate {
+            any,
+            element,
+            neutrals: (0..node.inputs.len())
+                .map(|slot| {
+                    node.inactive_operand(slot)
+                        .expect("a checking operation names each operand's inactive value")
+                })
+                .collect(),
+        });
+    }
+
+    /// Operand element `elem` of slot `slot` as the node being emitted reads
+    /// it: unchanged without an activation gate, and otherwise the value its
+    /// checks accept where the element's row is inactive.
+    fn gated(&self, elem: String, slot: usize) -> String {
+        match &self.gate {
+            Some(gate) => format!("(({}) ? ({elem}) : {})", gate.element, gate.neutrals[slot]),
+            None => elem,
+        }
+    }
+
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        self.emit_activation_gate(node, dag);
         // chelis#664/#1948: every semantic same-shape producer validates its
         // complete positive-rank operand relation before the op emitters index
         // operands through the output's shape. Nonmembers and rank-zero
@@ -2930,10 +3012,11 @@ impl CEmitter {
         }
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        self.line(&format!(
-            "__out_{id}[i] = {};",
-            elem_expr(format!("__in_a_{id}[i]"), format!("__in_b_{id}[i]"))
-        ));
+        let contiguous = elem_expr(
+            self.gated(format!("__in_a_{id}[i]"), 0),
+            self.gated(format!("__in_b_{id}[i]"), 1),
+        );
+        self.line(&format!("__out_{id}[i] = {contiguous};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2944,13 +3027,11 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("int64_t idx_a = i * t{id}_input{a}_step;"));
         self.line(&format!("int64_t idx_b = i * t{id}_input{b}_step;"));
-        self.line(&format!(
-            "(({et}*)t{id}_data)[i] = {};",
-            elem_expr(
-                format!("(({et}*)t{a}_data)[idx_a]"),
-                format!("(({et}*)t{b}_data)[idx_b]")
-            )
-        ));
+        let strided = elem_expr(
+            self.gated(format!("(({et}*)t{a}_data)[idx_a]"), 0),
+            self.gated(format!("(({et}*)t{b}_data)[idx_b]"), 1),
+        );
+        self.line(&format!("(({et}*)t{id}_data)[i] = {strided};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3012,10 +3093,11 @@ impl CEmitter {
         }
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        self.line(&format!(
-            "__out_{id}[i] = {};",
-            elem_expr(&format!("__in_a_{id}[i]"), &format!("__in_b_{id}[i]"))
-        ));
+        let contiguous = elem_expr(
+            &self.gated(format!("__in_a_{id}[i]"), 0),
+            &self.gated(format!("__in_b_{id}[i]"), 1),
+        );
+        self.line(&format!("__out_{id}[i] = {contiguous};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3026,13 +3108,11 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("int64_t idx_a = i * t{id}_input{a}_step;"));
         self.line(&format!("int64_t idx_b = i * t{id}_input{b}_step;"));
-        self.line(&format!(
-            "(({et}*)t{id}_data)[i] = {};",
-            elem_expr(
-                &format!("(({et}*)t{a}_data)[idx_a]"),
-                &format!("(({et}*)t{b}_data)[idx_b]")
-            )
-        ));
+        let strided = elem_expr(
+            &self.gated(format!("(({et}*)t{a}_data)[idx_a]"), 0),
+            &self.gated(format!("(({et}*)t{b}_data)[idx_b]"), 1),
+        );
+        self.line(&format!("(({et}*)t{id}_data)[i] = {strided};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3575,10 +3655,8 @@ impl CEmitter {
         }
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        self.line(&format!(
-            "__out_{id}[i] = {};",
-            elem_expr(format!("__in_a_{id}[i]"))
-        ));
+        let contiguous = elem_expr(self.gated(format!("__in_a_{id}[i]"), 0));
+        self.line(&format!("__out_{id}[i] = {contiguous};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3588,10 +3666,8 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
-        self.line(&format!(
-            "(({et}*)t{id}_data)[i] = {};",
-            elem_expr(format!("(({et}*)t{a}_data)[idx]"))
-        ));
+        let strided = elem_expr(self.gated(format!("(({et}*)t{a}_data)[idx]"), 0));
+        self.line(&format!("(({et}*)t{id}_data)[i] = {strided};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3648,7 +3724,8 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
-        let contiguous = Self::integer_abs_expr(ty.precision, &format!("__in_a_{id}[i]"));
+        let contiguous =
+            Self::integer_abs_expr(ty.precision, &self.gated(format!("__in_a_{id}[i]"), 0));
         self.line(&format!("__out_{id}[i] = {contiguous};"));
         self.indent -= 1;
         self.line("}");
@@ -3659,7 +3736,8 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
-        let strided = Self::integer_abs_expr(ty.precision, &format!("__in_a_{id}[idx]"));
+        let strided =
+            Self::integer_abs_expr(ty.precision, &self.gated(format!("__in_a_{id}[idx]"), 0));
         self.line(&format!("__out_{id}[i] = {strided};"));
         self.indent -= 1;
         self.line("}");
@@ -5994,7 +6072,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t mean_i = 0; mean_i < t{divisor}_size; mean_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("if ({value} == 0) chelis_numeric_trap({trap:?});"));
+        let checked = match &self.gate {
+            Some(gate) => format!("{} && {value} == 0", gate.any),
+            None => format!("{value} == 0"),
+        };
+        self.line(&format!("if ({checked}) chelis_numeric_trap({trap:?});"));
         self.indent -= 1;
         self.line("}");
         self.line(&format!("/* mean nonempty guard for node {id} */"));
@@ -8196,8 +8278,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // conversion parallel, but no worker calls an aborting helper:
         // workers reduce candidate indices and the selected lowest index is
         // reclassified after the region ([04-NUM-15]).
+        let gated_source = self.gated(format!("(({src_et}*)t{a}_data)[idx]"), 0);
         let trap_conditions = checked_plan.map(|plan| {
-            let probe = format!("(({src_et}*)t{a}_data)[idx]");
+            let probe = gated_source.clone();
             let mut conditions = Vec::new();
             if let Some(condition) = crate::host_emit::checked_cast_domain_condition(plan, &probe) {
                 conditions.push(condition);
@@ -8223,7 +8306,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
-        let src_elem = format!("(({src_et}*)t{a}_data)[idx]");
+        let src_elem = gated_source;
         let dst_elem = format!("(({dst_et}*)t{id}_data)[i]");
         let src_reduced = Self::is_reduced_float_prec(src_prec);
         let assignment = if trunc {

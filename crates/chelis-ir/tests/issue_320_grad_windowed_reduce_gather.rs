@@ -94,7 +94,7 @@ fn issue_320_lower_mean_over_symbolic_extent_does_not_panic() {
     );
     // This call previously PANICKED with "mean requires a concrete extent
     // for axis 0 in IR lowering".
-    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &sym_vec("n"), None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &sym_vec("n"), None);
     // The lowered mean must reduce to a scalar (axis 0 of a rank-1 operand).
     assert!(
         dag.get(mean)
@@ -133,7 +133,7 @@ fn issue_320_grad_through_symbolic_mean_is_exact() {
         sym_vec("n"),
         None,
     );
-    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &sym_vec("n"), None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &sym_vec("n"), None);
 
     // Forward value: mean([10,20,30,40]) = 25.
     let mut inputs = UnordMap::new();
@@ -174,7 +174,7 @@ fn issue_320_lower_mean_over_literal_extent_still_exact() {
         lit_vec(4),
         None,
     );
-    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &lit_vec(4), None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &lit_vec(4), None);
     // Literal extent keeps the single-Sum (value) form with a Const divisor.
     let sum_count = dag
         .nodes()

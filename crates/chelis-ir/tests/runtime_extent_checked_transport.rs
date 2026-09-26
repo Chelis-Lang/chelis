@@ -692,7 +692,7 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
             } else {
                 computed_reshape()
             };
-            let decl = dag.get(output).unwrap().decl;
+            let decl = dag.get(output).unwrap().owner.decl;
             while !dag.get(output).unwrap().output_type.dims.is_empty() {
                 let mut ty = dag.get(output).unwrap().output_type.clone();
                 ty.dims.remove(0);

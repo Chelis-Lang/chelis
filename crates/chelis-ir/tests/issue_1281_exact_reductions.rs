@@ -234,7 +234,7 @@ fn runtime_empty_mean_extrema_and_arg_reductions_trap_domain() {
             ty.clone(),
             None,
         );
-        let mean = tier2::lower_mean(mean_dag_decl, &mut mean_dag, x, 0, &ty, None);
+        let mean = tier2::lower_mean(mean_dag_decl.into(), &mut mean_dag, x, 0, &ty, None);
         let error = evaluate_single_input(
             &mean_dag,
             "x",
@@ -292,7 +292,7 @@ fn mean_uses_canonical_sum_then_divide_at_declared_f32_width() {
         ty.clone(),
         None,
     );
-    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &ty, None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &ty, None);
     let values = evaluate_single_input(
         &dag,
         "x",

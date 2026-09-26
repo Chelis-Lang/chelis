@@ -2,9 +2,9 @@
 
 use chelis_unord::UnordMap;
 
-use crate::dag::{ComparisonKind, Dag, DeclId, LogicalKind, NodeId, RiscOp};
+use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, Owner, RiscOp};
 
-type CseKey = (DeclId, String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
+type CseKey = (Owner, String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
 
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
@@ -353,6 +353,11 @@ fn dead_code_eliminate_impl(
             for &dep in &dag.nodes()[i].result_claim_deps {
                 live[dep.0] = true;
             }
+            // A node's activation decides whether it checks anything, so it
+            // lives as long as the node does ([`crate::dag::Owner`]).
+            if let Some(activation) = dag.nodes()[i].owner.activation {
+                live[activation.0] = true;
+            }
         }
     }
 
@@ -409,7 +414,7 @@ fn dead_code_eliminate_impl(
             // and the audit invariant says input Deep spans must appear
             // on at least one IR node post-pipeline).
             let new_id = new_dag.add_node(
-                node.decl,
+                node.owner.remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -517,11 +522,13 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .collect();
 
         let op_key = format!("{:?}", node.op);
-        // Nodes of two declarations never merge: a parameter is its
-        // declaration and its name, and a node's declaration decides which
-        // selection runs it.
+        // Nodes of two owners never merge: a parameter is its declaration and
+        // its name, a node's declaration decides which selection runs it, and
+        // its activation decides whether it checks (the same operation under
+        // `c` and under `Not c` stays two nodes).
+        let owner = node.owner.remap_with(|old| id_map.get(&old.0).copied());
         let cse_key = (
-            node.decl,
+            owner,
             op_key,
             remapped_inputs.clone(),
             remapped_shape_deps.clone(),
@@ -563,7 +570,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             // Survivor: clone its own span_id and merged_spans onto the
             // new node so the canonical provenance flows through CSE.
             let new_id = new_dag.add_node(
-                node.decl,
+                owner,
                 node.op.clone(),
                 remapped_inputs,
                 node.output_type.clone(),
@@ -610,7 +617,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
+    use crate::dag::{Dag, DeclId, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
     use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
 
     fn scalar_f32() -> TensorType {

@@ -727,7 +727,13 @@ fn tier2_sub_nodes_inherit_parent_span() {
         scalar_f32(),
         None,
     );
-    let result = tier2::lower_sigmoid(decl, &mut dag, x, &scalar_f32(), Some("sigmoid.expr"));
+    let result = tier2::lower_sigmoid(
+        decl.into(),
+        &mut dag,
+        x,
+        &scalar_f32(),
+        Some("sigmoid.expr"),
+    );
 
     // The operand const has no span. The sub-nodes are Neg, Exp, Add,
     // and Recip. Every synthesized one should carry span_id =
@@ -780,7 +786,7 @@ fn tier2_lower_div_synthesized_node_inherits_parent_span() {
         scalar_f32(),
         None,
     );
-    let result = tier2::lower_div(decl, &mut dag, a, b, &scalar_f32(), Some("div.expr"));
+    let result = tier2::lower_div(decl.into(), &mut dag, a, b, &scalar_f32(), Some("div.expr"));
 
     let node = dag.get(result).unwrap();
     assert!(
@@ -806,7 +812,7 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
         None,
     );
     // No parent span — sub-nodes should get __synthesized_tier2__.
-    let _ = tier2::lower_relu(decl, &mut dag, x, &scalar_f32(), None);
+    let _ = tier2::lower_relu(decl.into(), &mut dag, x, &scalar_f32(), None);
 
     // The dedicated ReLU identity carries the synthesized marker. The
     // original Const(1) input does not.
@@ -852,7 +858,7 @@ fn tier2_lower_sub_preserves_direct_identity_and_parent_span() {
         scalar_f32(),
         None,
     );
-    let result = tier2::lower_sub(decl, &mut dag, a, b, &scalar_f32(), Some("sub.expr"));
+    let result = tier2::lower_sub(decl.into(), &mut dag, a, b, &scalar_f32(), Some("sub.expr"));
     assert_eq!(dag.len(), 3, "direct sub should add exactly one node");
     let sub = dag.get(result).expect("lowered Sub node");
     assert_eq!(sub.op, RiscOp::Sub);

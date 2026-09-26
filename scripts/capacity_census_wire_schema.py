@@ -1290,9 +1290,16 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                     owner.get("inner", {}).get("struct", {}).get("kind", {})
                     .get("plain", {}).get("fields", ())
                 )
+            # Two exact WireDagNode fields are optional values that must be
+            # present, explicitly null when absent: the span and the
+            # activation (spec/10 section 3.2).
             _require(
-                options == (("deserialize_with", "require_explicit_span"),)
-                and item.get("name") == "span_id"
+                (
+                    (options == (("deserialize_with", "require_explicit_span"),)
+                     and item.get("name") == "span_id")
+                    or (options == (("deserialize_with", "require_explicit_activation"),)
+                        and item.get("name") == "activation")
+                )
                 and location is not None
                 and any(self._item(location[0], field) is item for field in fields),
                 "required span decoder belongs only to the exact WireDagNode field",
@@ -1301,7 +1308,12 @@ class _SchemaShapeGraph(_CodecShapeGraph):
 
     def _validate_field_serde(self, options, ty):
         options = dict(options)
-        if "deserialize_with" in options:
+        if options.get("deserialize_with") == "require_explicit_activation":
+            _require(
+                ty == ("container", "core::option::Option", (("primitive", "u64"),)),
+                "required activation decoder requires an optional node reference",
+            )
+        elif "deserialize_with" in options:
             _require(
                 ty == (
                     "container", "core::option::Option",

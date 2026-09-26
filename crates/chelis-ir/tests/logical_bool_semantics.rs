@@ -37,7 +37,7 @@ fn scalar_bits(value: &TensorValue, index: usize) -> serde_json::Value {
 #[test]
 fn tier2_preserves_every_comparison_and_logical_identity() {
     type ComparisonLowerer = fn(
-        chelis_ir::dag::DeclId,
+        chelis_ir::dag::Owner,
         &mut Dag,
         chelis_ir::dag::NodeId,
         chelis_ir::dag::NodeId,
@@ -75,7 +75,14 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
             operand_ty.clone(),
             None,
         );
-        let result = lower(decl, &mut dag, left, right, &operand_ty, Some("comparison"));
+        let result = lower(
+            decl.into(),
+            &mut dag,
+            left,
+            right,
+            &operand_ty,
+            Some("comparison"),
+        );
         assert_eq!(
             dag.get(result).unwrap().op,
             RiscOp::Compare(kind),
@@ -116,12 +123,12 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
         });
         let result = match kind {
             LogicalKind::And => {
-                tier2::lower_and(decl, &mut dag, left, right.unwrap(), &bool_ty, None)
+                tier2::lower_and(decl.into(), &mut dag, left, right.unwrap(), &bool_ty, None)
             }
             LogicalKind::Or => {
-                tier2::lower_or(decl, &mut dag, left, right.unwrap(), &bool_ty, None)
+                tier2::lower_or(decl.into(), &mut dag, left, right.unwrap(), &bool_ty, None)
             }
-            LogicalKind::Not => tier2::lower_not(decl, &mut dag, left, &bool_ty, None),
+            LogicalKind::Not => tier2::lower_not(decl.into(), &mut dag, left, &bool_ty, None),
         };
         assert_eq!(dag.get(result).unwrap().op, RiscOp::Logical(kind));
         assert_eq!(dag.get(result).unwrap().inputs.len(), arity);
@@ -162,7 +169,14 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         symbolic("n", Prim::F32),
         None,
     );
-    let comparison = tier2::lower_lt(valid_decl, &mut valid, left, right, &inferred_result, None);
+    let comparison = tier2::lower_lt(
+        valid_decl.into(),
+        &mut valid,
+        left,
+        right,
+        &inferred_result,
+        None,
+    );
     assert_eq!(
         valid.get(comparison).unwrap().output_type,
         symbolic("n", Prim::Bool),
@@ -228,7 +242,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     let comparison = tier2::lower_lt(
-        witnessed_decl,
+        witnessed_decl.into(),
         &mut witnessed,
         left,
         right,
@@ -264,7 +278,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     tier2::lower_lt(
-        invalid_decl,
+        invalid_decl.into(),
         &mut invalid,
         left,
         right,

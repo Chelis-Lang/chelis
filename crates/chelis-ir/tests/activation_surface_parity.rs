@@ -5,7 +5,7 @@ use chelis_types::types::Prim;
 use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars};
 
 type ActivationLowerer = fn(
-    chelis_ir::dag::DeclId,
+    chelis_ir::dag::Owner,
     &mut Dag,
     chelis_ir::dag::NodeId,
     &TensorType,
@@ -28,7 +28,7 @@ fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> S
         ty.clone(),
         None,
     );
-    let root = lower(decl, &mut dag, x, &ty, None);
+    let root = lower(decl.into(), &mut dag, x, &ty, None);
     let input = TensorValue::from_storage(vec![], tensor_from_scalars(prim, &[input]));
     let values =
         eval_tensor_roots_with_strict(&dag, &[root], |name| (name == "x").then(|| input.clone()))

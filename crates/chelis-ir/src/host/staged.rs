@@ -245,13 +245,8 @@ impl Partition<'_> {
                 return;
             };
             if matches!(node.op, RiscOp::ExtentWitness { .. }) {
-                for prerequisite in node
-                    .inputs
-                    .iter()
-                    .chain(&node.shape_deps)
-                    .chain(&node.result_claim_deps)
-                {
-                    add_value_export(logical, *prerequisite, exports);
+                for prerequisite in node.dependencies() {
+                    add_value_export(logical, prerequisite, exports);
                 }
             } else {
                 exports.insert(dependency);
@@ -284,8 +279,15 @@ impl Partition<'_> {
                         import_dependency(logical, available, names, dag, remap, *dependency)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let activation = source
+                    .owner
+                    .activation
+                    .map(|activation| {
+                        import_dependency(logical, available, names, dag, remap, activation)
+                    })
+                    .transpose()?;
                 let id = dag.add_node(
-                    source.decl,
+                    crate::dag::Owner::new(source.owner.decl, activation),
                     source.op.clone(),
                     inputs,
                     source.output_type.clone(),
@@ -307,8 +309,10 @@ impl Partition<'_> {
                 if !available.contains(&StageValue::Tensor(dependency)) {
                     return Err("an executable staged helper contains an unresolved input".into());
                 }
+                // A value computed in an earlier segment arrives as a
+                // parameter, which checks nothing.
                 dag.add_node(
-                    source.decl,
+                    crate::dag::Owner::unconditional(source.owner.decl),
                     RiscOp::Load {
                         name: names[&StageValue::Tensor(dependency)].as_str().into(),
                     },
@@ -329,13 +333,8 @@ impl Partition<'_> {
             .copied()
             .collect::<BTreeSet<_>>();
         for node in &self.logical.nodes()[end..] {
-            for dependency in node
-                .inputs
-                .iter()
-                .chain(&node.shape_deps)
-                .chain(&node.result_claim_deps)
-            {
-                add_value_export(self.logical, *dependency, &mut exports);
+            for dependency in node.dependencies() {
+                add_value_export(self.logical, dependency, &mut exports);
             }
         }
         for source in self.sources.iter().filter(|source| source.before >= end) {
@@ -369,12 +368,7 @@ impl Partition<'_> {
                 // the dependency; otherwise reconstruct it at the later cut.
                 continue;
             }
-            for &dependency in node
-                .inputs
-                .iter()
-                .chain(&node.shape_deps)
-                .chain(&node.result_claim_deps)
-            {
+            for dependency in node.dependencies() {
                 import_dependency(
                     self.logical,
                     &self.available,
@@ -385,7 +379,8 @@ impl Partition<'_> {
                 )?;
             }
             let id = dag.add_node(
-                node.decl,
+                node.owner
+                    .remap_with(|activation| remap.get(&activation).copied()),
                 node.op.clone(),
                 node.inputs.iter().map(|i| remap[i]).collect(),
                 node.output_type.clone(),
@@ -432,7 +427,7 @@ impl Partition<'_> {
             .collect();
         // The completion root retains the segment on behalf of the staged
         // region, whose declaration is its single root's.
-        let completion_decl = self.logical.nodes()[self.logical.roots()[0].0].decl;
+        let completion_decl = self.logical.nodes()[self.logical.roots()[0].0].owner.decl;
         let completed = dag.add_node(
             completion_decl,
             RiscOp::Const {
