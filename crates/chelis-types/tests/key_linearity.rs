@@ -1212,7 +1212,7 @@ fn a_guard_consumes_its_keys_on_every_later_arm() {
             ),
         ),
     ] {
-        let errors = rejects(&name.to_string(), &source, CheckErrorKind::KeyReuse);
+        let errors = rejects(name, &source, CheckErrorKind::KeyReuse);
         assert!(
             errors.iter().any(|error| error
                 .message
