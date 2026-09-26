@@ -1,7 +1,19 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "d533cb6bfc647ac7074026f69956d67ae6bcbb9e440df58f626b1ba26f7f89a7",
+  "corpus_sha256": "e3b2963f23bd954ad00c4a56e61654b26bb14d2d7635de26d0e1a03a703d3226",
   "rows": [
+    {
+      "id": "claim.combinator_result.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
+    {
+      "id": "claim.combinator_result.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
     {
       "id": "claim.literal.identity_root.c",
       "baseline": "silent_unguarded",

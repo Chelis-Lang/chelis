@@ -2834,6 +2834,21 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
         ),
+        # chelis#2598: a tensor a list combinator returns, or nests in its
+        # result, has that combinator as its producer. At base a projected
+        # element ended in an internal provenance error or an abort.
+        _row(
+            "claim.combinator_result.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator",
+        ),
+        _row(
+            "claim.combinator_result.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator",
+        ),
         # chelis#2512: a pass-through axis restamped under another binder is
         # guarded by the restamping operation. At base the lanes failed
         # untyped, differently, at the later consumer.
