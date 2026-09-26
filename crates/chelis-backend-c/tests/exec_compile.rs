@@ -8233,9 +8233,11 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
     )
     .expect("runtime branch codegen");
     assert_eq!(generated.input_labels, ["flag", "x"]);
+    // The claim is checked under its carrier's owner activation, read from
+    // that Bool's storage row by row (any row active runs the guard).
     assert!(
-        generated.c_source.contains("chelis_tensor_to_scalar(t"),
-        "branch activation crosses the exact tagged scalar carrier"
+        generated.c_source.contains("__local_guard_active |= (((const "),
+        "the claim's guard reads its carrier's owner activation"
     );
     generated
 }
