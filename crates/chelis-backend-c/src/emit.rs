@@ -1294,7 +1294,10 @@ impl CEmitter {
             any,
             element,
             neutrals: (0..node.inputs.len())
-                .map(|slot| node.inactive_operand(slot).unwrap_or(0))
+                .map(|slot| {
+                    node.inactive_operand(slot)
+                        .expect("a checking operation names each operand's inactive value")
+                })
                 .collect(),
         });
     }
@@ -1306,8 +1309,7 @@ impl CEmitter {
         match &self.gate {
             Some(gate) => format!(
                 "(({}) ? ({elem}) : {})",
-                gate.element,
-                gate.neutrals.get(slot).copied().unwrap_or(0)
+                gate.element, gate.neutrals[slot]
             ),
             None => elem,
         }

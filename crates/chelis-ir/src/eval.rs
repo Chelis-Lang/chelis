@@ -558,7 +558,9 @@ fn neutralize_inactive_operands(
     // (one) is accepted in every slot.
     let mut neutrals = Vec::<(NodeId, i64)>::new();
     for (slot, input) in node.inputs.iter().enumerate() {
-        let neutral = node.inactive_operand(slot).unwrap_or(0);
+        let neutral = node
+            .inactive_operand(slot)
+            .expect("a checking operation names each operand's inactive value");
         match neutrals.iter_mut().find(|(id, _)| id == input) {
             Some((_, existing)) => *existing = (*existing).max(neutral),
             None => neutrals.push((*input, neutral)),
