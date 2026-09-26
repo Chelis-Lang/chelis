@@ -16,7 +16,7 @@ the whole carried value. See
 [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).
 
 With `--target c`, a program whose definitions take a parameter the tensor
-entry cannot carry (a string, data-type or container parameter) now keeps each
+entry cannot carry (a string, data-type, container or unit parameter) now keeps each
 such definition as its own C function. Previously a constant body such as
 `def f(x: List[i64]) -> i64 = 1i64` emitted only a zero-input program entry and
 dropped `f`. See [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).
