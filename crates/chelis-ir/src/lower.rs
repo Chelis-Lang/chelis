@@ -1296,9 +1296,9 @@ fn lower_program_with_context_inner(
             may_trap[node.owner.decl.0 as usize] = true;
         }
     }
-    let library_scope = DeclarationScope {
+    let library_scope = LexicalScope {
         bindings: ctx.bindings.clone(),
-        ..DeclarationScope::default()
+        ..LexicalScope::default()
     };
     let library_values = ctx
         .dag
@@ -6490,24 +6490,22 @@ struct TopLevelValue {
 /// reference is reached, gated by the site's activation, and no other
 /// declaration reads a node that can trap: the verifier rejects that
 /// sharing. The declaration's own nodes run only when it is selected.
+///
+/// Its scope and a callable's declaring scope ([`CallableScope`]) are one
+/// representation for one rule, that a body reads its free names where it
+/// was written, applied to two cases. A callable declared at top level
+/// resolves in the live top level ([`LowerCtx::top_level`]); an initializer
+/// resolves in the snapshot its declaration was lowered in, so the copy
+/// lowers exactly as the declaration did and a library initializer keeps the
+/// library's scope when new code declares a name it reads.
 struct TrappingInitializer {
     expr: Expr,
-    scope: DeclarationScope,
-}
-
-/// The lexical state a top-level declaration's initializer is lowered in:
-/// the top-level names bound before it, and no enclosing function's
-/// witnesses or type substitutions. Lowering an initializer again in this
-/// state resolves every name it reads as its declaration did, whatever the
-/// reference site binds.
-#[derive(Clone, Default)]
-struct DeclarationScope {
-    bindings: UnordMap<String, LoweredValue>,
-    list_bindings: UnordMap<String, Expr>,
-    shape_bindings: UnordMap<String, Expr>,
-    static_size_bindings: UnordMap<String, i64>,
-    local_callables: UnordMap<String, CallableExpr>,
-    fn_typed_params: UnordSet<String>,
+    /// The lexical state the declaration's initializer was lowered in: the
+    /// top-level names bound before it, and no enclosing function's
+    /// witnesses ([`LowerCtx::declaration_scope`]). Lowering the initializer
+    /// again in this state resolves every name it reads as its declaration
+    /// did, whatever the reference site binds.
+    scope: LexicalScope,
 }
 
 /// A tuple whose every leaf is a key (spec/04 §8.4.1), such as the pair
@@ -8325,16 +8323,35 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// This context's current lexical state as a [`DeclarationScope`]: at
-    /// the top level, the names every earlier declaration bound.
-    fn declaration_scope(&self) -> DeclarationScope {
-        DeclarationScope {
-            bindings: self.bindings.clone(),
-            list_bindings: self.list_bindings.clone(),
-            shape_bindings: self.shape_bindings.clone(),
-            static_size_bindings: self.static_size_bindings.clone(),
-            local_callables: self.local_callables.clone(),
-            fn_typed_params: self.fn_typed_params.clone(),
+    /// This context's current lexical state as a trapping initializer's
+    /// scope ([`TrappingInitializer::scope`]): at the top level, the names
+    /// every earlier declaration bound, with no enclosing function's
+    /// witnesses.
+    fn declaration_scope(&self) -> LexicalScope {
+        LexicalScope {
+            binding_witnesses: UnordMap::new(),
+            ..self.capture_scope()
+        }
+    }
+
+    /// A trapping initializer as a transform sub-context sees it: its scope
+    /// rebased onto the sub-context's `Load`s with the same `rebase` as the
+    /// transformed body's declaring scope, so a parent node both scopes bind
+    /// is one `Load` and one splice entry. Host list and shape bindings are
+    /// expressions over names, lowered again where they are read, and are
+    /// kept as they are.
+    fn rebase_initializer(
+        &self,
+        subctx: &mut LowerCtx,
+        initializer: &TrappingInitializer,
+        rebase: &mut ScopeRebase,
+    ) -> TrappingInitializer {
+        let mut scope = self.rebase_scope(subctx, &initializer.scope, rebase);
+        scope.list_bindings = initializer.scope.list_bindings.clone();
+        scope.shape_bindings = initializer.scope.shape_bindings.clone();
+        TrappingInitializer {
+            expr: initializer.expr.clone(),
+            scope,
         }
     }
 
@@ -8405,7 +8422,7 @@ impl<'program> LowerCtx<'program> {
         }
         let initializer = Arc::new(TrappingInitializer {
             expr: initializer.clone(),
-            scope: DeclarationScope::default(),
+            scope: LexicalScope::default(),
         });
         let mut scratch = LowerCtx::new(
             self.program_types.clone(),
@@ -8436,20 +8453,7 @@ impl<'program> LowerCtx<'program> {
     /// Lower `initializer` here, in its declaration's scope and under this
     /// position's owner, and return its value.
     fn lower_initializer(&mut self, initializer: &TrappingInitializer) -> LoweredValue {
-        let scope = &initializer.scope;
-        let bindings = std::mem::replace(&mut self.bindings, scope.bindings.clone());
-        let list_bindings = std::mem::replace(&mut self.list_bindings, scope.list_bindings.clone());
-        let shape_bindings =
-            std::mem::replace(&mut self.shape_bindings, scope.shape_bindings.clone());
-        let static_size_bindings = std::mem::replace(
-            &mut self.static_size_bindings,
-            scope.static_size_bindings.clone(),
-        );
-        let local_callables =
-            std::mem::replace(&mut self.local_callables, scope.local_callables.clone());
-        let fn_typed_params =
-            std::mem::replace(&mut self.fn_typed_params, scope.fn_typed_params.clone());
-        let binding_witnesses = std::mem::take(&mut self.binding_witnesses);
+        let reference_scope = self.replace_scope(initializer.scope.clone());
         let signature_witnesses = std::mem::take(&mut self.signature_witnesses);
         let activation_witnesses = std::mem::take(&mut self.activation_witnesses);
         let local_unit_refinements = std::mem::take(&mut self.local_unit_refinements);
@@ -8460,13 +8464,7 @@ impl<'program> LowerCtx<'program> {
         let rank_substitutions = std::mem::take(&mut self.rank_substitutions);
         let dim_axis_positions = std::mem::take(&mut self.dim_axis_positions);
         let value = self.lower_expr(&initializer.expr);
-        self.bindings = bindings;
-        self.list_bindings = list_bindings;
-        self.shape_bindings = shape_bindings;
-        self.static_size_bindings = static_size_bindings;
-        self.local_callables = local_callables;
-        self.fn_typed_params = fn_typed_params;
-        self.binding_witnesses = binding_witnesses;
+        self.replace_scope(reference_scope);
         self.signature_witnesses = signature_witnesses;
         self.activation_witnesses = activation_witnesses;
         self.local_unit_refinements = local_unit_refinements;
