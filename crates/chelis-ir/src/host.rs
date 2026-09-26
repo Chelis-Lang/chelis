@@ -4805,9 +4805,12 @@ impl UncarriableWalk<'_> {
 
 /// Builtins the kernel lowering has no arm for: the lowerer's own host-side
 /// list (`lower.rs`, `expr_requires_host_runtime_with_ctx`) minus the names
-/// its `lower_builtin_app` does handle (`count`, `shape`, `concat`, `fold`,
-/// a static `to_tensor`, which the preflight covers). Measured against the
-/// arms on `801f92c02`.
+/// its `lower_builtin_app` does handle (`count`, `shape`, `concat`, a static
+/// `to_tensor`, which the preflight covers). Measured against the arms on
+/// `801f92c02`. `fold` is listed although `lower_builtin_app` has an arm:
+/// that arm unrolls only under a differentiated body's List rewrites, which
+/// neither a kernel nor a staged host region enables, so everywhere this
+/// walk runs `fold` lowers to an unresolved `Load("fold")` (chelis#2574).
 const HOST_ONLY_BUILTINS: &[&str] = &[
     "print",
     "debug",
@@ -4838,6 +4841,7 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "range",
     "map",
     "filter",
+    "fold",
     "scan",
     "tensor_scan",
     "partition",
