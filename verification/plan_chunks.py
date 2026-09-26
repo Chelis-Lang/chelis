@@ -15,13 +15,16 @@ then
    pattern in a later chunk would also hide them; the quotient graph is made
    acyclic again by merging its SCCs;
 3. packs the units, dependencies first, into chunks under a cost budget
-   (statements + item weight x items); a unit larger than the budget is its
-   own chunk.
+   (statements + item weight x items); a unit costing more than --isolate-cost
+   (one huge function or recursive group; Charon/Aeneas need 4-7 GB for the
+   15-25k-statement ones) is its own chunk.
 
 Each chunk records its package, features, root patterns (every owned item that
 Charon can select), the opaque patterns of the workspace items it reaches that
 earlier chunks own (so it carries their signatures, not their bodies; types stay
-transparent and come from the owner's manifest), and the
+transparent and come from the owner's manifest, and the types declared in the
+body of an opaque item get a more precise `transparent` (--include) pattern,
+since a pattern also matches the items nested in its item), and the
 owned local items the coverage audit expects. Items that cannot be roots
 (synthetic items, impls that Charon's passes remove) are owned but not rooted.
 
@@ -182,7 +185,7 @@ def shell_index(items: list[dict], patterns) -> dict[int, str]:
 
 
 def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weight: int,
-               owner_of: dict, shell: dict[int, str]) -> tuple[list[dict], list[str]]:
+               owner_of: dict, shell: dict[int, str], isolate: int) -> tuple[list[dict], list[str]]:
     """Chunks of one crate, and the reachable items of earlier crates that no
     chunk owns (they are then translated, hence owned, here).
 
@@ -190,7 +193,9 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
     owning an item of that name (names are not unique: closures print alike,
     and a dependency's pattern may be spelled differently in another dump);
     it is extended here. Native shell items (`shell`) are owned by no chunk:
-    every chunk makes them opaque."""
+    every chunk makes them opaque. A unit costing more than `isolate` (one huge
+    function or recursive group, which no plan can split) is its own chunk, so
+    that its Charon/Aeneas resources and failures are not shared."""
     items = dump["items"]
     local = [i for i, item in enumerate(items) if item["crate"] == crate and i not in shell]
     units = units_of(items, local)
@@ -203,11 +208,14 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
     current_cost = 0
     for unit in units:
         unit_cost = cost(unit)
-        if current and current_cost + unit_cost > budget:
+        if current and (current_cost + unit_cost > budget or unit_cost > isolate):
             packed.append(current)
             current, current_cost = [], 0
         current.append(unit)
         current_cost += unit_cost
+        if unit_cost > isolate:
+            packed.append(current)
+            current, current_cost = [], 0
     if current:
         packed.append(current)
 
@@ -231,6 +239,7 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
         seen = set(owned)
         frontier = list(owned)
         opaque = set()
+        opaque_targets = []
         while frontier:
             v = frontier.pop()
             for w in list(items[v]["deps"]) + list(items[v]["reaches"]):
@@ -249,8 +258,10 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
                     if local_owner[w] > chunk["index"]:
                         raise ExtractionFailure(f"{crate}: chunk order violated by {target['name']}")
                     opaque.add(target["pattern"])
+                    opaque_targets.append(w)
                 elif (target["crate"], target["kind"], target["name"]) in owner_of:
                     opaque.add(target["pattern"])
+                    opaque_targets.append(w)
                 else:
                     # Generated for this use only (a provided method or drop glue of an
                     # earlier crate's type that no earlier dump contains): this chunk
@@ -259,6 +270,21 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
                     owner_of[(target["crate"], target["kind"], target["name"])] = chunk["index"]
                     chunk.setdefault("adopted", []).append(w)
         chunk["opaque"] = sorted(opaque)
+        # Name patterns match prefixes, so an opaque function or impl also hides the
+        # types declared in its body (serde's `deserialize::__Field`, whose discriminant a
+        # monomorphized visitor body reads). Types stay transparent: name them with the
+        # more precise --include pattern, which wins over the enclosing --opaque one.
+        transparent, unnamed = set(), set()
+        for w in opaque_targets:
+            for j in items[w]["pattern_also_matches"]:
+                if j in shell or items[j]["kind"] != "type":
+                    continue
+                if items[j]["pattern"]:
+                    transparent.add(items[j]["pattern"])
+                else:
+                    unnamed.add(items[j]["name"])
+        chunk["transparent"] = sorted(transparent)
+        chunk["hidden_types"] = sorted(unnamed)
     return chunks, sorted(unowned)
 
 
@@ -300,6 +326,8 @@ def main() -> None:
     parser.add_argument("--budget", type=int, default=40_000,
                         help="chunk cost budget: statements + item weight x items")
     parser.add_argument("--item-weight", type=int, default=10)
+    parser.add_argument("--isolate-cost", type=int, default=15_000,
+                        help="a unit costing more is its own chunk")
     parser.add_argument("--target-dir", default=str(ROOT / "target" / "agents" / "wholecore"))
     parser.add_argument("--min-free-percent", type=int, default=20)
     parser.add_argument("--rss-cap-mb", type=int, default=7000)
@@ -422,6 +450,7 @@ def main() -> None:
         entry["core_dependents"] = sorted(entry["core_dependents"])
 
     owner_of: dict = {}
+    isolate = args.isolate_cost
     planned = []
     crate_stats = {}
     for crate in WORKSPACE_CRATES:
@@ -429,7 +458,7 @@ def main() -> None:
         if dump["crate"] != crate:
             raise ExtractionFailure(f"dump for {crate} names crate {dump['crate']}")
         chunks, unowned = plan_crate(dump, crate, len(planned), args.budget, args.item_weight, owner_of,
-                                     shells[crate])
+                                     shells[crate], isolate)
         items = dump["items"]
         local = [item for item in items if item["crate"] == crate]
         crate_stats[crate] = {
@@ -453,6 +482,10 @@ def main() -> None:
                 "features": chain["features"].get(crate, []),
                 "roots": [item["pattern"] for item in owned if rootable(item)],
                 "opaque": chunk["opaque"],
+                # Types declared in the bodies of opaque items (--include, see plan_crate);
+                # hidden_types: such types without a pattern (they stay opaque).
+                "transparent": chunk["transparent"],
+                "hidden_types": chunk["hidden_types"],
                 "externals": [earlier["name"] for earlier in planned],
                 "cost": chunk["cost"],
                 "units": chunk["units"],
@@ -490,7 +523,7 @@ def main() -> None:
                        (work / "dumps" / f"{crate}.callgraph.json").read_bytes()).hexdigest()
                        for crate in WORKSPACE_CRATES},
                    "native_shell_sha256": sha256_file(NATIVE_SHELL),
-                   "budget": args.budget, "item_weight": args.item_weight,
+                   "budget": args.budget, "item_weight": args.item_weight, "isolate_cost": isolate,
                    "charon_options": list(CHARON_OPTIONS),
                    "includes": list(ITERATOR_ADAPTERS) + list(CORE_FAMILIES)},
         "diagnostic_only": bool(args.allow_charon_errors),

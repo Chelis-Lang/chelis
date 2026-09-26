@@ -1,11 +1,13 @@
 """Separately compiled whole-core extraction (fail closed).
 
 Input is a chunk plan written by `plan_chunks.py`. Every chunk runs Charon on one
-workspace package with an explicit root set (`--start-from-file`) and the
-items owned by earlier chunks made opaque (`--opaque-file`), then Aeneas with
+workspace package with an explicit root set (`--start-from-file`), the
+items owned by earlier chunks made opaque (`--opaque-file`) and the types
+declared in their bodies kept transparent (`--include`), then Aeneas with
 canonical names, every earlier manifest as `-external`, and `-emit-manifest`.
 All chunks write into one Lean source root, compiled unmodified by one Lake
-package that requires the Aeneas Lean library.
+package that requires the Aeneas Lean library, one module at a time (imports
+first) so that one Lean process runs at a time under the RSS cap.
 
     python verification/extract_whole.py --plan PLAN --out FRESH_DIR \
         --charon BIN --aeneas BIN --aeneas-lean-dir BUILT_LIB [--diagnostic]
@@ -15,13 +17,16 @@ status, a missing/stale/empty artifact (checked by mtime, size and sha256), a
 source tree or Charon binary that differs from the plan, or a coverage defect.
 
 `--diagnostic` never accepts: Charon runs without --abort-on-error, Aeneas
-without -abort-on-error, failing chunks do not stop the run, and every error is
-recorded. A chunk whose predecessor wrote no manifest is extracted with the
+without -abort-on-error but with -diagnostic-manifest (a chunk with errors
+still writes a manifest of its emitted declarations, marked incomplete), failing
+chunks do not stop the run, and every error is recorded. A chunk whose
+predecessor wrote no manifest, or an incomplete one, is extracted with the
 manifests that exist; the resulting unknown externals are reported as
-consequential on the failed owner chunk. The run writes blockers.json and
-blockers.md (per-chunk status and first errors, errors classified by blocker
-class with a suggested owner, counts per class), and the summary says
-DIAGNOSTIC.
+consequential on the failed owner chunk. Lean modules whose imports failed or
+were not generated are not built ("blocked"). The run writes blockers.json and
+blockers.md (per-chunk status and first errors, per-module Lean results, errors
+classified by blocker class with a suggested owner, counts per class), and the
+summary says DIAGNOSTIC.
 
 The FCIS imperative shell listed in verification/native_shell.json is opaque in
 every chunk and never extracted (see plan_chunks.py).
@@ -32,9 +37,12 @@ Outputs under --out:
                   binary given}, "tools": {"charon"|"aeneas": {"path", "sha256",
                   "files": {path: sha256}, "version"}}, "chunks": [{"name",
                   "module", "crate", "charon": STEP, "aeneas": STEP,
-                  "llbc": {"bytes", "sha256"}, "manifest": {"entries", "sha256"}
-                  | null}], "declarations", "modules": [Lean module names],
-                  "lake": STEP | null}
+                  "llbc": {"bytes", "sha256"}, "manifest": {"entries", "sha256",
+                  "complete"} | null}], "declarations", "modules": [Lean module
+                  names], "aeneas_diagnostic_options": [options],
+                  "lake": {"status", "built", "failed", "blocked", "wall_seconds",
+                  "peak_rss_bytes", "modules": {module: STEP | {"status":
+                  "blocked", "missing_imports", "failed_imports"}}} | null}
                  STEP = {"status": "ok"|"failed"|"skipped", "returncode",
                   "wall_seconds", "peak_rss_bytes" (largest single process, from
                   wait4), "peak_tree_rss_bytes" (sampled sum over the process
@@ -56,6 +64,7 @@ Outputs under --out:
                   [{"chunk", "name"}], "opaque_local_items": count,
                   "opaque_local_item_list": [{"chunk", "name"}],
                   "chunks_without_manifest": [names],
+                  "chunks_with_partial_manifest": [names] (diagnostic runs),
                   "native_shell": {"sha256", "items": {pattern: {"kind",
                   "crate", "lean_model": Lean declaration | null,
                   "core_dependents": [non-shell local items with a deps edge
@@ -77,6 +86,7 @@ Outputs under --out:
 """
 
 import argparse
+import collections
 import gzip
 import hashlib
 import json
@@ -101,6 +111,11 @@ AENEAS_ACCEPTANCE = (
     "-backend", "lean", "-checks", "-abort-on-error", "-warnings-as-errors",
     "-strict-joins", "-sequential", "-no-progress-bar", "-canonical-names",
 )
+# Diagnostic runs only (Aeneas rejects it with -abort-on-error): the manifest is always
+# written, and a run with errors (or a partial -external) writes the emitted
+# declarations only, marked incomplete ({"version": 2, "complete": false}); only runs
+# with the option may load such a manifest.
+AENEAS_DIAGNOSTIC = ("-diagnostic-manifest",)
 PLAN_FORMAT = "chelis-wholecore-plan"
 COVERAGE_FORMAT = "chelis-wholecore-coverage"
 NATIVE_SHELL = ROOT / "verification" / "native_shell.json"
@@ -344,13 +359,17 @@ def read_obligations(path: Path, started: float, chunk: str) -> list[dict]:
 
 def charon_command(charon: str, *, package: str, features: list[str], llbc: Path,
                    target: Path, strict: bool, shell_file: Path, roots: list[str] | None = None,
-                   roots_file: Path | None = None, opaque_file: Path | None = None) -> list[str]:
+                   roots_file: Path | None = None, opaque_file: Path | None = None,
+                   transparent: list[str] = ()) -> list[str]:
     command = [charon, "cargo", *CHARON_OPTIONS, "--mir=promoted"]
     if strict:
         command += CHARON_STRICT
     else:
         command += ["--error-on-warnings"]
     command += charon_includes(WORKSPACE_CRATES)
+    # Types declared in the bodies of opaque items (plan_chunks.py: "transparent").
+    for pattern in transparent:
+        command += ["--include", pattern]
     for root in roots or ():
         command += ["--start-from", root]
     if roots_file:
@@ -384,7 +403,8 @@ SOURCE_LINE = re.compile(r"^Source: '([^']*)', lines? (\S+)")
 COMPILER_LINE = re.compile(r"^Compiler source: (\S+), line (\d+)")
 CHARON_ERROR = re.compile(r"^(error|warning)(\[[A-Z0-9]+\])?: (.*)$")
 CHARON_LOCATION = re.compile(r"^\s*--> (\S+)")
-LEAN_ERROR = re.compile(r"^(?:error: )?(\S+\.lean):(\d+):(\d+): error: (.*)$")
+# `lean`: "F.lean:L:C: error: M"; Lake 5 (Lean 4.29): "error: F.lean:L:C: M".
+LEAN_ERROR = re.compile(r"^(?:error: (\S+\.lean):(\d+):(\d+): (?!error: )|(?:error: )?(\S+\.lean):(\d+):(\d+): error: )(.*)$")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 # Blocker classes in priority order: (class, suggested owner, regex over
@@ -406,6 +426,8 @@ CLASSES = (
     ("nested borrows E11", "AeneasNested2",
      r"[Nn]ested (mutable )?borrow|end_abs|InterpBorrowsCore\.ml|InterpBorrows\.ml|"
      r"SymbolicToPureValues\.ml|reborrow of a reborrow"),
+    ("separate compilation", "AeneasSC",
+     r"MANIFEST_MISMATCH"),
     ("missing std model", "AeneasModels3",
      r"UNKNOWN_EXTERNAL|not listed in the builtin|external, unknown|[Mm]issing (builtin|model)|no model|"
      r"unknown type declaration with region parameters|Missing borrow analysis for the type|"
@@ -504,13 +526,14 @@ def parse_lean_log(log: Path, lean_root: Path) -> list[dict]:
     for line in ANSI.sub("", log.read_text(errors="replace")).splitlines():
         match = LEAN_ERROR.match(line.strip())
         if match:
-            path = Path(match.group(1))
+            file, row = (match.group(1), match.group(2)) if match.group(1) else (match.group(4), match.group(5))
+            path = Path(file) if Path(file).is_absolute() else lean_root / file  # Lake runs in the package
             try:
                 module = str(path.resolve().relative_to(lean_root.resolve()).with_suffix("")).replace("/", ".")
             except ValueError:
                 module = str(path)
-            errors.append({"level": "error", "message": match.group(4), "module": module,
-                           "source": f"{module}:{match.group(2)}", "compiler": "lean"})
+            errors.append({"level": "error", "message": match.group(7), "module": module,
+                           "source": f"{module}:{row}", "compiler": "lean"})
     return errors
 
 
@@ -569,7 +592,7 @@ def load_plan(path: Path) -> dict:
     return plan
 
 
-CHUNK_IDENTITY = ("name", "module", "package", "features", "roots", "opaque", "externals")
+CHUNK_IDENTITY = ("name", "module", "package", "features", "roots", "opaque", "transparent", "externals")
 
 
 def reusable_chunks(earlier: Path, plan: dict, charon: dict, aeneas: dict) -> dict[str, dict]:
@@ -590,7 +613,7 @@ def reusable_chunks(earlier: Path, plan: dict, charon: dict, aeneas: dict) -> di
     records = {record["name"]: record for record in summary["chunks"]}
     return {chunk["name"]: records[chunk["name"]] for chunk in plan["chunks"]
             if chunk["name"] in records and chunk["name"] in chunks
-            and all(chunks[chunk["name"]][key] == chunk[key] for key in CHUNK_IDENTITY)}
+            and all(chunks[chunk["name"]].get(key) == chunk.get(key) for key in CHUNK_IDENTITY)}
 
 
 def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: list[dict],
@@ -600,6 +623,14 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
     target = Path(args.target_dir).resolve()
     prepare_target(target, charon)
     manifests: dict[str, Path] = {}
+    # Chunks whose manifest is missing or partial ("missing"/"partial"): the workspace
+    # items they own are consequential unknown externals in later chunks.
+    degraded: dict[str, str] = {}
+    owners: dict[str, list[str]] = {}
+    for chunk in plan["chunks"]:
+        for item in chunk["owned"] + chunk.get("adopted", []):
+            for key in {normalize_pattern(key) for key in (item["name"], item["pattern"]) if key}:
+                owners.setdefault(key, []).append(chunk["name"])
     for index, chunk in enumerate(plan["chunks"]):
         work = out / "chunks" / f"{index:02d}-{chunk['name']}"
         work.mkdir(parents=True)
@@ -616,13 +647,18 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
                     raise ExtractionFailure(f"reused manifest of {chunk['name']} changed")
                 record["manifest"] = dict(record["manifest"], path=str(manifest))
                 manifests[chunk["name"]] = manifest
+                if not record["manifest"].get("complete", True):
+                    degraded[chunk["name"]] = "partial"
+            else:
+                degraded[chunk["name"]] = "missing"
             continue
         record = {"name": chunk["name"], "module": chunk["module"], "crate": chunk["crate"],
                   "package": chunk["package"], "features": chunk["features"],
                   "roots": len(chunk["roots"]), "opaque": len(chunk["opaque"]),
                   "charon": None, "aeneas": None, "llbc": None, "manifest": None,
-                  "errors": [], "missing_externals": []}
+                  "errors": [], "missing_externals": [], "partial_externals": []}
         results.append(record)
+        degraded[chunk["name"]] = "missing"  # until its manifest is read
         print(f"== chunk {index}: {chunk['name']} ({chunk['package']}, {len(chunk['roots'])} roots, "
               f"{len(chunk['opaque'])} opaque)", flush=True)
         roots = work / "roots.txt"
@@ -639,7 +675,7 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
         step = runner.run(charon_command(
             args.charon, package=chunk["package"], features=chunk["features"], llbc=llbc,
             target=target, strict=not args.diagnostic, shell_file=shell, roots_file=roots,
-            opaque_file=opaque if chunk["opaque"] else None,
+            opaque_file=opaque if chunk["opaque"] else None, transparent=chunk.get("transparent", []),
         ), log=work / "charon.log", env=charon_env)
         record["charon"] = step
         record["errors"] += [dict(error, stage="charon") for error in parse_charon_log(work / "charon.log")]
@@ -694,12 +730,15 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
         command = [args.aeneas, *AENEAS_ACCEPTANCE]
         if args.diagnostic:
             command.remove("-abort-on-error")
+            command += AENEAS_DIAGNOSTIC
         command += ["-split-files", "-subdir", chunk["module"]]
         if args.funs_chunk_bytes:
             command += ["-funs-chunk-bytes", str(args.funs_chunk_bytes)]
         for earlier in chunk["externals"]:
             if earlier in manifests:
                 command += ["-external", str(manifests[earlier])]
+                if degraded.get(earlier) == "partial":
+                    record["partial_externals"].append(earlier)
             elif args.diagnostic:
                 record["missing_externals"].append(earlier)
             else:
@@ -715,10 +754,20 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
         record["unknown_externals"] = unknown_externals(lean / chunk["module"])
         shell_names = {normalize_pattern(pattern) for pattern in plan["native_shell"]}
         for name in record["unknown_externals"]:
+            # The earlier chunks owning an item of that name (names are not unique).
+            candidates = [earlier for earlier in owners.get(normalize_pattern(name), ())
+                          if earlier in chunk["externals"]]
+            owner = next((earlier for earlier in candidates if earlier in degraded),
+                         candidates[0] if candidates else None)
             if normalize_pattern(name) in shell_names:
                 tag = "NATIVE_SHELL boundary item without a Lean model"
-            elif name.split("::", 1)[0] in WORKSPACE_CRATES and record["missing_externals"]:
-                tag = "CONSEQUENTIAL workspace item of a chunk without manifest"
+            elif owner in degraded:
+                tag = f"CONSEQUENTIAL workspace item of {owner} ({degraded[owner]} manifest)"
+            elif owner is not None:
+                tag = f"MANIFEST_MISMATCH workspace item not found in the complete manifest of {owner}"
+            elif name.split("::", 1)[0] in WORKSPACE_CRATES and (record["missing_externals"]
+                                                                or record["partial_externals"]):
+                tag = "CONSEQUENTIAL workspace item (owner unresolved) of a chunk without complete manifest"
             else:
                 tag = "UNKNOWN_EXTERNAL definition without model or manifest"
             record["errors"].append({"stage": "aeneas", "level": "error", "message": f"{tag}: {name}",
@@ -739,9 +788,18 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
                                                 "see this chunk's items as unknown externals",
                                      "source": None, "compiler": "extract_whole"})
             continue
-        entries = json.loads(manifest.read_text())["entries"]
-        record["manifest"] = dict(identity, entries=len(entries))
+        data = json.loads(manifest.read_text())
+        # -diagnostic-manifest: a run with errors (or with a partial -external) writes a
+        # manifest of the emitted declarations only, marked {"version": 2, "complete": false}.
+        complete = data.get("version") == 1 and data.get("complete", True) is True
+        if not complete and not args.diagnostic:
+            raise ExtractionFailure(f"chunk {chunk['name']}: incomplete manifest {manifest}")
+        record["manifest"] = dict(identity, entries=len(data["entries"]), complete=complete)
         manifests[chunk["name"]] = manifest
+        if complete:
+            degraded.pop(chunk["name"])
+        else:
+            degraded[chunk["name"]] = "partial"
         try:
             record["obligations"] = read_obligations(obligations, step["started"], chunk["name"])
         except (ExtractionFailure, ValueError) as error:
@@ -801,13 +859,78 @@ def write_lake_package(lean: Path, aeneas_lean: Path, modules: list[str]) -> Non
                     link.symlink_to(package.resolve())
 
 
-def lean_build(lean: Path, runner: Runner, diagnostic: bool) -> tuple[dict, list[dict]]:
-    step = runner.run(["lake", "build"], cwd=lean, log=lean.parent / "lake-build.log",
-                      env={"LAKE_NO_CACHE": "1"})
-    errors = parse_lean_log(lean.parent / "lake-build.log", lean)
-    if step["status"] != "ok" and not diagnostic:
-        raise ExtractionFailure(f"lake build failed; log: {step['log']}")
-    return step, errors
+LEAN_IMPORT = re.compile(r"^import\s+(\S+)", re.M)
+
+
+def lean_build(lean: Path, runner: Runner, diagnostic: bool, modules: list[str],
+               chunk_modules: set[str]) -> tuple[dict, list[dict]]:
+    """Build the generated modules one at a time, imports first (`lake build +M`),
+    so that one Lean process runs at a time under the RSS cap (a package-wide
+    `lake build` elaborates modules in parallel). A module importing a module that
+    failed, or that was not generated (the FunsExternal of a chunk with unknown
+    externals), is not built: "blocked" (diagnostic runs only; accepting runs stop
+    at the first failure). Returns {"status", "built", "failed", "blocked",
+    "modules": {module: STEP | {"status": "blocked", "missing_imports",
+    "failed_imports"}}} and the Lean errors."""
+    generated = set(modules)
+    imports = {}
+    for module in modules:
+        text = (lean / Path(*module.split("."))).with_suffix(".lean").read_text(errors="replace")
+        imports[module] = [name for name in LEAN_IMPORT.findall(text) if name.split(".")[0] in chunk_modules]
+    order: list[str] = []
+    state: dict[str, int] = {}
+
+    def visit(module: str) -> None:
+        if state.get(module) == 2:
+            return
+        if state.get(module) == 1:
+            raise ExtractionFailure(f"generated Lean modules import each other cyclically: {module}")
+        state[module] = 1
+        for name in imports[module]:
+            if name in generated:
+                visit(name)
+        state[module] = 2
+        order.append(module)
+
+    for module in modules:
+        visit(module)
+    logs = lean.parent / "lake"
+    logs.mkdir(exist_ok=True)
+    steps: dict[str, dict] = {}
+    errors: list[dict] = []
+    for module in order:
+        missing = [name for name in imports[module] if name not in generated]
+        failed = [name for name in imports[module] if name in steps and steps[name]["status"] != "ok"]
+        if missing or failed:
+            if not diagnostic:
+                raise ExtractionFailure(f"Lean module {module}: imports missing {missing} or failed {failed}")
+            steps[module] = {"status": "blocked", "missing_imports": missing, "failed_imports": failed}
+            errors.append({"level": "error", "module": module, "source": None, "compiler": "lake",
+                           "message": f"CONSEQUENTIAL: not built; imports not generated {missing}, "
+                                      f"imports failed {failed}"})
+            continue
+        log = logs / f"{module}.log"
+        # Memory-gated and capped always; the shared slot only for large modules (> 256 KB).
+        size = (lean / Path(*module.split("."))).with_suffix(".lean").stat().st_size
+        step = runner.run(["lake", "build", f"+{module}"], cwd=lean, log=log, env={"LAKE_NO_CACHE": "1"},
+                          slot=size > 256 << 10)
+        steps[module] = step
+        found = parse_lean_log(log, lean)
+        if step["status"] != "ok":
+            if not diagnostic:
+                raise ExtractionFailure(f"lake build of {module} failed; log: {log}")
+            if not any(error["module"] == module for error in found):
+                reason = ("killed at the RSS cap" if step["rss_cap_killed"]
+                          else f"exit status {step['returncode']}")
+                found.append({"level": "error", "module": module, "source": None, "compiler": "lake",
+                              "message": f"lake build failed without a Lean error ({reason}); log: {log}"})
+        errors += found
+    counts = collections.Counter(step["status"] for step in steps.values())
+    return {"status": "ok" if counts["ok"] == len(order) else "failed", "built": counts["ok"],
+            "failed": counts["failed"], "blocked": counts["blocked"],
+            "wall_seconds": round(sum(step.get("wall_seconds", 0) for step in steps.values()), 2),
+            "peak_rss_bytes": max((step.get("peak_tree_rss_bytes", 0) for step in steps.values()), default=0),
+            "modules": {module: steps[module] for module in order}}, errors
 
 
 # ---------------------------------------------------------------------------
@@ -975,19 +1098,21 @@ def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
                     for record in results for name in record.get("opaque_local", [])]
     without_manifest = [record["name"] for record in results if not record.get("manifest")]
     without_manifest += [chunk["name"] for chunk in plan["chunks"][len(results):]]
+    partial = [record["name"] for record in results
+               if record.get("manifest") and not record["manifest"].get("complete", True)]
     report = {
         "format": COVERAGE_FORMAT, "version": 2, "chain": plan["chain"],
         "crates": crates, "owners": owners, "categories": categories,
         "missing_items": missing, "duplicate_items": duplicates,
         "unknown_externals": len(unknown), "unknown_external_items": unknown,
         "opaque_local_items": len(opaque_local), "opaque_local_item_list": opaque_local,
-        "chunks_without_manifest": without_manifest,
+        "chunks_without_manifest": without_manifest, "chunks_with_partial_manifest": partial,
         "native_shell": {"sha256": plan["inputs"].get("native_shell_sha256"), "items": shell,
                          "defects": shell_defects},
         "pipeline_reachable": plan.get("pipeline_reachable", {}),
         "emitted_declarations": len(emitted),
     }
-    report["ok"] = not (missing or duplicates or unknown or opaque_local or without_manifest
+    report["ok"] = not (missing or duplicates or unknown or opaque_local or without_manifest or partial
                         or shell_defects)
     return report
 
@@ -1016,7 +1141,8 @@ def write_coverage_summary(report: dict, path: Path) -> None:
     lines += ["", f"duplicates: {len(report['duplicate_items'])}, unknown externals: "
               f"{report['unknown_externals']}, opaque local items: {report['opaque_local_items']}, "
               f"missing: {len(report['missing_items'])}, chunks without manifest: "
-              f"{len(report['chunks_without_manifest'])}, shell defects: "
+              f"{len(report['chunks_without_manifest'])}, partial manifests: "
+              f"{len(report['chunks_with_partial_manifest'])}, shell defects: "
               f"{len(report['native_shell']['defects'])}", "",
               "## Pipeline-rooted reachability (items of each crate reachable from "
               "chelis_pipeline_core's local items)", ""]
@@ -1082,21 +1208,42 @@ def fmt_step(step) -> str:
             f"peak {step['peak_rss_bytes'] >> 20} MB)")
 
 
-def write_blockers(report: dict, results: list[dict], lake: dict | None, coverage_report: dict,
-                   path: Path) -> None:
+def write_blockers(report: dict, results: list[dict], lake: dict | None, lean_errors: list[dict],
+                   coverage_report: dict, path: Path) -> None:
     lines = ["# Whole-core blockers (DIAGNOSTIC run, not an acceptance)", "",
              "## Chunks", "",
              "| chunk | Charon | Aeneas | manifest entries | errors | first error (class; source) |",
              "|---|---|---|---:|---:|---|"]
     for record in results:
         manifest = record["manifest"]["entries"] if record.get("manifest") else "none"
+        if record.get("manifest") and not record["manifest"].get("complete", True):
+            manifest = f"{manifest} (partial)"
         firsts = report["first_errors"].get(record["name"], [])
         first = (f"{firsts[0]['class']}; `{firsts[0]['source']}`: {firsts[0]['message'][:160]}"
                  if firsts else "-").replace("|", "\\|")
         lines.append(f"| {record['name']} | {fmt_step(record['charon'])} | {fmt_step(record['aeneas'])} "
                      f"| {manifest} | {len(record['errors']) + len(record.get('missing_externals', []))} "
                      f"| {first} |")
-    lines += ["", f"Lake build: {fmt_step(lake)}", "", "## Counts per class", "",
+    if lake and "modules" in lake:
+        lines += ["", f"Lake build (one module at a time): {lake['built']} built, {lake['failed']} failed, "
+                      f"{lake['blocked']} blocked (import failed or not generated); "
+                      f"{lake['wall_seconds']} s, peak {lake['peak_rss_bytes'] >> 20} MB", "",
+                  "| module | status | wall s | peak MB | first error / blocked by |", "|---|---|---:|---:|---|"]
+        first_lean: dict[str, dict] = {}
+        for error in lean_errors:
+            first_lean.setdefault(error["module"], error)
+        for module, step in lake["modules"].items():
+            if step["status"] == "blocked":
+                detail = ", ".join(step["missing_imports"] + step["failed_imports"])
+                lines.append(f"| {module} | blocked | - | - | {detail} |")
+                continue
+            example = first_lean.get(module)
+            detail = (f"`{example['source']}`: {example['message'][:160]}" if example else "-").replace("|", "\\|")
+            lines.append(f"| {module} | {step['status']}{' (RSS cap)' if step.get('rss_cap_killed') else ''} "
+                         f"| {step['wall_seconds']} | {step['peak_tree_rss_bytes'] >> 20} | {detail} |")
+    else:
+        lines += ["", f"Lake build: {fmt_step(lake)}"]
+    lines += ["", "## Counts per class", "",
               "| class | suggested owner | errors | chunks |", "|---|---|---:|---:|"]
     for name, totals in report["classes"].items():
         lines.append(f"| {name} | {totals['owner']} | {totals['count']} | {totals['chunks']} |")
@@ -1183,7 +1330,8 @@ def main() -> None:
                "chain": plan["chain"], "plan": str(args.plan.resolve()),
                "plan_sha256": sha256_file(args.plan), "plan_mismatch": mismatch,
                "binaries": {"charon": charon["sha256"], "aeneas": aeneas["sha256"]},
-               "tools": {"charon": charon, "aeneas": aeneas, "aeneas_lean": str(aeneas_lean)}}
+               "tools": {"charon": charon, "aeneas": aeneas, "aeneas_lean": str(aeneas_lean)},
+               "aeneas_diagnostic_options": list(AENEAS_DIAGNOSTIC) if args.diagnostic else []}
 
     def save():
         (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
@@ -1218,13 +1366,14 @@ def main() -> None:
     write_lake_package(lean, aeneas_lean, modules)
     lake, lean_errors = None, []
     if not args.no_lean:
-        lake, lean_errors = lean_build(lean, runner, args.diagnostic)
+        lake, lean_errors = lean_build(lean, runner, args.diagnostic, modules,
+                                       {chunk["module"] for chunk in plan["chunks"]})
     summary["lake"] = lake
     summary["lean_errors"] = len(lean_errors)
     if args.diagnostic:
         report_blockers = blockers(results, lean_errors, plan)
         (out / "blockers.json").write_text(json.dumps(report_blockers, indent=2))
-        write_blockers(report_blockers, results, lake, report, out / "blockers.md")
+        write_blockers(report_blockers, results, lake, lean_errors, report, out / "blockers.md")
         summary["accepted"] = False
         save()
         print(f"DIAGNOSTIC run (never an acceptance): {out / 'blockers.md'}")
