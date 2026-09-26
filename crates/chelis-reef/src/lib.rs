@@ -2337,12 +2337,12 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     if !lock_path.exists() || read_lockfile(&lock_path).is_err() {
         write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
     }
-    let entry_module = module_name_for_input(&root, file, &graph.graph.root_package)?;
     let root_package = graph
         .graph
         .packages
         .get(&graph.graph.root_package)
         .ok_or_else(|| "root package missing from prepared reef graph".to_string())?;
+    let entry_module = module_name_for_input(&root, file, root_package)?;
     let module = root_package
         .modules
         .get(&entry_module)
@@ -6506,10 +6506,29 @@ fn reconstruct_graph_from_lockfile(
         }
     }
 
+    insert_implicit_runtime(&mut packages)?;
     Ok(PackageGraph {
         root_package: root_name,
         packages,
     })
+}
+
+/// chelis#2414: every package depends on the bundled `chelis-std` runtime
+/// whether or not its manifest names it, the way `build_lockfile` records
+/// it. Both graph constructors (manifest resolution and lockfile
+/// reconstruction) end here, so an import of `Std.*` resolves against the
+/// same package set whether or not a `reef.lock` exists. A graph that
+/// already carries the runtime (an explicit dependency, a lockfile entry,
+/// or `chelis-std` itself as the root) is left unchanged.
+fn insert_implicit_runtime(packages: &mut BTreeMap<String, LoadedPackage>) -> Result<(), String> {
+    if packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
+        return Ok(());
+    }
+    packages.insert(
+        CHELIS_STD_PACKAGE_NAME.to_string(),
+        bundled_runtime_package()?,
+    );
+    Ok(())
 }
 
 /// Sentinel string smuggled through `run_with_timeout`'s
@@ -6804,6 +6823,7 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
         &mut stack,
         options,
     )?;
+    insert_implicit_runtime(&mut packages)?;
     Ok(PackageGraph {
         root_package: root_id.name,
         packages,
@@ -6929,12 +6949,7 @@ fn resolve_package_recursive(
                     }
                     // The declared version is the bundled one: the runtime
                     // comes from the compiler, never from the registry.
-                    if !packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
-                        packages.insert(
-                            CHELIS_STD_PACKAGE_NAME.to_string(),
-                            bundled_runtime_package()?,
-                        );
-                    }
+                    insert_implicit_runtime(packages)?;
                     continue;
                 }
                 // Item 8 insertion point: missing-from-registry deps
@@ -8030,11 +8045,11 @@ fn validate_source_signature_pairs(decls: &[Decl], module: &str) -> Result<(), S
     Ok(())
 }
 
-fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result<String, String> {
-    let root_pkg = resolve_package_graph(root, LoadOptions::default_for_load())?
-        .packages
-        .remove(package_name)
-        .ok_or_else(|| "root package missing".to_string())?;
+fn module_name_for_input(
+    root: &Path,
+    file: &Path,
+    root_pkg: &LoadedPackage,
+) -> Result<String, String> {
     let canonical = file
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize {}: {e}", file.display()))?;
@@ -13473,14 +13488,22 @@ module_prefix = "Stray"
         let graph = prepare_reef_graph(&root).expect("prepare graph");
         let digests = graph.source_digests().expect("source_digests");
         // Sort key invariant: digests are returned in (pkg, ver, mod)
-        // order. Validate the count and the load-bearing ordering for
-        // the fixture's two known modules.
+        // order. Validate the count and the ordering for the fixture's two
+        // known modules. The implicit chelis-std runtime (chelis#2414) is
+        // in every graph and contributes its own rows.
+        let fixture_digests = digests
+            .iter()
+            .filter(|d| d.package_name != CHELIS_STD_PACKAGE_NAME)
+            .count();
         assert_eq!(
-            digests.len(),
-            5,
-            "got {} digests: {:?}",
-            digests.len(),
+            fixture_digests, 5,
+            "got {fixture_digests} fixture digests: {digests:?}"
+        );
+        assert!(
             digests
+                .iter()
+                .any(|d| d.package_name == CHELIS_STD_PACKAGE_NAME),
+            "the implicit runtime must contribute source digests: {digests:?}"
         );
         assert!(
             digests
@@ -13801,6 +13824,64 @@ module_prefix = "RegistryLib"
             original.internal_maps.len(),
             restored.internal_maps.len(),
             "internal maps survive round-trip"
+        );
+    }
+
+    /// chelis#2414: manifest resolution and lockfile reconstruction yield the
+    /// same package set, and both carry the implicit `chelis-std` runtime even
+    /// though the manifest never names it and a hand-edited lock omits it.
+    #[test]
+    fn manifest_and_lockfile_graphs_carry_the_same_implicit_runtime() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        let from_manifest =
+            resolve_package_graph(&root, LoadOptions { auto_fetch: false }).expect("manifest");
+        let lock = build_lockfile(&from_manifest);
+        let from_lock =
+            reconstruct_graph_from_lockfile(&root, &lock, LoadOptions { auto_fetch: false })
+                .expect("lockfile");
+        let mut runtime_free_lock = lock.clone();
+        runtime_free_lock
+            .dependencies
+            .retain(|dep| dep.name != CHELIS_STD_PACKAGE_NAME);
+        let from_runtime_free_lock = reconstruct_graph_from_lockfile(
+            &root,
+            &runtime_free_lock,
+            LoadOptions { auto_fetch: false },
+        )
+        .expect("lockfile without runtime entry");
+
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+
+        let packages = |graph: &PackageGraph| graph.packages.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            packages(&from_manifest),
+            vec![
+                CHELIS_STD_PACKAGE_NAME.to_string(),
+                "myapp".into(),
+                "mylib".into()
+            ]
+        );
+        assert_eq!(packages(&from_manifest), packages(&from_lock));
+        assert_eq!(packages(&from_manifest), packages(&from_runtime_free_lock));
+        let std_modules = |graph: &PackageGraph| {
+            graph.packages[CHELIS_STD_PACKAGE_NAME]
+                .modules
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(std_modules(&from_manifest).contains(&"Std.Io.Json".to_string()));
+        assert_eq!(std_modules(&from_manifest), std_modules(&from_lock));
+        assert_eq!(
+            std_modules(&from_manifest),
+            std_modules(&from_runtime_free_lock)
         );
     }
 
