@@ -9,7 +9,7 @@
 //! this file locks the runtime half.
 use chelis_runtime::{
     chelis_list_append_owned, chelis_list_concat_owned, chelis_list_empty, chelis_list_index,
-    chelis_list_len, chelis_list_push, chelis_list_release, chelis_list_retain,
+    chelis_list_len, chelis_list_push_moved, chelis_list_release, chelis_list_retain,
     chelis_scalar_from_bits, chelis_value, chelis_value_box_scalar, chelis_value_release,
     chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
 };
@@ -32,7 +32,7 @@ unsafe fn int_at(list: *const chelis_runtime::chelis_list, index: i64) -> i64 {
 fn unique_append_owned_mutates_in_place_and_returns_the_same_list() {
     unsafe {
         let list = chelis_list_empty();
-        chelis_list_push(list, int_value(1));
+        chelis_list_push_moved(list, int_value(1));
         let one = int_value(2);
         let result = chelis_list_append_owned(list, one);
         chelis_value_release(one);
@@ -50,7 +50,7 @@ fn unique_append_owned_mutates_in_place_and_returns_the_same_list() {
 fn shared_append_owned_clones_and_leaves_the_shared_view_untouched() {
     unsafe {
         let list = chelis_list_empty();
-        chelis_list_push(list, int_value(1));
+        chelis_list_push_moved(list, int_value(1));
         // A second owner: the observable source list of the alias controls.
         chelis_list_retain(list);
         let three = int_value(3);
@@ -74,9 +74,9 @@ fn shared_append_owned_clones_and_leaves_the_shared_view_untouched() {
 fn unique_concat_owned_extends_in_place_and_shared_concat_owned_clones() {
     unsafe {
         let rhs = chelis_list_empty();
-        chelis_list_push(rhs, int_value(7));
+        chelis_list_push_moved(rhs, int_value(7));
         let unique = chelis_list_empty();
-        chelis_list_push(unique, int_value(5));
+        chelis_list_push_moved(unique, int_value(5));
         let grown = chelis_list_concat_owned(unique, rhs);
         assert!(std::ptr::eq(grown, unique));
         assert_eq!(chelis_list_len(grown), 2);
@@ -84,7 +84,7 @@ fn unique_concat_owned_extends_in_place_and_shared_concat_owned_clones() {
         chelis_list_release(grown);
 
         let shared = chelis_list_empty();
-        chelis_list_push(shared, int_value(5));
+        chelis_list_push_moved(shared, int_value(5));
         chelis_list_retain(shared);
         let fresh = chelis_list_concat_owned(shared, rhs);
         assert!(!std::ptr::eq(fresh, shared));
@@ -103,8 +103,8 @@ fn unique_concat_owned_extends_in_place_and_shared_concat_owned_clones() {
 fn concat_owned_with_an_aliasing_rhs_clones_instead_of_aborting() {
     unsafe {
         let list = chelis_list_empty();
-        chelis_list_push(list, int_value(1));
-        chelis_list_push(list, int_value(2));
+        chelis_list_push_moved(list, int_value(1));
+        chelis_list_push_moved(list, int_value(2));
         chelis_list_retain(list);
         let joined = chelis_list_concat_owned(list, list);
         assert!(
@@ -128,7 +128,7 @@ fn null_inputs_behave_like_the_cloning_entry_points() {
         assert_eq!(chelis_list_len(from_null), 1);
         chelis_list_release(from_null);
         let rhs = chelis_list_empty();
-        chelis_list_push(rhs, int_value(9));
+        chelis_list_push_moved(rhs, int_value(9));
         let joined = chelis_list_concat_owned(std::ptr::null_mut(), rhs);
         assert_eq!(chelis_list_len(joined), 1);
         chelis_list_release(joined);

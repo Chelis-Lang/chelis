@@ -1341,8 +1341,8 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
 
     for symbol in [
         "chelis_list_with_capacity",
-        "chelis_list_push",
-        "chelis_list_extend",
+        "chelis_list_push_moved",
+        "chelis_list_extend_moved",
         "chelis_list_append_owned",
         "chelis_list_concat_owned",
         "chelis_dict_insert_owned",
@@ -1358,8 +1358,8 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
 
     for declaration in [
         "chelis_list *chelis_list_with_capacity(int64_t capacity);",
-        "void chelis_list_push(chelis_list *list, chelis_value value);",
-        "void chelis_list_extend(chelis_list *list, const chelis_list *src);",
+        "void chelis_list_push_moved(chelis_list *list, chelis_value value);",
+        "void chelis_list_extend_moved(chelis_list *list, chelis_list *src);",
         "chelis_list *chelis_list_append_owned(chelis_list *list, chelis_value value);",
         "chelis_list *chelis_list_concat_owned(chelis_list *lhs, const chelis_list *rhs);",
         "chelis_dict *chelis_dict_insert_owned(chelis_dict *dict, chelis_value key, chelis_value value);",
@@ -1375,8 +1375,8 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
 
     for (symbol, expected_calls) in [
         ("chelis_list_with_capacity(", 6),
-        ("chelis_list_push(", 5),
-        ("chelis_list_extend(", 1),
+        ("chelis_list_push_moved(", 5),
+        ("chelis_list_extend_moved(", 1),
     ] {
         let occurrences = generated.matches(symbol).count();
         assert_eq!(
@@ -10713,11 +10713,12 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
 // target, …)`) without releasing the predecessor — Θ(n²) allocation,
 // with every intermediate generation unreachable at exit ("definitely
 // lost"). The fix accumulates in place (`chelis_list_with_capacity` +
-// `chelis_list_push`), so a combinator pipeline must now run leak-free.
-// Elements are floats deliberately: heap-payload elements (strings)
-// still leak linearly through the `chelis_list_index` retain imbalance,
-// which is tracked separately on #943 and not fixed by this oracle's
-// subject.
+// `chelis_list_push_moved`), so a combinator pipeline must now run leak-free.
+// Elements are floats. Heap-payload elements are covered by the
+// ownership-ledger corpus in chelis-compiler-api's
+// `issue_2508_list_step_ownership`: the linear leak once attributed to
+// `chelis_list_index` was the loop step cloning an item it had been
+// moved (chelis#2332, chelis#2508).
 //
 // Same toolchain gating and no-suppression contract as the #406 oracle
 // above. Registered in `docs/manual_gates.md`; manual gate:

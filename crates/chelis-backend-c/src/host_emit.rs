@@ -516,20 +516,8 @@ pub(crate) fn emit_host_abi_program(
         )?;
     }
 
-    // Keep runtime aggregate accessors out of translation units whose emitted
-    // code never reconstructs aggregate interface provenance. Besides avoiding
-    // dead support, this preserves the existing source-level contract that a
-    // compile-time record projection has no runtime ADT accessor at all. The
-    // helper group is mutually recursive through erased `chelis_value` children,
-    // so one actual aggregate-ingress call enables the complete group.
-    let needs_aggregate_interface_origin_support = body
-        .iter()
-        .any(|line| line.contains("__chelis_host_result_origin_interface_"));
     let mut result_claim_support = Vec::new();
     append_host_result_claim_support(&mut result_claim_support);
-    if needs_aggregate_interface_origin_support {
-        append_host_result_interface_origin_support(&mut result_claim_support);
-    }
     append_host_result_claim_checks(&mut result_claim_support);
     result_claim_support.push(String::new());
     result_claim_support.extend(body);
@@ -564,8 +552,12 @@ pub(crate) fn emit_host_abi_program(
         // whose refcount-1 exclusivity this emitter proves). The symbols are
         // exported by libchelis_runtime; only the declarations are private.
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
-        "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
-        "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
+        // chelis#2508: both accumulator steps consume their operand, because
+        // the ownership verifier moves every loop step's item into its
+        // accumulator. No cloning push is declared, so a verified move
+        // cannot be realized as a copy that leaves the moved owner live.
+        "void chelis_list_push_moved(chelis_list *list, chelis_value value);".to_string(),
+        "void chelis_list_extend_moved(chelis_list *list, chelis_list *src);".to_string(),
         // chelis#2205: the consuming counterparts of the container builtins
         // that may take a same-kind operand the ownership verifier moved at
         // its scheduled last use. Each mutates in place only at strong-owner
@@ -898,8 +890,7 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
         "    chelis_list *result = chelis_list_with_capacity(len);",
         "    for (int64_t index = 0; index < len; ++index) {",
         "        chelis_value entry = chelis_list_index(source, order[index]);",
-        "        chelis_list_push(result, entry);",
-        "        chelis_value_release(entry);",
+        "        chelis_list_push_moved(result, entry);",
         "    }",
         "    chelis_tensor_end_write(order_guard);",
         "    chelis_tensor_release(order_storage);",
@@ -2129,6 +2120,9 @@ typedef struct __chelis_host_result_origin {
     const char *op;
     const char *trap;
     int64_t child_count;
+    /* A leaf that stands for every value nested in the one it labels: the
+       interface `load` origin. Projecting a child of it yields itself. */
+    int uniform;
     const struct __chelis_host_result_origin *const *child_view;
     const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
@@ -2165,6 +2159,7 @@ static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_h
     node->op = NULL;
     node->trap = NULL;
     node->child_count = child_count;
+    node->uniform = 0;
     node->child_view = NULL;
     arena->head = node;
     return node;
@@ -2183,6 +2178,15 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__che
     return node;
 }
 
+/* The origin of a value that entered this invocation from its caller.
+   Every tensor nested in an interface value is a `load`, so one uniform leaf
+   describes the whole value without walking it (chelis#2522). */
+static const __chelis_host_result_origin *__chelis_host_result_origin_load(__chelis_host_result_origin_arena *arena) {
+    const __chelis_host_result_origin *leaf = __chelis_host_result_origin_leaf(arena, "load", "numeric trap: domain in load at i64");
+    ((__chelis_host_result_origin *)leaf)->uniform = 1;
+    return leaf;
+}
+
 static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(__chelis_host_result_origin_arena *arena, int64_t child_count, const __chelis_host_result_origin *const *children) {
     bool any = false;
     for (int64_t i = 0; i < child_count; ++i) {
@@ -2197,6 +2201,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(
 
 static const __chelis_host_result_origin *__chelis_host_result_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
     if (origin == NULL) return NULL;
+    if (origin->uniform) return origin;
     if (origin->child_count < 0 || index < 0 || index >= origin->child_count || origin->child_view == NULL) {
         fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
         abort();
@@ -2205,7 +2210,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_child(cons
 }
 
 static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffix(__chelis_host_result_origin_arena *arena, const __chelis_host_result_origin *origin, int64_t count) {
-    if (origin == NULL || count == 0) return origin;
+    if (origin == NULL || count == 0 || origin->uniform) return origin;
     // The runtime owns skip's negative-count diagnostic. Preserve that
     // ordering instead of replacing it with an internal metadata failure.
     if (count < 0) return origin;
@@ -2234,76 +2239,6 @@ static const __chelis_host_result_origin **__chelis_host_result_origin_children(
         abort();
     }
     return children;
-}
-"#.to_string());
-}
-
-fn append_host_result_interface_origin_support(out: &mut Vec<String>) {
-    out.push(r#"
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value);
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_list(__chelis_host_result_origin_arena *arena, const chelis_list *value) {
-    int64_t count = chelis_list_len(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_list_index(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_tuple(__chelis_host_result_origin_arena *arena, const chelis_tuple *value) {
-    int64_t count = chelis_tuple_len(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_tuple_get(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_adt(__chelis_host_result_origin_arena *arena, const chelis_adt *value) {
-    int64_t count = chelis_adt_field_count(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_adt_get_field(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_option(__chelis_host_result_origin_arena *arena, const chelis_option *value) {
-    if (!chelis_option_is_some(value)) return NULL;
-    chelis_value child = chelis_option_unwrap(value);
-    const __chelis_host_result_origin *child_origin = __chelis_host_result_origin_interface_value(arena, child);
-    chelis_value_release(child);
-    return __chelis_host_result_origin_aggregate(arena, 1, &child_origin);
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value) {
-    switch (value.tag) {
-        case CHELIS_VALUE_TENSOR:
-            return __chelis_host_result_origin_leaf(arena, "load", "numeric trap: domain in load at i64");
-        case CHELIS_VALUE_LIST:
-            return __chelis_host_result_origin_interface_list(arena, (const chelis_list *)value.payload.handle);
-        case CHELIS_VALUE_TUPLE:
-            return __chelis_host_result_origin_interface_tuple(arena, (const chelis_tuple *)value.payload.handle);
-        case CHELIS_VALUE_ADT:
-            return __chelis_host_result_origin_interface_adt(arena, (const chelis_adt *)value.payload.handle);
-        case CHELIS_VALUE_OPTION:
-            return __chelis_host_result_origin_interface_option(arena, (const chelis_option *)value.payload.handle);
-        default:
-            return NULL;
-    }
 }
 "#.to_string());
 }
@@ -3747,17 +3682,24 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        self.declare_local(target, ty)?;
+        self.assign_expr(target, expr, ty)?;
+        Ok(())
+    }
+
+    /// Declare a local that an expression will be assigned to, with the
+    /// result origin every assignment writes alongside the value.
+    fn declare_local(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
         self.declare_result_origin(target, ty, None);
-        self.assign_expr(target, expr, ty)?;
         Ok(())
     }
 
     fn declare_result_origin(&mut self, value: &str, ty: &HostType, producer: Option<&str>) {
         let origin = result_origin_name(value);
         let initializer = match producer {
-            Some("load") => self.interface_result_origin_expr(value, ty),
+            Some("load") => Self::interface_result_origin_expr(ty),
             Some(op) if matches!(ty, HostType::Tensor(_)) => {
                 let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
                 format!(
@@ -3772,31 +3714,21 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
-    fn interface_result_origin_expr(&self, value: &str, ty: &HostType) -> String {
-        if !host_type_may_carry_result_origin(ty) {
-            return "NULL".to_string();
-        }
-        match ty {
-            HostType::Tensor(_) => "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"load\", \"numeric trap: domain in load at i64\")".to_string(),
-            HostType::List(_) => format!(
-                "__chelis_host_result_origin_interface_list(__chelis_origin_arena, {value})"
-            ),
-            HostType::Tuple(_) => format!(
-                "__chelis_host_result_origin_interface_tuple(__chelis_origin_arena, {value})"
-            ),
-            HostType::Adt(_, _) => format!(
-                "__chelis_host_result_origin_interface_adt(__chelis_origin_arena, {value})"
-            ),
-            HostType::Option(_) => format!(
-                "__chelis_host_result_origin_interface_option(__chelis_origin_arena, {value})"
-            ),
-            _ => "NULL".to_string(),
+    /// The origin of a value that entered from outside the expression: a
+    /// parameter, a loop item, or a callee without private provenance. It is
+    /// one uniform `load` leaf, so no ingress walks the value, and a
+    /// recursive call over a large carried value stays linear (chelis#2522).
+    fn interface_result_origin_expr(ty: &HostType) -> String {
+        if host_type_may_carry_result_origin(ty) {
+            "__chelis_host_result_origin_load(__chelis_origin_arena)".to_string()
+        } else {
+            "NULL".to_string()
         }
     }
 
     fn assign_interface_result_origin(&mut self, target: &str, ty: &HostType) {
         let origin = result_origin_name(target);
-        let initializer = self.interface_result_origin_expr(target, ty);
+        let initializer = Self::interface_result_origin_expr(ty);
         self.lines
             .push(format!("{}{origin} = {initializer};", self.indent));
     }
@@ -4072,80 +4004,139 @@ impl<'a> HostEmitter<'a> {
         target: &str,
     ) -> Result<(), Unsupported> {
         for action in &site.directives {
-            match action {
-                VerifiedHostAction::Operation(VerifiedHostOperation::Define {
-                    block: owner_block,
-                    dest,
-                    ..
-                }) if *owner_block == block => {
-                    self.owner_vars.insert(dest.id(), target.to_string());
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                    block: owner_block,
-                    dest: Some(dest),
-                    binding_name,
-                    label,
-                    ..
-                }) if *owner_block == block => {
-                    let value = binding_name
-                        .as_ref()
-                        .filter(|_| {
-                            label.starts_with("option_payload")
-                                || label.starts_with("adt_payload")
-                                || *label == "loop_item"
-                        })
-                        .map_or_else(
-                            || target.to_string(),
-                            |name| c_ident(name.as_str()).into_owned(),
-                        );
-                    self.owner_vars.insert(dest.id(), value);
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
-                    operation,
-                    block: owner_block,
-                    ..
-                }) if *owner_block == block
-                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
-                {
-                    self.pre_emitted_terminals.insert((site.id, *operation));
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
-                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
-                    block: owner_block,
-                    dest,
-                    source,
-                    ..
-                }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
-                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
-                    block: owner_block,
-                    source,
-                    ..
-                }) if *owner_block == block => {
-                    self.owner_vars
-                        .insert(source.owner().id(), target.to_string());
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
-                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
-                    operation,
-                    block: owner_block,
-                    owner,
-                    ..
-                }) if *owner_block == block
-                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
-                {
-                    self.emit_owner_drop(owner.owner())?;
-                    self.pre_emitted_terminals.insert((site.id, *operation));
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
-                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
-                    block: owner_block,
-                    edge,
-                }) if *owner_block == block && edge.params().len() == 1 => {
-                    self.owner_vars
-                        .insert(edge.params()[0].id(), target.to_string());
-                }
-                _ => {}
+            self.emit_expression_block_action(site, block, target, action)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a list-building loop body's block actions in verified order, with
+    /// the loop's consuming step emitted at the step's own position.
+    ///
+    /// The step (`list_push`, `list_extend`, `filter_step`,
+    /// `partition_step`) moves an operand the body produced, and the actions
+    /// the schedule places before it (the copy that pays for a captured,
+    /// parameter or global owner the body returns, and every earlier release)
+    /// must run first: a consuming entry point may release its operand before
+    /// returning. Emitting the step from the verified action sequence, rather
+    /// than ahead of every block action, makes that order the schedule's
+    /// (chelis#2508).
+    fn emit_loop_step_block_actions(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+        step: &str,
+        emit_step: impl FnOnce(&mut Self) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let mut emit_step = Some(emit_step);
+        for action in &site.directives {
+            if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                label,
+                ..
+            }) = action
+                && *owner_block == block
+                && *label == step
+            {
+                let emit = emit_step.take().ok_or_else(|| {
+                    invalid_abi_shape(
+                        format!("verified loop body repeats its `{step}` step"),
+                        "verified C host ownership emission",
+                    )
+                })?;
+                emit(self)?;
             }
+            self.emit_expression_block_action(site, block, target, action)?;
+        }
+        if emit_step.is_some() {
+            return Err(invalid_abi_shape(
+                format!("verified loop body has no `{step}` step"),
+                "verified C host ownership emission",
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_expression_block_action(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+        action: &VerifiedHostAction<'a>,
+    ) -> Result<(), Unsupported> {
+        match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Define {
+                block: owner_block,
+                dest,
+                ..
+            }) if *owner_block == block => {
+                self.owner_vars.insert(dest.id(), target.to_string());
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                dest: Some(dest),
+                binding_name,
+                label,
+                ..
+            }) if *owner_block == block => {
+                let value = binding_name
+                    .as_ref()
+                    .filter(|_| {
+                        label.starts_with("option_payload")
+                            || label.starts_with("adt_payload")
+                            || *label == "loop_item"
+                    })
+                    .map_or_else(
+                        || target.to_string(),
+                        |name| c_ident(name.as_str()).into_owned(),
+                    );
+                self.owner_vars.insert(dest.id(), value);
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                operation,
+                block: owner_block,
+                ..
+            }) if *owner_block == block
+                && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+            {
+                self.pre_emitted_terminals.insert((site.id, *operation));
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+            VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                block: owner_block,
+                dest,
+                source,
+                ..
+            }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
+            VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                block: owner_block,
+                source,
+                ..
+            }) if *owner_block == block => {
+                self.owner_vars
+                    .insert(source.owner().id(), target.to_string());
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+            VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                operation,
+                block: owner_block,
+                owner,
+                ..
+            }) if *owner_block == block
+                && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+            {
+                self.emit_owner_drop(owner.owner())?;
+                self.pre_emitted_terminals.insert((site.id, *operation));
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
+            VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                block: owner_block,
+                edge,
+            }) if *owner_block == block && edge.params().len() == 1 => {
+                self.owner_vars
+                    .insert(edge.params()[0].id(), target.to_string());
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -4794,7 +4785,7 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
                     let target_origin = result_origin_name(target);
                     if self.interface_reload_names.contains(name) {
-                        let load = self.interface_result_origin_expr(target, ty);
+                        let load = Self::interface_result_origin_expr(ty);
                         self.lines
                             .push(format!("{}{target_origin} = {load};", self.indent));
                     } else {
@@ -8546,13 +8537,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let result_var = self.next_temp("map_result");
-        self.lines.push(format!(
-            "{}{} {};",
-            self.indent,
-            c_type(&callback.ret_ty)?,
-            result_var
-        ));
-        self.declare_result_origin(&result_var, &callback.ret_ty, None);
+        self.declare_local(&result_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("map_item");
         self.lines.push(format!(
@@ -8565,12 +8550,14 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
-            self.indent,
-            self.box_value_expr(&result_var, &callback.ret_ty)?
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        let pushed = self.box_value_expr(&result_var, &callback.ret_ty)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_push_moved({target}, {pushed});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8611,8 +8598,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let keep_var = self.next_temp("filter_keep");
-        self.lines
-            .push(format!("{}bool {};", self.indent, keep_var));
+        self.declare_local(&keep_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("filter_item");
         self.lines.push(format!(
@@ -8625,17 +8611,19 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
-        self.lines
-            .push(format!("{}if ({}) {{", self.indent, keep_var));
-        let nested_indent = format!("{}    ", self.indent);
-        let nested_previous = std::mem::replace(&mut self.indent, nested_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
-            self.indent, item_value
-        ));
-        self.indent = nested_previous;
-        self.lines.push(format!("{}}}", self.indent));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        // `filter_step` moves the item: a kept item moves into the result
+        // and a rejected one is released here.
+        self.emit_loop_step_block_actions(site, body_block, target, "filter_step", |this| {
+            let indent = &this.indent;
+            this.lines.extend([
+                format!("{indent}if ({keep_var}) {{"),
+                format!("{indent}    chelis_list_push_moved({target}, {item_value});"),
+                format!("{indent}}} else {{"),
+                format!("{indent}    chelis_value_release({item_value});"),
+                format!("{indent}}}"),
+            ]);
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8715,12 +8703,12 @@ impl<'a> HostEmitter<'a> {
             )
         });
         self.emit_edge_terminals(site.id, &body_edge)?;
-        if body_acc_dropped {
+        if body_acc_dropped && let Some(released) = params[0].ty.c_released_value() {
             // An inline callback still has a physical parameter even when the
             // verified program proves that parameter dead on entry.  Do not
-            // propagate a released pointer into that non-semantic C alias.
+            // propagate a released handle into that non-semantic C alias.
             self.lines
-                .push(format!("{}{} = NULL;", self.indent, acc_arg));
+                .push(format!("{}{} = {released};", self.indent, acc_arg));
         }
         let item_value = self.next_temp("fold_item_value");
         self.lines.push(format!(
@@ -8843,12 +8831,14 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
-            self.indent,
-            self.box_value_expr(&acc_var, &acc_ty)?
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_push_moved({target}, {pushed});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8930,8 +8920,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let keep_var = self.next_temp("partition_keep");
-        self.lines
-            .push(format!("{}bool {};", self.indent, keep_var));
+        self.declare_local(&keep_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("partition_item");
         self.lines.push(format!(
@@ -8944,25 +8933,17 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
-        self.lines
-            .push(format!("{}if ({}) {{", self.indent, keep_var));
-        let then_indent = format!("{}    ", self.indent);
-        let then_previous = std::mem::replace(&mut self.indent, then_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push({}, {});",
-            self.indent, pass_var, item_value
-        ));
-        self.indent = then_previous;
-        self.lines.push(format!("{}}} else {{", self.indent));
-        let else_indent = format!("{}    ", self.indent);
-        let else_previous = std::mem::replace(&mut self.indent, else_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push({}, {});",
-            self.indent, fail_var, item_value
-        ));
-        self.indent = else_previous;
-        self.lines.push(format!("{}}}", self.indent));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "partition_step", |this| {
+            let indent = &this.indent;
+            this.lines.extend([
+                format!("{indent}if ({keep_var}) {{"),
+                format!("{indent}    chelis_list_push_moved({pass_var}, {item_value});"),
+                format!("{indent}}} else {{"),
+                format!("{indent}    chelis_list_push_moved({fail_var}, {item_value});"),
+                format!("{indent}}}"),
+            ]);
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8981,6 +8962,14 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_tuple_from_values({}, 2);",
             self.indent, tuple_values
         ));
+        // `chelis_tuple_from_values` retains its items, as for a tuple
+        // literal, so the two moved lists are released here.
+        for index in 0..2 {
+            self.lines.push(format!(
+                "{}chelis_value_release({tuple_values}[{index}]);",
+                self.indent
+            ));
+        }
         Ok(())
     }
 
@@ -9018,13 +9007,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let result_var = self.next_temp("flat_map_result");
-        self.lines.push(format!(
-            "{}{} {};",
-            self.indent,
-            c_type(&callback.ret_ty)?,
-            result_var
-        ));
-        self.declare_result_origin(&result_var, &callback.ret_ty, None);
+        self.declare_local(&result_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("flat_map_item");
         self.lines.push(format!(
@@ -9037,11 +9020,13 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_extend({target}, {});",
-            self.indent, result_var
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_extend", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_extend_moved({target}, {result_var});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -9089,7 +9074,16 @@ impl<'a> HostEmitter<'a> {
                         param.name,
                         arg_var
                     ));
-                    self.declare_result_origin(&param.name, &param.ty, Some("load"));
+                    // The parameter aliases the argument, so it carries the
+                    // argument's origin. Rescanning would walk the value on
+                    // every iteration, and would dereference a dead
+                    // accumulator the fold has already cleared.
+                    self.lines.push(format!(
+                        "{}const __chelis_host_result_origin *{} = {};",
+                        self.indent,
+                        result_origin_name(&param.name),
+                        result_origin_name(arg_var)
+                    ));
                     if self.interface_reload_names.remove(&param.name) {
                         shadowed_interface_globals.push(param.name.clone());
                     }
@@ -9957,10 +9951,10 @@ fn host_type(expr: &HostExpr) -> HostType {
 }
 
 /// Whether the evaluator's `ResultProducer` model can attach provenance to
-/// a value of this resolved ABI type.  This keeps a true interface ingress
-/// O(1) for scalar-only lists/tuples instead of walking values that can only
-/// produce an all-null tree.  ADT arguments are type parameters rather than a
-/// field-layout description, so ADTs remain conservatively recursive.
+/// a value of this resolved ABI type. A value that cannot carries a null
+/// origin rather than the uniform `load` leaf. ADT arguments are type
+/// parameters rather than a field-layout description, so every ADT is
+/// conservatively treated as able to.
 fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
     match ty {
         HostType::Tensor(_) | HostType::Adt(_, _) => true,

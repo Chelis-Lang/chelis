@@ -365,8 +365,7 @@ int main(void) {
                 chelis_value_take_string(chelis_string_from_cstr("value"))
             };
             chelis_value pair = chelis_value_take_tuple(chelis_tuple_from_values(fields, 2));
-            chelis_list_push(pairs, pair);
-            chelis_value_release(pair);
+            chelis_list_push_moved(pairs, pair);
             chelis_value_release(fields[0]);
             chelis_value_release(fields[1]);
         }
@@ -390,7 +389,7 @@ int main(void) {
 }
 "#;
     let emitted = generated.replace("int main(void) {", "int json_fixture_main(void) {") + driver;
-    let anchor = "        chelis_value_release(entry);";
+    let anchor = "        chelis_list_push_moved(result, entry);";
     assert_eq!(
         emitted.matches(anchor).count(),
         1,
