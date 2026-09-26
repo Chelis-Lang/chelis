@@ -544,8 +544,8 @@ pub(crate) fn emit_host_abi_program(
         "#include <stdlib.h>".to_string(),
         "#include <string.h>".to_string(),
     ];
-    out.extend([
-        String::new(),
+    out.push(String::new());
+    out.extend(c_linkage_declarations([
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
         // from the published chelis_runtime.h (the capacity census governs
         // that surface, and these exist only for compiler-owned accumulators
@@ -578,7 +578,7 @@ pub(crate) fn emit_host_abi_program(
         "chelis_dict *chelis_dict_remove_owned(chelis_dict *dict, chelis_value key);".to_string(),
         "chelis_string chelis_string_concat_owned(chelis_string lhs, chelis_string rhs);"
             .to_string(),
-    ]);
+    ]));
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
         out.push(CEmitter::blas_integer_support());
@@ -1806,17 +1806,37 @@ fn append_helper(
     Ok(requirements)
 }
 
+/// The one path for a declaration of a symbol another translation unit
+/// defines with C linkage: the runtime archive's emitter-private entries and
+/// a peer helper's exported entry. The host program is also compiled as C++
+/// (the Metal `.mm` and the HIP `.cpp` are this source), where a bare
+/// prototype takes C++ linkage, is name-mangled, and does not link against
+/// the C definition (chelis#2582). The guard leaves the C spelling unchanged.
+/// Each declaration takes its own prefix `extern "C"` line rather than one
+/// braced block: the prefix line is the linkage spelling the generated
+/// artifact contract masks before parsing the source as C.
+fn c_linkage_declarations(declarations: impl IntoIterator<Item = String>) -> Vec<String> {
+    declarations
+        .into_iter()
+        .flat_map(|declaration| {
+            [
+                "#ifdef __cplusplus".to_string(),
+                "extern \"C\"".to_string(),
+                "#endif".to_string(),
+                declaration,
+            ]
+        })
+        .collect()
+}
+
 /// Declare a helper that a peer translation unit defines. The prototype is
 /// the shared tensor-helper ABI, so the wrapper's call site is unchanged
 /// whether the body is the C emitter's `static` definition or a device
 /// backend's exported entry.
 fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) {
-    out.push("#ifdef __cplusplus".to_string());
-    out.push("extern \"C\"".to_string());
-    out.push("#endif".to_string());
-    out.push(format!(
+    out.extend(c_linkage_declarations([format!(
         "void {helper_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
-    ));
+    )]));
     // Peer translation units keep their established ABI and baked-seed
     // behavior. The private adapter does not export Random state to a device.
     out.push(format!(

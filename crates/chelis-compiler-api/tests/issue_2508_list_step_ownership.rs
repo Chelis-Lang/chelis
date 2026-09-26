@@ -502,24 +502,10 @@ fn every_seeded_accumulator_over(kind_name: &str) {
         .flat_map(|op| {
             SEEDED_CALLBACKS.iter().flat_map(move |callback| {
                 SEED_OWNERS.iter().map(move |(owner_name, owner)| {
-                    let binds_local =
-                        callback.name == "inline_returns_captured" || *owner == SeedOwner::Local;
-                    let returns_tuple = matches!(
-                        owner,
-                        SeedOwner::LocalUsedAfter | SeedOwner::ParameterUsedAfter
-                    );
-                    // chelis#2574: eval refuses a function that binds a local
-                    // and returns a `fold`'s tensor.
-                    let expectation =
-                        if kind.linear && *op == "fold" && binds_local && !returns_tuple {
-                            Expectation::EvalGap("reaches the host-only builtin `fold`")
-                        } else {
-                            Expectation::AgreesWithEval
-                        };
                     (
                         format!("{op}_{}_{owner_name}_{}", callback.name, kind.name),
                         instantiate_seeded(kind, op, callback, *owner),
-                        expectation,
+                        Expectation::AgreesWithEval,
                     )
                 })
             })
@@ -582,9 +568,6 @@ enum Expectation {
     AgreesWithEval,
     /// The checker rejects the program with this diagnostic kind.
     CheckerRejects(&'static str),
-    /// Compiled C returns every allocation; eval still rejects the program
-    /// with this message, a known eval-lane gap tracked by its own issue.
-    EvalGap(&'static str),
 }
 
 fn check_expecting(name: &str, source: &str, expectation: Expectation) -> Result<(), String> {
@@ -602,13 +585,6 @@ fn check_expecting(name: &str, source: &str, expectation: Expectation) -> Result
                 error.contains(kind),
                 "expected a `{kind}` rejection: {error}"
             );
-        }
-        Expectation::EvalGap(message) => {
-            let error = eval_error(source);
-            assert!(error.contains(message), "the eval gap changed: {error}");
-            let generated = ownership_support::emit(source, name);
-            let (summary, _) = ownership_support::run_program(&generated);
-            ownership_support::balanced(&summary);
         }
     }))
     .map_err(|payload| {
@@ -661,10 +637,6 @@ fn every_outer_owner_over(kind_name: &str) {
                 // that reads it after the loop is not a program.
                 OuterOwner::LocalUsedAfter if kind.linear => {
                     Expectation::CheckerRejects("UseAfterConsume")
-                }
-                // chelis#2574: eval refuses this valid program.
-                OuterOwner::Local if kind.linear && shape.name == "fold_returns_outer" => {
-                    Expectation::EvalGap("reaches the host-only builtin `fold`")
                 }
                 _ => Expectation::AgreesWithEval,
             };
