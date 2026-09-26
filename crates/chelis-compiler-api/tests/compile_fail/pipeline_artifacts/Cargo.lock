@@ -132,6 +132,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "chelis-abi"
+version = "0.18.11"
+dependencies = [
+ "chelis-vocab",
+]
+
+[[package]]
 name = "chelis-backend-c"
 version = "0.18.11"
 dependencies = [
@@ -218,6 +225,7 @@ dependencies = [
 name = "chelis-ir"
 version = "0.18.11"
 dependencies = [
+ "chelis-abi",
  "chelis-deep",
  "chelis-effects",
  "chelis-types",
