@@ -47,6 +47,8 @@ MODELS = {
     "kernel_std_models": "KernelStdModels",
     "text_std_models": "TextStdModels",
     "closure_mut_args": "ClosureMutArgs",
+    "primitive_order_models": "PrimitiveOrderModels",
+    "checked_place_updates": "CheckedPlaceUpdates",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate

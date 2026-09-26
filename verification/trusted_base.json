@@ -24,6 +24,10 @@
       "justification": "Lean core platform word size, only known to be 32 or 64. Aeneas usize bounds depend on it, so every theorem holds for both widths (more general than the arm64/x86_64 native targets, which are 64-bit)."
     },
     {
+      "match": "Aeneas\\.Std\\.core\\.intrinsics\\.ub_checks",
+      "justification": "Rust build configuration `cfg!(ub_checks)` (the `ub_checks` intrinsic that guards core's `assert_unsafe_precondition!` checks). It follows `debug_assertions`: native tests and debug builds run the checks, release builds do not. Aeneas translates MIR `NullaryOp(UbChecks)` to this opaque Bool, so every theorem holds for both configurations. Compiled evaluation (#eval/#guard) uses the default `false`, which is never counted as proof."
+    },
+    {
       "match": "Lean\\.opaqueId",
       "justification": "Lean core identity kept opaque for compilation. Witness path: proof terms of Lean core `grind` commutative-ring normalization (Lean.Grind.CommRing.Mon.revlexWF, well-founded recursion) used inside Mathlib lemma proofs; it occurs in proofs, not in any stated model definition."
     },
