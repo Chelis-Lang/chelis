@@ -225,32 +225,41 @@ fn an_unconditional_integer_sub_guard_reads_its_operands_directly() {
     assert!(source.contains("chelis_record_numeric_failure"), "{source}");
 }
 
-/// A cast into an integer width in an untaken arm: HIP compiles no cast
-/// into an integer width (chelis#689's f32/f64 cast family), gated or not,
-/// so the arm is refused as the unconditional cast is. A cast HIP compiles,
-/// `f32` to `f64`, is gated in the arm and ungated outside it.
+/// A cast checks its operand only when its target is an integer or `bool`
+/// width (`DagNode::runtime_check`), and HIP compiles no such cast, gated or
+/// not: its cast kernels cover exactly `f32` and `f64` (chelis#689), and a
+/// cast into `bool` needs the one-byte family HIP lacks (chelis#1364). So no
+/// cast that can trap reaches a HIP kernel, and each is refused in an arm as
+/// it is unconditionally. The one cast family HIP compiles, `f32` to and from
+/// `f64`, checks nothing, so an arm launches the same ungated kernel as the
+/// unconditional cast (a node with nothing to check takes no gate).
 ///
-/// Evidentiary status: the refusals are a DISPOSITION LOCK (both refused at
-/// 224414e1f); the gated `f32` to `f64` cast is a REGRESSION TEST (ungated
-/// at 224414e1f).
+/// Evidentiary status: DISPOSITION LOCK throughout. By code read of
+/// 224414e1f, which has the same `f32`/`f64` and `bool` rejections and no
+/// HIP activation gate, every row holds there too.
 #[test]
-fn an_untaken_arms_cast_is_gated_where_hip_compiles_it() {
-    let integer_arm = "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, i32]) -> tensor[4, i32] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, i32) else y\n";
-    let integer_unconditional = "def main(x: tensor[4, f32]) -> tensor[4, i32] = cast(x, i32)\n";
-    for source in [integer_arm, integer_unconditional] {
-        let error = emit(source).expect_err("HIP refuses a cast into i32");
-        assert!(
-            error.to_string().contains("int32") || error.to_string().contains("i32"),
-            "{error}"
+fn no_cast_hip_compiles_can_trap_so_an_arms_cast_launches_ungated() {
+    for (target, refusal) in [("i32", "chelis#689"), ("bool", "chelis#1364")] {
+        let in_arm = format!(
+            "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, {target}]) -> tensor[4, {target}] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, {target}) else y\n"
         );
+        let unconditional =
+            format!("def main(x: tensor[4, f32]) -> tensor[4, {target}] = cast(x, {target})\n");
+        for source in [in_arm, unconditional] {
+            let error = emit(&source).expect_err("HIP refuses a cast that can trap");
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("dtype `{target}`")) && error.contains(refusal),
+                "{error}"
+            );
+        }
     }
     let widening_arm = "def main(x: tensor[4, f32], s: tensor[f32], y: tensor[4, f64]) -> tensor[4, f64] = if lt(tensor_to_scalar(s), 0.0f32) then cast(x, f64) else y\n";
     let host = emit(widening_arm).expect("HIP compiles the widening arm");
-    let source = kernel(&host, "kernel_cast_f32_to_f64_gated_0");
-    assert_eq!(
-        line_with(&source, "out[i] ="),
-        "  out[i] = (double)(chelis_active ? a[idx] : (float)(0LL));"
-    );
+    let source = kernel(&host, "kernel_cast_f32_to_f64");
+    assert!(!source.contains("chelis_act"), "{source}");
+    assert_eq!(line_with(&source, "out[i] ="), "  out[i] = (double)a[idx];");
+    assert!(!host.contains("_gated"), "{host}");
     let host = emit("def main(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n")
         .expect("HIP compiles the widening cast");
     let source = kernel(&host, "kernel_cast_f32_to_f64");
@@ -364,4 +373,57 @@ fn a_vmap_in_an_untaken_arm_reads_the_expanded_activation_through_its_strides() 
         );
     }
     assert!(launch.contains(&gate_arguments(id, act, 2)), "{launch}");
+}
+
+/// Fail-closed for the kinds whose check HIP cannot gate (decisions section
+/// 11; `TrapSeeds::is_activation_gated`): an integer reduction's overflow check
+/// (HIP's one integer `sum`, the `i16` sum promoted to `i32`) and an extreme reduction's empty-axis check under an untaken arm's
+/// activation are refused, with the gate's `unimplemented chelis#2413`
+/// rejection, rather than launched with a check that would run where the
+/// activation is false. The same reduction every execution runs has no
+/// activation and compiles.
+///
+/// Evidentiary status: REGRESSION TEST for the refusals. At 224414e1f HIP
+/// launches both arms' reductions ungated. The unconditional twins are a
+/// disposition lock (they compile at 224414e1f).
+#[test]
+fn an_untaken_arms_reduction_check_is_refused_and_its_unconditional_twin_compiles() {
+    for (kind, arm, unconditional) in [
+        (
+            "integer sum",
+            "def main(x: tensor[4, i16], y: tensor[i32], s: tensor[f32]) -> tensor[i32] = if lt(tensor_to_scalar(s), 0.0f32) then sum(x, 0i32) else y\n",
+            "def main(x: tensor[4, i16]) -> tensor[i32] = sum(x, 0i32)\n",
+        ),
+        (
+            "empty-axis max_reduce",
+            "def main(e: tensor[0, f32], y: tensor[f32], s: tensor[f32]) -> tensor[f32] = if lt(tensor_to_scalar(s), 0.0f32) then max_reduce(e, 0i32) else y\n",
+            "def main(e: tensor[0, f32]) -> tensor[f32] = max_reduce(e, 0i32)\n",
+        ),
+    ] {
+        let dag = lowered(arm);
+        let seeds = dag.trap_seeds();
+        let gated = dag
+            .nodes()
+            .iter()
+            .filter(|node| seeds.is_activation_gated(node))
+            .map(|node| chelis_ir::grad::risc_op_name(&node.op))
+            .collect::<Vec<_>>();
+        assert!(
+            gated
+                .iter()
+                .any(|op| op.contains("sum") || op.contains("max")),
+            "{kind}: the arm's reduction is gated: {gated:?}"
+        );
+        let error = support::codegen_hip(&dag, "gated")
+            .map(|result| result.c_source)
+            .expect_err(kind);
+        let message = error.to_string();
+        assert!(
+            message.contains("a checking operation under an activation")
+                && message.contains("2413"),
+            "{kind}: {message}"
+        );
+        emit(unconditional)
+            .unwrap_or_else(|error| panic!("{kind}: the unconditional twin: {error}"));
+    }
 }

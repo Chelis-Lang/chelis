@@ -22,8 +22,8 @@ use std::collections::BTreeSet;
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SHRINK_TO_END,
-    TensorType, bind_symbolic_dims,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
+    SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -533,17 +533,18 @@ fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<Tens
     where_elementwise(&mask, value, &fill)
 }
 
-/// Replace the operands of a checking `node` whose activation is false, in
-/// the rows where it is false, with values its checks accept
-/// ([`DagNode::inactive_operand`]), so the node computes a value and reports
-/// nothing.
+/// Replace the operands of a gated `node` ([`crate::dag::TrapSeeds::is_activation_gated`],
+/// `gated`) whose activation is false, in the rows where it is false, with
+/// values its checks accept ([`DagNode::inactive_operand`]), so the node
+/// computes a value and reports nothing.
 /// Returns the replaced values, which the caller restores once the node has
 /// run: its operands' other consumers read them unchanged.
 fn neutralize_inactive_operands(
     node: &DagNode,
+    gated: bool,
     values: &mut UnordMap<NodeId, TensorValue>,
 ) -> Result<Vec<(NodeId, TensorValue)>, String> {
-    if node.owner.activation.is_none() || node.inactive_operand(0).is_none() {
+    if !gated || node.inactive_operand(0).is_none() {
         return Ok(Vec::new());
     }
     let activity = node_activity(node, values)?;
@@ -551,12 +552,13 @@ fn neutralize_inactive_operands(
         return Ok(Vec::new());
     }
     // One operand may fill several slots (`x / x`); the larger neutral
-    // (one) is accepted in every slot.
+    // (one) is accepted in every slot. A slot with no inactive value (a
+    // guarded abort's fallback) is read unchanged.
     let mut neutrals = Vec::<(NodeId, i64)>::new();
     for (slot, input) in node.inputs.iter().enumerate() {
-        let neutral = node
-            .inactive_operand(slot)
-            .expect("a checking operation names each operand's inactive value");
+        let Some(neutral) = node.inactive_operand(slot) else {
+            continue;
+        };
         match neutrals.iter_mut().find(|(id, _)| id == input) {
             Some((_, existing)) => *existing = (*existing).max(neutral),
             None => neutrals.push((*input, neutral)),
@@ -2939,7 +2941,7 @@ where
 }
 
 /// The nodes `roots` need, with every observable root
-/// ([`Dag::is_observable_root`]) of a declaration the selection enters.
+/// ([`crate::dag::TrapSeeds::is_observable_root`]) of a declaration the selection enters.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
@@ -2969,7 +2971,7 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // chelis#2368: effect nodes are live because they are effects, not
     // because a value reaches them; chelis#2440 and chelis#2413: so is a
     // potentially trapping node, numeric or random. One predicate names the
-    // class ([`Dag::is_observable_root`]).
+    // class ([`crate::dag::TrapSeeds::is_observable_root`]).
     //
     // chelis#2476 scopes it to the selection ([`Dag::outside_selection`]).
     // An abort, or a trap, in a declaration this evaluation does not enter is
@@ -2978,10 +2980,11 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // seed still reaches every observable root of the declarations the
     // selection enters, including the discarded ones, which is what
     // [05-OP-68] is about.
+    let seeds = dag.trap_seeds();
     stack.extend(
         dag.nodes()
             .iter()
-            .filter(|node| dag.is_observable_root(node) && !unselected[node.id.0])
+            .filter(|node| seeds.is_observable_root(node) && !unselected[node.id.0])
             .map(|node| node.id),
     );
     while let Some(id) = stack.pop() {
@@ -3549,6 +3552,10 @@ where
         .retained_roots()
         .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
 
+    // One seed query for the walk: the literal result claims a witness
+    // checks are a whole-graph derivation, read from the unbound graph as
+    // the C lane reads them.
+    let seeds = dag.trap_seeds();
     for (index, id) in order.into_iter().enumerate() {
         let node = bound_dag
             .get(id)
@@ -3563,7 +3570,19 @@ where
         {
             continue;
         }
-        if let Some(failure) = movement_failures.remove(&node.id) {
+        // spec/10 §3.2: a node whose activation holds in no row checks
+        // nothing. An operand-value check reads neutral operands below; an
+        // extent or bound check is skipped here, since one tensor's rows
+        // share their extents and it runs when any row is active. Whether
+        // the node is gated is read from the unbound graph, as the C lane
+        // reads it, since binding renames no node.
+        let gated = dag
+            .get(node.id)
+            .is_some_and(|source| seeds.is_activation_gated(source));
+        let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
+        if let Some(failure) = movement_failures.remove(&node.id)
+            && !inactive
+        {
             return Err(failure);
         }
         // `spec/05-risc-primitives.md` section 2.4.1 makes every stride step
@@ -3573,7 +3592,9 @@ where
         // movement plan validates this same vector before emitting any local
         // extent site. Reuse the resolved vector for both the sites and the
         // operation so Eval has one signed-validation boundary as well.
-        let resolved_stride_steps = if let RiscOp::Stride { strides } = &node.op {
+        let resolved_stride_steps = if inactive {
+            None
+        } else if let RiscOp::Stride { strides } = &node.op {
             let input = values.get(&node.inputs[0]).ok_or_else(|| {
                 format!(
                     "stride at node {}: missing value for tensor operand",
@@ -3685,9 +3706,19 @@ where
 
         // spec/10 §3.2: a node under a false activation computes a value
         // from operands its checks accept, and checks nothing.
-        let inactive_operands = neutralize_inactive_operands(node, &mut values)?;
+        let inactive_operands = neutralize_inactive_operands(node, gated, &mut values)?;
+        let mut inactive_value = if inactive {
+            inactive_unchecked_value(node, &values, &runtime_dims)?
+        } else {
+            None
+        };
         let out_prim = node.output_type.precision;
         let value = match &node.op {
+            // An extent or bound check under a false activation: the value
+            // of its declared type, checked by nothing.
+            _ if inactive_value.is_some() => inactive_value
+                .take()
+                .expect("an inactive node's unchecked value"),
             RiscOp::Const { value } => {
                 // chelis#616: a Const whose symbolic dims resolve neither
                 // statically nor through the runtime bindings may carry a
@@ -3800,9 +3831,10 @@ where
                     .shape
                     .get(*axis as usize)
                     .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
-                for required in requirements.iter().chain(
-                    crate::axis_sources::literal_result_witness_requirements(dag, node.id).iter(),
-                ) {
+                for required in requirements
+                    .iter()
+                    .chain(seeds.literal_result_witness_requirements(node.id))
+                {
                     let required = required
                         .as_i64_exact()
                         .ok_or_else(|| "extent witness requires i64".to_string())?;
@@ -4627,6 +4659,115 @@ where
     })
 }
 
+/// The value a node whose activation holds in no row produces without
+/// checking anything (spec/10 §3.2), for the classes that check an extent or
+/// a bound rather than an operand's values ([`RuntimeCheck`]); `None` for a
+/// node that computes from its operands as usual.
+///
+/// A movement node reads no bound and produces zeros of its declared type,
+/// each axis it declares itself taking its operand's extent, so an empty or
+/// out-of-range bound in an untaken arm allocates and traps on nothing. A
+/// reduction over an empty axis reduces to zeros. An extent claim compares
+/// nothing and produces the value it would have checked.
+fn inactive_unchecked_value(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<Option<TensorValue>, String> {
+    let operand = || {
+        node.inputs
+            .first()
+            .and_then(|input| values.get(input))
+            .ok_or_else(|| format!("node {} reads a missing operand", node.id.0))
+    };
+    // All-zero bits, the C lane's zero-fill: positive zeros, and at `key`
+    // the key whose bits are zero (`key_from_seed(0)`).
+    let zeros = |shape: &[usize]| -> Result<TensorValue, String> {
+        let prim = node.output_type.precision;
+        let len = admit_result("activation", shape, prim)?;
+        let storage = if prim == Prim::Key {
+            let seed = chelis_types::scalar_from_i64("activation", Prim::Int64, 0)
+                .map_err(|trap| trap.to_string())?;
+            let zero = RandomKey::from_seed(seed).map_err(|error| error.to_string())?;
+            TensorStorage::from_keys(vec![zero; len])
+        } else {
+            zero_storage(prim, len)?
+        };
+        Ok(TensorValue::from_storage(shape.to_vec(), storage))
+    };
+    match node.runtime_check() {
+        RuntimeCheck::MovementBounds => {
+            let operand = operand()?;
+            let shape = node
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .map(|(axis, dim)| match dim {
+                    DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Ok(*extent),
+                    // A movement keeps its operand's rank, so the operand
+                    // has every axis the node declares.
+                    DimInfo::Named(name, None) => runtime_dims
+                        .get(name)
+                        .or_else(|| operand.shape.get(axis))
+                        .copied()
+                        .ok_or_else(|| {
+                            format!(
+                                "node {} declares axis {axis}, which its operand of rank {} does not have",
+                                node.id.0,
+                                operand.shape.len()
+                            )
+                        }),
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::EmptyAxis => {
+            let axis = match &node.op {
+                RiscOp::MaxReduce { axis }
+                | RiscOp::MinReduce { axis }
+                | RiscOp::Argmax { axis }
+                | RiscOp::Argmin { axis } => *axis,
+                _ => return Ok(None),
+            };
+            let operand = operand()?;
+            if operand.shape.get(axis) != Some(&0) {
+                return Ok(None);
+            }
+            let mut shape = operand.shape.clone();
+            shape.remove(axis);
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::ExtentClaims => match &node.op {
+            RiscOp::ExtentWitness {
+                axis: RtAxis::Lit(axis),
+                ..
+            } => {
+                let extent = operand()?
+                    .shape
+                    .get(*axis as usize)
+                    .copied()
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                finalize_wide_int(
+                    "shape",
+                    node.output_type.precision,
+                    vec![],
+                    vec![i64::try_from(extent).map_err(|_| "extent exceeds i64")?],
+                )
+                .map(Some)
+            }
+            RiscOp::CheckedReshapeExtent { .. } => Ok(Some(operand()?.clone())),
+            _ => Ok(None),
+        },
+        RuntimeCheck::Nothing
+        | RuntimeCheck::OperandValues
+        | RuntimeCheck::MeanDivisor
+        | RuntimeCheck::Random
+        | RuntimeCheck::Abort
+        | RuntimeCheck::Ungated => Ok(None),
+    }
+}
+
 fn local_guard_is_active(
     claim: &crate::axis_sources::LocalGuardClaim,
     values: &UnordMap<NodeId, TensorValue>,
@@ -4640,10 +4781,14 @@ fn local_guard_is_active(
             activation.0
         )
     })?;
+    // An extent is shared by every row of its tensor, so under a per-row
+    // activation the guard runs when any row is active.
     match value.storage().to_raw() {
-        RawTensor::Int(values) if values.len() == 1 => Ok(values[0] != 0),
+        RawTensor::Int(values) if value.prim() == Prim::Bool => {
+            Ok(values.iter().any(|value| *value != 0))
+        }
         _ => Err(format!(
-            "local extent guard activation at node {} is not a scalar Bool",
+            "local extent guard activation at node {} is not a Bool",
             activation.0
         )),
     }
@@ -6207,7 +6352,8 @@ mod tests {
 
         let (dag, z, g, main) = program(Prim::Int32);
         assert!(
-            dag.is_observable_root(dag.get(g).expect("node")),
+            dag.trap_seeds()
+                .is_observable_root(dag.get(g).expect("node")),
             "precondition: integer arithmetic must be a trapping node, or this \
              test passes for the wrong reason"
         );
@@ -6227,7 +6373,9 @@ mod tests {
 
         let (float_dag, float_z, float_g, float_main) = program(Prim::F32);
         assert!(
-            !float_dag.is_observable_root(float_dag.get(float_g).expect("node")),
+            !float_dag
+                .trap_seeds()
+                .is_observable_root(float_dag.get(float_g).expect("node")),
             "control: float arithmetic cannot trap, so it is never seeded at all"
         );
         let float_live = live_mask_for_roots(&float_dag, &[float_main]);

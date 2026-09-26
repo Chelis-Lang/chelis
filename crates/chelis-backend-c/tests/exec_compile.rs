@@ -13,8 +13,8 @@ mod runtime_archive;
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
-    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, LogicalKind, ReduceWindowKind,
-    RiscOp, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtentClaim, ExtentWitnessSite, ExtremaKind, ExtremaOperand,
+    LogicalKind, Owner, ReduceWindowKind, RiscOp, RtAxis, TensorType,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
@@ -25,6 +25,8 @@ use chelis_ir::host::{
     ConcreteHostProgram as HostProgram, HostFunctionOrigin,
 };
 use chelis_types::types::Prim;
+use chelis_types::{RawTensor, finalize_tensor};
+use chelis_unord::UnordMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8231,9 +8233,13 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
     )
     .expect("runtime branch codegen");
     assert_eq!(generated.input_labels, ["flag", "x"]);
+    // The claim is checked under its carrier's owner activation, read from
+    // that Bool's storage row by row (any row active runs the guard).
     assert!(
-        generated.c_source.contains("chelis_tensor_to_scalar(t"),
-        "branch activation crosses the exact tagged scalar carrier"
+        generated
+            .c_source
+            .contains("__local_guard_active |= (((const "),
+        "the claim's guard reads its carrier's owner activation"
     );
     generated
 }
@@ -10703,4 +10709,568 @@ fn issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c() {
         assert_zero_geometry_both_lanes(dag.clone(), &[("x", &[2, 3])], &[&[2, 3]], false);
         assert_zero_geometry_both_lanes(dag, &[("x", &[3, 2])], &[&[2, 3]], true);
     }
+}
+
+/// One input of [`gated_check_graph`]: its rank-1 extent (`None` for rank
+/// 0), dtype and one fill value for every element.
+struct GatedInput {
+    name: &'static str,
+    extent: Option<usize>,
+    prim: Prim,
+    fill: i64,
+}
+
+/// A hand-built graph whose root is one check-carrying node under the
+/// rank-0 activation `a` (decisions section 11): `x` is `tensor[3, i64]` of
+/// sevens, `n` a rank-0 `i64` bound, `y` a `tensor[k, i64]` of runtime
+/// extent. Returns the graph and its inputs besides `a`.
+fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = |dims: Vec<DimInfo>, precision| TensorType { dims, precision };
+    let load = |dag: &mut Dag, name: &str, dims, precision| {
+        dag.add_node(
+            decl,
+            RiscOp::Load { name: name.into() },
+            vec![],
+            ty(dims, precision),
+            None,
+        )
+    };
+    let x = load(&mut dag, "x", vec![DimInfo::Lit(3)], Prim::Int64);
+    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let a = load(&mut dag, "a", vec![], Prim::Bool);
+    let owner = Owner {
+        decl,
+        activation: Some(a),
+    };
+    let x_input = GatedInput {
+        name: "x",
+        extent: Some(3),
+        prim: Prim::Int64,
+        fill: 7,
+    };
+    let n_input = GatedInput {
+        name: "n",
+        extent: None,
+        prim: Prim::Int64,
+        fill: bound,
+    };
+    let movement = |dag: &mut Dag, op| {
+        dag.add_node(
+            owner,
+            op,
+            vec![x, n],
+            ty(vec![DimInfo::Named("result".into(), None)], Prim::Int64),
+            None,
+        )
+    };
+    let root = match kind {
+        "shrink" => movement(
+            &mut dag,
+            RiscOp::Shrink {
+                bounds: vec![(
+                    chelis_ir::dag::RtDim::Lit(0),
+                    chelis_ir::dag::RtDim::Node(1),
+                )],
+            },
+        ),
+        "stride" => movement(
+            &mut dag,
+            RiscOp::Stride {
+                strides: vec![chelis_ir::dag::RtDim::Node(1)],
+            },
+        ),
+        "pad" => movement(
+            &mut dag,
+            RiscOp::Pad {
+                padding: vec![(
+                    chelis_ir::dag::RtDim::Node(1),
+                    chelis_ir::dag::RtDim::Lit(0),
+                )],
+                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+            },
+        ),
+        "extent witness" => {
+            // A call `g[k](y: tensor[k], x: tensor[k])`: `y`'s witness
+            // declares `k`, `x`'s claims it.
+            let y = load(
+                &mut dag,
+                "y",
+                vec![DimInfo::Named("k".into(), None)],
+                Prim::Int64,
+            );
+            let declares = dag.add_node(
+                owner,
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::Caller,
+                    parameter: "y".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![y],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            let root = dag.add_node(
+                owner,
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::Caller,
+                    parameter: "x".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: vec![ExtentClaim {
+                        claim: "k".into(),
+                        requirement_declares: true,
+                    }],
+                },
+                vec![x, declares],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            dag.add_root(root);
+            let y_input = GatedInput {
+                name: "y",
+                extent: Some(usize::try_from(bound).unwrap()),
+                prim: Prim::Int64,
+                fill: 5,
+            };
+            return (dag, vec![x_input, n_input, y_input]);
+        }
+        "checked reshape" => {
+            // The target extent `n` against the claimed extent 3.
+            let required = dag.add_node(
+                owner,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 3).unwrap(),
+                },
+                vec![],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            dag.add_node(
+                owner,
+                RiscOp::CheckedReshapeExtent {
+                    claims: vec!["rows".into()],
+                    axis: RtAxis::Lit(0),
+                },
+                vec![n, required],
+                ty(vec![], Prim::Int64),
+                None,
+            )
+        }
+        other => panic!("{other}"),
+    };
+    dag.add_root(root);
+    (dag, vec![x_input, n_input])
+}
+
+/// Decisions section 11 in the C lane for the checks a Tensor-lane C entry
+/// cannot reach from source, because a runtime-extent result has no C
+/// representation there (chelis#600): runtime `shrink`, `stride` and `pad`
+/// bounds, a call's extent claim (`ExtentWitness`) and a checked reshape
+/// target (`CheckedReshapeExtent`), each under a rank-0 activation `a`. The
+/// DAG evaluator and the compiled C run the same graph. With `a` false both
+/// return the same value (a movement's zeros of its operand's extent; a
+/// claim's unchanged value) and trap nothing; with `a` true both trap, with
+/// the typed trap each kind raises.
+///
+/// Evidentiary status: REGRESSION TEST for the inactive rows (at
+/// 224414e1f both lanes trap them: neither gates these kinds); the active
+/// rows are a disposition lock.
+#[test]
+fn a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_eval_and_c() {
+    // (kind, bound, the evaluator's trap, the C lane's trap). `pad`'s
+    // evaluator trap is its bound's untyped report, not a NumericTrap.
+    let cases = [
+        (
+            "shrink",
+            4,
+            "domain in shrink at i64",
+            "numeric trap: domain in shrink at i64",
+        ),
+        (
+            "stride",
+            0,
+            "domain in stride at i64",
+            "numeric trap: domain in stride at i64",
+        ),
+        (
+            "pad",
+            -1,
+            "must be a non-negative integer",
+            "numeric trap: domain in pad at i64",
+        ),
+        (
+            "extent witness",
+            2,
+            "domain in load at i64",
+            "numeric trap: domain in load at i64",
+        ),
+        (
+            "checked reshape",
+            2,
+            "domain in reshape at i64",
+            "numeric trap: domain in reshape at i64",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, bound, eval_trap, c_trap) in cases {
+        let (dag, inputs) = gated_check_graph(kind, bound);
+        let generated =
+            codegen(&dag, "gated_check").unwrap_or_else(|error| panic!("{kind}: {error}"));
+        for active in [false, true] {
+            let mut values = UnordMap::new();
+            let mut allocations = String::new();
+            let mut slots = Vec::new();
+            let mut all = inputs.iter().collect::<Vec<_>>();
+            let activation = GatedInput {
+                name: "a",
+                extent: None,
+                prim: Prim::Bool,
+                fill: i64::from(active),
+            };
+            all.push(&activation);
+            for input in &all {
+                let shape = input.extent.map_or_else(Vec::new, |extent| vec![extent]);
+                let count = input.extent.unwrap_or(1);
+                values.insert(
+                    input.name.to_string(),
+                    TensorValue::from_storage(
+                        shape.clone(),
+                        finalize_tensor(
+                            input.name,
+                            input.prim,
+                            RawTensor::Int(vec![input.fill; count]),
+                        )
+                        .unwrap(),
+                    ),
+                );
+                let (dtype, bits) = if input.prim == Prim::Bool {
+                    ("CHELIS_DTYPE_BOOL", input.fill as u64)
+                } else {
+                    ("CHELIS_DTYPE_I64", input.fill as u64)
+                };
+                allocations.push_str(&format!(
+                    "    int64_t {name}_shape[] = {{{extent}}};\n    chelis_tensor *{name} = chelis_alloc({rank}, {name}_shape, {dtype});\n    chelis_tensor_write *{name}_guard = chelis_tensor_begin_write({name});\n    chelis_fill_scalar({name}_guard, chelis_scalar_from_bits({dtype}, UINT64_C({bits})));\n    chelis_tensor_end_write({name}_guard);\n",
+                    name = input.name,
+                    extent = input.extent.unwrap_or(1),
+                    rank = usize::from(input.extent.is_some()),
+                ));
+            }
+            for label in &generated.input_labels {
+                assert!(
+                    all.iter().any(|input| input.name == label),
+                    "{kind}: slot {label}"
+                );
+                slots.push(label.clone());
+            }
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void gated_check(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+{allocations}    chelis_tensor *inputs[] = {{{slots}}}, *outputs[] = {{NULL}};
+    gated_check(inputs, {count}, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%d", chelis_tensor_rank(outputs[0]));
+    for (int64_t i = 0; i < out.count; ++i) printf(" %lld", (long long)((const int64_t *)out.data)[i]);
+    printf("\n");
+    return 0;
+}}
+"#,
+                slots = slots.join(", "),
+                count = slots.len(),
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            let c = if run.status.success() {
+                Ok(String::from_utf8_lossy(&run.stdout).trim().to_string())
+            } else {
+                Err(String::from_utf8_lossy(&run.stderr).to_string())
+            };
+            let root = dag.roots()[0];
+            let eval = eval_tensor(&dag, &values).map(|result| {
+                let value = &result[&root];
+                let mut text = value.shape.len().to_string();
+                for element in value.to_f64_lossy_vec() {
+                    text.push_str(&format!(" {element}"));
+                }
+                text
+            });
+            match (active, &eval, &c) {
+                (false, Ok(eval), Ok(c)) if eval == c => {}
+                (true, Err(eval), Err(c)) if eval.contains(eval_trap) && c.contains(c_trap) => {}
+                _ => failures.push(format!("{kind}, active {active}: eval {eval:?}, C {c:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// `f` of `source` (one input `x: tensor[n, f32]` of ones, a rank-0 `f32`
+/// result) lowered as a tensor entry, run by the DAG evaluator and by its
+/// compiled C: each lane's value, or its trap text (for C, the emitter's
+/// refusal where it refuses the graph).
+fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let mut values = UnordMap::new();
+    values.insert(
+        "x".to_string(),
+        TensorValue::from_storage(
+            vec![n],
+            finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; n])).unwrap(),
+        ),
+    );
+    let root = *dag.roots().last().expect("a root");
+    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+    let generated = match codegen(&dag, "claim_arm") {
+        Ok(generated) => generated,
+        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+    };
+    assert_eq!(generated.input_labels, ["x"]);
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float x_data[{n}];
+    for (int i = 0; i < {n}; ++i) x_data[i] = 1.0f;
+    int64_t x_shape[1] = {{{n}}};
+    chelis_tensor *x = chelis_tensor_entry_borrow(1, x_shape, CHELIS_DTYPE_F32, x_data, sizeof(x_data));
+    chelis_tensor *inputs[1] = {{x}}, *outputs[1] = {{NULL}};
+    claim_arm(inputs, 1, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%.1f\n", (double)((const float *)out.data)[0]);
+    return 0;
+}}
+"#
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let c = if run.status.success() {
+        String::from_utf8_lossy(&run.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run.stderr).to_string())
+    };
+    (eval, c)
+}
+
+/// Decisions section 11 for a callee's result claim: a call in a runtime
+/// `if` arm inlines its callee under the arm's activation, and the claim its
+/// declared result makes (a named `tensor[n, f32]` over a `shrink`, and a
+/// literal `tensor[2, 2, f32]` over a `reshape` whose target folds to 3) is
+/// checked under its carrier's owner activation. Untaken, the DAG evaluator
+/// and the compiled C both return the `else` value; taken, both trap with
+/// the claim's typed trap.
+///
+/// Evidentiary status: REGRESSION TEST for both untaken rows (at eaa5f3306
+/// and 224414e1f the evaluator traps each claim in the untaken arm); the
+/// taken rows are a disposition lock.
+#[test]
+fn a_callees_result_claim_checks_only_in_a_taken_arm_in_eval_and_c() {
+    let cases = [
+        (
+            "named result claim",
+            "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\ndef f(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(g(copy(x)), 0i32) else sum(x, 0i32)\n}\n",
+            4,
+            "numeric trap: domain in shrink at i64",
+        ),
+        (
+            "literal result claim",
+            "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef f(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
+            6,
+            "numeric trap: domain in reshape at i64",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, source, n, trap) in cases {
+        let untaken = tensor_entry_lanes(&source.replace("{c}", "50.0f32"), n);
+        let expected = n as f64;
+        if !matches!(untaken, (Ok(eval), Ok(c)) if eval == expected && c == expected) {
+            failures.push(format!("untaken {kind}: {untaken:?}"));
+        }
+        let taken = tensor_entry_lanes(&source.replace("{c}", "-5.0f32"), n);
+        if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
+            failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// One kind [`a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c`]
+/// covers: the declarations before `f`, the dead `let` (with `{v}` for the
+/// value that decides the check), the value that traps and the one that
+/// does not, `x`'s extent, and each lane's trap.
+struct DeadLetKind {
+    name: &'static str,
+    callee: &'static str,
+    dead: &'static str,
+    traps: &'static str,
+    total: &'static str,
+    n: usize,
+    eval_trap: &'static str,
+    c_trap: &'static str,
+}
+
+/// The kinds the trap seed gained on this branch (decisions sections 6.2
+/// and 11: a potentially trapping node of an entered declaration is seeded,
+/// so a discarded `let` initializer runs its check): an integer sum and
+/// product, an empty reduced axis, runtime `shrink`, `stride` and `pad`
+/// bounds, a call's named extent claim, and a callee's named and literal
+/// result claims. The integer sum row is the spec/03 section 4.4 oracle
+/// (`dead_sum`).
+const DEAD_LET_KINDS: [DeadLetKind; 10] = [
+    DeadLetKind {
+        name: "integer sum (dead_sum)",
+        callee: "",
+        dead: "dead = sum(to_tensor([{v}]), 0i32)",
+        traps: "2000000000i32, 2000000000i32",
+        total: "2i32, 2i32",
+        n: 1,
+        eval_trap: "numeric trap: overflow in sum at i32",
+        c_trap: "numeric trap: overflow in sum at i32",
+    },
+    DeadLetKind {
+        name: "integer product",
+        callee: "",
+        dead: "dead = prod_reduce(to_tensor([{v}]), 0i32)",
+        traps: "100000i32, 100000i32",
+        total: "2i32, 3i32",
+        n: 4,
+        eval_trap: "numeric trap: overflow in prod_reduce at i32",
+        // The C DAG emitter refuses an integer product outright (#729).
+        c_trap: "`i32` tensors in the C DAG emitter",
+    },
+    DeadLetKind {
+        name: "empty max_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = max_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in max_reduce at f32",
+        c_trap: "numeric trap: domain in max_reduce at f32",
+    },
+    DeadLetKind {
+        name: "empty argmax_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = argmax_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in argmax_reduce at i64",
+        c_trap: "numeric trap: domain in argmax_reduce at i64",
+    },
+    DeadLetKind {
+        name: "shrink past the end",
+        callee: "",
+        dead: "dead = shrink(&x, [[1i64, add(shape(&x, 0i32), {v})]])",
+        traps: "3i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "stride of zero",
+        callee: "",
+        dead: "dead = stride(&x, sub(shape(&x, 0i32), {v}))",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in stride at i64",
+        c_trap: "numeric trap: domain in stride at i64",
+    },
+    DeadLetKind {
+        name: "negative pad",
+        callee: "",
+        dead: "dead = pad(&x, [[sub(shape(&x, 0i32), {v}), 0i64]], 0.0f32)",
+        traps: "5i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "must be a non-negative integer",
+        c_trap: "numeric trap: domain in pad at i64",
+    },
+    DeadLetKind {
+        name: "call's named extent claim",
+        callee: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\n",
+        dead: "dead = g(shrink(&x, [[0i64, sub(shape(&x, 0i32), {v})]]), copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in load at i64",
+        c_trap: "numeric trap: domain in load at i64",
+    },
+    DeadLetKind {
+        name: "callee's named result claim",
+        callee: "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[{v}, shape(x, 0i32)]])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "callee's literal result claim",
+        callee: "def g[n](y: tensor[n, f32]) -> tensor[{v}, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "3",
+        total: "2",
+        n: 4,
+        eval_trap: "numeric trap: domain in reshape at i64",
+        c_trap: "numeric trap: domain in reshape at i64",
+    },
+];
+
+/// Decisions sections 6.2 and 11 for every kind the trap seed gained: a
+/// discarded `let` whose initializer can trap runs its check, in the DAG
+/// evaluator and in compiled C of the same lowered graph, and its total
+/// twin (the same program with a value the check accepts) returns `sum(x)`.
+/// The C emitter refuses an integer `prod_reduce` (#729), so that row's C
+/// lane pins the refusal, for both twins.
+/// `chelis-cli`'s `issue_2563_untaken_arm_eval_file` has the
+/// `chelis eval --file` rows of the same sources.
+///
+/// Evidentiary status: per row, in the report of ks5-h2f (REGRESSION TEST
+/// where the trapping row returns at 224414e1f, DISPOSITION LOCK where it
+/// traps there); the total twins are a disposition lock.
+#[test]
+fn a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c() {
+    let mut failures = Vec::new();
+    for kind in &DEAD_LET_KINDS {
+        let source = |v: &str| {
+            format!(
+                "{}def f(x: tensor[{}, f32]) -> tensor[f32] = {{\n  {}\n  sum(x, 0i32)\n}}\n",
+                kind.callee.replace("{v}", v),
+                kind.n,
+                kind.dead.replace("{v}", v)
+            )
+        };
+        let dead = tensor_entry_lanes(&source(kind.traps), kind.n);
+        if !matches!(&dead, (Err(eval), Err(c)) if eval.contains(kind.eval_trap) && c.contains(kind.c_trap))
+        {
+            failures.push(format!("dead {}: {dead:?}", kind.name));
+        }
+        let total = tensor_entry_lanes(&source(kind.total), kind.n);
+        let expected = kind.n as f64;
+        let c_refused = kind.c_trap.starts_with('`');
+        if !matches!(&total, (Ok(eval), Ok(c)) if *eval == expected && *c == expected)
+            && !matches!(&total, (Ok(eval), Err(c)) if c_refused && *eval == expected && c.contains(kind.c_trap))
+        {
+            failures.push(format!("total {}: {total:?}", kind.name));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

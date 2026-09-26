@@ -129,6 +129,10 @@ pub struct HipEmitter {
     /// The activation gate of the checking node being emitted, until its
     /// kernel launch consumes it ([`Self::activation_gate`]).
     gate: Option<HipActivationGate>,
+    /// Per node id, whether it checks nothing where its activation is false
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// query over the graph.
+    activation_gated: Vec<bool>,
 }
 
 /// How a checking node under an activation (spec/10 section 3.2) reads it:
@@ -251,14 +255,26 @@ impl HipEmitter {
     }
 
     /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
-    /// `emit_activation_gate` derives it: a node under an activation whose
-    /// operation checks its operands' values reads every operand through
-    /// the gate, taking [`DagNode::inactive_operand`]'s value for its slot
-    /// where the activation is false. `None` for a node every execution
-    /// checks, or one whose operation checks nothing of its operands.
-    fn activation_gate(node: &DagNode, dag: VerifiedDagView<'_>) -> Option<HipActivationGate> {
+    /// `emit_activation_gate` derives it: a gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]) whose operation checks its
+    /// operands' values reads every operand through the gate, taking
+    /// [`DagNode::inactive_operand`]'s value for its slot where the
+    /// activation is false. `None` for a node that is not gated, and for a
+    /// gated node whose check is not of every operand's values (an extent,
+    /// a bound, an empty axis, an abort's condition beside its fallback),
+    /// which this lane has no gate for: [`Self::begin_node_gate`] refuses it.
+    fn activation_gate(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Option<HipActivationGate> {
+        if !self.activation_gated[node.id.0] {
+            return None;
+        }
         let activation = node.owner.activation?;
-        node.inactive_operand(0)?;
+        let inactive = (0..node.inputs.len())
+            .map(|slot| node.inactive_operand(slot))
+            .collect::<Option<Vec<_>>>()?;
         let rank = dag
             .get(activation)
             .expect("verified activation")
@@ -268,14 +284,7 @@ impl HipEmitter {
         Some(HipActivationGate {
             activation,
             per_row: rank <= node.output_type.dims.len(),
-            operands: kernels::OperandGate {
-                inactive: (0..node.inputs.len())
-                    .map(|slot| {
-                        node.inactive_operand(slot)
-                            .expect("a checking operation names each operand's inactive value")
-                    })
-                    .collect(),
-            },
+            operands: kernels::OperandGate { inactive },
         })
     }
 
@@ -309,9 +318,24 @@ impl HipEmitter {
         )
     }
 
-    /// Set [`Self::gate`] for `node` before its emitter runs.
-    fn begin_node_gate(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
-        self.gate = Self::activation_gate(node, dag);
+    /// Set [`Self::gate`] for `node` before its emitter runs. A gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], the one declaration every lane
+    /// reads) whose check this lane cannot gate by operand substitution is
+    /// refused here, so a newly gated kind compiles only once its HIP
+    /// emitter takes the gate.
+    fn begin_node_gate(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        self.gate = self.activation_gate(node, dag);
+        if self.activation_gated[node.id.0] && self.gate.is_none() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "HIP has no activation gate for this kind of check",
+            ));
+        }
+        Ok(())
     }
 
     /// End `node`'s emission: its launch must have consumed the gate.
@@ -565,6 +589,13 @@ impl HipEmitter {
             device_entrypoint_mode: false,
             draw_keys: BTreeMap::new(),
             gate: None,
+            activation_gated: {
+                let seeds = dag.trap_seeds();
+                dag.nodes()
+                    .iter()
+                    .map(|node| seeds.is_activation_gated(node))
+                    .collect()
+            },
             kernel_rank: match dag
                 .nodes()
                 .iter()
@@ -1458,7 +1489,7 @@ impl HipEmitter {
         dag: VerifiedDagView<'_>,
     ) -> Result<Option<String>, Unsupported> {
         let name = self.ungated_kernel_name_for_op(op, node, dag)?;
-        Ok(match Self::activation_gate(node, dag) {
+        Ok(match self.activation_gate(node, dag) {
             Some(gate) => name.map(|name| Self::gated_kernel_name(name, &gate.operands)),
             None => name,
         })
@@ -1786,7 +1817,7 @@ impl HipEmitter {
         // their operands through it take it; a gate left untaken is refused
         // below rather than compiled into a kernel that checks where the
         // activation is false (spec/10 section 3.2).
-        let gate = Self::activation_gate(node, dag).map(|gate| gate.operands);
+        let gate = self.activation_gate(node, dag).map(|gate| gate.operands);
         let gate_taken = std::cell::Cell::new(false);
         let take_gate = || {
             gate_taken.set(true);
@@ -2298,7 +2329,7 @@ impl HipEmitter {
         // A checking node under an activation checks nothing where it is
         // false (spec/10 section 3.2): its launch consumes the gate, and
         // `end_node_gate` refuses a node whose emitter did not.
-        self.begin_node_gate(node, dag);
+        self.begin_node_gate(node, dag)?;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).

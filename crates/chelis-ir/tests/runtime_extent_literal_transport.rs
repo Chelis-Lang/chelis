@@ -103,31 +103,53 @@ fn discarded_result_keeps_a_potentially_failing_witness() {
     assert!(error.contains("claimed = 4, x axis 0 = 5"), "{error}");
 }
 
+/// A call is stamped with its caller's declaration (spec/10 section 3.2), so
+/// another invocation's witness is one a declaration the root does not enter
+/// owns: [06] section 5.2 scopes potentially trapping liveness to the program
+/// the evaluation runs, and the witness is dropped. A witness the root's own
+/// declaration owns is that declaration's discarded call, whose initializer
+/// runs whether or not its value is read (spec/03 section 4.4), so its
+/// literal claim stays a seed even though no value reaches it.
 #[test]
 fn unrelated_root_does_not_activate_another_invocations_witness() {
-    let mut dag = Dag::new();
-    let decl = dag.declare("test");
-    claimed_witness(&mut dag, decl, &[4]);
-    let result = dag.add_node(
-        decl,
-        RiscOp::Const {
-            value: scalar_from_i64("load", Prim::Int64, 9).unwrap(),
-        },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::Int64,
-        },
-        None,
-    );
-    dag.add_root(result);
-    let dag = dead_code_eliminate(&dag);
+    let build = |witness_is_the_roots: bool| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let other = dag.declare("other");
+        claimed_witness(
+            &mut dag,
+            if witness_is_the_roots { decl } else { other },
+            &[4],
+        );
+        let result = dag.add_node(
+            decl,
+            RiscOp::Const {
+                value: scalar_from_i64("load", Prim::Int64, 9).unwrap(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.add_root(result);
+        dead_code_eliminate(&dag)
+    };
+    let unrelated = build(false);
     assert!(
-        dag.nodes()
+        unrelated
+            .nodes()
             .iter()
             .all(|node| !matches!(node.op, RiscOp::ExtentWitness { .. }))
     );
-    assert!(eval_tensor_with(&dag, |_| None).is_ok());
+    assert!(eval_tensor_with(&unrelated, |_| None).is_ok());
+    let discarded = build(true);
+    let error = eval_tensor_with(&discarded, |_| {
+        Some(TensorValue::from_vec(vec![5], vec![7.0; 5]))
+    })
+    .unwrap_err();
+    assert!(error.contains("claimed = 4, x axis 0 = 5"), "{error}");
 }
 
 #[test]

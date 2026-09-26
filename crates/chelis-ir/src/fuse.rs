@@ -72,11 +72,11 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 }
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible_elementwise(node: &DagNode) -> bool {
+fn is_fusible_elementwise(seeds: &crate::dag::TrapSeeds<'_>, node: &DagNode) -> bool {
     // A checking operation under an activation substitutes operands its
     // checks accept where the activation is false (spec/10 section 3.2);
     // it stays its own kernel, where both lanes substitute them.
-    if node.owner.activation.is_some() && node.inactive_operand(0).is_some() {
+    if seeds.is_activation_gated(node) {
         return false;
     }
     // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
@@ -164,13 +164,14 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
     let is_claim_barrier = |node: &DagNode| claimed_producers[node.id.0];
 
+    let seeds = dag.trap_seeds();
     // Walk in topological order.
     for node in dag.nodes() {
         let id = node.id.0;
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node) || is_claim_barrier(node) {
+        if !is_fusible_elementwise(&seeds, node) || is_claim_barrier(node) {
             continue;
         }
 
@@ -195,7 +196,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 // activation checks under that activation, so it starts its
                 // own chain (spec/10 section 3.2).
                 Some(c)
-                    if is_fusible_elementwise(c)
+                    if is_fusible_elementwise(&seeds, c)
                         && !is_claim_barrier(c)
                         && c.owner == node.owner =>
                 {

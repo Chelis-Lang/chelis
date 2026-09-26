@@ -1287,8 +1287,9 @@ fn lower_program_with_context_inner(
     // inlined where new code reads it, from the library's own definition
     // and in the library's top-level scope.
     let mut may_trap = vec![false; ctx.dag.declarations().len()];
+    let seeds = ctx.dag.trap_seeds();
     for node in ctx.dag.nodes() {
-        if ctx.dag.is_observable_root(node) {
+        if seeds.is_observable_root(node) {
             may_trap[node.owner.decl.0 as usize] = true;
         }
     }
@@ -6431,7 +6432,7 @@ struct TopLevelValue {
     /// here ([`names_top_level_value`]).
     bound: Option<LoweredValue>,
     /// The initializer, when its lowered form holds a potentially trapping
-    /// node ([`Dag::is_observable_root`]). `None` for a total one, whose one
+    /// node ([`crate::dag::TrapSeeds::is_observable_root`]). `None` for a total one, whose one
     /// node set every reference shares.
     trapping: Option<Arc<TrappingInitializer>>,
 }
@@ -6945,20 +6946,22 @@ struct LowerCtx<'program> {
     /// Activation-local lowering tokens allocated before its body executes.
     local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
     /// Scalar Bool selecting the runtime control-flow path currently being
-    /// lowered. A local-ascription owner retains this as a non-value
-    /// dependency so its guard executes only when that source branch is
-    /// selected. Unlike [`Self::random_path_condition`], this is present in
+    /// lowered. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
     /// The conjunction of the enclosing `if` branch predicates, or `None`
     /// at the top level. Maintained unconditionally by `lower_if` and
     /// restored on exit.
     ///
-    /// Two consumers: a local tensor ascription activates only on its path,
-    /// and (chelis#1464) an [05-OP-68] guard fires only on its path. The
-    /// DAG is evaluated eagerly in topological order, so a guard node that
-    /// did not conjoin this would be checked even when the forward program
-    /// takes the sibling branch — the exact thing
-    /// `spec/06-transformations.md` §2.10.1 forbids.
+    /// Every node's owner activation ([`Self::draw_activation`]) conjoins
+    /// it, and a local tensor ascription's claims read that owner (see
+    /// `axis_sources::claim_carrier_activation`). The one direct
+    /// consumer is (chelis#1464) an [05-OP-68] guard's fire condition,
+    /// which conjoins it so a guard fires only on its path even in a lane
+    /// that does not yet gate the guard on its owner activation. The DAG is
+    /// evaluated eagerly in topological order, so a guard node that did not
+    /// conjoin this would be checked even when the forward program takes the
+    /// sibling branch — the exact thing `spec/06-transformations.md`
+    /// §2.10.1 forbids.
     branch_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
@@ -8104,9 +8107,10 @@ impl<'program> LowerCtx<'program> {
             && !declaration_name.is_empty()
             && let Some(value) = self.bindings.get(declaration_name)
         {
+            let seeds = self.dag.trap_seeds();
             let may_trap = self.dag.nodes()[first_node..]
                 .iter()
-                .any(|node| self.dag.is_observable_root(node));
+                .any(|node| seeds.is_observable_root(node));
             let trapping = may_trap.then(|| {
                 Arc::new(TrappingInitializer {
                     expr: initializer.clone(),
@@ -8224,10 +8228,11 @@ impl<'program> LowerCtx<'program> {
         }));
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
         let lowered = lowered.ok()?;
+        let seeds = lowered.trap_seeds();
         lowered
             .nodes()
             .iter()
-            .any(|node| lowered.is_observable_root(node))
+            .any(|node| seeds.is_observable_root(node))
             .then_some(initializer)
     }
 
@@ -9531,11 +9536,20 @@ impl<'program> LowerCtx<'program> {
                             for (axis, _) in &claims {
                                 self.restore_local_ascription_owner_axis(owner, *axis);
                             }
+                            // The node carrying the claims is owned by the
+                            // ascription's own position: its owner activation
+                            // is the one fact the claims are checked under
+                            // (spec/10 section 3.2), the random path inside a
+                            // spliced `grad` or `vmap` body as well as an
+                            // arm's branch path. An initializer produced
+                            // before a claim token, or under another owner
+                            // (before this arm, say), gets a fresh carrier.
+                            let ascription_owner = self.owner();
                             for (_axis, token) in &claims {
-                                let latest_dependency = self
-                                    .branch_path_condition
-                                    .map_or(token.0, |activation| token.0.max(activation.0));
-                                if owner.0 <= latest_dependency {
+                                if owner.0 <= token.0
+                                    || self.dag.get(owner).expect("initializer").owner
+                                        != ascription_owner
+                                {
                                     let ty = self
                                         .dag
                                         .get(owner)
@@ -9543,7 +9557,7 @@ impl<'program> LowerCtx<'program> {
                                         .output_type
                                         .clone();
                                     owner = self.dag.add_node(
-                                        self.owner(),
+                                        ascription_owner,
                                         RiscOp::Copy,
                                         vec![owner],
                                         ty,
@@ -9552,11 +9566,6 @@ impl<'program> LowerCtx<'program> {
                                     val_id = LoweredValue::Node(owner);
                                 }
                                 self.dag.add_shape_dep(owner, *token);
-                            }
-                            if let Some(activation) = self.branch_path_condition
-                                && !claims.is_empty()
-                            {
-                                self.dag.add_shape_dep(owner, activation);
                             }
                             if !claims.is_empty() {
                                 self.invocation_witnesses.push(owner);
@@ -18940,51 +18949,6 @@ impl<'program> LowerCtx<'program> {
         lowered
     }
 
-    /// chelis#1464 / [05-OP-68]: the predicate under which the guard must
-    /// actually abort — the branch predicate AND the enclosing path.
-    ///
-    /// Without the conjunction, a guard nested inside another runtime `if`
-    /// aborts even when the outer condition selects the sibling, because
-    /// the DAG evaluates every node regardless of which branch the forward
-    /// program takes. That turned programs with a well-defined value into
-    /// hard aborts in both lanes, and was visible as a static/runtime split:
-    /// the same program returned a value when the outer condition folded
-    /// (chelis#620 pruning removed the guard) and aborted when it did not.
-    ///
-    /// At the top level there is no enclosing path, so the branch predicate
-    /// is used directly and no nodes are synthesized.
-    fn guard_fire_condition(&mut self, cond: NodeId, trap_on_true: bool) -> (NodeId, bool) {
-        let Some(path) = self.branch_path_condition else {
-            return (cond, trap_on_true);
-        };
-        let path_ty = TensorType {
-            dims: Vec::new(),
-            precision: Prim::Bool,
-        };
-        // `trap_on_true` exists to avoid synthesizing a negation when the
-        // `fail` is the else arm; once the path is conjoined the firing
-        // predicate is explicit, so it collapses to `true`.
-        let branch_predicate = if trap_on_true {
-            cond
-        } else {
-            self.dag.add_node(
-                self.owner(),
-                RiscOp::Logical(LogicalKind::Not),
-                vec![cond],
-                path_ty.clone(),
-                self.current_span_id.clone(),
-            )
-        };
-        let fires = self.dag.add_node(
-            self.owner(),
-            RiscOp::Logical(LogicalKind::And),
-            vec![path, branch_predicate],
-            path_ty,
-            self.current_span_id.clone(),
-        );
-        (fires, true)
-    }
-
     /// chelis#1464: a compile-time-resolvable `if` that selects its
     /// `fail(...)` branch, inside a transform.
     ///
@@ -19049,6 +19013,13 @@ impl<'program> LowerCtx<'program> {
     /// The result carries the fallback's exact type, so the guard is
     /// type-transparent: every consumer downstream sees what it would have
     /// seen had the branch been written without the guard.
+    ///
+    /// The condition is the `if`'s own predicate. The enclosing path is the
+    /// guard's owner activation ([`Self::owner`]), which implies every arm
+    /// predicate [`Self::branch_path_condition`] holds, and a guard whose
+    /// activation is false fires nothing in any lane (spec/10 section 3.2).
+    /// A guard nested in an arm the outer condition does not select, whose
+    /// condition the DAG still computes, therefore does not abort.
     fn guarded_fail_value(
         &mut self,
         cond: NodeId,
@@ -19062,7 +19033,6 @@ impl<'program> LowerCtx<'program> {
         // came from `else`.
         let which = if trap_on_true { "else" } else { "then" };
         let fallback = self.expect_runtime_if_branch(fallback, which, span);
-        let (cond, trap_on_true) = self.guard_fire_condition(cond, trap_on_true);
         let out_ty = self
             .dag
             .get(fallback)

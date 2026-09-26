@@ -2172,60 +2172,364 @@ impl DagNode {
     /// The value operand `slot` takes where this node's activation is false
     /// ([`Owner::activation`]): one no check of the operation rejects, so the
     /// node computes a value and reports nothing (spec/10 section 3.2).
-    /// `None` for an operation that checks nothing of its operands' values.
-    /// The evaluator and the C lane substitute exactly these values.
+    /// `None` for an operation that checks nothing of its operands' values
+    /// ([`RuntimeCheck::OperandValues`], [`RuntimeCheck::MeanDivisor`] and
+    /// [`RuntimeCheck::Abort`] are the ones that do). The evaluator and the C
+    /// lane substitute exactly these values.
     pub fn inactive_operand(&self, slot: usize) -> Option<i64> {
-        match &self.op {
-            RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs
-                if self.output_type.precision.is_integer() =>
-            {
-                Some(0)
-            }
-            // A zero divisor, an integer `MIN / -1`, and an empty `mean`'s
-            // count: zero divided by one rejects none of them.
-            RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
-                Some(i64::from(slot == 1))
-            }
-            // Zero converts to every dtype: no domain or range check rejects
-            // it.
-            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => Some(0),
-            _ => None,
+        match self.runtime_check() {
+            RuntimeCheck::OperandValues | RuntimeCheck::MeanDivisor => Some(match &self.op {
+                // A zero divisor, an integer `MIN / -1`, and an empty
+                // `mean`'s count: zero divided by one rejects none of them.
+                RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
+                    i64::from(slot == 1)
+                }
+                // Zero converts to every dtype, no sum or product of zeros
+                // overflows, and zero is in every integer range.
+                _ => 0,
+            }),
+            // The condition takes the value that does not fire. The fallback
+            // is checked by nothing, so it is read unchanged.
+            RuntimeCheck::Abort => match &self.op {
+                RiscOp::GuardedFail { trap_on_true, .. } if slot == 0 => {
+                    Some(i64::from(!trap_on_true))
+                }
+                _ => None,
+            },
+            RuntimeCheck::Nothing
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims
+            | RuntimeCheck::Random
+            | RuntimeCheck::Ungated => None,
         }
     }
 
-    /// chelis#2440: whether executing this numeric node can raise a
-    /// [`NumericTrap`]. Deliberately conservative: over-retaining costs dead
-    /// code, under-retaining loses a trap. `spec/06-transformations.md`
-    /// §5.2's own example removes a FLOAT `Add`, which is consistent: float
-    /// arithmetic never traps here, integer arithmetic can.
+    /// What this node checks at run time ([`RuntimeCheck`]): the one
+    /// exhaustive declaration, with no wildcard arm, from which the trap
+    /// seed ([`TrapSeeds::is_observable_root`]) and the false-activation behaviour
+    /// ([`Self::inactive_operand`], [`TrapSeeds::is_activation_gated`]) are both
+    /// read. A new operation does not compile until it states which class
+    /// it is in.
     ///
-    /// Integer arithmetic overflows, integer division and remainder divide by
-    /// zero, and a cast into an integer or bool width can be out of domain.
-    /// Float arithmetic never traps — it produces infinities and NaN.
-    fn may_trap_numerically(&self) -> bool {
-        let precision = self.output_type.precision;
+    /// Inventory (the evaluator's `eval.rs` and the C emitter), by class:
+    ///
+    /// | class | operations | what traps |
+    /// |---|---|---|
+    /// | `OperandValues` | integer `Add` `Sub` `Mul` `Neg` `Abs` | overflow |
+    /// | | `FloorDiv` `TruncDiv` `Mod`, integer `Div` | division by zero, `MIN / -1` |
+    /// | | `Cast` `CastTrunc` into an integer or bool width | domain, overflow |
+    /// | | integer `Sum` `ProdReduce`, integer `ReduceWindow` | overflow |
+    /// | | integer `FusedElem` | its steps' overflow and division |
+    /// | `MeanDivisor` | float `Div` | a lowered `mean`'s empty count |
+    /// | `EmptyAxis` | `MaxReduce` `MinReduce` `Argmax` `Argmin` | an empty reduced axis |
+    /// | `MovementBounds` | `Shrink` `Stride` `Pad` | a runtime bound out of domain |
+    /// | `ExtentClaims` | `ExtentWitness` (checking sites), `CheckedReshapeExtent` | a claimed extent |
+    /// | `Random` | `Dropout` `DropoutReplay` `UniformLike` `UniformBoundAdjoint` `SplitN` `FoldIn` `KeySelect` | controls, key extents, a negative count |
+    /// | `Abort` | `GuardedFail` | its authored condition |
+    /// | `Ungated` | `Reshape` `Expand` | a runtime target extent |
+    /// | | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
+    /// | `Nothing` | every other operation, and float arithmetic and reductions | |
+    ///
+    /// Two checks are not an operation kind's and are listed here for
+    /// completeness. Every same-shape producer's operand agreement (the
+    /// evaluator's "tensor shapes must match" and the C lane's
+    /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
+    /// the kernel, not a gated check: a false activation leaves it in place.
+    /// A result's element count and byte size are admitted at every
+    /// allocation ([05-OP-33]) whatever the activation.
+    pub fn runtime_check(&self) -> RuntimeCheck {
+        let integer = self.output_type.precision.is_integer();
+        let value_check = |checks: bool| {
+            if checks {
+                RuntimeCheck::OperandValues
+            } else {
+                RuntimeCheck::Nothing
+            }
+        };
         match &self.op {
-            // Overflow at the dtype's range.
             RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
-                precision.is_integer()
+                value_check(integer)
             }
-            // DivZero, and Overflow for MIN / -1.
-            RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
-                precision.is_integer()
-            }
-            // Domain for a non-finite or fractional source, Overflow for a
-            // source outside the target range. `CastTrunc` is included on
-            // the conservative side: it truncates the fractional case, but
-            // the non-finite and out-of-range cases remain trap candidates.
-            // Read the cast's OWN target, not the node's output type. They
-            // agree today; if a lowering ever let them drift, deriving the
-            // seed from the output type would silently switch the trap
-            // retention off rather than fail.
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => value_check(integer),
+            // Float-only since chelis#178; its one float check is a lowered
+            // `mean`'s count, which the node alone cannot tell apart.
+            RiscOp::Div if integer => RuntimeCheck::OperandValues,
+            RiscOp::Div => RuntimeCheck::MeanDivisor,
+            // Read the cast's OWN target, not the node's output type: if a
+            // lowering ever let them drift, deriving the class from the
+            // output type would silently switch the check off.
             RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
-                new_precision.is_integer() || *new_precision == Prim::Bool
+                value_check(new_precision.is_integer() || *new_precision == Prim::Bool)
             }
-            _ => false,
+            RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => value_check(integer),
+            // An integer window sum overflows; a window is never empty, and
+            // max and min select without arithmetic.
+            RiscOp::ReduceWindow { reducer, .. } => value_check(
+                integer && matches!(reducer, ReduceWindowKind::Sum | ReduceWindowKind::Mean),
+            ),
+            RiscOp::FusedElem { .. } => value_check(integer),
+            RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. } => RuntimeCheck::EmptyAxis,
+            RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
+                RuntimeCheck::MovementBounds
+            }
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LiteralResultClaim,
+                ..
+            } => RuntimeCheck::Nothing,
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } if !requirements.is_empty() => RuntimeCheck::Nothing,
+            RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } => {
+                RuntimeCheck::ExtentClaims
+            }
+            RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformLike
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::SplitN { .. }
+            | RiscOp::FoldIn
+            | RiscOp::KeySelect => RuntimeCheck::Random,
+            RiscOp::GuardedFail { .. } => RuntimeCheck::Abort,
+            RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. }
+            | RiscOp::ScatterElements { .. }
+            | RiscOp::OneHot { .. } => RuntimeCheck::Ungated,
+            RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Round
+            | RiscOp::Recip
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::Count { .. }
+            | RiscOp::ReduceWindowGrad { .. }
+            | RiscOp::Permute { .. }
+            | RiscOp::Shape { .. }
+            | RiscOp::CheckedUnitAxis { .. }
+            | RiscOp::Const { .. }
+            | RiscOp::ConstTensor { .. }
+            | RiscOp::Load { .. }
+            | RiscOp::Store { .. }
+            | RiscOp::Copy
+            | RiscOp::Drop
+            | RiscOp::Realize
+            | RiscOp::BlasMatmul { .. } => RuntimeCheck::Nothing,
         }
+    }
+}
+
+/// What an operation checks at run time (the classes of
+/// [`DagNode::runtime_check`]'s inventory), and so what a node of it does
+/// where its activation is false (spec/10 section 3.2: it is computed, since
+/// a `Where` may read its value, and checks nothing) and whether it is a
+/// trap seed ([`TrapSeeds::is_observable_root`], spec/06 section 5.2).
+///
+/// Under a per-row activation (a `vmap`ped `if`) a check of an operand's
+/// VALUES decides row by row, and a check of an EXTENT decides for every
+/// row at once, since the rows of one tensor share their extents: it runs
+/// when the activation holds in some row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCheck {
+    /// Checks nothing a well-typed operand can fail. Never a seed.
+    Nothing,
+    /// Checks its operands' element values: integer overflow, integer
+    /// division, a cast's range. Where the activation is false each operand
+    /// slot reads [`DagNode::inactive_operand`], a value no check rejects.
+    /// A seed.
+    OperandValues,
+    /// A float `Div`, which checks a lowered `mean`'s count for zero and is
+    /// gated like [`Self::OperandValues`]. Not a seed: the node alone does
+    /// not say it is a `mean`.
+    MeanDivisor,
+    /// Checks that its reduced axis is not empty. Where the activation is
+    /// false an empty axis reduces to zeros. A seed unless its operand's
+    /// reduced axis is a nonzero literal.
+    EmptyAxis,
+    /// Checks its runtime bounds (a `shrink` range, a `stride` step, a `pad`
+    /// width) against its operand's extents. Where the activation is false
+    /// it reads no bound and produces zeros of its declared type, each axis
+    /// it declares itself taking its operand's extent. A seed unless every
+    /// bound is statically in range ([`Dag::movement_bounds_may_fail`]).
+    MovementBounds,
+    /// Compares an extent a contract claims (a call's, a result's, a local
+    /// ascription's, a reshape target's). Where the activation is false it
+    /// compares nothing; its value is unchanged. A seed.
+    ExtentClaims,
+    /// A draw or key operation, gated by its owner's activation in its own
+    /// emitter (it draws or validates nothing where it is false) and
+    /// seeded by the per-guard rule ([`Dag::random_node_may_trap`]).
+    Random,
+    /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
+    /// its condition reading the value that does not fire. Always a seed.
+    Abort,
+    /// Can trap, and neither checks nothing under a false activation nor
+    /// is a seed (chelis#2440's remaining kinds).
+    Ungated,
+}
+
+/// The trap seed ([`Self::is_observable_root`]), the check-may-fail fact it
+/// and the activation gate share ([`Self::check_may_fail`]), and the gate
+/// itself ([`Self::is_activation_gated`]), over one graph
+/// ([`Dag::trap_seeds`]).
+///
+/// A literal result claim observed at a call's parameter witness makes that
+/// witness a check ([`Self::literal_result_witness_requirements`]), and
+/// which witness observes a claim is a whole-graph derivation. The queries
+/// therefore live on this value rather than on [`Dag`]: a pass takes one
+/// before it walks the nodes and the derivation runs at most once, where a
+/// per-node query on the graph repeated it for every witness, quadratic in
+/// the graph in dead-code elimination, the evaluator's seeds and the
+/// verifier.
+pub struct TrapSeeds<'dag> {
+    dag: &'dag Dag,
+    literal_result_witness_requirements:
+        std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
+}
+
+impl TrapSeeds<'_> {
+    /// Whether `node` is an observable root (`spec/06-transformations.md`
+    /// §5.2): it must execute because of what it does, not because a value
+    /// reaches it. "Potentially effectful or trapping nodes are observable
+    /// roots; purity alone does not make a possible trap dead."
+    ///
+    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
+    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
+    /// backward-synthesized adjoint is not a numeric member: its trap
+    /// obligation belongs to the forward node it was derived from, and it is
+    /// scaffolding for a gradient that may not be requested (seeding one
+    /// resurrects integer adjoint machinery that fails verification as
+    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
+    ///
+    /// This is the one seed predicate. The evaluator, dead-code elimination,
+    /// `grad`'s pruner, the verifier's dangling rule and the host transform
+    /// runner all read it; the evaluator and dead-code elimination then keep
+    /// only the seeds whose declaration the evaluation enters
+    /// ([`Dag::outside_selection`]), and a node whose activation is false
+    /// checks nothing when it runs.
+    pub fn is_observable_root(&self, node: &DagNode) -> bool {
+        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
+        match node.runtime_check() {
+            RuntimeCheck::Abort => true,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
+            RuntimeCheck::Random => self.check_may_fail(node),
+            RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
+        }
+    }
+
+    /// Whether `node`'s run-time check ([`DagNode::runtime_check`]) can
+    /// fail for some input: its class checks something, and no static fact
+    /// rules the failure out. The facts are per class: a reduced axis of
+    /// nonzero literal extent is not empty
+    /// ([`Dag::reduced_axis_may_be_empty`]), movement bounds statically in
+    /// range are in range ([`Dag::movement_bounds_may_fail`]), and a random
+    /// node's literal in-range controls pass ([`Dag::random_node_may_trap`]).
+    /// The trap seed ([`Self::is_observable_root`]) and the activation gate
+    /// ([`Self::is_activation_gated`]) both read it.
+    pub fn check_may_fail(&self, node: &DagNode) -> bool {
+        match node.runtime_check() {
+            RuntimeCheck::Nothing => false,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::MeanDivisor
+            | RuntimeCheck::Abort
+            | RuntimeCheck::Ungated => true,
+            RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
+            RuntimeCheck::EmptyAxis => self.dag.reduced_axis_may_be_empty(node),
+            RuntimeCheck::MovementBounds => self.dag.movement_bounds_may_fail(node),
+            RuntimeCheck::Random => self.dag.random_node_may_trap(node),
+        }
+    }
+
+    /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
+    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
+    /// compares its axis against its literal requirements, its named claims
+    /// and the literal result claims observed at it
+    /// ([`Self::literal_result_witness_requirements`], the evaluator's and
+    /// the C lane's full list); a witness with none of the three only
+    /// reports the extent it reads, which no input can fail. Lowering places
+    /// such a witness at every call entry, so seeding it would keep a
+    /// parameter's `Load` that nothing else reads and make that parameter a
+    /// required input.
+    fn extent_claims_may_fail(&self, node: &DagNode) -> bool {
+        match &node.op {
+            RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            } => {
+                !requirements.is_empty()
+                    || !claims.is_empty()
+                    || !self.literal_result_witness_requirements(node.id).is_empty()
+            }
+            _ => true,
+        }
+    }
+
+    /// The literal result claims checked at `witness`
+    /// ([`crate::axis_sources::literal_result_witness_requirements`]), in
+    /// claim order. The whole graph's are derived on the first call and
+    /// shared by every later one.
+    pub fn literal_result_witness_requirements(
+        &self,
+        witness: NodeId,
+    ) -> &[chelis_types::ScalarValue] {
+        self.literal_result_witness_requirements
+            .get_or_init(|| crate::axis_sources::literal_result_witness_requirements(self.dag))
+            .get(&witness)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `node` checks nothing where its activation is false (spec/10
+    /// section 3.2): it has an activation, its check can fail
+    /// ([`Self::check_may_fail`]; a node whose check no input fails needs
+    /// no gate and computes as usual), and its class is one the lanes gate,
+    /// by one of the mechanisms [`RuntimeCheck`] names: every class but
+    /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
+    /// key-operation emitters read the owner's activation themselves, and
+    /// [`RuntimeCheck::Ungated`].
+    ///
+    /// The one gate declaration every lane reads: the evaluator and the C
+    /// emitter gate exactly these nodes, fusion keeps each in its own
+    /// kernel, and the HIP emitter refuses one whose kernel does not take
+    /// the gate.
+    pub fn is_activation_gated(&self, node: &DagNode) -> bool {
+        node.owner.activation.is_some()
+            && self.check_may_fail(node)
+            && match node.runtime_check() {
+                RuntimeCheck::OperandValues
+                | RuntimeCheck::MeanDivisor
+                | RuntimeCheck::EmptyAxis
+                | RuntimeCheck::MovementBounds
+                | RuntimeCheck::ExtentClaims
+                | RuntimeCheck::Abort => true,
+                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+            }
     }
 }
 
@@ -2517,35 +2821,72 @@ impl Dag {
         &self.roots
     }
 
-    /// Whether `node` is an observable root (`spec/06-transformations.md`
-    /// §5.2): it must execute because of what it does, not because a value
-    /// reaches it. "Potentially effectful or trapping nodes are observable
-    /// roots; purity alone does not make a possible trap dead."
-    ///
-    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
-    /// numeric node that can trap (chelis#2440); and a random node that can
-    /// trap by itself ([`Self::random_node_may_trap`], chelis#2413). A
-    /// backward-synthesized adjoint is not a numeric member: its trap
-    /// obligation belongs to the forward node it was derived from, and it is
-    /// scaffolding for a gradient that may not be requested (seeding one
-    /// resurrects integer adjoint machinery that fails verification as
-    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
-    ///
-    /// This is the one seed predicate. The evaluator, dead-code elimination,
-    /// `grad`'s pruner, the verifier's dangling rule and the host transform
-    /// runner all read it; the evaluator and dead-code elimination then keep
-    /// only the seeds whose declaration the evaluation enters
-    /// ([`Self::outside_selection`]), and a node whose activation is false
-    /// checks nothing when it runs.
-    pub fn is_observable_root(&self, node: &DagNode) -> bool {
-        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
-        node.op.is_unconditional_effect()
-            || (node.may_trap_numerically() && !synthesized_adjoint)
-            || self.random_node_may_trap(node)
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`TrapSeeds`]). A pass takes one and asks it about every node, so the
+    /// whole-graph facts they read are derived once per pass.
+    pub fn trap_seeds(&self) -> TrapSeeds<'_> {
+        TrapSeeds {
+            dag: self,
+            literal_result_witness_requirements: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Whether the reduced axis of an [`RuntimeCheck::EmptyAxis`] node can
+    /// be empty at run time: anything but a nonzero literal extent.
+    fn reduced_axis_may_be_empty(&self, node: &DagNode) -> bool {
+        let axis = match &node.op {
+            RiscOp::MaxReduce { axis }
+            | RiscOp::MinReduce { axis }
+            | RiscOp::Argmax { axis }
+            | RiscOp::Argmin { axis } => *axis,
+            _ => return true,
+        };
+        !node
+            .inputs
+            .first()
+            .and_then(|input| self.get(*input))
+            .and_then(|input| input.output_type.dims.get(axis))
+            .is_some_and(|dim| matches!(dim, DimInfo::Lit(extent) if *extent > 0))
+    }
+
+    /// Whether a [`RuntimeCheck::MovementBounds`] node's bounds can fail at
+    /// run time. A bound read at run time (a node, another tensor's axis, a
+    /// symbol) may; a literal bound is checked here against its operand's
+    /// axis, and exempt only where that axis is a literal extent too and the
+    /// bound is in range for every lane: a `shrink` range nonempty and
+    /// inside the axis (the evaluator rejects an empty one), a `stride` step
+    /// positive. A literal `pad` width cannot be negative.
+    pub fn movement_bounds_may_fail(&self, node: &DagNode) -> bool {
+        let Some(operand) = node.inputs.first().and_then(|input| self.get(*input)) else {
+            return true;
+        };
+        let extent = |axis: usize| match operand.output_type.dims.get(axis) {
+            Some(DimInfo::Lit(extent)) => Some(*extent),
+            _ => None,
+        };
+        match &node.op {
+            RiscOp::Shrink { bounds } => bounds.iter().enumerate().any(|(axis, (start, end))| {
+                let end = match end {
+                    RtDim::ToEnd => extent(axis),
+                    end => end.as_lit(),
+                };
+                !matches!(
+                    (start.as_lit(), end, extent(axis)),
+                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                )
+            }),
+            RiscOp::Stride { strides } => strides
+                .iter()
+                .any(|step| !step.as_lit().is_some_and(|step| step > 0)),
+            RiscOp::Pad { padding, .. } => padding
+                .iter()
+                .any(|(before, after)| before.as_lit().is_none() || after.as_lit().is_none()),
+            _ => true,
+        }
     }
 
     /// chelis#2413: whether a random node can trap by itself, the random
-    /// member of [`Self::is_observable_root`].
+    /// member of [`TrapSeeds::is_observable_root`].
     ///
     /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
     /// and cannot trap only when every guard is statically satisfied:
