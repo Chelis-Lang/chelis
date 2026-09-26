@@ -66,6 +66,20 @@ class DiagnosticKindOracleTests(unittest.TestCase):
             mutated,
         )
 
+    def test_vocabulary_mutation_accepts_a_later_count_without_reanchoring(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
+        declared = re.search(r"pub const ALL: \[Self; (\d+)\]", source)
+        self.assertIsNotNone(declared)
+        assert declared is not None
+        original_count = int(declared.group(1))
+        future = source.replace(
+            f"pub const ALL: [Self; {original_count}]",
+            "pub const ALL: [Self; 100]",
+            1,
+        )
+        mutated = oracle.mutate_diagnostic_vocabulary(future)
+        self.assertIn("pub const ALL: [Self; 101]", mutated)
+
     def test_vocabulary_mutation_checks_workspace_libraries(self) -> None:
         self.assertEqual(
             oracle.command_text(oracle.VOCABULARY_CHECK),
