@@ -6945,6 +6945,8 @@ struct LowerCtx<'program> {
     /// `Load` names this graph already gives a kernel input or a transform
     /// formal. A top-level reference cannot take one of them (chelis#2588).
     interface_loads: UnordSet<String>,
+    /// Counter for the aliases [`LowerCtx::pin_free_names`] mints.
+    next_pin: usize,
     bindings: UnordMap<String, LoweredValue>,
     list_bindings: UnordMap<String, Expr>,
     /// chelis#369: `let`-bound names whose value is a `shape(operand,
@@ -7178,6 +7180,7 @@ impl<'program> LowerCtx<'program> {
             dag: Dag::new(),
             top_level: LexicalScope::default(),
             interface_loads: UnordSet::new(),
+            next_pin: 0,
             bindings: UnordMap::new(),
             list_bindings: UnordMap::new(),
             shape_bindings: UnordMap::new(),
@@ -7240,6 +7243,87 @@ impl<'program> LowerCtx<'program> {
             ty,
             self.current_span_id.clone(),
         )
+    }
+
+    /// `expr` with each free name the current scope binds respelled to a
+    /// fresh alias bound to the same entries (chelis#2603).
+    ///
+    /// A recorded list or `shape` expression is lowered again where its name
+    /// is used, which can be after a rebinding of a name it reads. Reading
+    /// its names through aliases nothing else spells keeps them meaning what
+    /// they meant where it was bound. The aliases live exactly as long as
+    /// the scope the expression was recorded in. A name the scope does not
+    /// bind, a top-level declaration or a builtin, keeps its spelling.
+    fn pin_free_names(&mut self, expr: &Expr, top_level: bool) -> Expr {
+        fn pin<V: Clone>(
+            table: &mut UnordMap<String, V>,
+            top: Option<&mut UnordMap<String, V>>,
+            name: &str,
+            alias: &str,
+        ) -> bool {
+            let Some(value) = table.get(name).cloned() else {
+                return false;
+            };
+            if let Some(top) = top {
+                top.insert(alias.to_string(), value.clone());
+            }
+            table.insert(alias.to_string(), value);
+            true
+        }
+        let mut renames = BTreeMap::new();
+        for name in chelis_types::linearity::free_runtime_variables(expr) {
+            let alias = format!("__chelis_pinned_{}_{name}", self.next_pin);
+            let top = &mut self.top_level;
+            let mut bound = false;
+            bound |= pin(
+                &mut self.bindings,
+                top_level.then_some(&mut top.bindings),
+                &name,
+                &alias,
+            );
+            bound |= pin(
+                &mut self.list_bindings,
+                top_level.then_some(&mut top.list_bindings),
+                &name,
+                &alias,
+            );
+            bound |= pin(
+                &mut self.shape_bindings,
+                top_level.then_some(&mut top.shape_bindings),
+                &name,
+                &alias,
+            );
+            bound |= pin(
+                &mut self.static_size_bindings,
+                top_level.then_some(&mut top.static_size_bindings),
+                &name,
+                &alias,
+            );
+            bound |= pin(
+                &mut self.binding_witnesses,
+                top_level.then_some(&mut top.binding_witnesses),
+                &name,
+                &alias,
+            );
+            bound |= pin(
+                &mut self.local_callables,
+                top_level.then_some(&mut top.local_callables),
+                &name,
+                &alias,
+            );
+            if self.fn_typed_params.contains(&name) {
+                self.fn_typed_params.insert(alias.clone());
+                if top_level {
+                    top.fn_typed_params.insert(alias.clone());
+                }
+                bound = true;
+            }
+            if bound {
+                self.next_pin += 1;
+                renames.insert(name, alias);
+            }
+        }
+        chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
     }
 
     /// The current lexical scope, for a function literal to close over.
@@ -9247,10 +9331,9 @@ impl<'program> LowerCtx<'program> {
             // A `def` is a top-level declaration: each entry it makes is also
             // part of the scope every top-level function body resolves in.
             if self.is_host_list_expr(&kids[1]) {
-                self.list_bindings.insert(name.clone(), kids[1].clone());
-                self.top_level
-                    .list_bindings
-                    .insert(name.clone(), kids[1].clone());
+                let recorded = self.pin_free_names(&kids[1], true);
+                self.list_bindings.insert(name.clone(), recorded.clone());
+                self.top_level.list_bindings.insert(name.clone(), recorded);
             }
             self.bindings.insert(name.clone(), body_id.clone());
             self.top_level
@@ -9314,8 +9397,10 @@ impl<'program> LowerCtx<'program> {
                     if self.is_host_list_expr(&bind_kids[i + 1])
                         || collect_cons_chain(&bind_kids[i + 1]).is_some()
                     {
-                        self.list_bindings
-                            .insert(name.clone(), bind_kids[i + 1].clone());
+                        // chelis#2603: it is lowered again where `name` is
+                        // used, so its names are pinned to their meaning here.
+                        let recorded = self.pin_free_names(&bind_kids[i + 1], false);
+                        self.list_bindings.insert(name.clone(), recorded);
                     }
                     // chelis#369/#469: remember a `len = shape(operand, axis)`
                     // binding — OR a `let`-to-`let` alias / use-site `cast` of
@@ -9331,7 +9416,15 @@ impl<'program> LowerCtx<'program> {
                     // re-binding of `name` to anything else must drop any stale
                     // shape entry so shadowing never recovers a wrong extent.
                     if let Some(shape_app) = self.resolve_shape_binding_source(&bind_kids[i + 1]) {
-                        self.shape_bindings.insert(name.clone(), shape_app);
+                        // chelis#2603: a directly bound `shape(...)` is lowered
+                        // again at its use, so its operand is pinned here; an
+                        // alias's recorded app was pinned where it was bound.
+                        let recorded = if shape_app_operand_axis(&bind_kids[i + 1]).is_some() {
+                            self.pin_free_names(&shape_app, false)
+                        } else {
+                            shape_app
+                        };
+                        self.shape_bindings.insert(name.clone(), recorded);
                     } else {
                         self.shape_bindings.remove(name);
                     }
