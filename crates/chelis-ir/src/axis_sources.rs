@@ -3450,18 +3450,24 @@ fn literal_result_interface_claims(
 /// and also moves an invocation-local obligation ahead of the call that owns
 /// it. Only a raw input-axis observation with no witness enters the common
 /// entry schedule above.
+///
+/// Every witness's obligations, keyed by witness, in claim order, derived in
+/// one walk of the graph. It is a whole-graph derivation, so a pass reads it
+/// once ([`crate::dag::Dag::trap_seeds`] holds it for the trap seed, the
+/// activation gate and the lanes' witness checks) rather than once per
+/// witness, which made every seed query quadratic in the graph.
 pub fn literal_result_witness_requirements(
     dag: &Dag,
-    witness: NodeId,
-) -> Vec<chelis_types::ScalarValue> {
-    literal_result_interface_claims(dag)
-        .into_iter()
-        .filter_map(|(_, observed, required)| {
-            (observed == LiteralResultInterfaceObservation::Witness(witness)
-                && observed.entry_axis(dag).is_none())
-            .then_some(required)
-        })
-        .collect()
+) -> std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>> {
+    let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
+    for (_, observed, required) in literal_result_interface_claims(dag) {
+        if let LiteralResultInterfaceObservation::Witness(witness) = observed
+            && observed.entry_axis(dag).is_none()
+        {
+            requirements.entry(witness).or_default().push(required);
+        }
+    }
+    requirements
 }
 
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each

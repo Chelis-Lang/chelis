@@ -1287,8 +1287,9 @@ fn lower_program_with_context_inner(
     // inlined where new code reads it, from the library's own definition
     // and in the library's top-level scope.
     let mut may_trap = vec![false; ctx.dag.declarations().len()];
+    let seeds = ctx.dag.trap_seeds();
     for node in ctx.dag.nodes() {
-        if ctx.dag.is_observable_root(node) {
+        if seeds.is_observable_root(node) {
             may_trap[node.owner.decl.0 as usize] = true;
         }
     }
@@ -6431,7 +6432,7 @@ struct TopLevelValue {
     /// here ([`names_top_level_value`]).
     bound: Option<LoweredValue>,
     /// The initializer, when its lowered form holds a potentially trapping
-    /// node ([`Dag::is_observable_root`]). `None` for a total one, whose one
+    /// node ([`crate::dag::TrapSeeds::is_observable_root`]). `None` for a total one, whose one
     /// node set every reference shares.
     trapping: Option<Arc<TrappingInitializer>>,
 }
@@ -8106,9 +8107,10 @@ impl<'program> LowerCtx<'program> {
             && !declaration_name.is_empty()
             && let Some(value) = self.bindings.get(declaration_name)
         {
+            let seeds = self.dag.trap_seeds();
             let may_trap = self.dag.nodes()[first_node..]
                 .iter()
-                .any(|node| self.dag.is_observable_root(node));
+                .any(|node| seeds.is_observable_root(node));
             let trapping = may_trap.then(|| {
                 Arc::new(TrappingInitializer {
                     expr: initializer.clone(),
@@ -8226,10 +8228,11 @@ impl<'program> LowerCtx<'program> {
         }));
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
         let lowered = lowered.ok()?;
+        let seeds = lowered.trap_seeds();
         lowered
             .nodes()
             .iter()
-            .any(|node| lowered.is_observable_root(node))
+            .any(|node| seeds.is_observable_root(node))
             .then_some(initializer)
     }
 

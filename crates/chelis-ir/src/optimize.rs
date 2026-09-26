@@ -309,6 +309,7 @@ fn dead_code_eliminate_impl(
         .copied()
         .collect::<Vec<_>>();
     let outside = dag.outside_selection(&selection);
+    let seeds = dag.trap_seeds();
     for node in dag.nodes() {
         let observed = matches!(node.op, RiscOp::Store { .. });
         // chelis#2368: an unconditional effect is live regardless of
@@ -317,9 +318,9 @@ fn dead_code_eliminate_impl(
         // be removed, and a slice that silently skipped one would report a
         // successful result for a program that aborts. chelis#2440 and
         // chelis#2413: a potentially trapping node, numeric or random, is in
-        // that class too ([`Dag::is_observable_root`]).
+        // that class too ([`crate::dag::TrapSeeds::is_observable_root`]).
         if (implicit_observations && observed)
-            || (dag.is_observable_root(node) && !outside[node.id.0])
+            || (seeds.is_observable_root(node) && !outside[node.id.0])
         {
             live[node.id.0] = true;
         }

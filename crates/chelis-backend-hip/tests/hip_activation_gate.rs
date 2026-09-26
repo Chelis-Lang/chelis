@@ -376,7 +376,7 @@ fn a_vmap_in_an_untaken_arm_reads_the_expanded_activation_through_its_strides() 
 }
 
 /// Fail-closed for the kinds whose check HIP cannot gate (decisions section
-/// 11; `Dag::is_activation_gated`): an integer reduction's overflow check
+/// 11; `TrapSeeds::is_activation_gated`): an integer reduction's overflow check
 /// (HIP's one integer `sum`, the `i16` sum promoted to `i32`) and an extreme reduction's empty-axis check under an untaken arm's
 /// activation are refused, with the gate's `unimplemented chelis#2413`
 /// rejection, rather than launched with a check that would run where the
@@ -401,10 +401,11 @@ fn an_untaken_arms_reduction_check_is_refused_and_its_unconditional_twin_compile
         ),
     ] {
         let dag = lowered(arm);
+        let seeds = dag.trap_seeds();
         let gated = dag
             .nodes()
             .iter()
-            .filter(|node| dag.is_activation_gated(node))
+            .filter(|node| seeds.is_activation_gated(node))
             .map(|node| chelis_ir::grad::risc_op_name(&node.op))
             .collect::<Vec<_>>();
         assert!(

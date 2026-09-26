@@ -2207,8 +2207,8 @@ impl DagNode {
 
     /// What this node checks at run time ([`RuntimeCheck`]): the one
     /// exhaustive declaration, with no wildcard arm, from which the trap
-    /// seed ([`Dag::is_observable_root`]) and the false-activation behaviour
-    /// ([`Self::inactive_operand`], [`Dag::is_activation_gated`]) are both
+    /// seed ([`TrapSeeds::is_observable_root`]) and the false-activation behaviour
+    /// ([`Self::inactive_operand`], [`TrapSeeds::is_activation_gated`]) are both
     /// read. A new operation does not compile until it states which class
     /// it is in.
     ///
@@ -2345,7 +2345,7 @@ impl DagNode {
 /// [`DagNode::runtime_check`]'s inventory), and so what a node of it does
 /// where its activation is false (spec/10 section 3.2: it is computed, since
 /// a `Where` may read its value, and checks nothing) and whether it is a
-/// trap seed ([`Dag::is_observable_root`], spec/06 section 5.2).
+/// trap seed ([`TrapSeeds::is_observable_root`], spec/06 section 5.2).
 ///
 /// Under a per-row activation (a `vmap`ped `if`) a check of an operand's
 /// VALUES decides row by row, and a check of an EXTENT decides for every
@@ -2388,6 +2388,147 @@ pub enum RuntimeCheck {
     /// Can trap, and neither checks nothing under a false activation nor
     /// is a seed (chelis#2440's remaining kinds).
     Ungated,
+}
+
+/// The trap seed ([`Self::is_observable_root`]), the check-may-fail fact it
+/// and the activation gate share ([`Self::check_may_fail`]), and the gate
+/// itself ([`Self::is_activation_gated`]), over one graph
+/// ([`Dag::trap_seeds`]).
+///
+/// A literal result claim observed at a call's parameter witness makes that
+/// witness a check ([`Self::literal_result_witness_requirements`]), and
+/// which witness observes a claim is a whole-graph derivation. The queries
+/// therefore live on this value rather than on [`Dag`]: a pass takes one
+/// before it walks the nodes and the derivation runs at most once, where a
+/// per-node query on the graph repeated it for every witness, quadratic in
+/// the graph in dead-code elimination, the evaluator's seeds and the
+/// verifier.
+pub struct TrapSeeds<'dag> {
+    dag: &'dag Dag,
+    literal_result_witness_requirements: std::cell::OnceCell<
+        std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>,
+    >,
+}
+
+impl TrapSeeds<'_> {
+    /// Whether `node` is an observable root (`spec/06-transformations.md`
+    /// §5.2): it must execute because of what it does, not because a value
+    /// reaches it. "Potentially effectful or trapping nodes are observable
+    /// roots; purity alone does not make a possible trap dead."
+    ///
+    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
+    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
+    /// backward-synthesized adjoint is not a numeric member: its trap
+    /// obligation belongs to the forward node it was derived from, and it is
+    /// scaffolding for a gradient that may not be requested (seeding one
+    /// resurrects integer adjoint machinery that fails verification as
+    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
+    ///
+    /// This is the one seed predicate. The evaluator, dead-code elimination,
+    /// `grad`'s pruner, the verifier's dangling rule and the host transform
+    /// runner all read it; the evaluator and dead-code elimination then keep
+    /// only the seeds whose declaration the evaluation enters
+    /// ([`Dag::outside_selection`]), and a node whose activation is false
+    /// checks nothing when it runs.
+    pub fn is_observable_root(&self, node: &DagNode) -> bool {
+        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
+        match node.runtime_check() {
+            RuntimeCheck::Abort => true,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
+            RuntimeCheck::Random => self.check_may_fail(node),
+            RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
+        }
+    }
+
+    /// Whether `node`'s run-time check ([`DagNode::runtime_check`]) can
+    /// fail for some input: its class checks something, and no static fact
+    /// rules the failure out. The facts are per class: a reduced axis of
+    /// nonzero literal extent is not empty
+    /// ([`Dag::reduced_axis_may_be_empty`]), movement bounds statically in
+    /// range are in range ([`Dag::movement_bounds_may_fail`]), and a random
+    /// node's literal in-range controls pass ([`Dag::random_node_may_trap`]).
+    /// The trap seed ([`Self::is_observable_root`]) and the activation gate
+    /// ([`Self::is_activation_gated`]) both read it.
+    pub fn check_may_fail(&self, node: &DagNode) -> bool {
+        match node.runtime_check() {
+            RuntimeCheck::Nothing => false,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::MeanDivisor
+            | RuntimeCheck::Abort
+            | RuntimeCheck::Ungated => true,
+            RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
+            RuntimeCheck::EmptyAxis => self.dag.reduced_axis_may_be_empty(node),
+            RuntimeCheck::MovementBounds => self.dag.movement_bounds_may_fail(node),
+            RuntimeCheck::Random => self.dag.random_node_may_trap(node),
+        }
+    }
+
+    /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
+    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
+    /// compares its axis against its literal requirements, its named claims
+    /// and the literal result claims observed at it
+    /// ([`Self::literal_result_witness_requirements`], the evaluator's and
+    /// the C lane's full list); a witness with none of the three only
+    /// reports the extent it reads, which no input can fail. Lowering places
+    /// such a witness at every call entry, so seeding it would keep a
+    /// parameter's `Load` that nothing else reads and make that parameter a
+    /// required input.
+    fn extent_claims_may_fail(&self, node: &DagNode) -> bool {
+        match &node.op {
+            RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            } => {
+                !requirements.is_empty()
+                    || !claims.is_empty()
+                    || !self.literal_result_witness_requirements(node.id).is_empty()
+            }
+            _ => true,
+        }
+    }
+
+    /// The literal result claims checked at `witness`
+    /// ([`crate::axis_sources::literal_result_witness_requirements`]), in
+    /// claim order. The whole graph's are derived on the first call and
+    /// shared by every later one.
+    pub fn literal_result_witness_requirements(&self, witness: NodeId) -> &[chelis_types::ScalarValue] {
+        self.literal_result_witness_requirements
+            .get_or_init(|| crate::axis_sources::literal_result_witness_requirements(self.dag))
+            .get(&witness)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `node` checks nothing where its activation is false (spec/10
+    /// section 3.2): it has an activation, its check can fail
+    /// ([`Self::check_may_fail`]; a node whose check no input fails needs
+    /// no gate and computes as usual), and its class is one the lanes gate,
+    /// by one of the mechanisms [`RuntimeCheck`] names: every class but
+    /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
+    /// key-operation emitters read the owner's activation themselves, and
+    /// [`RuntimeCheck::Ungated`].
+    ///
+    /// The one gate declaration every lane reads: the evaluator and the C
+    /// emitter gate exactly these nodes, fusion keeps each in its own
+    /// kernel, and the HIP emitter refuses one whose kernel does not take
+    /// the gate.
+    pub fn is_activation_gated(&self, node: &DagNode) -> bool {
+        node.owner.activation.is_some()
+            && self.check_may_fail(node)
+            && match node.runtime_check() {
+                RuntimeCheck::OperandValues
+                | RuntimeCheck::MeanDivisor
+                | RuntimeCheck::EmptyAxis
+                | RuntimeCheck::MovementBounds
+                | RuntimeCheck::ExtentClaims
+                | RuntimeCheck::Abort => true,
+                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+            }
+    }
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -2678,113 +2819,14 @@ impl Dag {
         &self.roots
     }
 
-    /// Whether `node` is an observable root (`spec/06-transformations.md`
-    /// §5.2): it must execute because of what it does, not because a value
-    /// reaches it. "Potentially effectful or trapping nodes are observable
-    /// roots; purity alone does not make a possible trap dead."
-    ///
-    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
-    /// numeric node that can trap (chelis#2440); and a random node that can
-    /// trap by itself ([`Self::random_node_may_trap`], chelis#2413). A
-    /// backward-synthesized adjoint is not a numeric member: its trap
-    /// obligation belongs to the forward node it was derived from, and it is
-    /// scaffolding for a gradient that may not be requested (seeding one
-    /// resurrects integer adjoint machinery that fails verification as
-    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
-    ///
-    /// This is the one seed predicate. The evaluator, dead-code elimination,
-    /// `grad`'s pruner, the verifier's dangling rule and the host transform
-    /// runner all read it; the evaluator and dead-code elimination then keep
-    /// only the seeds whose declaration the evaluation enters
-    /// ([`Self::outside_selection`]), and a node whose activation is false
-    /// checks nothing when it runs.
-    pub fn is_observable_root(&self, node: &DagNode) -> bool {
-        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
-        match node.runtime_check() {
-            RuntimeCheck::Abort => true,
-            RuntimeCheck::OperandValues
-            | RuntimeCheck::EmptyAxis
-            | RuntimeCheck::MovementBounds
-            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
-            RuntimeCheck::Random => self.check_may_fail(node),
-            RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`TrapSeeds`]). A pass takes one and asks it about every node, so the
+    /// whole-graph facts they read are derived once per pass.
+    pub fn trap_seeds(&self) -> TrapSeeds<'_> {
+        TrapSeeds {
+            dag: self,
+            literal_result_witness_requirements: std::cell::OnceCell::new(),
         }
-    }
-
-    /// Whether `node`'s run-time check ([`DagNode::runtime_check`]) can
-    /// fail for some input: its class checks something, and no static fact
-    /// rules the failure out. The facts are per class: a reduced axis of
-    /// nonzero literal extent is not empty
-    /// ([`Self::reduced_axis_may_be_empty`]), movement bounds statically in
-    /// range are in range ([`Self::movement_bounds_may_fail`]), and a random
-    /// node's literal in-range controls pass ([`Self::random_node_may_trap`]).
-    /// The trap seed ([`Self::is_observable_root`]) and the activation gate
-    /// ([`Self::is_activation_gated`]) both read it.
-    pub fn check_may_fail(&self, node: &DagNode) -> bool {
-        match node.runtime_check() {
-            RuntimeCheck::Nothing => false,
-            RuntimeCheck::OperandValues
-            | RuntimeCheck::MeanDivisor
-            | RuntimeCheck::Abort
-            | RuntimeCheck::Ungated => true,
-            RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
-            RuntimeCheck::EmptyAxis => self.reduced_axis_may_be_empty(node),
-            RuntimeCheck::MovementBounds => self.movement_bounds_may_fail(node),
-            RuntimeCheck::Random => self.random_node_may_trap(node),
-        }
-    }
-
-    /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
-    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
-    /// compares its axis against its literal requirements, its named claims
-    /// and the literal result claims observed at it
-    /// ([`crate::axis_sources::literal_result_witness_requirements`], the
-    /// evaluator's full list); a witness with none of the three only reports
-    /// the extent it reads, which no input can fail. Lowering places such a
-    /// witness at every call entry, so seeding it would keep a parameter's
-    /// `Load` that nothing else reads and make that parameter a required
-    /// input.
-    fn extent_claims_may_fail(&self, node: &DagNode) -> bool {
-        match &node.op {
-            RiscOp::ExtentWitness {
-                requirements,
-                claims,
-                ..
-            } => {
-                !requirements.is_empty()
-                    || !claims.is_empty()
-                    || !crate::axis_sources::literal_result_witness_requirements(self, node.id)
-                        .is_empty()
-            }
-            _ => true,
-        }
-    }
-
-    /// Whether `node` checks nothing where its activation is false (spec/10
-    /// section 3.2): it has an activation, its check can fail
-    /// ([`Self::check_may_fail`]; a node whose check no input fails needs
-    /// no gate and computes as usual), and its class is one the lanes gate,
-    /// by one of the mechanisms [`RuntimeCheck`] names: every class but
-    /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
-    /// key-operation emitters read the owner's activation themselves, and
-    /// [`RuntimeCheck::Ungated`].
-    ///
-    /// The one gate declaration every lane reads: the evaluator and the C
-    /// emitter gate exactly these nodes, fusion keeps each in its own
-    /// kernel, and the HIP emitter refuses one whose kernel does not take
-    /// the gate.
-    pub fn is_activation_gated(&self, node: &DagNode) -> bool {
-        node.owner.activation.is_some()
-            && self.check_may_fail(node)
-            && match node.runtime_check() {
-                RuntimeCheck::OperandValues
-                | RuntimeCheck::MeanDivisor
-                | RuntimeCheck::EmptyAxis
-                | RuntimeCheck::MovementBounds
-                | RuntimeCheck::ExtentClaims
-                | RuntimeCheck::Abort => true,
-                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
-            }
     }
 
     /// Whether the reduced axis of an [`RuntimeCheck::EmptyAxis`] node can
@@ -2842,7 +2884,7 @@ impl Dag {
     }
 
     /// chelis#2413: whether a random node can trap by itself, the random
-    /// member of [`Self::is_observable_root`].
+    /// member of [`TrapSeeds::is_observable_root`].
     ///
     /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
     /// and cannot trap only when every guard is statically satisfied:

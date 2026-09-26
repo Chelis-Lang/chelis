@@ -1711,6 +1711,7 @@ fn verify_confinement(
 fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
+    let seeds = dag.trap_seeds();
     // chelis#2413: a `Load` reads its declaration's parameter, so two
     // declarations may each name a parameter `x` with its own type.
     let mut load_types =
@@ -3790,11 +3791,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // have no consumer; firing, or trapping, is the point. Requiring
             // one would force it back into the value graph, which is exactly
             // the reachability criterion that let DCE sweep it. This is the
-            // verifier agreeing with the DCE seed ([`Dag::is_observable_root`],
+            // verifier agreeing with the DCE seed ([`crate::dag::TrapSeeds::is_observable_root`],
             // `spec/06-transformations.md` §5.2) rather than carving an
             // exception out of it.
             && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
-            && !dag.is_observable_root(node)
+            && !seeds.is_observable_root(node)
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
@@ -3822,7 +3823,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
 
 /// #2413 (spec/10 section 3.2): a node reads a node of another declaration
 /// only when none of that declaration's nodes can trap
-/// ([`Dag::is_observable_root`]). A reference to a value declaration whose
+/// ([`crate::dag::TrapSeeds::is_observable_root`]). A reference to a value declaration whose
 /// initializer may trap lowers the initializer again at the reference site,
 /// under that site's owner, so its checks run exactly where and when the
 /// reference is reached. A shared node of such a declaration would instead
@@ -3830,8 +3831,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
 /// reader's activation.
 pub fn verify_declaration_sharing(dag: &Dag, errors: &mut Vec<String>) {
     let mut may_trap = vec![false; dag.declarations().len()];
+    let seeds = dag.trap_seeds();
     for node in dag.nodes() {
-        if dag.is_observable_root(node)
+        if seeds.is_observable_root(node)
             && let Some(flag) = may_trap.get_mut(node.owner.decl.0 as usize)
         {
             *flag = true;

@@ -171,10 +171,12 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.is_root(id)
     }
 
-    /// Whether `node` checks nothing where its activation is false
-    /// ([`crate::dag::Dag::is_activation_gated`], the one gate declaration).
-    pub fn is_activation_gated(self, node: &DagNode) -> bool {
-        self.dag.is_activation_gated(node)
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`crate::dag::TrapSeeds`]: whether a node checks nothing where its
+    /// activation is false, the one gate declaration, and the literal result
+    /// claims a witness checks). An emitter takes one per graph.
+    pub fn trap_seeds(self) -> crate::dag::TrapSeeds<'a> {
+        self.dag.trap_seeds()
     }
 
     pub fn topological_order(self) -> Vec<NodeId> {
@@ -275,13 +277,6 @@ impl<'a> VerifiedDagView<'a> {
     ) -> Option<crate::axis_sources::SameShapeAgreement> {
         crate::axis_sources::same_shape_result_agreement(self.dag, node)
             .expect("verified same-shape result agreement")
-    }
-
-    pub fn literal_result_witness_requirements(
-        self,
-        witness: NodeId,
-    ) -> Vec<chelis_types::ScalarValue> {
-        crate::axis_sources::literal_result_witness_requirements(self.dag, witness)
     }
 
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {

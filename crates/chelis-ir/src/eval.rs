@@ -533,7 +533,7 @@ fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<Tens
     where_elementwise(&mask, value, &fill)
 }
 
-/// Replace the operands of a gated `node` ([`Dag::is_activation_gated`],
+/// Replace the operands of a gated `node` ([`crate::dag::TrapSeeds::is_activation_gated`],
 /// `gated`) whose activation is false, in the rows where it is false, with
 /// values its checks accept ([`DagNode::inactive_operand`]), so the node
 /// computes a value and reports nothing.
@@ -2941,7 +2941,7 @@ where
 }
 
 /// The nodes `roots` need, with every observable root
-/// ([`Dag::is_observable_root`]) of a declaration the selection enters.
+/// ([`crate::dag::TrapSeeds::is_observable_root`]) of a declaration the selection enters.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
@@ -2971,7 +2971,7 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // chelis#2368: effect nodes are live because they are effects, not
     // because a value reaches them; chelis#2440 and chelis#2413: so is a
     // potentially trapping node, numeric or random. One predicate names the
-    // class ([`Dag::is_observable_root`]).
+    // class ([`crate::dag::TrapSeeds::is_observable_root`]).
     //
     // chelis#2476 scopes it to the selection ([`Dag::outside_selection`]).
     // An abort, or a trap, in a declaration this evaluation does not enter is
@@ -2980,10 +2980,11 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // seed still reaches every observable root of the declarations the
     // selection enters, including the discarded ones, which is what
     // [05-OP-68] is about.
+    let seeds = dag.trap_seeds();
     stack.extend(
         dag.nodes()
             .iter()
-            .filter(|node| dag.is_observable_root(node) && !unselected[node.id.0])
+            .filter(|node| seeds.is_observable_root(node) && !unselected[node.id.0])
             .map(|node| node.id),
     );
     while let Some(id) = stack.pop() {
@@ -3551,6 +3552,10 @@ where
         .retained_roots()
         .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
 
+    // One seed query for the walk: the literal result claims a witness
+    // checks are a whole-graph derivation, read from the unbound graph as
+    // the C lane reads them.
+    let seeds = dag.trap_seeds();
     for (index, id) in order.into_iter().enumerate() {
         let node = bound_dag
             .get(id)
@@ -3573,7 +3578,7 @@ where
         // reads it, since binding renames no node.
         let gated = dag
             .get(node.id)
-            .is_some_and(|source| dag.is_activation_gated(source));
+            .is_some_and(|source| seeds.is_activation_gated(source));
         let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
         if let Some(failure) = movement_failures.remove(&node.id)
             && !inactive
@@ -3826,9 +3831,10 @@ where
                     .shape
                     .get(*axis as usize)
                     .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
-                for required in requirements.iter().chain(
-                    crate::axis_sources::literal_result_witness_requirements(dag, node.id).iter(),
-                ) {
+                for required in requirements
+                    .iter()
+                    .chain(seeds.literal_result_witness_requirements(node.id))
+                {
                     let required = required
                         .as_i64_exact()
                         .ok_or_else(|| "extent witness requires i64".to_string())?;
@@ -6346,7 +6352,7 @@ mod tests {
 
         let (dag, z, g, main) = program(Prim::Int32);
         assert!(
-            dag.is_observable_root(dag.get(g).expect("node")),
+            dag.trap_seeds().is_observable_root(dag.get(g).expect("node")),
             "precondition: integer arithmetic must be a trapping node, or this \
              test passes for the wrong reason"
         );
@@ -6366,7 +6372,9 @@ mod tests {
 
         let (float_dag, float_z, float_g, float_main) = program(Prim::F32);
         assert!(
-            !float_dag.is_observable_root(float_dag.get(float_g).expect("node")),
+            !float_dag
+                .trap_seeds()
+                .is_observable_root(float_dag.get(float_g).expect("node")),
             "control: float arithmetic cannot trap, so it is never seeded at all"
         );
         let float_live = live_mask_for_roots(&float_dag, &[float_main]);

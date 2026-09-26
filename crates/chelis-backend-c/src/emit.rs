@@ -79,6 +79,14 @@ pub struct CEmitter {
     /// realized-extent fallback may observe the same semantic claim through a
     /// different C expression, but one comparison has already discharged it.
     emitted_local_dim_guards: Vec<(usize, usize, chelis_ir::ownership::LocalGuardClaim)>,
+    /// Per node id, whether it checks nothing where its activation is false
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// query over the graph.
+    activation_gated: Vec<bool>,
+    /// The literal result claims each witness checks
+    /// ([`chelis_ir::dag::TrapSeeds::literal_result_witness_requirements`]),
+    /// derived once for the graph.
+    literal_result_witness_requirements: BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>,
     /// Claim names this function actually declares as C variables. Resolved
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
@@ -404,6 +412,7 @@ impl CEmitter {
             }
         }
 
+        let seeds = dag.trap_seeds();
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -426,6 +435,19 @@ impl CEmitter {
             runtime_dim_sites,
             local_dim_guard_sites,
             emitted_local_dim_guards: Vec::new(),
+            activation_gated: dag
+                .nodes()
+                .iter()
+                .map(|node| seeds.is_activation_gated(node))
+                .collect(),
+            literal_result_witness_requirements: dag
+                .nodes()
+                .iter()
+                .filter_map(|node| {
+                    let requirements = seeds.literal_result_witness_requirements(node.id);
+                    (!requirements.is_empty()).then(|| (node.id, requirements.to_vec()))
+                })
+                .collect(),
             declared_dim_names: chelis_unord::UnordSet::new(),
             inherited_result_sites: if private_invocation_context && dag.roots().len() == 1 {
                 dag.result_extent_sites(dag.roots()[0])
@@ -1259,7 +1281,7 @@ impl CEmitter {
     }
 
     /// Hoist the activation of a node that checks nothing where it is false
-    /// ([`chelis_ir::dag::Dag::is_activation_gated`], spec/10 section 3.2) before its
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], spec/10 section 3.2) before its
     /// loops and record how its loops read it. A rank-0 activation is read
     /// once. A per-row activation (a `vmap`ped `if`), shaped like the node's
     /// leading axes, is read once per row by each element loop
@@ -1270,7 +1292,7 @@ impl CEmitter {
     /// through [`Self::gated_check`].
     fn emit_activation_gate(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         self.gate = None;
-        if !dag.is_activation_gated(node) {
+        if !self.activation_gated[node.id.0] {
             return;
         }
         let activation = node
@@ -1463,7 +1485,13 @@ impl CEmitter {
                 };
                 for required in requirements
                     .iter()
-                    .chain(dag.literal_result_witness_requirements(node.id).iter())
+                    .chain(
+                        &self
+                            .literal_result_witness_requirements
+                            .get(&node.id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
                 {
                     let required = required.as_i64_exact().expect("verified i64 requirement");
                     let differs = self.gated_check(&format!(

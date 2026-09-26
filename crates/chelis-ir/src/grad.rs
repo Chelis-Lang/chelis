@@ -816,18 +816,19 @@ fn prune_to_requested_outputs(
     for &root in dag.roots() {
         live[root.0] = true;
     }
+    let seeds = dag.trap_seeds();
     for node in dag.nodes() {
         // chelis#2368: `Store` and every unconditional effect. grad has its
         // own pruner, separate from `optimize::dead_code_eliminate`, so the
         // seed has to be repeated here — the definition is shared even where
         // the loop is not. Every observable root is a seed
-        // ([`Dag::is_observable_root`]): an abort, a potentially trapping
+        // ([`crate::dag::TrapSeeds::is_observable_root`]): an abort, a potentially trapping
         // numeric node (chelis#2440), and a draw or runtime-count `SplitN`
         // that can trap by itself (chelis#2413). The predicate leaves out a
         // backward-synthesized adjoint, whose trap obligation is its forward
         // node's. This pruner does not scope by declaration; the evaluator
         // and dead-code elimination scope the graph that holds its result.
-        if matches!(node.op, RiscOp::Store { .. }) || dag.is_observable_root(node) {
+        if matches!(node.op, RiscOp::Store { .. }) || seeds.is_observable_root(node) {
             live[node.id.0] = true;
         }
     }
