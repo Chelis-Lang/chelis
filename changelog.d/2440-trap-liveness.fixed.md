@@ -12,22 +12,27 @@ float arithmetic cannot, and §5.2's own example of a removable dead float
 `add` still holds.
 
 The seeds are scoped to the declarations the evaluation enters, the rule
-§5.2 now states: an evaluation enters each selected root's declaration and
-every value declaration that an entered declaration names, whether or not
-the name is read, and because a function runs inlined in its caller, a
-function's own nodes are entered only when the function is selected. A
-discarded trapping node in a selected or entered declaration therefore traps
+§5.2 now states: an evaluation enters each selected root's declaration, a
+function runs inlined in its caller, and a reference to a value declaration
+whose initializer can trap runs that initializer inlined where the reference
+is reached, whether or not it is read, so a function's or a value's own
+nodes run only when it is selected. A discarded trapping node in a selected
+declaration, or reached through a call or such a reference, therefore traps
 in `chelis eval` (the DAG evaluator and the host interpreter) and in compiled
 C, while an uncalled function's discarded overflow neither runs nor makes
-its parameters required inputs.
+its parameters required inputs. A node in an `if` arm that is lowered as a
+selection checks only when its arm is taken: an untaken arm's integer
+arithmetic, division, cast or dead value reference checks nothing in the
+DAG evaluator and in compiled C, including under `grad`, per `vmap` row and
+at a `vmap` call site
+([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)).
 
 Not yet covered: integer reductions and the movement-op domain traps, so
 [05-OP-68] keeps a non-normative note that its rule is not fully
-implemented for every trapping operation; the host interpreter does not trap
-on a dead reference to a trapping value declaration inside a taken `if` arm;
-and in an `if` lowered as a selection, an operation or a dead value
-reference in the untaken arm can still trap in `chelis eval` and compiled
-C ([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)).
+implemented for every trapping operation; and in an `if` lowered as a
+selection, an untaken arm's shrink or stride bound, integer reduction,
+extent witness or shift, or a check in the body of a `vmap` of `grad`
+applied there, can still trap in `chelis eval` and compiled C.
 This carries and supersedes
 [#2466](https://github.com/Chelis-Lang/chelis/pull/2466). See
 [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).
