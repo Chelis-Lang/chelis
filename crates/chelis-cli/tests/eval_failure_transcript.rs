@@ -52,7 +52,12 @@ fn failure_emits_preceding_effects_once_in_text_and_json_modes() {
             assert!(!stderr.contains("after"), "{stderr}");
             if json {
                 assert!(output.stdout.is_empty(), "no partial JSON or human output");
-                assert!(stderr.starts_with("first\nsecond\nerror:"), "{stderr}");
+                assert!(
+                    stderr.starts_with(
+                        "first\nsecond\nnumeric trap: division by zero in floor_div at i64"
+                    ),
+                    "{stderr}"
+                );
                 assert_eq!(stderr.matches("first").count(), 1);
             } else {
                 assert_eq!(output.stdout, b"first\nsecond\n");
@@ -70,7 +75,10 @@ fn failure_before_effect_emits_no_transcript() {
         let stderr = String::from_utf8(output.stderr).expect("stderr");
         assert!(!output.status.success(), "{stderr}");
         assert!(output.stdout.is_empty());
-        assert!(stderr.starts_with("error:"), "{stderr}");
+        assert_eq!(
+            stderr,
+            "numeric trap: division by zero in floor_div at i64\n"
+        );
         assert!(!stderr.contains("after"), "{stderr}");
     }
 }

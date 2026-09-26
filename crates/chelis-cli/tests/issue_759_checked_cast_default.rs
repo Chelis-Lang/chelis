@@ -125,7 +125,7 @@ fn scalar_fractional_float_to_int_traps_domain() {
         // chelis#759's float-to-int rung SHIPPED as `cast_trunc`
         // ([05-OP-6]), so the hint now names it as the migration target
         // rather than calling it future work.
-        let expected_hint_suffix = "; hint: fractional float-to-int conversion must state its \
+        let expected_hint_suffix = "\n  hint: fractional float-to-int conversion must state its \
         rounding explicitly: use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
         `floor` or `round` before `cast`; the remaining named lossy cast forms are tracked \
         by chelis#759";
