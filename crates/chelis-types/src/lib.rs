@@ -52,8 +52,9 @@ mod source_arch;
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
-    InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
-    builtin_env, prelude_adt_defs, realizability, shape_class,
+    CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting, Realizability,
+    ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys, prelude_adt_defs,
+    realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,

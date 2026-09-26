@@ -10,7 +10,10 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::builtins::{BUILTIN_NAMES, BuiltinSemanticDomain, builtin_decl};
+use crate::builtins::{
+    BUILTIN_NAMES, BuiltinSemanticDomain, BuiltinSiblingCaseId, CaseKeys, KeyParameterSite,
+    KeyRouting, builtin_decl, case_keys,
+};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
@@ -1109,6 +1112,7 @@ impl Checker {
             self.check_expr(func, scope);
         }
         self.reject_key_operands_outside_key_operations(builtin, &children[1..], scope);
+        self.reject_keys_a_builtin_case_refuses(builtin, expr, &children[1..], scope);
         let observational = children
             .first()
             .is_some_and(callee_is_observational_higher_order);
@@ -2425,6 +2429,141 @@ impl Checker {
                 ));
             }
         }
+    }
+
+    /// [04-LIN-9] and spec/04 section 1.1 for a Container or Boundary
+    /// builtin, read from its case's declaration ([`case_keys`]): an operand
+    /// whose atom names no `key` refuses a key-carrying type, and a type
+    /// parameter whose values reach both the callback and the result refuses
+    /// a key-carrying instantiation. Borrowed parameters are refused by the
+    /// borrowed-operand rule in `check_app`.
+    fn reject_keys_a_builtin_case_refuses(
+        &mut self,
+        builtin: Option<&str>,
+        call: &Expr,
+        args: &[Expr],
+        scope: &LinearScope,
+    ) {
+        let Some(name) = builtin else {
+            return;
+        };
+        let Some(decl) = builtin_decl(name) else {
+            return;
+        };
+        if scope.top_id(name).is_some() {
+            return;
+        }
+        let numeric_domain = decl
+            .capability
+            .domains
+            .contains(&BuiltinSemanticDomain::Numeric);
+        let rules = self.selected_case_keys(name, args, scope);
+        let operand_type = |checker: &Self, index: usize| -> Option<Expr> {
+            let arg = args.get(index)?;
+            checker.value_type(borrow_inner(arg).unwrap_or(arg), scope)
+        };
+        for rule in rules {
+            match rule {
+                CaseKeys::NoKeyOperand => {}
+                CaseKeys::Refused(positions) => {
+                    for &index in positions {
+                        let Some(ty) = operand_type(self, index) else {
+                            continue;
+                        };
+                        // A key dtype operand of a builtin that is also in the
+                        // Numeric domain was reported by the dtype rule.
+                        if !self.type_holds_key(&ty)
+                            || (numeric_domain && type_expr_is_key_dtype(&ty))
+                        {
+                            continue;
+                        }
+                        self.push_diagnostic(CheckError::new(
+                            CheckErrorKind::PrecisionMismatch,
+                            with_macro_provenance(
+                                &args[index],
+                                format!(
+                                    "`{name}` does not admit a key-carrying operand at argument \
+                                 {index} {}: an operation admits `key` elements only where its \
+                                 own atom names `key` (spec/04-type-system.md section 1.1)",
+                                    diag_site(&args[index])
+                                ),
+                            ),
+                            vec![
+                            "Keys only feed `split_key`, `split_keys`, `fold_in` and random draws"
+                                .to_string(),
+                        ],
+                        ));
+                    }
+                }
+                CaseKeys::Values(parameters) => {
+                    for parameter in parameters {
+                        if parameter.routing != KeyRouting::CallbackAndResult {
+                            continue;
+                        }
+                        let instantiated = match parameter.site {
+                            KeyParameterSite::Argument(index)
+                            | KeyParameterSite::ListElement(index) => operand_type(self, index),
+                            KeyParameterSite::CallbackResult(index) => operand_type(self, index)
+                                .and_then(|ty| {
+                                    tagged_children(&ty, DeepTag::TFn)
+                                        .and_then(|kids| kids.last().cloned())
+                                }),
+                        }
+                        // The parameter is in the result by its routing, so the
+                        // call's own type decides when the site is unreadable.
+                        .or_else(|| self.expr_type(call, scope).cloned());
+                        if !instantiated.is_some_and(|ty| self.type_holds_key(&ty)) {
+                            continue;
+                        }
+                        self.key_reuse(
+                            call,
+                            format!(
+                                "`{name}` {} passes each value of its type parameter `{}` to its \
+                             callback and also keeps it in its result, so a key-carrying \
+                             instantiation would use each key twice ([04-LIN-9])",
+                                diag_site(call),
+                                parameter.name
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The key rules of the case `name` selects for these operands: the one
+    /// rule every case of the builtin shares; for `concat`, whose two cases
+    /// differ, the case its second operand selects ([05-OP-54], [05-OP-62]);
+    /// and otherwise every case's rule, the union of their refusals.
+    fn selected_case_keys(&self, name: &str, args: &[Expr], scope: &LinearScope) -> Vec<CaseKeys> {
+        let Some(decl) = builtin_decl(name) else {
+            return Vec::new();
+        };
+        let mut rules: Vec<CaseKeys> = Vec::new();
+        for case in decl.capability.sibling_cases {
+            let rule = case_keys(case.case);
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        }
+        if rules.len() > 1 && name == "concat" {
+            let axis = args
+                .get(1)
+                .and_then(|arg| self.value_type(arg, scope))
+                .is_some_and(|ty| {
+                    tagged_children(&ty, DeepTag::TPrim)
+                        .and_then(|kids| kids.first())
+                        .and_then(symbol_name)
+                        == Some("i32")
+                });
+            let case = if axis {
+                BuiltinSiblingCaseId::ConcatTensors
+            } else {
+                BuiltinSiblingCaseId::ConcatList
+            };
+            return vec![case_keys(case)];
+        }
+        rules
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {

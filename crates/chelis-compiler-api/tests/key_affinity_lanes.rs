@@ -17,13 +17,22 @@ use std::collections::BTreeMap;
 
 /// `uniform_like(key_from_seed(7), t, 0, 1)` over 2 elements.
 const U_KEY7_2: [u32; 2] = [0x3e019516, 0x3f56526f];
+/// The first draw of `uniform(split(key(7)).0, 2, f32, 0, 1)` and of `.1`.
+const U_LEFT7_FIRST: u32 = 0x3f251727;
+const U_RIGHT7_FIRST: u32 = 0x3ef80128;
+/// `uniform(fold_in(fold_in(key(7), 3), 5), 2, f32, 0, 1)`.
+const U_FOLD7_3_5: [u32; 2] = [0x3f7d19f2, 0x3d937002];
 const ONE_TWO: [u32; 2] = [0x3f800000, 0x40000000];
 const NEG_ONE_TWO: [u32; 2] = [0xbf800000, 0xc0000000];
+
+fn f32_text(bits: u32) -> String {
+    format_element(Prim::F32, ElementRef::F32(f32::from_bits(bits)))
+}
 
 fn tensor(shape: &[usize], bits: &[u32]) -> String {
     let data = bits
         .iter()
-        .map(|bits| format_element(Prim::F32, ElementRef::F32(f32::from_bits(*bits))))
+        .map(|bits| f32_text(*bits))
         .collect::<Vec<_>>()
         .join(", ");
     format!("tensor(shape={shape:?}, data=[{data}])")
@@ -115,5 +124,38 @@ fn a_guard_that_draws_with_a_key_no_later_arm_uses_runs() {
             tensor(&[2], &NEG_ONE_TWO),
             tensor(&[2], &NEG_ONE_TWO),
         ]),
+    );
+}
+
+/// The `map` twin of the P1-2 refusals: `map` hands each key of a
+/// `List[key]` to its callback once and keeps only the callback's results.
+#[test]
+fn map_over_a_key_list_draws_once_per_key() {
+    let source = "def first_draw(j: key) -> f32 = index(to_list(uniform_like(j, to_tensor([0.0f32, \
+                  0.0f32]), 0.0f32, 1.0f32)), 0i64)\n\
+                  def main() = {\n  (a, b) = split_key(key_from_seed(7i64))\n  map(first_draw, [a, \
+                  b])\n}\n";
+    both_lanes(
+        source,
+        "map_key_list",
+        &[format!(
+            "main = [{}, {}]",
+            f32_text(U_LEFT7_FIRST),
+            f32_text(U_RIGHT7_FIRST)
+        )],
+    );
+}
+
+/// The `fold` twin of the `scan` refusal: each key accumulator feeds the
+/// next call once, and only the last is the result.
+#[test]
+fn fold_threads_a_key_accumulator_once_per_element() {
+    let source = "def main() = {\n  k = fold(fn (acc: key, n: i64) -> fold_in(acc, n), \
+                  key_from_seed(7i64), [3i64, 5i64])\n  uniform_like(k, to_tensor([0.0f32, \
+                  0.0f32]), 0.0f32, 1.0f32)\n}\n";
+    both_lanes(
+        source,
+        "fold_key_accumulator",
+        &[format!("main = {}", tensor(&[2], &U_FOLD7_3_5))],
     );
 }
