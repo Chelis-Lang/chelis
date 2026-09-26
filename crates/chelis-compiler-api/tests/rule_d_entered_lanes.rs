@@ -1864,3 +1864,93 @@ fn a_vmapped_arms_c_kernel_reads_each_rows_activation_once() {
         }
     }
 }
+
+/// `g`, whose body names the value `sampled` in a dead binding, taking one
+/// row when `vmapped`.
+fn shadowed_callee(vmapped: bool) -> String {
+    let row = if vmapped {
+        "tensor[f32]"
+    } else {
+        "tensor[32, f32]"
+    };
+    format!("def g(v: {row}) -> {row} = {{\n  dead = sampled\n  v\n}}\n")
+}
+
+/// `entry` binds a local spelled `sampled`, like the value `g` names, and
+/// its runtime `if` arm applies `g` to `x`: called (`g(x)`) or vmapped over
+/// `x`'s rows (`vmap(g)(x)`). It runs in the Tensor lane.
+fn shadowing_caller(entry: &str, condition: &str, vmapped: bool) -> String {
+    let call = if vmapped { "vmap(g)(x)" } else { "g(x)" };
+    format!(
+        "def {entry}(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  sampled = copy(x)\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if {condition} then {call} else x\n}}\n"
+    )
+}
+
+/// The two scoping rules together: a callee's body reads its free names in
+/// the scope it was written in (chelis#2588), and a reference from another
+/// declaration to a value whose initializer may trap inlines that
+/// initializer at the reference, under the reference's activation (section
+/// 12). A caller's local spelled like the value therefore neither hides the
+/// reference nor is read in its place. The taken arm runs `g`'s dead
+/// reference to the top-level `sampled`, inlined under the arm, and traps;
+/// the untaken twin checks nothing and returns `x`. Rows: the DAG evaluator
+/// on the whole source, for a call and for a `vmap` of `g`, and the call in
+/// the entry-scoped C of a context whose client declares all three.
+///
+/// Evidentiary status: REGRESSION TEST for the taken rows. At 3455102ab
+/// (before origin/main's chelis#2588 fix merged) `g` read the caller's
+/// local and returned `x`. The untaken rows are a disposition lock.
+#[test]
+fn a_callee_reads_a_trapping_value_in_its_declaring_scope_under_the_arm() {
+    let mut rows = Rows::default();
+    let contexts =
+        dependency_contexts("module Mylib.Math\nexport (one)\n\ndef one() -> i32 = 1i32\n");
+    for kind in KINDS {
+        let sampled = kind.sampled(false, true);
+        for vmapped in [false, true] {
+            let shape = if vmapped { "vmap" } else { "call" };
+            let callee = shadowed_callee(vmapped);
+            for (arm, condition, taken) in [
+                ("untaken", "lt(s, 0.0f32)", false),
+                ("taken", "lt(0.0f32, s)", true),
+            ] {
+                let row = format!("{kind:?} {shape}, {arm} arm");
+                let outcome = select(
+                    &format!(
+                        "{sampled}{callee}{}",
+                        shadowing_caller("selected", condition, vmapped)
+                    ),
+                    "selected",
+                    x32(),
+                );
+                if taken {
+                    rows.traps(&format!("E {row}"), outcome, kind.trap());
+                } else {
+                    rows.returns(
+                        &format!("E {row}"),
+                        outcome,
+                        "selected",
+                        &[1.0; 32],
+                        Some(Lane::Tensor),
+                    );
+                }
+                // The compiled-execution lane refuses an entry whose own body
+                // names a transform (chelis#1138), and a monolithic build
+                // initializes every value, so C runs the call in a context,
+                // entry-scoped.
+                if !vmapped {
+                    let client = format!(
+                        "module App.Eval\n\n{sampled}{callee}{}",
+                        shadowing_caller("main", condition, vmapped)
+                    );
+                    let expected = if taken { Err(kind.trap()) } else { Ok(()) };
+                    for context in &contexts {
+                        let ran = run_c(&compile_c_in(context, &client, "main"), "main", 0);
+                        rows.c(&format!("C in context {row}"), ran, expected);
+                    }
+                }
+            }
+        }
+    }
+    rows.assert_empty();
+}
