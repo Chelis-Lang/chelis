@@ -383,17 +383,16 @@ fn record_site_binders(expr: &Expr, bound: &Arc<UnordSet<String>>, sites: &mut S
         }
         Expr::Node(node, _) if node.tag() == DeepTag::Fn => {
             let kids = node.children_slice();
-            let params = kids
-                .first()
-                .and_then(as_node)
-                .map(|params| {
-                    params
-                        .children_slice()
-                        .iter()
-                        .filter_map(param_name)
-                        .collect::<UnordSet<_>>()
-                })
-                .unwrap_or_default();
+            // A `fn` with no params list binds no parameter; spelled out
+            // rather than defaulted (loud_unsupported.md B2.5).
+            let params = match kids.first().and_then(as_node) {
+                Some(params) => params
+                    .children_slice()
+                    .iter()
+                    .filter_map(param_name)
+                    .collect::<UnordSet<_>>(),
+                None => UnordSet::new(),
+            };
             let inner = extended(params);
             for kid in kids {
                 record_site_binders(kid, &inner, sites);
@@ -402,17 +401,15 @@ fn record_site_binders(expr: &Expr, bound: &Arc<UnordSet<String>>, sites: &mut S
         Expr::Node(node, _) if node.tag() == DeepTag::Let => {
             let kids = node.children_slice();
             let mut current = bound.clone();
-            if let Some(bind_list) = kids.first() {
-                if let Some(bind) = as_node(bind_list) {
-                    for pair in bind.children_slice().chunks(2) {
-                        if let Some(value) = pair.get(1) {
-                            record_site_binders(value, &current, sites);
-                        }
-                        if let Some(name) = pair.first().and_then(symbol_name) {
-                            let mut next = current.as_ref().clone();
-                            next.insert(name.to_string());
-                            current = Arc::new(next);
-                        }
+            if let Some(bind) = kids.first().and_then(as_node) {
+                for pair in bind.children_slice().chunks(2) {
+                    if let Some(value) = pair.get(1) {
+                        record_site_binders(value, &current, sites);
+                    }
+                    if let Some(name) = pair.first().and_then(symbol_name) {
+                        let mut next = current.as_ref().clone();
+                        next.insert(name.to_string());
+                        current = Arc::new(next);
                     }
                 }
             }
