@@ -1859,12 +1859,13 @@ metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
 Python binding tests, and sixteen backend-header census/enrollment tests. Counts
 and digests are derived summaries, not membership authority. The Python leg names its
 integration binaries and relevant internal ownership tests explicitly rather
-than freezing platform-only package tests. The Python extension and the HIP
-harnesses still select their runtime through `CHELIS_RUNTIME_DIR` and otherwise
-search for one, so every leg that runs no chelis-cli tests receives the pin's
-exclusive directory under that name; chelis-cli legs, which may run `chelis
-build`, never do. That export ends when those consumers carry or name their
-runtime (#1354). The command first obtains a complete
+than freezing platform-only package tests. Only the HIP harnesses still select
+their runtime through `CHELIS_RUNTIME_DIR` and otherwise search for one, so
+every leg that runs no chelis-cli or chelis-python tests receives the pin's
+exclusive directory under that name. chelis-cli legs, which may run `chelis
+build`, and the Python leg, which links the runtime the extension carries,
+receive no directory: both packages reject the variable. That export ends when
+the HIP harnesses carry or name their runtime (#1354). The command first obtains a complete
 fresh Phase 1 receipt, then lists and executes each complete current Phase 2
 cohort with zero retries. Every required identity must remain selected,
 nonignored, executed and passing; additions are executed and reported, while a

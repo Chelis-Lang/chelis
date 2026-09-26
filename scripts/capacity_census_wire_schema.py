@@ -756,6 +756,8 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             ("symbolic_dims", ("container", "alloc::vec::Vec", (string,))),
             ("source_path", string),
             ("source_hash", string),
+            ("runtime_sha256", string),
+            ("library_sha256", string),
         ]
 
         def fields(definition):

@@ -18,6 +18,7 @@ extension-module = ["pyo3/extension-module"]
 chelis-abi.workspace = true
 chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
+chelis-runtime-bundle.workspace = true
 chelis-vocab.workspace = true
 libc = "0.2"
 libloading = "0.8"

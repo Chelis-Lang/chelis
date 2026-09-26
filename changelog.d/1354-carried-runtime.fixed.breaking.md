@@ -4,6 +4,4 @@ mutated archive left in a build directory is no longer linked by mistake. The
 build report adds a `Staged runtime <path> (sha256 <digest>)` line, the output
 directory gains `chelis_runtime.receipt.json`, and the printed compile commands
 name the staged archive by path instead of `-L<dir> -lchelis_runtime`. Setting
-`CHELIS_RUNTIME_DIR` is now an error for `chelis build`; unset it. The Python
-extension still takes its runtime from `CHELIS_RUNTIME_DIR` until it carries its
-own. See [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).
+`CHELIS_RUNTIME_DIR` is now an error for `chelis build`; unset it. See [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).

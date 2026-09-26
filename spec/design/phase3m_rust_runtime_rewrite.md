@@ -169,8 +169,8 @@ target directory are never read.
   tarballs ship its output and build with `sealed-runtime`.
 - A test or oracle that needs an instrumented runtime builds its consumer with
   that runtime feature, or links an exact instrumented Cargo artifact itself.
-- The Python extension still selects its runtime separately until its cutover
-  (chelis#1354).
+- The Python extension stages its carried runtime into the artifact directory
+  and rejects a set `CHELIS_RUNTIME_DIR` (chelis#1354).
 
 ## Execution Plan
 

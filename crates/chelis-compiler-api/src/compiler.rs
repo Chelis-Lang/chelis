@@ -8944,8 +8944,8 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     // actually computes, and the numeric value proves the correct library def
     // is invoked (identity `consume`, so `main([3, 4]) == [3, 4]`). The runtime
     // numeric-through-cc leg is the manual oracle's job (it needs
-    // CHELIS_RUNTIME_DIR + a C toolchain); this gate proves eval and the
-    // compiled interface agree without either.
+    // a C toolchain); this gate proves eval and the
+    // compiled interface agree without one.
     #[test]
     fn in_context_compiled_metadata_agrees_with_eval() {
         let (_dir, root) = copy_drop_context_fixture();
