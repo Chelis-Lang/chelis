@@ -17905,6 +17905,15 @@ fn infer_app_expr_host_type(
         return None;
     };
     let name = callee_kids.first().and_then(symbol_name)?;
+    // A lexical binding shadows a builtin of the same spelling (spec/04
+    // §8.6, chelis#1964): the application calls the binding, whose result
+    // type is the callable's, never the builtin's.
+    if let Some(bound) = scope.get(name) {
+        return match bound {
+            HostTypeTerm::Fn(_, ret) => Some(ret.as_ref().clone()),
+            _ => None,
+        };
+    }
     if !BUILTIN_NAMES.contains(&name) {
         // Predicate disposition (chelis#1271): this returns the type an
         // application would produce, so answering an ambiguous name would

@@ -8343,11 +8343,30 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
-        self.bindings
+        let mut scope: UnordMap<String, crate::host_type_state::HostTypeTerm> = self
+            .bindings
             .to_sorted()
             .into_iter()
             .filter_map(|(name, value)| self.host_value_type(value).map(|ty| (name.clone(), ty)))
-            .collect()
+            .collect();
+        // A local function literal binds its name too, so an application of
+        // it, even one spelled like a builtin, is typed as that function's
+        // (chelis#1964).
+        if let Some(program) = self.host_program {
+            for (name, callable) in self.local_callables.to_sorted() {
+                if scope.contains_key(name) {
+                    continue;
+                }
+                let CallableExpr::Plain(function) = callable else {
+                    continue;
+                };
+                let ty = crate::host::expr_host_type(function, program, &UnordMap::new());
+                if matches!(ty, crate::host_type_state::HostTypeTerm::Fn(..)) {
+                    scope.insert(name.clone(), ty);
+                }
+            }
+        }
+        scope
     }
 
     /// Native aggregates keep their field graph for tensor consumers. A host
