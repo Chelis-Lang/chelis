@@ -1,0 +1,86 @@
+# aeneas integration step 12 after cba11f3beb: commit f584676d71ff62f642ae0c2023d4f161af1f8537
+# first parent fac649a3805c66c921876872afcea4e5c3d4baf4
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# stdlib: Chelis native primitive CapacityScopeSupply
+#
+# The process-global capacity-scope counter is an oracle of the identities
+# drawn through the handle; exhaustion is the native expect panic. The native
+# constructor is deliberately unmodeled.
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 9499347..d76e985 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -4,6 +4,7 @@ import Aeneas.Std.ArrayIter
+ import Aeneas.Std.BTreeMap
+ import Aeneas.Std.BTreeSet
+ import Aeneas.Std.BigUint
++import Aeneas.Std.ChelisNative
+ import Aeneas.Std.Core
+ import Aeneas.Std.Core.Borrow
+ import Aeneas.Std.Float
+diff --git a/backends/lean/Aeneas/Std/ChelisNative.lean b/backends/lean/Aeneas/Std/ChelisNative.lean
+new file mode 100644
+index 0000000..f5d22f5
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/ChelisNative.lean
+@@ -0,0 +1,36 @@
++import Aeneas.Std.Scalar.Core
++
++/-!
++# Chelis native primitives (trusted base)
++
++Models of the crate-local native primitives of the Chelis semantic core. Each is
++an explicit state object whose native behavior (atomics, process-global
++counters, ...) is abstracted as an oracle: extracted entry points receive the
++state as a parameter, so correspondence theorems quantify over every native
++behavior. Native constructors (e.g. `CapacityScopeSupply::native`) are
++deliberately not modeled: an extracted call to one fails closed as an unknown
++external.
++-/
++
++namespace Aeneas.Std
++
++/-- `chelis_ir::capacity_key::CapacityScopeSupply`: a handle on the process-global
++    capacity-scope identity sequence. The model is an oracle of the identities the
++    counter hands to this invocation: `draw n` is the `n`-th identity drawn through
++    this handle, `none` when the native counter is exhausted. -/
++@[rust_type "chelis_ir::capacity_key::CapacityScopeSupply"]
++structure chelis_ir.capacity_key.CapacityScopeSupply where
++  draw : Nat → Option U64
++  taken : Nat
++
++/-- `CapacityScopeSupply::fresh_id`: the next identity of the oracle; exhaustion
++    is the native `.expect("capacity-scope identity space exhausted")` panic. -/
++@[rust_fun "chelis_ir::capacity_key::{chelis_ir::capacity_key::CapacityScopeSupply}::fresh_id"]
++def chelis_ir.capacity_key.CapacityScopeSupply.fresh_id
++    (s : chelis_ir.capacity_key.CapacityScopeSupply) :
++    Result (U64 × chelis_ir.capacity_key.CapacityScopeSupply) :=
++  match s.draw s.taken with
++  | some id => .ok (id, { s with taken := s.taken + 1 })
++  | none => .fail .panic
++
++end Aeneas.Std
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 940d49a..05ab996 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -28,6 +28,8 @@ let lean_builtin_types = [
+   mk_type "alloc::vec::Vec" "_root_.Aeneas.Std.alloc.vec.Vec";
+   (* file: "Aeneas/Std/VecIter.lean", line: 9 *)
+   mk_type "alloc::vec::into_iter::IntoIter" "_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 21 *)
++  mk_type "chelis_ir::capacity_key::CapacityScopeSupply" "_root_.Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply" ~kind:(KStruct [("draw", Some "draw"); ("taken", Some "taken")]);
+   (* file: "Aeneas/Std/Core/Ptr.lean", line: 78 *)
+   mk_type "core::alloc::layout::Layout" "_root_.Aeneas.Std.core.alloc.layout.Layout" ~kind:(KStruct [("size", Some "size"); ("align", Some "align")]);
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 115 *)
+@@ -400,6 +402,8 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{core::ops::index::Index<alloc::vec::Vec<@T>, @I, @O>}::index" "_root_.Aeneas.Std.alloc.vec.Vec.index" ~keep_params:(Some [true; true; false; true]);
+   (* file: "Aeneas/Std/Vec.lean", line: 252 *)
+   mk_fun "alloc::vec::{core::ops::index::IndexMut<alloc::vec::Vec<@T>, @I, @O>}::index_mut" "_root_.Aeneas.Std.alloc.vec.Vec.index_mut" ~keep_params:(Some [true; true; false; true]);
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 28 *)
++  mk_fun "chelis_ir::capacity_key::{chelis_ir::capacity_key::CapacityScopeSupply}::fresh_id" "_root_.Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply.fresh_id";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 130 *)
+   mk_fun "core::array::equality::{core::cmp::PartialEq<[@T; @N], [@U; @N]>}::eq" "_root_.Aeneas.Std.core.array.equality.PartialEqArray.eq";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 138 *)

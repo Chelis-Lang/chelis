@@ -1,0 +1,217 @@
+# charon integration step 13 after 546078ea5d: commit 72dd68680e0435993ebc47edd18378b2c1401bfe
+# first parent d1e4811a01c2c68fe999e52ee00894abc49eca47
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: --start-from an external crate root registers every item it defines; coverage report
+
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index 80e6a01..247793e 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -273,6 +273,163 @@ impl<'tcx> TranslateCtx<'tcx> {
+         let _: Option<ItemId> = self.register_and_enqueue(&None, item_src);
+     }
+ 
++    /// Register every item defined in the external crate `krate`, whose root a `--start-from`
++    /// pattern names. The children of an external module are only its nameable items: impls
++    /// (and items nested in function bodies) are not among them. Enumerate all the definitions
++    /// of the crate instead. Associated items are reached through their trait or impl, and
++    /// closures and anonymous constants through the item whose body defines them.
++    ///
++    /// Methods are otherwise only translated once something uses them. Here every method the
++    /// crate defines is a root: all methods of the crate's own traits (including provided ones),
++    /// and every method its impls implement (for foreign traits too, which then translates that
++    /// method for every impl of the trait, as for any used method).
++    pub fn enqueue_external_crate(&mut self, krate: rustc_hir::def_id::CrateNum) {
++        use rustc_hir::def::DefKind;
++        let tcx = self.tcx;
++        if self.options.monomorphize_with_hax {
++            register_error!(
++                self,
++                Span::dummy(),
++                "`--start-from` on the external crate `{}` is not supported with monomorphization",
++                tcx.crate_name(krate)
++            );
++            return;
++        }
++        for index in 0..tcx.num_extern_def_ids(krate) {
++            let def_id = rustc_hir::def_id::DefId {
++                krate,
++                index: rustc_hir::def_id::DefIndex::from_usize(index),
++            };
++            let kind = tcx.def_kind(def_id);
++            let is_root = matches!(
++                kind,
++                DefKind::Struct
++                    | DefKind::Enum
++                    | DefKind::Union
++                    | DefKind::TyAlias
++                    | DefKind::ForeignTy
++                    | DefKind::Fn
++                    | DefKind::Const
++                    | DefKind::Static { nested: false, .. }
++                    | DefKind::Trait
++                    | DefKind::TraitAlias
++                    | DefKind::Impl { .. }
++            );
++            // Modules only structure the items above. The remaining kinds are parts of other
++            // items (associated items, variants, fields, generic params, closures, anonymous
++            // constants, opaque types, nested statics), or are not translated at all (macros,
++            // uses, extern crates, global asm).
++            if !is_root {
++                continue;
++            }
++            self.coverage_roots.push(def_id);
++            let hax_def_id: hax::DefId = def_id.sinto(&self.hax_state);
++            self.enqueue_module_item(&hax_def_id);
++            let trait_id = match kind {
++                DefKind::Trait => def_id,
++                DefKind::Impl { of_trait: true } => tcx.impl_trait_ref(def_id).skip_binder().def_id,
++                _ => continue,
++            };
++            let trait_id: hax::DefId = trait_id.sinto(&self.hax_state);
++            let trait_src = TransItemSource::polymorphic(&trait_id, TransItemSourceKind::TraitDecl);
++            let Some(trait_id) = self.register_and_enqueue::<TraitDeclId>(&None, trait_src) else {
++                continue;
++            };
++            for assoc in tcx.associated_items(def_id).in_definition_order() {
++                if matches!(assoc.kind, rustc_middle::ty::AssocKind::Fn { .. }) {
++                    let assoc_id: hax::DefId = assoc.def_id.sinto(&self.hax_state);
++                    let Ok(name) = self.translate_trait_item_name(&assoc_id) else {
++                        register_error!(
++                            self,
++                            Span::dummy(),
++                            "cannot name method `{}` of external root `{}`",
++                            tcx.def_path_str(assoc.def_id),
++                            tcx.def_path_str(def_id)
++                        );
++                        continue;
++                    };
++                    // Mark the method used: enqueue its known implementations, and later ones
++                    // as they get registered.
++                    let status = self
++                        .method_status
++                        .get_or_extend_and_insert_default(trait_id)
++                        .entry(name)
++                        .or_default();
++                    if let MethodStatus::Unused { implementors } = status {
++                        let implementors = std::mem::take(implementors);
++                        *status = MethodStatus::Used;
++                        for fun_id in implementors {
++                            self.enqueue_id(fun_id);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    /// When `CHARON_COVERAGE_REPORT` names a file, write the auditable root/translation coverage
++    /// of this run as JSON: per crate, the definitions enumerated as roots; and per crate and
++    /// item kind, the items that were translated, those whose translation failed, and those
++    /// registered as references but never needed (unused methods, unneeded vtables).
++    pub fn write_coverage_report(&self) {
++        let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
++            return;
++        };
++        use std::collections::BTreeMap;
++        let tcx = self.tcx;
++        let crate_of = |def_id: &hax::DefId| match def_id.as_rust_def_id() {
++            Some(id) => tcx.crate_name(id.krate).to_string(),
++            None => "<synthetic>".to_string(),
++        };
++        let path_of = |def_id: &hax::DefId| match def_id.as_rust_def_id() {
++            Some(id) => tcx.def_path_str(id),
++            None => format!("{def_id:?}"),
++        };
++        let mut roots: BTreeMap<String, Vec<String>> = BTreeMap::new();
++        for &def_id in &self.coverage_roots {
++            roots
++                .entry(tcx.crate_name(def_id.krate).to_string())
++                .or_default()
++                .push(format!("{:?} {}", tcx.def_kind(def_id), tcx.def_path_str(def_id)));
++        }
++        type ByKind = BTreeMap<String, Vec<String>>;
++        let mut translated: BTreeMap<String, ByKind> = BTreeMap::new();
++        let mut failed: BTreeMap<String, ByKind> = BTreeMap::new();
++        let mut not_enqueued: BTreeMap<String, ByKind> = BTreeMap::new();
++        for (id, src) in &self.reverse_id_map {
++            let table = if self.translated.get_item(*id).is_some() {
++                &mut translated
++            } else if self.processed.contains(src) {
++                &mut failed
++            } else {
++                // Registered but never needed: methods nothing uses, vtables of traits never
++                // used as `dyn`.
++                &mut not_enqueued
++            };
++            table
++                .entry(crate_of(src.def_id()))
++                .or_default()
++                .entry(format!("{:?}", src.kind))
++                .or_default()
++                .push(path_of(src.def_id()));
++        }
++        for table in [&mut translated, &mut failed, &mut not_enqueued] {
++            for names in table.values_mut().flat_map(|by_kind| by_kind.values_mut()) {
++                names.sort();
++            }
++        }
++        let report = serde_json::json!({
++            "roots": roots,
++            "translated": translated,
++            "failed": failed,
++            "registered_not_enqueued": not_enqueued,
++        });
++        let text = serde_json::to_string_pretty(&report).unwrap();
++        std::fs::write(&path, text).unwrap_or_else(|error| {
++            panic!("cannot write coverage report {}: {error}", path.to_string_lossy())
++        });
++    }
++
+     pub(crate) fn register_no_enqueue<T: TryFrom<ItemId>>(
+         &mut self,
+         dep_src: &Option<DepSource>,
+@@ -746,6 +903,7 @@ pub fn translate<'tcx>(
+         lt_mutability_computer: Default::default(),
+         translated_preshims: Default::default(),
+         closure_capture_params: Default::default(),
++        coverage_roots: Default::default(),
+     };
+     ctx.register_target_info();
+ 
+@@ -756,6 +914,13 @@ pub fn translate<'tcx>(
+                 match super::resolve_path::def_path_def_ids(&ctx.hax_state, &pattern, strict) {
+                     Ok(resolved) => {
+                         for def_id in resolved {
++                            if !def_id.is_local() && def_id.is_crate_root() {
++                                // An external crate root: its nameable children miss impls and
++                                // unused methods, so enumerate everything the crate defines.
++                                ctx.enqueue_external_crate(def_id.krate);
++                                continue;
++                            }
++                            ctx.coverage_roots.push(def_id);
+                             let def_id: hax::DefId = def_id.sinto(&ctx.hax_state);
+                             ctx.enqueue_module_item(&def_id);
+                         }
+@@ -832,6 +997,7 @@ pub fn translate<'tcx>(
+     // Remove methods not marked as "used". They are never called and we made sure not to translate
+     // them. This removes them from the traits and impls.
+     ctx.remove_unused_methods();
++    ctx.write_coverage_report();
+ 
+     // Return the context, dropping the hax state and rustc `tcx`.
+     Ok(TransformCtx {
+diff --git a/src/bin/charon-driver/translate/translate_ctx.rs b/src/bin/charon-driver/translate/translate_ctx.rs
+index 1f5fe95..868025c 100644
+--- a/src/bin/charon-driver/translate/translate_ctx.rs
++++ b/src/bin/charon-driver/translate/translate_ctx.rs
+@@ -74,6 +74,8 @@ pub struct TranslateCtx<'tcx> {
+     /// For each translated closure, which capture occurrence each of its upvar region params
+     /// stands for (see `ClosureCaptureParams`).
+     pub closure_capture_params: HashMap<hax::DefId, ClosureCaptureParams>,
++    /// The definitions `--start-from` patterns enumerated, for the coverage report.
++    pub coverage_roots: Vec<rustc_hir::def_id::DefId>,
+ }
+ 
+ /// How the upvar region params of a closure item relate to the capture region occurrences of its

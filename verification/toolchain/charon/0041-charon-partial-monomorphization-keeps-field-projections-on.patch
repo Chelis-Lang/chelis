@@ -1,0 +1,160 @@
+# charon integration step 41 after 546078ea5d: commit ca6e5e9d827ad2b8497b74f313dff20193efbc42
+# first parent ac69a1513c8707bea69389b4794e41ef1032e5b3
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: partial monomorphization keeps field projections on the specialized ADT
+#
+# A field projection names the ADT it projects out of (FieldProjKind::Adt). In the
+# instance of a body whose closure type got specialized (closures keep their parent's
+# trait clauses), the projected place's type was rewritten to the specialized closure
+# but the projection still named the generic one, so Aeneas's interpreter rejected the
+# instance body (InterpPaths.project_value sanity check). Rewrite the projection's id
+# from the projected place's type after the type was specialized.
+#
+# The typecheck now checks that a field projection names the ADT of the place it
+# projects out of, including the places read by an rvalue (visit_rvalue does not
+# recurse into them, so no place of an rvalue was checked before).
+#
+# Test: ui/monomorphize-mut-closure-field-projection.rs (a closure capturing a closure
+# that captures `&mut S`, as chelis's catch_lowering_with did) fails the check without
+# the rewrite. monomorphize-mut-opaque(-hard).out: the generic closure type
+# `external::closure` was retained only by such a projection in the body of its
+# instance, and is gone.
+
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index a016690..4739626 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -660,6 +660,20 @@ impl VisitAstMut for PartialMonomorphizer<'_> {
+             *x = new_decl_ref.try_into().unwrap()
+         }
+     }
++    /// A field projection names the ADT it projects out of. When the type of the projected
++    /// place was just rewritten to a specialized ADT (e.g. the closure of a generic function
++    /// inside one of its instances), the projection must name that specialized ADT too.
++    fn exit_place(&mut self, place: &mut Place) {
++        if let PlaceKind::Projection(sub, ProjectionElem::Field(FieldProjKind::Adt(id, _), _)) =
++            &mut place.kind
++            && let TyKind::Adt(TypeDeclRef {
++                id: TypeId::Adt(sub_id),
++                ..
++            }) = sub.ty.kind()
++        {
++            *id = *sub_id;
++        }
++    }
+     fn exit_fn_ptr(&mut self, x: &mut FnPtr) {
+         // TODO: methods. any `Trait::method<&mut A>` requires monomorphizing all the instances of
+         // that method just in case :>>>
+diff --git a/src/transform/typecheck_and_unify.rs b/src/transform/typecheck_and_unify.rs
+index 2969fe5..0424fde 100644
+--- a/src/transform/typecheck_and_unify.rs
++++ b/src/transform/typecheck_and_unify.rs
+@@ -201,6 +201,25 @@ impl TypeCheckVisitor<'_> {
+         }
+     }
+ 
++    /// Check that a field projection names the ADT of the place it projects out of.
++    fn check_field_projection(&self, place: &Place) {
++        if let PlaceKind::Projection(sub, ProjectionElem::Field(FieldProjKind::Adt(id, _), _)) =
++            &place.kind
++            && let TyKind::Adt(TypeDeclRef {
++                id: TypeId::Adt(sub_id),
++                ..
++            }) = sub.ty.kind()
++            && id != sub_id
++        {
++            let fmt = &self.val_fmt_ctx();
++            self.error(format!(
++                "Field projection out of \"{}\" names another type: {}",
++                sub.ty.with_ctx(fmt),
++                id.with_ctx(fmt)
++            ));
++        }
++    }
++
+     /// For pretty error printing. This can print values that we encounter because we track binders
+     /// properly. This doesn't have the right binders to print values we get from somewhere else
+     /// (namely the `GenericParam`s we get from elsewhere in the crate).
+@@ -474,6 +493,9 @@ impl VisitAstMut for TypeCheckVisitor<'_> {
+             TypeId::Builtin(_) => {}
+         }
+     }
++    fn enter_place(&mut self, x: &mut Place) {
++        self.check_field_projection(x);
++    }
+     fn enter_fun_decl_ref(&mut self, x: &mut FunDeclRef) {
+         self.assert_matches_item(x.id, &mut x.generics);
+     }
+@@ -491,6 +513,8 @@ impl VisitAstMut for TypeCheckVisitor<'_> {
+         if let Rvalue::UnaryOp(UnOp::Cast(CastKind::Concretize(src, tar)), _) = x {
+             self.check_concretization_ty_match(src, tar);
+         }
++        // The rest of an rvalue is not visited, but the places it reads are checked.
++        x.dyn_visit(|place: &Place| self.check_field_projection(place));
+         Continue(())
+     }
+     fn visit_body(&mut self, body: &mut Body) -> ControlFlow<Self::Break> {
+diff --git a/tests/ui/monomorphize-mut-closure-field-projection.rs b/tests/ui/monomorphize-mut-closure-field-projection.rs
+new file mode 100644
+index 0000000..205b6d3
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-closure-field-projection.rs
+@@ -0,0 +1,26 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++//@ no-check-output
++
++// A closure keeps the trait clauses of its generic parent, so an instance of the parent
++// specializes the closure type too. The instance of the closure's body reads its capture out of
++// that specialized type: the field projection must name it, not the generic closure type
++// (checked after the transformations).
++pub fn apply<R>(x: &mut u32, f: impl FnOnce(&mut u32) -> R) -> R {
++    f(x)
++}
++
++pub fn catching<R>(x: &mut u32, f: impl FnOnce(&mut u32) -> R) -> R {
++    apply(x, move |y| f(y))
++}
++
++pub fn with_state<S, R>(x: &mut u32, state: &mut S, f: impl FnOnce(&mut u32, &mut S) -> R) -> R {
++    catching(x, move |y| f(y, state))
++}
++
++pub fn caller(x: &mut u32, count: &mut u64) -> u32 {
++    with_state(x, count, |x, count| {
++        *count += 1;
++        *x
++    })
++}
+diff --git a/tests/ui/monomorphize-mut-opaque-hard.out b/tests/ui/monomorphize-mut-opaque-hard.out
+index 93fab14..accb992 100644
+--- a/tests/ui/monomorphize-mut-opaque-hard.out
++++ b/tests/ui/monomorphize-mut-opaque-hard.out
+@@ -76,11 +76,6 @@ where
+   &'_0 mut T1,
+ }
+ 
+-// Full name: test_crate::external::closure
+-opaque type closure<'_0, T, T1>
+-where
+-    [@TraitClause0]: FnMut<T1, (T,), ()>,
+-
+ fn test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
+ where
+     [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,
+diff --git a/tests/ui/monomorphize-mut-opaque.out b/tests/ui/monomorphize-mut-opaque.out
+index f4e0f58..4fe59e1 100644
+--- a/tests/ui/monomorphize-mut-opaque.out
++++ b/tests/ui/monomorphize-mut-opaque.out
+@@ -71,10 +71,6 @@ where
+   &'_0 mut T1,
+ }
+ 
+-opaque type test_crate::external::closure<'_0, T, T1>
+-where
+-    [@TraitClause0]: FnMut<T1, (T,), ()>,
+-
+ fn test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
+ where
+     [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,

@@ -1,0 +1,30 @@
+# charon integration step 12 after 546078ea5d: commit d1e4811a01c2c68fe999e52ee00894abc49eca47
+# first parent 483e3b816d7d6a325010fd9a6cb91b8afa847d58
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: buffer LLBC serialization writes
+
+diff --git a/src/export.rs b/src/export.rs
+index 03edf20..e8b5223 100644
+--- a/src/export.rs
++++ b/src/export.rs
+@@ -99,12 +99,16 @@ impl CrateData {
+             error!("Could not open: {:?}", target_filename);
+             return Err(());
+         };
+-        // Write to the file.
+-        let res = serde_json::to_writer(&outfile, self);
++        // Write to the file. `serde_json` emits one small write per token: buffer them, or large
++        // crates spend their serialization time in write syscalls.
++        let mut writer = std::io::BufWriter::new(outfile);
++        let res = serde_json::to_writer(&mut writer, self)
++            .map_err(|err| format!("{err:?}"))
++            .and_then(|()| std::io::Write::flush(&mut writer).map_err(|err| format!("{err:?}")));
+         match res {
+             Ok(()) => {}
+             Err(err) => {
+-                error!("Could not serialize to `{target_filename:?}`: {err:?}");
++                error!("Could not serialize to `{target_filename:?}`: {err}");
+                 return Err(());
+             }
+         }

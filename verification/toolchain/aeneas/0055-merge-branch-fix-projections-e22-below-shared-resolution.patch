@@ -1,0 +1,1688 @@
+# aeneas integration step 55 after cba11f3beb: commit fbe597115c633f34cc78cc9bd30c583d206fbfb0
+# first parent 57ec6f920e954a39960757c4ff37b517efcd8b0b, merged d4da390ec7279acfaf2b0085ed042accbc4f8375
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/projections' (E22/below_shared resolution, shared payload copies with mutable borrows, shared reborrows of expanded values, SpecializedClosureClauses regenerated)
+
+diff --git a/src/interp/InterpExpansion.ml b/src/interp/InterpExpansion.ml
+index 6cc5793..d2035b9 100644
+--- a/src/interp/InterpExpansion.ml
++++ b/src/interp/InterpExpansion.ml
+@@ -88,6 +88,33 @@ let apply_symbolic_expansion_to_target_aevalues (span : Meta.span)
+             ());
+         super#visit_eproj current_abs aproj
+ 
++      (** The shared reborrows of the expanded value (e.g., the region
++          abstraction of a call receiving [&'a Option<&'b mut T>] reborrows
++          the value of type [Option<&'b mut T>] behind the shared borrow as a
++          shared value): project them over the expansion, as when they were
++          introduced (see
++          [InterpProjectors.apply_proj_borrows_on_shared_borrow]). Otherwise
++          they would keep referring to the expanded symbolic value, whose loan
++          projectors are expanded below. *)
++      method! visit_AProjSharedBorrow current_abs pm asb =
++        match proj_kind with
++        | LoanProj -> AProjSharedBorrow (pm, asb)
++        | BorrowProj ->
++            let proj_regions = (Option.get current_abs).regions.owned in
++            let expand_asb (asb : abstract_shared_borrow) :
++                abstract_shared_borrows =
++              match asb with
++              | AsbProjReborrows proj when proj.sv_id = original_sv.sv_id ->
++                  let value =
++                    symbolic_expansion_non_shared_borrow_to_value span
++                      original_sv expansion
++                  in
++                  apply_proj_borrows_on_shared_borrow span ctx proj_regions
++                    value proj.proj_ty
++              | AsbBorrow _ | AsbProjReborrows _ -> [ asb ]
++            in
++            AProjSharedBorrow (pm, List.concat_map expand_asb asb)
++
+       method! visit_ASymbolic current_abs pm aproj =
+         [%sanity_check] span (pm = PNone);
+         let current_abs = Option.get current_abs in
+@@ -397,17 +424,23 @@ let expand_symbolic_value_shared_borrow (span : Meta.span)
+     if proj.sv_id = original_sv.sv_id then
+       match proj.proj_ty with
+       | TRef (r, ref_ty, RShared) ->
+-          (* Projector over the shared value *)
++          (* Projector over the shared value - there is none if the shared
++             value has no region of the abstraction (e.g., the [&'a [u32]]
++             field of a value that an abstraction of region ['b] reborrows):
++             nobody lends projections over such a value (see
++             [InterpProjectors.apply_proj_borrows_on_shared_borrow]) *)
+           let shared_asb =
+-            AsbProjReborrows { sv_id = shared_sv.sv_id; proj_ty = ref_ty }
++            if ty_has_regions_in_set proj_regions ref_ty then
++              [ AsbProjReborrows { sv_id = shared_sv.sv_id; proj_ty = ref_ty } ]
++            else []
+           in
+           (* Check if the region is in the set of projected regions *)
+           if region_in_set r proj_regions then
+             (* In the set: we need to reborrow *)
+             let sid = ctx.fresh_shared_borrow_id () in
+-            Some [ AsbBorrow (bid, sid); shared_asb ]
++            Some (AsbBorrow (bid, sid) :: shared_asb)
+           else (* Not in the set: ignore *)
+-            Some [ shared_asb ]
++            Some shared_asb
+       | _ -> [%craise] span "Unexpected"
+     else None
+   in
+diff --git a/src/interp/InterpJoin.ml b/src/interp/InterpJoin.ml
+index 1026c67..d14377c 100644
+--- a/src/interp/InterpJoin.ml
++++ b/src/interp/InterpJoin.ml
+@@ -36,7 +36,16 @@ let reborrow_ashared_loans (span : Meta.span) (loop_id : LoopId.id option)
+ 
+   (* Keep the original occurrence in the frozen loan. The copy has fresh
+      regions backed by shared reborrow and loan projectors; its symbolic type
+-     must use those same regions so later expansion resolves its own loans. *)
++     must use those same regions so later expansion resolves its own loans.
++
++     The copied value may contain mutable borrows (e.g., the payload
++     [Option<&'1 mut T>] of [Option::as_ref]): the loan projectors of their
++     regions are frozen, because the copy is only reachable through the shared
++     loan of [push_abs_for_shared_value] (the only user of
++     [mk_value_with_fresh_sids_no_shared_loans]). The values they consume are
++     the unchanged values of the copy, and the abstraction gives nothing back
++     to the original (its borrow is a shared reborrow): see
++     [SymbolicToPureExpressions.translate_end_abs_identity]. *)
+   let copy_symbolic_regions (sv : symbolic_value) nsid =
+     if symbolic_value_has_borrows (Some span) ctx sv then (
+       [%cassert] span
+@@ -50,13 +59,6 @@ let reborrow_ashared_loans (span : Meta.span) (loop_id : LoopId.id option)
+       in
+       List.iter
+         (fun rid ->
+-          [%cassert] span
+-            (not
+-               (ty_has_mut_borrow_for_region_in_set ctx.type_ctx.type_infos
+-                  (RegionId.Set.singleton rid)
+-                  proj_ty))
+-            "A shared payload copy cannot create an independent mutable loan \
+-             projector";
+           let borrow : tavalue =
+             {
+               value =
+diff --git a/src/interp/InterpProjectors.mli b/src/interp/InterpProjectors.mli
+index 7d3d262..fd5efb6 100644
+--- a/src/interp/InterpProjectors.mli
++++ b/src/interp/InterpProjectors.mli
+@@ -46,6 +46,17 @@ val symbolic_expansion_non_borrow_to_value :
+ val symbolic_expansion_non_shared_borrow_to_value :
+   Meta.span -> symbolic_value -> symbolic_expansion -> tvalue
+ 
++(** Project the borrows of a value lent through a shared borrow onto the
++    regions of an abstraction, as shared reborrows: [ty] is the type of the
++    shared value (it shouldn't contain erased regions). *)
++val apply_proj_borrows_on_shared_borrow :
++  Meta.span ->
++  eval_ctx ->
++  RegionId.Set.t ->
++  tvalue ->
++  ty ->
++  abstract_shared_borrows
++
+ (** Apply (and reduce) a projector over borrows to an avalue. We use this for
+     instance to spread the borrows present in the inputs of a function into the
+     regions introduced for this function. For instance:
+diff --git a/src/llbc/TypesUtils.ml b/src/llbc/TypesUtils.ml
+index a9db620..996c45e 100644
+--- a/src/llbc/TypesUtils.ml
++++ b/src/llbc/TypesUtils.ml
+@@ -264,9 +264,13 @@ let ty_has_borrow_under_mut span (infos : TypesAnalysis.type_infos) (ty : ty) :
+   info.TypesAnalysis.contains_borrow_under_mut
+ 
+ (** Check if a {!type:Charon.Types.ty} contains a mutable borrow which uses a
+-    region from a given set. *)
+-let ty_has_mut_borrow_for_region_in_pred (infos : TypesAnalysis.type_infos)
+-    (pred : region -> bool) (ty : ty) : bool =
++    region from a given set.
++
++    If [frozen_under_shared] is true, we ignore the borrows below a shared
++    reference (they are frozen). *)
++let ty_has_mut_borrow_for_region_in_pred ?(frozen_under_shared = false)
++    (infos : TypesAnalysis.type_infos) (pred : region -> bool) (ty : ty) : bool
++    =
+   let obj =
+     object (self)
+       inherit [_] iter_ty as super
+@@ -277,7 +281,8 @@ let ty_has_mut_borrow_for_region_in_pred (infos : TypesAnalysis.type_infos)
+           | RMut -> if pred r then raise Found
+           | RShared -> ()
+         end;
+-        super#visit_TRef env r ty rkind
++        if not (frozen_under_shared && rkind = RShared) then
++          super#visit_TRef env r ty rkind
+ 
+       method! visit_TAdt env tref =
+         (* Lookup the information for this ADT *)
+diff --git a/src/pure/PureMicroPassesAnnots.ml b/src/pure/PureMicroPassesAnnots.ml
+index 3425d8a..d3d69cc 100644
+--- a/src/pure/PureMicroPassesAnnots.ml
++++ b/src/pure/PureMicroPassesAnnots.ml
+@@ -93,6 +93,18 @@ let add_type_annotations_to_fun_decl (trans_ctx : trans_ctx)
+     | Switch (discr, body) ->
+         (* We consider that the type of the discriminant is unknown *)
+         let discr = visit hole discr in
++        (* A constant constructor of a generic type (typically [none], once a
++           value known in this branch has been inlined) does not determine its
++           type, while Lean elaborates the branches with the type of the
++           scrutinee (e.g. [{ c with ... }] in the [some c] branch). *)
++        let discr =
++          match (discr.e, discr.ty) with
++          | Qualif { id = AdtCons _; _ }, TAdt (_, generics)
++            when Config.backend () = Lean
++                 && (generics.types <> [] || generics.const_generics <> []) ->
++              mk_type_annot discr
++          | _ -> discr
++        in
+         let body = visit_switch_body ty body in
+         { e with e = Switch (discr, body) }
+     | Loop _ ->
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 38cb814..07930e4 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1338,7 +1338,7 @@ and translate_function_call_aux (call : S.call) (e : S.expr) (ctx : bs_ctx) :
+                        (NameMatcher.ctx_from_crate ctx.decls_ctx.crate)
+                        decl.def_id decl.item_meta.name)
+                 then
+-                  let signature = (FunDeclId.Map.find id ctx.fun_sigs).sg in
++                  let signature = (lookup_fun_sigs ctx id).sg in
+                   let subst =
+                     make_subst_from_generics signature.generics generics
+                   in
+@@ -1358,7 +1358,7 @@ and translate_function_call_aux (call : S.call) (e : S.expr) (ctx : bs_ctx) :
+             let func =
+               match (contract, fid) with
+               | ModelStateABI.TranslatedCanonicalBody _, FunId (FRegular id) ->
+-                  let signature = (FunDeclId.Map.find id ctx.fun_sigs).sg in
++                  let signature = (lookup_fun_sigs ctx id).sg in
+                   let subst =
+                     make_subst_from_generics signature.generics generics
+                   in
+@@ -2603,19 +2603,49 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+ 
+ and translate_end_abs_identity (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+-  [%cassert] ctx.span (abs_level = 0) "Unimplemented";
++  (* A copy of a shared payload (see [InterpJoin.reborrow_ashared_loans]) may
++     hold the loans of the mutable borrows of the copied value, possibly nested
++     (e.g., [&'1 mut Frame<'2>]), so we end its levels one by one. Those loans
++     are frozen: the copy is only reachable through the shared loan of the
++     reborrow abstraction, so its mutable borrows are only read, never used to
++     update anything, and ending them gives the unchanged values of the copy
++     back to the copy itself. The copy gives nothing to anybody else: its only
++     borrows are shared reborrows of the original payload. We check this
++     shape, and the end of such a copy translates to nothing. *)
++  let frozen_copy =
++    abs.kind = V.CopySymbolicValue
++    && List.exists
++         (fun (av : V.tavalue) ->
++           TypesUtils.ty_has_mut_borrows ctx.type_ctx.type_infos av.ty)
++         abs.avalues
++    && List.for_all
++         (fun (av : V.tavalue) ->
++           match av.value with
++           | V.ABorrow
++               (V.AProjSharedBorrow _ | V.ASharedBorrow _ | V.AEndedSharedBorrow)
++             -> true
++           | V.ABorrow _
++           | V.ASymbolic (_, (V.AProjBorrows _ | V.AEndedProjBorrows _))
++           | V.AAdt { borrow_proj = true; _ } -> false
++           | _ -> true)
++         abs.avalues
++  in
++  if frozen_copy then translate_expr e ctx
++  else begin
++    [%cassert] ctx.span (abs_level = 0) "Unimplemented";
+ 
+-  (* We simply check that the abstraction only contains shared borrows/loans,
+-     and translate the next expression *)
++    (* We simply check that the abstraction only contains shared borrows/loans,
++       and translate the next expression *)
+ 
+-  (* We can do this simply by checking that it consumes and gives back nothing *)
+-  let inputs = abs_to_consumed ctx ectx abs abs_level in
+-  let ctx, outputs = abs_to_given_back None abs abs_level ctx in
+-  [%sanity_check] ctx.span (inputs = []);
+-  [%sanity_check] ctx.span (outputs = []);
++    (* We can do this simply by checking that it consumes and gives back nothing *)
++    let inputs = abs_to_consumed ctx ectx abs abs_level in
++    let ctx, outputs = abs_to_given_back None abs abs_level ctx in
++    [%sanity_check] ctx.span (inputs = []);
++    [%sanity_check] ctx.span (outputs = []);
+ 
+-  (* Translate the next expression *)
+-  translate_expr e ctx
++    (* Translate the next expression *)
++    translate_expr e ctx
++  end
+ 
+ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+     (e : S.expr) (ctx : bs_ctx) (rg_id : T.RegionGroupId.id)
+@@ -3160,11 +3190,7 @@ and translate_intro_symbolic (ectx : C.eval_ctx) (p : S.mplace option)
+         let inputs, output =
+           match kind with
+           | T.FunId (FRegular fid) ->
+-              let sg =
+-                [%unwrap_with_span] ctx.span
+-                  (FunDeclId.Map.find_opt fid ctx.fun_sigs)
+-                  "Could not lookup a function item signature"
+-              in
++              let sg = lookup_fun_sigs ctx fid in
+               let subst = make_subst_from_generics sg.sg.generics generics in
+               ( List.map (ty_substitute subst) sg.sg.inputs,
+                 ty_substitute subst sg.sg.output )
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index 6b5f5eb..cbb5415 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -1732,12 +1732,33 @@ and translate_fun_sig (decls_ctx : C.decls_ctx) (fun_id : A.fun_id)
+   (* Finish the translation *)
+   translate_fun_sig_from_decomposed sg
+ 
++(** Lookup the translated signature of a function called from the body being
++    translated.
++
++    The signature of a function is translated independently of its body, and a
++    function whose signature can not be translated is missing from
++    [ctx.fun_sigs]: the calls to it can not be translated either, and the error
++    points to the calling declaration. *)
++and lookup_fun_sigs (ctx : bs_ctx) (fid : A.FunDeclId.id) : fun_sigs =
++  match A.FunDeclId.Map.find_opt fid ctx.fun_sigs with
++  | Some sg -> sg
++  | None ->
++      let name =
++        match A.FunDeclId.Map.find_opt fid ctx.fun_ctx.llbc_fun_decls with
++        | Some decl -> name_to_string ctx decl.item_meta.name
++        | None -> A.FunDeclId.to_string fid
++      in
++      [%craise] ctx.span
++        ("Cannot translate a call to '" ^ name
++       ^ "': the signature of this function could not be translated (see the \
++          previous error)")
++
+ (** TODO: not very clean. *)
+ and get_fun_effect_info (ctx : bs_ctx) (fun_id : A.fn_ptr_kind)
+     (gid : T.RegionGroupId.id option) : fun_effect_info =
+   match fun_id with
+   | TraitMethod (_, _, fid) | FunId (FRegular fid) ->
+-      let sg = A.FunDeclId.Map.find fid ctx.fun_sigs in
++      let sg = lookup_fun_sigs ctx fid in
+       let sg = sg.dsg in
+       let info =
+         match gid with
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 8020ce2..b41e7f5 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -1023,9 +1023,12 @@ let rec fold_aproj_at_level abs_level current_level f acc (aproj : V.aproj)
+         visit_children acc loans
+     | APendingLoans _ | AEmpty -> acc
+ 
+-let compute_tavalue_proj_kind span type_infos (abs_regions : T.RegionId.Set.t)
+-    (abs_level : abs_level) (current_level : abs_level) (av : V.tavalue) :
+-    proj_kind =
++(** [below_shared_loans]: whether we account for the mutable loans below the
++    ignored shared loans (their regions are frozen by a shared borrow of
++    another region), see [aloan_content_to_consumed_aux]. *)
++let compute_tavalue_proj_kind ?(below_shared_loans = true) span type_infos
++    (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
++    (current_level : abs_level) (av : V.tavalue) : proj_kind =
+   let has_borrows = ref false in
+   let has_mut_borrows = ref false in
+   let has_loans = ref false in
+@@ -1059,7 +1062,8 @@ let compute_tavalue_proj_kind span type_infos (abs_regions : T.RegionId.Set.t)
+     | _ -> false
+   in
+   let ty_has_mut_region =
+-    TypesUtils.ty_has_mut_borrow_for_region_in_pred type_infos keep_region
++    TypesUtils.ty_has_mut_borrow_for_region_in_pred
++      ~frozen_under_shared:(not below_shared_loans) type_infos keep_region
+   in
+   let visitor =
+     object
+@@ -1087,8 +1091,12 @@ let compute_tavalue_proj_kind span type_infos (abs_regions : T.RegionId.Set.t)
+               ()
+           | AMutLoan _ | AEndedMutLoan _ -> set_has_mut_loans level
+         end;
+-        (* Continue exploring as a sanity check: we want to make sure we don't find borrows *)
+-        super#visit_ALoan (level, ty) lc
++        match lc with
++        | AIgnoredSharedLoan _ when not below_shared_loans -> ()
++        | _ ->
++            (* Continue exploring as a sanity check: we want to make sure we
++               don't find borrows *)
++            super#visit_ALoan (level, ty) lc
+ 
+       method! visit_ABorrow (level, ty) bc =
+         begin
+@@ -1289,14 +1297,14 @@ let gtranslate_adt_fields ~(project_borrows : bool)
+     we only translate the value given back if it consumes values, and the
+     borrowed value if it consumes values or if the value given back doesn't. *)
+ let consumed_nested_sides_to_translate (ctx : bs_ctx) ~(filter : bool)
+-    (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+-    (current_level : abs_level) (child : V.tavalue) (given_back : V.tavalue) :
+-    bool * bool =
++    ~(below_shared : bool) (abs_regions : T.RegionId.Set.t)
++    (abs_level : abs_level) (current_level : abs_level) (child : V.tavalue)
++    (given_back : V.tavalue) : bool * bool =
+   if filter then (true, true)
+   else
+     let real level av =
+-      compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-        abs_level level av
++      compute_tavalue_proj_kind ~below_shared_loans:below_shared ctx.span
++        ctx.type_ctx.type_infos abs_regions abs_level level av
+       = LoanProj BMut
+     in
+     let given_back_real = real (current_level + 1) given_back in
+@@ -1317,19 +1325,20 @@ let consumed_nested_sides_to_translate (ctx : bs_ctx) ~(filter : bool)
+       let ... = choose_back b x y nz in
+                                   ^^
+     ]} *)
+-let rec tavalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
++let rec tavalue_to_consumed_aux ~(filter : bool)
++    ~(below_shared : bool) (ctx : bs_ctx)
+     (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (av : V.tavalue) : texpr option =
+   let value =
+     match av.value with
+     | AAdt adt_v ->
+-        adt_avalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++        adt_avalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+           current_level av adt_v
+     | ALoan lc ->
+-        aloan_content_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++        aloan_content_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+           current_level lc
+     | ABorrow bc ->
+-        aborrow_content_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++        aborrow_content_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+           current_level bc
+     | ASymbolic (pm, aproj) ->
+         [%sanity_check] ctx.span (pm = PNone);
+@@ -1357,7 +1366,8 @@ let rec tavalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+   (* Return *)
+   value
+ 
+-and adt_avalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
++and adt_avalue_to_consumed_aux ~(filter : bool)
++    ~(below_shared : bool) (ctx : bs_ctx)
+     (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (av : V.tavalue) (adt_v : V.adt_avalue) :
+     texpr option =
+@@ -1367,13 +1377,13 @@ and adt_avalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+       (fun ~filter ctx v ->
+         ( ctx,
+           match
+-            tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++            tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+               current_level v
+           with
+           | None -> None
+           | Some x -> Some ((), x) ))
+-      (compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-         abs_level current_level)
++      (compute_tavalue_proj_kind ~below_shared_loans:below_shared ctx.span
++         ctx.type_ctx.type_infos abs_regions abs_level current_level)
+       (fun fields ->
+         let ty = translate_fwd_ty (Some ctx.span) ctx.decls_ctx av.ty in
+         mk_adt_texpr ctx.span ty adt_v.variant_id fields)
+@@ -1382,7 +1392,8 @@ and adt_avalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+   in
+   Option.map snd out
+ 
+-and aloan_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
++and aloan_content_to_consumed_aux ~(filter : bool)
++    ~(below_shared : bool) (ctx : bs_ctx)
+     (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (lc : V.aloan_content) : texpr option =
+   match lc with
+@@ -1392,7 +1403,7 @@ and aloan_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+       (* A loan of a lower level may still be live when a deeper sub-abstraction
+          ends (nested borrows): it consumes nothing at the selected level. *)
+       [%cassert] ctx.span (current_level < abs_level) "Unreachable";
+-      tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++      tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+         current_level child
+   | AEndedMutLoan { child; given_back; given_back_meta } ->
+       if abs_level = current_level then (
+@@ -1404,11 +1415,11 @@ and aloan_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+         Some (tvalue_to_texpr ctx ectx given_back_meta))
+       else
+         let child =
+-          tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++          tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+             current_level child
+         in
+         let given_back =
+-          tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++          tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+             (current_level + 1) given_back
+         in
+         [%cassert] ctx.span (child = None) "Unimplemented";
+@@ -1426,18 +1437,19 @@ and aloan_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+       let child_av = child in
+       let given_back_av = given_back in
+       let translate_child, translate_given_back =
+-        consumed_nested_sides_to_translate ctx ~filter abs_regions abs_level
++        consumed_nested_sides_to_translate ctx ~filter ~below_shared abs_regions
++          abs_level
+           current_level child_av given_back_av
+       in
+       let child =
+         if translate_child then
+-          tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++          tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+             current_level child
+         else None
+       in
+       let given_back =
+         if translate_given_back then
+-          tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++          tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+             (current_level + 1) given_back
+         else None
+       in
+@@ -1450,25 +1462,41 @@ and aloan_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+              the selected level. *)
+           combine_nested_sides ctx.span ~filter
+             ~real:(fun level av ->
+-              compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos
+-                abs_regions abs_level level av
++              compute_tavalue_proj_kind ~below_shared_loans:below_shared
++                ctx.span ctx.type_ctx.type_infos abs_regions abs_level level av
+               = LoanProj BMut)
+             ~mk_tuple:(mk_simpl_tuple_texpr ctx.span)
+             (current_level, child_av, child)
+             (current_level + 1, given_back_av, given_back))
+-  | AIgnoredSharedLoan _ ->
++  | AIgnoredSharedLoan child ->
+       (* An ignored shared loan: this doesn't consume anything. Note that
+          there might be mutable borrows inside the shared value, but those
+-         are frozen (immutable) under the shared context. *)
+-      None
+-
+-and aborrow_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
++         are frozen (immutable) under the shared context.
++
++         The mutable loans of the selected regions below it are frozen as
++         well. The backward function of a callee still receives their values
++         when they come from its output ([below_shared], see
++         [abs_to_consumed]): e.g., [Option::as_ref] on [Option<&'1 mut T>]
++         returns [Option<&'0 &'1 mut T>], and the backward function of ['1]
++         receives an [Option T] (see [translate_back_inputs_for_gid]). *)
++      if
++        below_shared
++        && compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos
++             abs_regions abs_level current_level child
++           = LoanProj BMut
++      then
++        tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions
++          abs_level current_level child
++      else None
++
++and aborrow_content_to_consumed_aux ~(filter : bool)
++    ~(below_shared : bool) (ctx : bs_ctx)
+     (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (bc : V.aborrow_content) : texpr option =
+   match bc with
+   | V.AMutBorrow (_, _, child) | V.AIgnoredMutBorrow (_, child) ->
+       (* Can happen with nested borrows, when ending sub-abstractions *)
+-      tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++      tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+         current_level child
+   | V.ASharedBorrow _ -> None
+   | V.AEndedMutBorrow (_, _) ->
+@@ -1488,10 +1516,12 @@ and aborrow_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+          position of the carrier: we do not translate it. This happens with
+          four levels or more, when the borrowed value holds positions of other
+          levels only (e.g., ended borrows of the same region group, which the
+-         consumed values of a deeper level do not translate). *)
++         consumed values of a deeper level do not translate). The kinds
++         account for the loans below ignored shared loans exactly when the
++         sides are then translated with them ([below_shared]). *)
+       let kind level av =
+-        compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-          abs_level level av
++        compute_tavalue_proj_kind ~below_shared_loans:below_shared ctx.span
++          ctx.type_ctx.type_infos abs_regions abs_level level av
+       in
+       let carrier_overwritten =
+         (not filter)
+@@ -1502,11 +1532,11 @@ and aborrow_content_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+       let child =
+         if carrier_overwritten then None
+         else
+-          tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
+-            current_level child
++          tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions
++            abs_level current_level child
+       in
+       let given_back =
+-        tavalue_to_consumed_aux ~filter ctx ectx abs_regions abs_level
++        tavalue_to_consumed_aux ~filter ~below_shared ctx ectx abs_regions abs_level
+           (current_level + 1) given_back
+       in
+       match (child, given_back) with
+@@ -1939,8 +1969,8 @@ let select_back_side ?(dropped : dropped_consumed list ref option)
+       else { av with value = V.AIgnored None }
+ 
+ let tavalue_to_consumed ?(side : back_side = BothSides)
+-    ?(dropped : dropped_consumed list ref option) (ctx : bs_ctx)
+-    (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t)
++    ?(below_shared : bool = false) ?(dropped : dropped_consumed list ref option)
++    (ctx : bs_ctx) (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t)
+     (abs_level : abs_level) (av : V.tavalue) : texpr option =
+   (* Check if the value was generated from a loan projector: if yes, and if
+      it contains mutable loans, then we generate a consumed value (because
+@@ -1954,12 +1984,13 @@ let tavalue_to_consumed ?(side : back_side = BothSides)
+     ^ "\n<: " ^ ty_to_string ctx av.ty];
+   let av = select_back_side ?dropped ctx abs_regions side abs_level av in
+   match
+-    compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-      abs_level 0 av
++    compute_tavalue_proj_kind ~below_shared_loans:below_shared ctx.span
++      ctx.type_ctx.type_infos abs_regions abs_level 0 av
+   with
+   | LoanProj BMut ->
+       [%ltrace "the value contains mutable loan projectors"];
+-      tavalue_to_consumed_aux ~filter:true ctx ectx abs_regions abs_level 0 av
++      tavalue_to_consumed_aux ~filter:true ~below_shared ctx ectx abs_regions
++        abs_level 0 av
+   | LoanProj BShared | BorrowProj _ | UnknownProj ->
+       (* If it is a borrow proj we ignore it. If it is an unknown projection,
+          it means the value doesn't contain loans nor borrows, so nothing
+@@ -1991,6 +2022,13 @@ let abs_to_consumed_dropped ?(sides : back_side option list option)
+     "- abs:\n"
+     ^ abs_to_string ~with_ended:true ctx abs
+     ^ "\n- abs_level: " ^ string_of_int abs_level];
++  (* The backward function of a callee receives the values of the mutable
++     borrows of its output, including below shared borrows *)
++  let below_shared =
++    match abs.kind with
++    | V.FunCall _ -> true
++    | _ -> false
++  in
+   let values =
+     List.filter_map
+       (fun (index, (side, av)) ->
+@@ -2000,8 +2038,8 @@ let abs_to_consumed_dropped ?(sides : back_side option list option)
+             let dropped = ref [] in
+             Option.map
+               (fun value -> (index, value, List.rev !dropped))
+-              (tavalue_to_consumed ~side ~dropped ctx ectx abs.regions.owned
+-                 abs_level av))
++              (tavalue_to_consumed ~side ~below_shared ~dropped ctx ectx
++                 abs.regions.owned abs_level av))
+       (List.mapi (fun index x -> (index, x)) (abs_back_sides abs sides))
+   in
+   [%ltrace
+diff --git a/tests/lean/OptionMutNestedRegion/Checks.lean b/tests/lean/OptionMutNestedRegion/Checks.lean
+index 2dc87f3..282ae54 100644
+--- a/tests/lean/OptionMutNestedRegion/Checks.lean
++++ b/tests/lean/OptionMutNestedRegion/Checks.lean
+@@ -78,4 +78,19 @@ def noCounter (r : Result (U32 × Option Counter × (Option Counter → Option C
+ 
+ #guard noCounter (has_counter none (u 3)) == some (3, true)
+ 
++/-- `counts`: `count` advances the counter twice; the backward functions
++    compose to give back `total` (native `total` once the counter is dropped).
++    In the `None` branch, the backward function matches on the constant
++    `none`. -/
++def counts : Result (Nat × Nat × Nat × Option Nat) := do
++  let (r1, c1, back1) ← count (some (counter 100)) (u 3)
++  let c1 ← match c1 with | some c => ok c | none => fail .panic
++  let (r2, c2, back2) ← count (some c1) (u 1)
++  let c2 ← match c2 with | some c => ok c | none => fail .panic
++  let final := back1 (back2 (some c2))
++  ok (r1.val, r2.val, c2.pos.val, final.map (fun c => c.total.val))
++
++#guard (match counts with | ok v => some v | _ => none) == some (8, 8, 2, some 112)
++#guard noCounter (count none (u 4)) == some (4, true)
++
+ end option_mut_nested_region.checks
+diff --git a/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean b/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean
+index 4b74124..9a68ea5 100644
+--- a/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean
++++ b/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean
+@@ -178,4 +178,57 @@ def has_counter
+         _root_.option_mut_nested_region.Counter)
+     _root_.Aeneas.Std.Result.ok (n, execution, back)
+ 
++/-- [option_mut_nested_region::count]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 96:0-101:1
++    Visibility: public -/
++def count
++  (execution : _root_.Option _root_.option_mut_nested_region.Counter)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Counter) × (_root_.Option
++    _root_.option_mut_nested_region.Counter → _root_.Option
++    _root_.option_mut_nested_region.Counter))
++  := do
++  match execution with
++  | none =>
++    let back :=
++      (fun execution1 =>
++         let o :=
++           match (none : _root_.Option _root_.option_mut_nested_region.Counter)
++             with
++           | none => none
++           | some c =>
++             match execution1 with
++             | some c1 => some { c with total := c1.total }
++             | _ => none
++         match execution with
++         | none => none
++         | some c =>
++           match o with
++           | some c1 => some { c with total := c1.total }
++           | _ => some c : _root_.Option
++        _root_.option_mut_nested_region.Counter → _root_.Option
++        _root_.option_mut_nested_region.Counter)
++    _root_.Aeneas.Std.Result.ok (n, none, back)
++  | some c =>
++    let (i, c1, advance_back) ←
++      _root_.option_mut_nested_region.Counter.advance c
++    let n1 ← n + i
++    let back :=
++      (fun execution1 =>
++         let c2 :=
++           match execution1 with
++           | some c3 => { c1 with total := c3.total }
++           | _ => c1
++         let c3 := advance_back { c1 with total := c2.total }
++         match execution with
++         | none => none
++         | some c4 =>
++           match some { c with total := c3.total } with
++           | some c5 => some { c4 with total := c5.total }
++           | _ => some c4 : _root_.Option
++        _root_.option_mut_nested_region.Counter → _root_.Option
++        _root_.option_mut_nested_region.Counter)
++    _root_.Aeneas.Std.Result.ok (n1, some c1, back)
++
+ end option_mut_nested_region
+diff --git a/tests/lean/SharedBorrowOfMutOutput.lean b/tests/lean/SharedBorrowOfMutOutput.lean
+new file mode 100644
+index 0000000..e5dd54e
+--- /dev/null
++++ b/tests/lean/SharedBorrowOfMutOutput.lean
+@@ -0,0 +1 @@
++import SharedBorrowOfMutOutput.Checks
+diff --git a/tests/lean/SharedBorrowOfMutOutput/Checks.lean b/tests/lean/SharedBorrowOfMutOutput/Checks.lean
+new file mode 100644
+index 0000000..2f4bca6
+--- /dev/null
++++ b/tests/lean/SharedBorrowOfMutOutput/Checks.lean
+@@ -0,0 +1,25 @@
++import SharedBorrowOfMutOutput.SharedBorrowOfMutOutput
++
++/-! Evaluate the model of `tests/src/shared-borrow-of-mut-output.rs` on the
++    inputs of its `native` test module and compare with the native results:
++    the result, and the position of the frame given back. -/
++
++namespace shared_borrow_of_mut_output.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def steps : Slice U32 := ⟨[u 1, u 2, u 3], by simp; scalar_tac⟩
++
++def frame (pos : Nat) : Frame := { steps, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def withPos (r : Result (Usize × Frame)) : Option (Nat × Nat) :=
++  match r with
++  | ok (v, f) => some (v.val, f.pos.val)
++  | _ => none
++
++#guard withPos (pos_of (frame 1)) == some (4, 1)
++#guard withPos (pos_then_advance (frame 1)) == some (4, 2)
++#guard withPos (pos_then_advance (frame 2)) == some (5, 3)
++
++end shared_borrow_of_mut_output.checks
+diff --git a/tests/lean/SharedBorrowOfMutOutput/SharedBorrowOfMutOutput.lean b/tests/lean/SharedBorrowOfMutOutput/SharedBorrowOfMutOutput.lean
+new file mode 100644
+index 0000000..8901343
+--- /dev/null
++++ b/tests/lean/SharedBorrowOfMutOutput/SharedBorrowOfMutOutput.lean
+@@ -0,0 +1,63 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [shared_borrow_of_mut_output]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace shared_borrow_of_mut_output
++
++/-- [shared_borrow_of_mut_output::Frame]
++    Source: 'tests/src/shared-borrow-of-mut-output.rs', lines 13:0-16:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [shared_borrow_of_mut_output::wrap]:
++    Source: 'tests/src/shared-borrow-of-mut-output.rs', lines 18:0-20:1
++    Visibility: public -/
++def wrap
++  (f : _root_.shared_borrow_of_mut_output.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.shared_borrow_of_mut_output.Frame) × (_root_.Option
++    _root_.shared_borrow_of_mut_output.Frame → _root_.Unit))
++  := do
++  let back :=
++    (fun o => () : _root_.Option _root_.shared_borrow_of_mut_output.Frame →
++      _root_.Unit)
++  _root_.Aeneas.Std.Result.ok (some f, back)
++
++/-- [shared_borrow_of_mut_output::pos_of]:
++    Source: 'tests/src/shared-borrow-of-mut-output.rs', lines 23:0-29:1
++    Visibility: public -/
++def pos_of
++  (f : _root_.shared_borrow_of_mut_output.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.shared_borrow_of_mut_output.Frame)
++  := do
++  let (o, _) ← _root_.shared_borrow_of_mut_output.wrap f
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok (0#usize, f)
++  | some f1 =>
++    let i := _root_.Aeneas.Std.Slice.len f1.steps
++    let i1 ← f1.pos + i
++    _root_.Aeneas.Std.Result.ok (i1, f)
++
++/-- [shared_borrow_of_mut_output::pos_then_advance]:
++    Source: 'tests/src/shared-borrow-of-mut-output.rs', lines 32:0-36:1
++    Visibility: public -/
++def pos_then_advance
++  (f : _root_.shared_borrow_of_mut_output.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.shared_borrow_of_mut_output.Frame)
++  := do
++  let (p, f1) ← _root_.shared_borrow_of_mut_output.pos_of f
++  let i ← f1.pos + 1#usize
++  _root_.Aeneas.Std.Result.ok (p, { f1 with pos := i })
++
++end shared_borrow_of_mut_output
+diff --git a/tests/lean/SharedPayloadMutJoin.lean b/tests/lean/SharedPayloadMutJoin.lean
+new file mode 100644
+index 0000000..f12148a
+--- /dev/null
++++ b/tests/lean/SharedPayloadMutJoin.lean
+@@ -0,0 +1 @@
++import SharedPayloadMutJoin.Checks
+diff --git a/tests/lean/SharedPayloadMutJoin/Checks.lean b/tests/lean/SharedPayloadMutJoin/Checks.lean
+new file mode 100644
+index 0000000..5f0fcf6
+--- /dev/null
++++ b/tests/lean/SharedPayloadMutJoin/Checks.lean
+@@ -0,0 +1,38 @@
++import SharedPayloadMutJoin.SharedPayloadMutJoin
++
++/-! Evaluate the model of `tests/src/shared-payload-mut-join.rs` on the
++    inputs of its `native` test module and compare with the native results:
++    the result, and for `peek_then_add` the value given back to the caller. -/
++
++namespace shared_payload_mut_join.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def steps : Slice U32 := ⟨[u 3, u 5, u 7], by simp; scalar_tac⟩
++
++def frame (pos ctx : Nat) : Frame :=
++  { steps, ctx := u ctx, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def view (pos : Nat) : View := { steps, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def val (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++def valBack (r : Result (U32 × Option U32)) : Option (Nat × Option Nat) :=
++  match r with
++  | ok (v, b) => some (v.val, b.map (·.val))
++  | _ => none
++
++#guard val (current_step (some (frame 1 1))) == some 6
++#guard val (current_step none) == some 0
++#guard val (current_step (some (frame 2 4))) == some 11
++#guard val (current_view_as_ref (some (view 1))) == some 6
++#guard val (current_view_as_ref (some (view 2))) == some 8
++#guard val (current_view_as_ref none) == some 0
++#guard valBack (peek_then_add (some (u 5))) == some (7, some 12)
++#guard valBack (peek_then_add none) == some (7, none)
++
++end shared_payload_mut_join.checks
+diff --git a/tests/lean/SharedPayloadMutJoin/SharedPayloadMutJoin.lean b/tests/lean/SharedPayloadMutJoin/SharedPayloadMutJoin.lean
+new file mode 100644
+index 0000000..74d5845
+--- /dev/null
++++ b/tests/lean/SharedPayloadMutJoin/SharedPayloadMutJoin.lean
+@@ -0,0 +1,97 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [shared_payload_mut_join]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace shared_payload_mut_join
++
++/-- [core::option::{core::option::Option<T>}::as_ref::<0, &1 mut (T0)>]:
++    Source: '/rustc/library/core/src/option.rs', lines 744:4-744:44
++    Name pattern: [core::option::{core::option::Option<@T>}::as_ref<'0, &'1 mut @T0>]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::as_ref<'0, &'1 mut @T0>"]
++def
++  core.option.Option.as_ref0Mut1T0_specialized_253deead77f6d5065ff35515329ff854
++  {T0 : Type} (self : _root_.Option T0) :
++  _root_.Aeneas.Std.Result ((_root_.Option T0) × (_root_.Option T0 →
++    _root_.Unit))
++  := do
++  match self with
++  | none =>
++    let back := (fun o => () : _root_.Option T0 → _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (none, back)
++  | some _ =>
++    let back := (fun o => () : _root_.Option T0 → _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (self, back)
++
++/-- [shared_payload_mut_join::Frame]
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 15:0-19:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [shared_payload_mut_join::View]
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 22:0-25:1
++    Visibility: public -/
++structure View where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [shared_payload_mut_join::current_step]:
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 28:0-33:1
++    Visibility: public -/
++def current_step
++  (execution : _root_.Option _root_.shared_payload_mut_join.Frame) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match execution with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some f => let i ← Slice.index_usize f.steps f.pos
++              i + f.ctx
++
++/-- [shared_payload_mut_join::current_view_as_ref]:
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 36:0-41:1
++    Visibility: public -/
++def current_view_as_ref
++  (view : _root_.Option _root_.shared_payload_mut_join.View) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (o, _) ←
++    _root_.shared_payload_mut_join.core.option.Option.as_ref0Mut1T0_specialized_253deead77f6d5065ff35515329ff854
++      view
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some v => let i ← Slice.index_usize v.steps v.pos
++              i + 1#u32
++
++/-- [shared_payload_mut_join::peek]:
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 43:0-45:1 -/
++def peek
++  (_x : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 7#u32
++
++/-- [shared_payload_mut_join::peek_then_add]:
++    Source: 'tests/src/shared-payload-mut-join.rs', lines 48:0-54:1
++    Visibility: public -/
++def peek_then_add
++  (x : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U32))
++  := do
++  let n ← _root_.shared_payload_mut_join.peek x
++  match x with
++  | none => _root_.Aeneas.Std.Result.ok (n, none)
++  | some v => let v1 ← v + n
++              _root_.Aeneas.Std.Result.ok (n, some v1)
++
++end shared_payload_mut_join
+diff --git a/tests/lean/SharedReborrowInnerShared.lean b/tests/lean/SharedReborrowInnerShared.lean
+new file mode 100644
+index 0000000..67ba6a3
+--- /dev/null
++++ b/tests/lean/SharedReborrowInnerShared.lean
+@@ -0,0 +1 @@
++import SharedReborrowInnerShared.Checks
+diff --git a/tests/lean/SharedReborrowInnerShared/Checks.lean b/tests/lean/SharedReborrowInnerShared/Checks.lean
+new file mode 100644
+index 0000000..b6714d2
+--- /dev/null
++++ b/tests/lean/SharedReborrowInnerShared/Checks.lean
+@@ -0,0 +1,26 @@
++import SharedReborrowInnerShared.SharedReborrowInnerShared
++
++/-! Evaluate the model of `tests/src/shared-reborrow-inner-shared.rs` on the
++    inputs of its `native` test module and compare with the native results:
++    the result and the position of the frame given back to the caller. -/
++
++namespace shared_reborrow_inner_shared.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def steps : Slice U32 := ⟨[u 3, u 5, u 7], by simp; scalar_tac⟩
++
++def frame (pos : Nat) : Frame := { steps, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def val (r : Result (U32 × Option Frame)) : Option (Nat × Option Nat) :=
++  match r with
++  | ok (v, f) => some (v.val, f.map (·.pos.val))
++  | _ => none
++
++#guard val (peek_then_advance (some (frame 0))) == some (7, some 1)
++#guard val (peek_then_advance none) == some (7, none)
++#guard val (peek_then_step (some (frame 1))) == some (14, some 2)
++#guard val (peek_then_step none) == some (7, none)
++
++end shared_reborrow_inner_shared.checks
+diff --git a/tests/lean/SharedReborrowInnerShared/SharedReborrowInnerShared.lean b/tests/lean/SharedReborrowInnerShared/SharedReborrowInnerShared.lean
+new file mode 100644
+index 0000000..c18125f
+--- /dev/null
++++ b/tests/lean/SharedReborrowInnerShared/SharedReborrowInnerShared.lean
+@@ -0,0 +1,61 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [shared_reborrow_inner_shared]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace shared_reborrow_inner_shared
++
++/-- [shared_reborrow_inner_shared::Frame]
++    Source: 'tests/src/shared-reborrow-inner-shared.rs', lines 15:0-18:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [shared_reborrow_inner_shared::peek]:
++    Source: 'tests/src/shared-reborrow-inner-shared.rs', lines 20:0-22:1 -/
++def peek
++  (_x : _root_.Option _root_.shared_reborrow_inner_shared.Frame) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 7#u32
++
++/-- [shared_reborrow_inner_shared::peek_then_advance]:
++    Source: 'tests/src/shared-reborrow-inner-shared.rs', lines 25:0-31:1
++    Visibility: public -/
++def peek_then_advance
++  (x : _root_.Option _root_.shared_reborrow_inner_shared.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.shared_reborrow_inner_shared.Frame))
++  := do
++  let n ← _root_.shared_reborrow_inner_shared.peek x
++  match x with
++  | none => _root_.Aeneas.Std.Result.ok (n, none)
++  | some f =>
++    let i ← f.pos + 1#usize
++    _root_.Aeneas.Std.Result.ok (n, some { f with pos := i })
++
++/-- [shared_reborrow_inner_shared::peek_then_step]:
++    Source: 'tests/src/shared-reborrow-inner-shared.rs', lines 34:0-43:1
++    Visibility: public -/
++def peek_then_step
++  (x : _root_.Option _root_.shared_reborrow_inner_shared.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.shared_reborrow_inner_shared.Frame))
++  := do
++  let n ← _root_.shared_reborrow_inner_shared.peek x
++  match x with
++  | none => _root_.Aeneas.Std.Result.ok (n, none)
++  | some f =>
++    let i ← f.pos + 1#usize
++    let i1 ← Slice.index_usize f.steps i
++    let n1 ← i1 + n
++    _root_.Aeneas.Std.Result.ok (n1, some { f with pos := i })
++
++end shared_reborrow_inner_shared
+diff --git a/tests/lean/SpecializedClosureClauses.lean b/tests/lean/SpecializedClosureClauses.lean
+new file mode 100644
+index 0000000..ab2fe83
+--- /dev/null
++++ b/tests/lean/SpecializedClosureClauses.lean
+@@ -0,0 +1 @@
++import SpecializedClosureClauses.Checks
+diff --git a/tests/lean/SpecializedClosureClauses/Checks.lean b/tests/lean/SpecializedClosureClauses/Checks.lean
+new file mode 100644
+index 0000000..83e025c
+--- /dev/null
++++ b/tests/lean/SpecializedClosureClauses/Checks.lean
+@@ -0,0 +1,32 @@
++import SpecializedClosureClauses.SpecializedClosureClauses
++
++/-! Evaluate the model of `tests/src/specialized-closure-clauses.rs` on the
++    inputs of its `native` test module and compare with the native results:
++    the result, then the values of `x` and of the captured state after the
++    call. -/
++
++namespace specialized_closure_clauses.checks
++open Aeneas Aeneas.Std Result
++
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def u64 (n : Nat) : U64 := ⟨BitVec.ofNat _ n⟩
++
++def vals {A B C : Type} (fa : A → Nat) (fb : B → Nat) (fc : C → Nat)
++    (r : Result (A × B × C)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (fa a, fb b, fc c)
++  | _ => none
++
++def scaledVals (x k : Nat) : Option (Nat × Nat × Nat) :=
++  vals (·.val) (·.val) (·.val) (scaled (u32 x) (u32 k))
++
++def offsetVals (x base : Nat) : Option (Nat × Nat × Nat) :=
++  vals (·.val) (·.val) (·.val) (offset (u32 x) (u64 base))
++
++#guard scaledVals 3 7 == some (21, 21, 7)
++#guard scaledVals 0x80000001 2 == some (2, 2, 2)
++#guard offsetVals 4 100 == some (105, 5, 100)
++#guard offsetVals 0xFFFFFFFF 0xFFFFFFFFFFFFFFFF ==
++  some (0xFFFFFFFFFFFFFFFF, 0, 0xFFFFFFFFFFFFFFFF)
++
++end specialized_closure_clauses.checks
+diff --git a/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+index 30d8ed8..8c7560c 100644
+--- a/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
++++ b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+@@ -22,7 +22,7 @@ structure
+   (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
+   FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :
+     _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair T0 T1 T2 T3
+-  call_mut : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T0 × T1)
++  call_mut : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1 × T0)
+ 
+ /-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3>]
+     Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
+@@ -55,7 +55,7 @@ def with_state.closure {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+ @[rust_trait
+   "core::ops::function::FnOnce<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"]
+ structure
+-  core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++  core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301
+   {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy T0)
+   (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
+@@ -75,16 +75,16 @@ structure
+     Visibility: public -/
+ @[rust_trait
+   "core::ops::function::FnMut<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"
+-  (parentClauses := ["FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst"])]
++  (parentClauses := ["FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301Inst"])]
+ structure
+-  core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++  core.ops.function.FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14
+   {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy T0)
+   (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+   T2 _root_.Aeneas.Std.U32 T0 T1) where
+-  FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst :
+-    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++  FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301Inst :
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301
+     T3 T4 markerCopyInst
+     FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   call_mut : _root_.specialized_closure_clauses.with_state.closure
+@@ -105,16 +105,16 @@ structure
+     Visibility: public -/
+ @[rust_trait
+   "core::ops::function::Fn<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"
+-  (parentClauses := ["FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst"])]
++  (parentClauses := ["FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14Inst"])]
+ structure
+-  core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
++  core.ops.function.FnclosureTupleMut1T3T4_specialized_b015f178735cfe10ae41a400b1429817
+   {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy T0)
+   (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+   T2 _root_.Aeneas.Std.U32 T0 T1) where
+-  FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst :
+-    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++  FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14Inst :
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14
+     T3 T4 markerCopyInst
+     FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   call : _root_.specialized_closure_clauses.with_state.closure markerCopyInst
+@@ -132,7 +132,7 @@ structure
+   (T0 : Type) (T1 : Type) (T2 : Type) where
+   FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+     _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T0 × T1)
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+ 
+ /-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1)), T2>]
+     Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
+@@ -162,21 +162,22 @@ def apply
+   coreopsfunctionFnT1TupleMut0U32R_specialized_376f35bc3609dcb1a6c11d6093e4cc92Inst.call
+     f x
+ 
+-/-- [specialized_closure_clauses::apply::<0, T0, specialized_closure_clauses::with_state::closure<1, T1, T2, T3>[TraitClause@1, TraitClause@2]>]:
++/-- [specialized_closure_clauses::apply::<0, T0, specialized_closure_clauses::with_state::closure<1, T1, T2, T3>[TraitClause@0, TraitClause@1]>]:
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 20:0-22:1
+     Visibility: public -/
+-def apply0T0closure_specialized_f82cd5b4f4035dd8ee52e9294de894e5
+-  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+-  (coreopsfunctionFnclosureTupleMut0U32T0_specialized_1643b505530fb7e921e18a8b32f11983Inst
+-  :
+-  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
+-  _root_.Aeneas.Std.U32 T0 coremarkerCopyInst
+-  coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst)
+-  (coremarkerCopyInst : _root_.Aeneas.Std.core.marker.Copy T1)
++def apply0T0closure_specialized_2459d546ccd5a61352049a898ec5b877
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy T1)
+   (coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+-  T3 _root_.Aeneas.Std.U32 T1 T2) (x : _root_.Aeneas.Std.U32)
++  T3 _root_.Aeneas.Std.U32 T1 T2)
++  (coreopsfunctionFnclosureTupleMut0U32T0_specialized_b015f178735cfe10ae41a400b1429817Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_b015f178735cfe10ae41a400b1429817
++  _root_.Aeneas.Std.U32 T0 coremarkerCopyInst
++  coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  (x : _root_.Aeneas.Std.U32)
+   (f : _root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
+   coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst)
+   :
+@@ -185,14 +186,14 @@ def apply0T0closure_specialized_f82cd5b4f4035dd8ee52e9294de894e5
+     coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst))
+   := do
+   let (t, x1) ←
+-    coreopsfunctionFnclosureTupleMut0U32T0_specialized_1643b505530fb7e921e18a8b32f11983Inst.call
++    coreopsfunctionFnclosureTupleMut0U32T0_specialized_b015f178735cfe10ae41a400b1429817Inst.call
+       f x
+   _root_.Aeneas.Std.Result.ok (t, x1, f)
+ 
+ /-- [specialized_closure_clauses::with_state::{core::ops::function::Fn::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call]:
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ def
+-  core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++  core.ops.function.FnclosureTupleMutU32R_specialized_b015f178735cfe10ae41a400b1429817.Blanket.call
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+@@ -211,7 +212,7 @@ def
+ /-- [specialized_closure_clauses::with_state::{core::ops::function::FnMut::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call_mut]:
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ def
+-  core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++  core.ops.function.FnMutclosureTupleMutU32R_specialized_a88d2a8185b91990e6b0cdc278280b14.Blanket.call_mut
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+@@ -235,7 +236,7 @@ def
+   := do
+   let (t, _) := state
+   let (t1, args1) ←
+-    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_b015f178735cfe10ae41a400b1429817.Blanket.call
+       coremarkerCopyInst
+       coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+       state args
+@@ -252,7 +253,7 @@ def
+ /-- [specialized_closure_clauses::with_state::{core::ops::function::FnOnce::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call_once]:
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ def
+-  core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket.call_once
++  core.ops.function.FnOnceclosureTupleMutU32R_specialized_6af36f6a7b8d8af52fc68c939d653301.Blanket.call_once
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+@@ -269,7 +270,7 @@ def
+   := do
+   let (t, _) := c
+   let (t1, c1, call_mut_back, i1) ←
+-    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_a88d2a8185b91990e6b0cdc278280b14.Blanket.call_mut
+       coremarkerCopyInst
+       coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+       c i
+@@ -281,19 +282,19 @@ def
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ @[reducible]
+ def
+-  core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket
++  core.ops.function.FnOnceclosureTupleMutU32R_specialized_6af36f6a7b8d8af52fc68c939d653301.Blanket
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+   T2 _root_.Aeneas.Std.U32 S R) :
+-  _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++  _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301
+   _root_.Aeneas.Std.U32 R coremarkerCopyInst
+   coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   := {
+   call_once :=
+-    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket.call_once
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_6af36f6a7b8d8af52fc68c939d653301.Blanket.call_once
+     coremarkerCopyInst
+     coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+ }
+@@ -302,24 +303,24 @@ def
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ @[reducible]
+ def
+-  core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket
++  core.ops.function.FnMutclosureTupleMutU32R_specialized_a88d2a8185b91990e6b0cdc278280b14.Blanket
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+   T2 _root_.Aeneas.Std.U32 S R) :
+-  _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++  _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14
+   _root_.Aeneas.Std.U32 R coremarkerCopyInst
+   coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   := {
+-  FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst
++  FnOnceclosureTupleMut1T3T4_specialized_6af36f6a7b8d8af52fc68c939d653301Inst
+     :=
+-    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_6af36f6a7b8d8af52fc68c939d653301.Blanket
+     coremarkerCopyInst
+     coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   call_mut :=
+-    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_a88d2a8185b91990e6b0cdc278280b14.Blanket.call_mut
+     coremarkerCopyInst
+     coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+ }
+@@ -328,23 +329,23 @@ def
+     Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
+ @[reducible]
+ def
+-  core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket
++  core.ops.function.FnclosureTupleMutU32R_specialized_b015f178735cfe10ae41a400b1429817.Blanket
+   {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
+   _root_.Aeneas.Std.core.marker.Copy S)
+   (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   :
+   _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
+   T2 _root_.Aeneas.Std.U32 S R) :
+-  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
++  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_b015f178735cfe10ae41a400b1429817
+   _root_.Aeneas.Std.U32 R coremarkerCopyInst
+   coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   := {
+-  FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst :=
+-    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket
++  FnMutclosureTupleMut1T3T4_specialized_a88d2a8185b91990e6b0cdc278280b14Inst :=
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_a88d2a8185b91990e6b0cdc278280b14.Blanket
+     coremarkerCopyInst
+     coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+   call :=
+-    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_b015f178735cfe10ae41a400b1429817.Blanket.call
+     coremarkerCopyInst
+     coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
+ }
+@@ -363,12 +364,12 @@ def with_state
+   _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32 × S)
+   := do
+   let (t, x1, c) ←
+-    _root_.specialized_closure_clauses.apply0T0closure_specialized_f82cd5b4f4035dd8ee52e9294de894e5
+-      (_root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket
+-      coremarkerCopyInst
+-      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++    _root_.specialized_closure_clauses.apply0T0closure_specialized_2459d546ccd5a61352049a898ec5b877
+       coremarkerCopyInst
+       coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++      (_root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_b015f178735cfe10ae41a400b1429817.Blanket
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
+       x (f, state)
+   let (_, state1) := c
+   _root_.Aeneas.Std.Result.ok (t, x1, state1)
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 8f7b701..23d2d5e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -104,6 +104,8 @@ package «tests» {}
+ @[default_target] lean_lib OptionMutNestedRegion
+ @[default_target] lean_lib Order
+ @[default_target] lean_lib Paper
++@[default_target] lean_lib SharedBorrowOfMutOutput
++@[default_target] lean_lib SpecializedClosureClauses
+ @[default_target] lean_lib PoloniusList
+ @[default_target] lean_lib PrimitiveOrder
+ @[default_target] lean_lib RustBorrowCheckIssues
+@@ -112,6 +114,8 @@ package «tests» {}
+ @[default_target] lean_lib RenameAttribute
+ @[default_target] lean_lib Scalars
+ @[default_target] lean_lib SharedObservationConsumed
++@[default_target] lean_lib SharedPayloadMutJoin
++@[default_target] lean_lib SharedReborrowInnerShared
+ @[default_target] lean_lib SliceElementRegions
+ @[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
+diff --git a/tests/src/option-mut-nested-region.rs b/tests/src/option-mut-nested-region.rs
+index c920670..30af99b 100644
+--- a/tests/src/option-mut-nested-region.rs
++++ b/tests/src/option-mut-nested-region.rs
+@@ -90,6 +90,16 @@ pub fn has_counter(execution: Option<&mut Counter<'_>>, n: u32) -> u32 {
+     }
+ }
+ 
++/// Advance the counter if there is one. In the `None` branch, the value given
++/// back for the inner lifetime of the counter is built from the constant
++/// `None`.
++pub fn count(execution: Option<&mut Counter<'_>>, n: u32) -> u32 {
++    match execution {
++        Some(c) => n + c.advance(),
++        None => n,
++    }
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -127,4 +137,16 @@ mod native {
+         assert_eq!(total, 105);
+         assert_eq!(has_counter(None, 3), 3);
+     }
++
++    #[test]
++    fn counts() {
++        let steps = [5, 7];
++        let mut total = 100;
++        let mut counter = Counter { steps: &steps, total: &mut total, pos: 0 };
++        assert_eq!(count(Some(&mut counter), 3), 8);
++        assert_eq!(count(Some(&mut counter), 1), 8);
++        assert_eq!(counter.pos, 2);
++        assert_eq!(total, 112);
++        assert_eq!(count(None, 4), 4);
++    }
+ }
+diff --git a/tests/src/shared-borrow-of-mut-output.rs b/tests/src/shared-borrow-of-mut-output.rs
+new file mode 100644
+index 0000000..c00060a
+--- /dev/null
++++ b/tests/src/shared-borrow-of-mut-output.rs
+@@ -0,0 +1,53 @@
++//@ [!lean] skip
++//@ [lean] subdir=SharedBorrowOfMutOutput
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A function returning a shared borrow of a mutable borrow,
++//! `Option<&'a &'b mut Frame<'_>>`, as `Option::as_ref` does on the
++//! `Option<&mut ExecutionFrame<'_>>` of `chelis_ir::eval`. The region `'b` is
++//! frozen below `'a`: the backward function of `'b` receives the final value
++//! of the frame (unchanged), and gives nothing back.
++//! `SharedBorrowOfMutOutput/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++pub struct Frame<'a> {
++    steps: &'a [u32],
++    pos: usize,
++}
++
++pub fn wrap<'a, 'b, 'c>(f: &'a &'b mut Frame<'c>) -> Option<&'a &'b mut Frame<'c>> {
++    Some(f)
++}
++
++/// Read the frame through the frozen borrow
++pub fn pos_of(f: &mut Frame<'_>) -> usize {
++    let r = &f;
++    match wrap(r) {
++        Some(g) => g.pos + g.steps.len(),
++        None => 0,
++    }
++}
++
++/// Read the frame through the frozen borrow, then advance it
++pub fn pos_then_advance(f: &mut Frame<'_>) -> usize {
++    let p = pos_of(f);
++    f.pos += 1;
++    p
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn frames() {
++        let steps = [1, 2, 3];
++        let mut frame = Frame { steps: &steps, pos: 1 };
++        assert_eq!(pos_of(&mut frame), 4);
++        assert_eq!(frame.pos, 1);
++        assert_eq!(pos_then_advance(&mut frame), 4);
++        assert_eq!(frame.pos, 2);
++        assert_eq!(pos_then_advance(&mut frame), 5);
++        assert_eq!(frame.pos, 3);
++    }
++}
+diff --git a/tests/src/shared-payload-mut-join.rs b/tests/src/shared-payload-mut-join.rs
+new file mode 100644
+index 0000000..34aa621
+--- /dev/null
++++ b/tests/src/shared-payload-mut-join.rs
+@@ -0,0 +1,89 @@
++//@ [!lean] skip
++//@ [lean] subdir=SharedPayloadMutJoin
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Shared borrows of values holding mutable borrows, as `Option::as_ref` on
++//! the `Option<&mut ExecutionFrame<'_>>` of `chelis_ir::eval`:
++//! - a join below the shared borrow copies the shared payload
++//!   (`Option<&'1 mut Frame<'2>>`): the loans of the mutable borrows of the
++//!   copy are frozen, and ending them gives nothing back;
++//! - a caller which lends `&x` to a callee, then matches on `x`, expands the
++//!   payload that the callee's region abstraction reborrows.
++//! `SharedPayloadMutJoin/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub struct Frame<'a> {
++    steps: &'a [u32],
++    ctx: &'a mut u32,
++    pos: usize,
++}
++
++/// A frame without mutable borrows inside
++pub struct View<'a> {
++    steps: &'a [u32],
++    pos: usize,
++}
++
++/// Match on the shared borrow, then join
++pub fn current_step(execution: &Option<&mut Frame<'_>>) -> u32 {
++    match execution {
++        Some(frame) => frame.steps[frame.pos] + *frame.ctx,
++        None => 0,
++    }
++}
++
++/// `Option::as_ref` (whose body joins below the shared borrow), then read
++pub fn current_view_as_ref(view: &Option<&mut View<'_>>) -> u32 {
++    match view.as_ref() {
++        Some(v) => v.steps[v.pos] + 1,
++        None => 0,
++    }
++}
++
++fn peek(_x: &Option<&mut u32>) -> u32 {
++    7
++}
++
++/// Lend the option to a callee, then expand it and update its payload
++pub fn peek_then_add(x: Option<&mut u32>) -> u32 {
++    let n = peek(&x);
++    if let Some(v) = x {
++        *v += n;
++    }
++    n
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn frames() {
++        let steps = [3, 5, 7];
++        let mut ctx = 1;
++        let mut frame = Frame { steps: &steps, ctx: &mut ctx, pos: 1 };
++        assert_eq!(current_step(&Some(&mut frame)), 6);
++        assert_eq!(current_step(&None), 0);
++        frame.pos = 2;
++        *frame.ctx = 4;
++        assert_eq!(current_step(&Some(&mut frame)), 11);
++    }
++
++    #[test]
++    fn views() {
++        let steps = [3, 5, 7];
++        let mut view = View { steps: &steps, pos: 1 };
++        assert_eq!(current_view_as_ref(&Some(&mut view)), 6);
++        view.pos = 2;
++        assert_eq!(current_view_as_ref(&Some(&mut view)), 8);
++        assert_eq!(current_view_as_ref(&None), 0);
++    }
++
++    #[test]
++    fn peeks() {
++        let mut v = 5;
++        assert_eq!(peek_then_add(Some(&mut v)), 7);
++        assert_eq!(v, 12);
++        assert_eq!(peek_then_add(None), 7);
++    }
++}
+diff --git a/tests/src/shared-reborrow-inner-shared.rs b/tests/src/shared-reborrow-inner-shared.rs
+new file mode 100644
+index 0000000..31974ad
+--- /dev/null
++++ b/tests/src/shared-reborrow-inner-shared.rs
+@@ -0,0 +1,60 @@
++//@ [!lean] skip
++//@ [lean] subdir=SharedReborrowInnerShared
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A caller lends `&x` to a callee, then matches on `x`, whose payload holds
++//! shared borrows (`Option<&mut Frame<'_>>` with `steps: &[u32]`, as the
++//! `Option<&mut ExecutionFrame<'_>>` of `chelis_ir::eval`). The region
++//! abstraction of the callee reborrows the payload as a shared value; when
++//! the expansion of the payload reaches the shared borrow `steps`, the value
++//! behind it (`[u32]`) holds no region of the abstraction: the reborrow
++//! projects nothing there.
++//! `SharedReborrowInnerShared/Checks.lean` evaluates the model on the inputs
++//! of the `native` test module below and compares with the native results.
++
++pub struct Frame<'a> {
++    steps: &'a [u32],
++    pos: usize,
++}
++
++fn peek(_x: &Option<&mut Frame<'_>>) -> u32 {
++    7
++}
++
++/// Lend the option to a callee, then expand it and update its payload
++pub fn peek_then_advance(x: Option<&mut Frame<'_>>) -> u32 {
++    let n = peek(&x);
++    if let Some(v) = x {
++        v.pos += 1;
++    }
++    n
++}
++
++/// Same, reading the shared payload after the update
++pub fn peek_then_step(x: Option<&mut Frame<'_>>) -> u32 {
++    let n = peek(&x);
++    match x {
++        Some(v) => {
++            v.pos += 1;
++            v.steps[v.pos] + n
++        }
++        None => n,
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn frames() {
++        let steps = [3, 5, 7];
++        let mut frame = Frame { steps: &steps, pos: 0 };
++        assert_eq!(peek_then_advance(Some(&mut frame)), 7);
++        assert_eq!(frame.pos, 1);
++        assert_eq!(peek_then_advance(None), 7);
++        assert_eq!(peek_then_step(Some(&mut frame)), 14);
++        assert_eq!(frame.pos, 2);
++        assert_eq!(peek_then_step(None), 7);
++    }
++}
+diff --git a/tests/src/specialized-closure-clauses.rs b/tests/src/specialized-closure-clauses.rs
+index 8bb94bc..554431f 100644
+--- a/tests/src/specialized-closure-clauses.rs
++++ b/tests/src/specialized-closure-clauses.rs
+@@ -8,14 +8,14 @@
+ //! `Fn::<with_state::closure<'_, S, R, F>[TraitClause@0], (&mut u32,), R>`.
+ //! The call through such a clause (`f(x)` in `apply`) supplies the trait refs
+ //! of the specialized declaration along with its types.
+-//! The generated Lean does not compile yet (so it is not a lakefile target):
+-//! the specialized `apply` binds its `Fn<closure[TraitClause@1]>` clause before
+-//! the closure's own clause `TraitClause@1` (Charon's partial
+-//! monomorphization appends merged clauses), and the `FnOnce`/`FnMut`
+-//! implementations for the closure, which carries `&'0 mut S`, return the
+-//! closure state in a different shape than the specialized declarations;
+-//! the user closures' `FnMut<(&mut u32, S)>` `call_mut` also return the
+-//! closure and the argument in the opposite order of the pair model.
++//! The generated Lean relies on two orders from Charon's partial
++//! monomorphization: the specialized `apply` binds the closure's own clause
++//! `TraitClause@1` before its `Fn<closure[TraitClause@1]>` clause, and the
++//! specialized `FnMut::<_, (&'0 mut T1, T2), _>::call_mut` takes the region
++//! `'0` of the trait arguments before the borrow of `self`, like the `call_mut`
++//! of the user closures (impl region first): both then give back the argument
++//! before the closure. `SpecializedClosureClauses/Checks.lean` compares the
++//! model with the native results below.
+ 
+ pub fn apply<R>(x: &mut u32, f: impl Fn(&mut u32) -> R) -> R {
+     f(x)

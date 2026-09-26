@@ -1,0 +1,648 @@
+# charon integration step 43 after 546078ea5d: commit edaf3da24157560e40e7694412db17f6911e5735
+# first parent a9792e57169669e1353f17fbadb2d03dd995babe
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: partially monomorphized associated items take their parent parameters first
+#
+# compute_shape visited the explicit region arguments of an item before its type arguments. For a trait
+# method, the region of `&mut self` therefore came before the regions found inside the trait arguments.
+# For example, FnMut::<_, (&'a mut T1, T2), _>::call_mut had <'self, 'a>, whereas the call_mut of an
+# impl takes the impl regions first, as in the generics of every associated item. Consumers that order
+# regions by position (the backward functions of Aeneas) then disagreed between the specialized trait
+# declaration and its implementations: (closure, arg) versus (arg, closure) in the Lean output of
+# Aeneas' SpecializedClosureClauses test (E18-d).
+#
+# The shape now visits the parent arguments (the trait declaration or implementation arguments of an
+# associated item) before the item's own arguments. New UI test: monomorphize-mut-method-region-order.
+# The re-blessed monomorphize-mut-{opaque,opaque-hard,clause-order}.out contain only these region
+# renumberings. Suite: 325 passed, 3 ignored.
+#
+# Integrated onto ca6e5e9 (partial monomorphization keeps field projections): monomorphize-mut-opaque(-hard).out
+# conflicted with ca6e5e9, which drops the generic closure type from them; both were re-blessed from the
+# integrated binary and equal the renumbering above applied to the ca6e5e9 outputs. Suite: 326 passed, 3 ignored.
+
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index 1cb27c6..aa313cc 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -29,6 +29,28 @@ use crate::{transform::TransformCtx, ullbc_ast::*};
+ 
+ type MutabilityShape = Binder<GenericArgs>;
+ 
++/// The numbers of region and type parameters that an associated item takes from its trait
++/// declaration or implementation: they come first in its generics.
++#[derive(Debug, Default, Clone, Copy)]
++struct ParentParams {
++    regions: usize,
++    types: usize,
++}
++
++impl ParentParams {
++    fn of_source(src: &ItemSource) -> Self {
++        let generics = match src {
++            ItemSource::TraitDecl { trait_ref, .. } => &trait_ref.generics,
++            ItemSource::TraitImpl { impl_ref, .. } => &impl_ref.generics,
++            _ => return Self::default(),
++        };
++        ParentParams {
++            regions: generics.regions.len(),
++            types: generics.types.len(),
++        }
++    }
++}
++
+ /// Only runtime fields contribute captured state. In particular, closure types
+ /// can retain enclosing lifetime/type parameters without storing any of them.
+ #[derive(Clone, Default, PartialEq, Eq)]
+@@ -168,6 +190,15 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+     /// - `shape` is as shallow as possible (i.e. takes just enough to get all the infected types
+     ///   and not more).
+     ///
++    /// The target item may be an associated item whose first region and type parameters are those
++    /// of its trait declaration or implementation (`parent` gives their numbers). Its shape keeps
++    /// all the parameters coming from these parent arguments (including the regions found inside
++    /// the parent types) before its own parameters, as in the generics of associated items. The
++    /// shape of the parent is computed from the parent arguments only, so both agree on the order
++    /// of the parent parameters; consumers which order the regions of an associated item by
++    /// position (e.g. the backward functions of Aeneas) then agree between the declaration of a
++    /// method in a specialized trait and its implementations.
++    ///
+     /// Note: the input arguments are assumed to have been already partially monomorphized, in the
+     /// sense that we won't recurse inside ADT args because we assume any ADT applied to infected
+     /// args to have been replaced with a fresh infected ADT.
+@@ -175,6 +206,7 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+         pm: &'pm PartialMonomorphizer<'ctx>,
+         target_params: &GenericParams,
+         args: &GenericArgs,
++        parent: ParentParams,
+     ) -> (MutabilityShape, GenericArgs) {
+         // We start with the implicit parameters from the original item. We'll need to substitute
+         // them once we've figured out the mapping of explicit parameters, but we'll also be adding
+@@ -199,8 +231,21 @@ impl<'pm, 'ctx> MutabilityShapeBuilder<'pm, 'ctx> {
+         };
+ 
+         // Traverse the generics and replace any non-infected type, region or const generic with a
+-        // fresh variable.
++        // fresh variable: the parent arguments first, then the arguments of the item itself (see
++        // above).
++        let parent_regions = parent.regions.min(shape_contents.regions.len());
++        let parent_types = parent.types.min(shape_contents.types.len());
++        let mut own_args = GenericArgs {
++            regions: shape_contents.regions.split_off(parent_regions),
++            types: shape_contents.types.split_off(parent_types),
++            const_generics: mem::take(&mut shape_contents.const_generics),
++            trait_refs: IndexVec::new(),
++        };
+         let _ = VisitWithBinderDepth::new(&mut builder).visit(&mut shape_contents);
++        let _ = VisitWithBinderDepth::new(&mut builder).visit(&mut own_args);
++        shape_contents.regions.extend(own_args.regions);
++        shape_contents.types.extend(own_args.types);
++        shape_contents.const_generics = own_args.const_generics;
+ 
+         let shape_params = {
+             let mut shape_params = builder.params;
+@@ -489,6 +534,8 @@ struct PartialMonomorphizer<'a> {
+     /// This also makes it possible to record the generics of our to-be-added items without adding
+     /// them.
+     generic_params: HashMap<ItemId, GenericParams>,
++    /// The parameters that associated items take from their trait declaration or implementation.
++    parent_params: HashMap<ItemId, ParentParams>,
+     /// Map of partial monomorphizations. The source item applied with the generic params gives the
+     /// target item. The resulting partially-monomorphized item will have the binder params as
+     /// generic params.
+@@ -513,6 +560,18 @@ impl<'a> PartialMonomorphizer<'a> {
+             .all_items()
+             .map(|item| (item.id(), item.generic_params().clone()))
+             .collect();
++        let parent_params: HashMap<ItemId, ParentParams> = ctx
++            .translated
++            .fun_decls
++            .iter()
++            .map(|decl| (decl.def_id.into(), ParentParams::of_source(&decl.src)))
++            .chain(
++                ctx.translated
++                    .global_decls
++                    .iter()
++                    .map(|decl| (decl.def_id.into(), ParentParams::of_source(&decl.src))),
++            )
++            .collect();
+ 
+         // Enqueue all items to be processed.
+         let to_process = ctx.translated.all_ids().collect();
+@@ -523,6 +582,7 @@ impl<'a> PartialMonomorphizer<'a> {
+             infected_types,
+             runtime_type_shapes,
+             generic_params,
++            parent_params,
+             to_process,
+             partial_mono_shapes: SeqHashMap::default(),
+             reverse_shape_map: Default::default(),
+@@ -602,8 +662,9 @@ impl<'a> PartialMonomorphizer<'a> {
+ 
+         // Split the args between the infected part and the non-infected part.
+         let item_params = self.generic_params.get(&id)?;
++        let parent = self.parent_params.get(&id).copied().unwrap_or_default();
+         let (shape, shape_args) =
+-            MutabilityShapeBuilder::compute_shape(self, item_params, generics);
++            MutabilityShapeBuilder::compute_shape(self, item_params, generics, parent);
+ 
+         // Create a new type id.
+         let new_params = shape.params.clone();
+diff --git a/tests/ui/monomorphize-mut-clause-order.out b/tests/ui/monomorphize-mut-clause-order.out
+index d85ae12..c690f21 100644
+--- a/tests/ui/monomorphize-mut-clause-order.out
++++ b/tests/ui/monomorphize-mut-clause-order.out
+@@ -79,7 +79,7 @@ pub trait core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3
+ pub trait core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
+-    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0_1, '_0, T0, T1, T2, T3>[Self]
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0, '_0_1, T0, T1, T2, T3>[Self]
+     vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1, T2), T3>
+ }
+ 
+@@ -87,7 +87,7 @@ pub trait core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
+ pub trait core::ops::function::Fn::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
+-    fn call<'_0_1> = core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0_1, '_0, T0, T1, T2, T3>[Self]
++    fn call<'_0_1> = core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0, '_0_1, T0, T1, T2, T3>[Self]
+     vtable: core::ops::function::Fn::{vtable}<(&'_0 mut T1, T2), T3>
+ }
+ 
+@@ -117,7 +117,7 @@ where
+     [@TraitClause1]: for<'_0_1> core::ops::function::Fn::<_, (&_ mut _, _), _><'_0_1, T2, u32, T0, T1>,
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1]
+-    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0_1, '_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1, Self]
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_0_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1, Self]
+     vtable: core::ops::function::FnMut::{vtable}<(&'_1 mut T3,), T4>
+ }
+ 
+@@ -128,7 +128,7 @@ where
+     [@TraitClause1]: for<'_0_1> core::ops::function::Fn::<_, (&_ mut _, _), _><'_0_1, T2, u32, T0, T1>,
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnMut::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1]
+-    fn call<'_0_1> = core::ops::function::Fn::call::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0_1, '_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1, Self]
++    fn call<'_0_1> = core::ops::function::Fn::call::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_0_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1, Self]
+     vtable: core::ops::function::Fn::{vtable}<(&'_1 mut T3,), T4>
+ }
+ 
+@@ -143,7 +143,7 @@ pub trait core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+-    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_0_1, T0, T1, T2>[Self]
+     vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1,), T2>
+ }
+ 
+@@ -151,7 +151,7 @@ pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ pub trait core::ops::function::Fn::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+-    fn call<'_0_1> = core::ops::function::Fn::call::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    fn call<'_0_1> = core::ops::function::Fn::call::<_, _, (&_ mut _,), _><'_0, '_0_1, T0, T1, T2>[Self]
+     vtable: core::ops::function::Fn::{vtable}<(&'_0 mut T1,), T2>
+ }
+ 
+@@ -160,21 +160,21 @@ where
+     [@TraitClause0]: Fn<Self, Args, Clause0_Clause0_Clause0_Output>,
+ = <opaque>
+ 
+-pub fn core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_0 T0, _2: (&'_1 mut T1, T2)) -> T3
++pub fn core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_1 T0, _2: (&'_0 mut T1, T2)) -> T3
+ where
+-    [@TraitClause0]: core::ops::function::Fn::<_, (&_ mut _, _), _><'_1, T0, T1, T2, T3>,
++    [@TraitClause0]: core::ops::function::Fn::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>,
+ = <opaque>
+ 
+-pub fn core::ops::function::Fn::call::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_2, T0, T1, T2, T3, T4>(_1: &'_0 test_crate::with_state::closure<'_1, T0, T1, T2>[@TraitClause0, @TraitClause1], _2: (&'_2 mut T3,)) -> T4
++pub fn core::ops::function::Fn::call::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_2, T0, T1, T2, T3, T4>(_1: &'_2 test_crate::with_state::closure<'_0, T0, T1, T2>[@TraitClause0, @TraitClause1], _2: (&'_1 mut T3,)) -> T4
+ where
+     [@TraitClause0]: Copy<T0>,
+     [@TraitClause1]: for<'_0_1> core::ops::function::Fn::<_, (&_ mut _, _), _><'_0_1, T2, u32, T0, T1>,
+-    [@TraitClause2]: core::ops::function::Fn::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_1, '_2, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1],
++    [@TraitClause2]: core::ops::function::Fn::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1],
+ = <opaque>
+ 
+-pub fn core::ops::function::Fn::call::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 T0, _2: (&'_1 mut T1,)) -> T2
++pub fn core::ops::function::Fn::call::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_1 T0, _2: (&'_0 mut T1,)) -> T2
+ where
+-    [@TraitClause0]: core::ops::function::Fn::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++    [@TraitClause0]: core::ops::function::Fn::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
+ = <opaque>
+ 
+ pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
+@@ -182,21 +182,21 @@ where
+     [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
+ = <opaque>
+ 
+-pub fn core::ops::function::FnMut::call_mut::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_2, T0, T1, T2, T3, T4>(_1: &'_0 mut test_crate::with_state::closure<'_1, T0, T1, T2>[@TraitClause0, @TraitClause1], _2: (&'_2 mut T3,)) -> T4
++pub fn core::ops::function::FnMut::call_mut::<_, test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, '_2, T0, T1, T2, T3, T4>(_1: &'_2 mut test_crate::with_state::closure<'_0, T0, T1, T2>[@TraitClause0, @TraitClause1], _2: (&'_1 mut T3,)) -> T4
+ where
+     [@TraitClause0]: Copy<T0>,
+     [@TraitClause1]: for<'_0_1> core::ops::function::Fn::<_, (&_ mut _, _), _><'_0_1, T2, u32, T0, T1>,
+-    [@TraitClause2]: core::ops::function::FnMut::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_1, '_2, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1],
++    [@TraitClause2]: core::ops::function::FnMut::<test_crate::with_state::closure<_, _, _, _>[@TraitClause0, @TraitClause1], (&_ mut _,), _><'_0, '_1, T0, T1, T2, T3, T4>[@TraitClause0, @TraitClause1],
+ = <opaque>
+ 
+-pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_0 mut T0, _2: (&'_1 mut T1, T2)) -> T3
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_1 mut T0, _2: (&'_0 mut T1, T2)) -> T3
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _, _), _><'_1, T0, T1, T2, T3>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>,
+ = <opaque>
+ 
+-pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 mut T0, _2: (&'_1 mut T1,)) -> T2
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_1 mut T0, _2: (&'_0 mut T1,)) -> T2
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
+ = <opaque>
+ 
+ pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
+diff --git a/tests/ui/monomorphize-mut-method-region-order.out b/tests/ui/monomorphize-mut-method-region-order.out
+new file mode 100644
+index 0000000..90f3e84
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-method-region-order.out
+@@ -0,0 +1,208 @@
++# Final LLBC before serialization:
++
++#[lang_item("fn_once")]
++pub trait core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
++{
++    fn call_once = core::ops::function::FnOnce::call_once::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<(&'_0 mut T1, T2), T3>
++}
++
++#[lang_item("fn_mut")]
++pub trait core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
++{
++    parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0, '_0_1, T0, T1, T2, T3>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1, T2), T3>
++}
++
++#[lang_item("fn")]
++pub trait core::ops::function::Fn::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
++{
++    parent_clause0 : [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>
++    fn call<'_0_1> = core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0, '_0_1, T0, T1, T2, T3>[Self]
++    vtable: core::ops::function::Fn::{vtable}<(&'_0 mut T1, T2), T3>
++}
++
++pub fn core::ops::function::Fn::call::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_1 T0, _2: (&'_0 mut T1, T2)) -> T3
++where
++    [@TraitClause0]: core::ops::function::Fn::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>,
++= <opaque>
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args, Self_Output>
++{
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args, Self_Output>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self_Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnOnce<Self, Args, Self_Clause0_Output>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args, Self_Clause0_Output>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self_Clause0_Output>
++}
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
++where
++    [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _, _), _><'_0, '_1, T0, T1, T2, T3>(_1: &'_1 mut T0, _2: (&'_0 mut T1, T2)) -> T3
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
++where
++    [@TraitClause0]: FnOnce<Self, Args, Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>(_1: T0, _2: (&'_0 mut T1, T2)) -> T3
++where
++    [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++pub fn test_crate::call<'_0, '_1, T0>(f_1: &'_0 mut T0, x_2: &'_1 mut u32) -> u32
++where
++    [@TraitClause0]: for<'_0_1> core::ops::function::FnMut::<_, (&_ mut _, _), _><'_0_1, T0, u32, u32, u32>,
++{
++    let _0: u32; // return
++    let f_1: &'1 mut T0; // arg #1
++    let x_2: &'3 mut u32; // arg #2
++    let _3: &'4 mut T0; // anonymous local
++    let _4: (&'6 mut u32, u32); // anonymous local
++    let _5: &'7 mut u32; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut (*f_1)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &two-phase-mut (*x_2)
++    _4 = (move _5, const 1 : u32)
++    _0 = @TraitClause0::call_mut<'12>(move _3, move _4)
++    storage_dead(_5)
++    storage_dead(_4)
++    storage_dead(_3)
++    return
++}
++
++// Full name: test_crate::add::closure
++struct closure {}
++
++// Full name: test_crate::add::{impl core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call
++fn {impl core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call<'_0, '_1>(_1: &'_1 closure, tupled_args_2: (&'_0 mut u32, u32)) -> u32
++{
++    let _0: u32; // return
++    let _1: &'1 closure; // arg #1
++    let tupled_args_2: (&'_0 mut u32, u32); // arg #2
++    let x_3: &'2 mut u32; // local
++    let k_4: u32; // local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++
++    storage_live(x_3)
++    storage_live(k_4)
++    storage_live(_6)
++    x_3 = move tupled_args_2.0
++    k_4 = move tupled_args_2.1
++    storage_live(_5)
++    _5 = copy k_4
++    _6 = copy (*x_3) panic.+ copy _5
++    (*x_3) = move _6
++    storage_dead(_5)
++    _0 = copy (*x_3)
++    return
++}
++
++// Full name: test_crate::add::{impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_mut
++fn {impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_mut<'_0, '_1>(state_1: &'_1 mut closure, args_2: (&'_0 mut u32, u32)) -> u32
++{
++    let _0: u32; // return
++    let state_1: &'_1 mut closure; // arg #1
++    let args_2: (&'_0 mut u32, u32); // arg #2
++    let _3: &'0 closure; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call<'_0, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::add::{impl core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_once
++fn {impl core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_once<'_0>(_1: closure, _2: (&'_0 mut u32, u32)) -> u32
++{
++    let _0: u32; // return
++    let _1: closure; // arg #1
++    let _2: (&'0 mut u32, u32); // arg #2
++    let _3: &'2 mut closure; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_mut<'_0, '8>(move _3, move _2)
++    drop[{impl#3}] _1
++    return
++}
++
++// Full name: test_crate::add::{impl core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}
++impl<'_0> core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure {
++    fn call_once = {impl core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_once<'_0>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::add::{impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}
++impl<'_0> core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure {
++    parent_clause0 = {impl core::ops::function::FnOnce::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}<'_0>
++    fn call_mut<'_0_1> = {impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call_mut<'_0, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::add
++pub fn add<'_0>(x_1: &'_0 mut u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: &'1 mut u32; // arg #1
++    let f_2: closure; // local
++    let _3: &'3 mut closure; // anonymous local
++    let _4: &'4 mut closure; // anonymous local
++    let _5: &'5 mut u32; // anonymous local
++
++    storage_live(f_2)
++    f_2 = closure {  }
++    storage_live(_3)
++    storage_live(_4)
++    _4 = &mut f_2
++    _3 = &two-phase-mut (*_4)
++    storage_live(_5)
++    _5 = &two-phase-mut (*x_1)
++    _0 = test_crate::call<'10, '11, closure>[{impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}<'6>](move _3, move _5)
++    storage_dead(_5)
++    storage_dead(_3)
++    storage_dead(f_2)
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::add::{impl core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}
++impl<'_0> core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure {
++    parent_clause0 = {impl core::ops::function::FnMut::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}<'_0>
++    fn call<'_0_1> = {impl core::ops::function::Fn::<_, (&_ mut _, _), _><'_, u32, u32, u32> for closure}::call<'_0, '_0_1>
++    non-dyn-compatible
++}
++
++
++
+diff --git a/tests/ui/monomorphize-mut-method-region-order.rs b/tests/ui/monomorphize-mut-method-region-order.rs
+new file mode 100644
+index 0000000..abee610
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-method-region-order.rs
+@@ -0,0 +1,18 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++// The regions of a partially monomorphized method come in the order of the generics of methods:
++// the regions of the (specialized) trait first, then those of the method itself. Specializing
++// `FnMut<(&'a mut u32, u32)>` for `call` gives `FnMut::call_mut` the region `'a` of the trait
++// arguments besides its own region (the borrow of `self`): `'a` must come first, as in the
++// `call_mut` of the closure implementation, whose impl region `'a` comes before its own region.
++pub fn call(f: &mut impl FnMut(&mut u32, u32) -> u32, x: &mut u32) -> u32 {
++    f(x, 1)
++}
++
++pub fn add(x: &mut u32) -> u32 {
++    let mut f = |x: &mut u32, k: u32| {
++        *x += k;
++        *x
++    };
++    call(&mut f, x)
++}
+diff --git a/tests/ui/monomorphize-mut-opaque-hard.out b/tests/ui/monomorphize-mut-opaque-hard.out
+index accb992..482530c 100644
+--- a/tests/ui/monomorphize-mut-opaque-hard.out
++++ b/tests/ui/monomorphize-mut-opaque-hard.out
+@@ -28,7 +28,7 @@ pub trait core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+-    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_0_1, T0, T1, T2>[Self]
+     vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1,), T2>
+ }
+ 
+@@ -37,9 +37,9 @@ where
+     [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
+ = <opaque>
+ 
+-pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 mut T0, _2: (&'_1 mut T1,)) -> T2
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_1 mut T0, _2: (&'_0 mut T1,)) -> T2
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
+ = <opaque>
+ 
+ pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
+@@ -76,17 +76,17 @@ where
+   &'_0 mut T1,
+ }
+ 
+-fn test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
++fn test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_2 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>[@TraitClause0], tupled_args_2: (&'_1 mut T0,))
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T1, T0, ()>,
+ {
+     let _0: (); // return
+-    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0]; // arg #1
+-    let tupled_args_2: (&'_2 mut T0,); // arg #2
+-    let y_3: &'_2 mut T0; // local
++    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>[@TraitClause0]; // arg #1
++    let tupled_args_2: (&'_1 mut T0,); // arg #2
++    let y_3: &'_1 mut T0; // local
+     let _4: &'3 mut T1; // anonymous local
+-    let _5: (&'_2 mut T0,); // anonymous local
+-    let _6: &'_2 mut T0; // anonymous local
++    let _5: (&'_1 mut T0,); // anonymous local
++    let _6: &'_1 mut T0; // anonymous local
+ 
+     storage_live(y_3)
+     _0 = ()
+@@ -98,11 +98,11 @@ where
+     _6 = move y_3
+     _5 = (move _6,)
+     _0 = @TraitClause0::call_mut<'6>(move _4, move _5)
+-    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] _6
++    conditional_drop[{built_in impl Destruct for &'_1 mut T0}] _6
+     storage_dead(_6)
+     storage_dead(_5)
+     storage_dead(_4)
+-    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] y_3
++    conditional_drop[{built_in impl Destruct for &'_1 mut T0}] y_3
+     return
+ }
+ 
+@@ -131,7 +131,7 @@ where
+     storage_live(_7)
+     _7 = move x_1
+     _6 = (move _7,)
+-    _0 = test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '13, '_0, T0, T1>[@TraitClause0](move _5, move _6)
++    _0 = test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '_0, '13, T0, T1>[@TraitClause0](move _5, move _6)
+     conditional_drop[{built_in impl Destruct for &'_0 mut T0}] _7
+     storage_dead(_7)
+     storage_dead(_6)
+diff --git a/tests/ui/monomorphize-mut-opaque.out b/tests/ui/monomorphize-mut-opaque.out
+index 4fe59e1..58462df 100644
+--- a/tests/ui/monomorphize-mut-opaque.out
++++ b/tests/ui/monomorphize-mut-opaque.out
+@@ -28,7 +28,7 @@ pub trait core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+ {
+     parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
+-    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_0_1, T0, T1, T2>[Self]
+     vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1,), T2>
+ }
+ 
+@@ -37,9 +37,9 @@ where
+     [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
+ = <opaque>
+ 
+-pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 mut T0, _2: (&'_1 mut T1,)) -> T2
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_1 mut T0, _2: (&'_0 mut T1,)) -> T2
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
+ = <opaque>
+ 
+ pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
+@@ -71,17 +71,17 @@ where
+   &'_0 mut T1,
+ }
+ 
+-fn test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
++fn test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_2 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>[@TraitClause0], tupled_args_2: (&'_1 mut T0,))
+ where
+-    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T1, T0, ()>,
+ {
+     let _0: (); // return
+-    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0]; // arg #1
+-    let tupled_args_2: (&'_2 mut T0,); // arg #2
+-    let y_3: &'_2 mut T0; // local
++    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>[@TraitClause0]; // arg #1
++    let tupled_args_2: (&'_1 mut T0,); // arg #2
++    let y_3: &'_1 mut T0; // local
+     let _4: &'3 mut T1; // anonymous local
+-    let _5: (&'_2 mut T0,); // anonymous local
+-    let _6: &'_2 mut T0; // anonymous local
++    let _5: (&'_1 mut T0,); // anonymous local
++    let _6: &'_1 mut T0; // anonymous local
+ 
+     storage_live(y_3)
+     _0 = ()
+@@ -93,11 +93,11 @@ where
+     _6 = move y_3
+     _5 = (move _6,)
+     _0 = @TraitClause0::call_mut<'6>(move _4, move _5)
+-    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] _6
++    conditional_drop[{built_in impl Destruct for &'_1 mut T0}] _6
+     storage_dead(_6)
+     storage_dead(_5)
+     storage_dead(_4)
+-    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] y_3
++    conditional_drop[{built_in impl Destruct for &'_1 mut T0}] y_3
+     return
+ }
+ 
+@@ -126,7 +126,7 @@ where
+     storage_live(_7)
+     _7 = move x_1
+     _6 = (move _7,)
+-    _0 = test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '13, '_0, T0, T1>[@TraitClause0](move _5, move _6)
++    _0 = test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '_0, '13, T0, T1>[@TraitClause0](move _5, move _6)
+     conditional_drop[{built_in impl Destruct for &'_0 mut T0}] _7
+     storage_dead(_7)
+     storage_dead(_6)

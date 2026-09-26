@@ -1,0 +1,245 @@
+# aeneas integration step 22 after cba11f3beb: commit 46d4027fe44a40ad31665d38498675dfbbacdbd2
+# first parent 547f46df68fd4fd8cf4f57de116e2441f3ff0522
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Collection admission: defer generic iterator dictionaries to callers
+#
+# A generic collector's iterator dictionary (a trait clause of the function,
+# possibly projected through parent clauses) becomes an obligation of the
+# function. Every call instantiates the callee's obligations and checks them
+# against the reviewed iterators, or defers them to the caller's clauses, to a
+# fixpoint. Also admits the modeled BTreeMap/BTreeSet Extend and the BTreeSet
+# Iter/IntoIter iterators.
+
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 0c270cc..0abe881 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -2,12 +2,26 @@
+     size_hint at allocation/specialization-dependent points. Erasing capacity is
+     sound only when those calls are total and unobservable and the selected
+     consumer has the same callback schedule as repeated next. This is a closed
+-    provenance check, not an effect guess based on a method's name or body. *)
++    provenance check, not an effect guess based on a method's name or body.
++
++    A generic function may collect from an iterator dictionary it receives as
++    a trait clause. Its admission is deferred: the dictionary, expressed in the
++    function's own generics, becomes an obligation of the function, and every
++    call instantiates it and checks the instance (or defers it further to the
++    caller's clauses). Only reviewed iterators ever discharge an obligation, so
++    the next-driven models are used exactly where every native consumer path
++    (next, fold, for_each, try_fold, size_hint) agrees with them: see
++    [LawfulIterator] in the Lean library. *)
++
+ open Types
+ open Expressions
+ open LlbcAst
+ open Errors
+ 
++type obligation =
++  | Iter of trait_ref  (** Must resolve to a reviewed iterator. *)
++  | Into of trait_ref  (** An [IntoIterator] whose iterator is reviewed. *)
++
+ let prefix = "_root_.Aeneas.Std."
+ let iterator = prefix ^ "core.iter.traits.iterator.Iterator"
+ let into_iterator = prefix ^ "core.iter.traits.collect.IntoIterator"
+@@ -75,6 +89,28 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               native_impl span { id = original.def_id; generics })
+       | _ -> reference
+     in
++    let obligations : obligation list FunDeclId.Map.t ref =
++      ref FunDeclId.Map.empty
++    in
++    let current : FunDeclId.id option ref = ref None in
++    let changed = ref false in
++    let rec generic_root (tr : trait_ref) =
++      match tr.kind with
++      | Clause (Free _) -> true
++      | ParentClause (inner, _) | ItemClause (inner, _, _) -> generic_root inner
++      | _ -> false
++    in
++    let defer span obligation =
++      match !current with
++      | Some id ->
++          let known =
++            Option.value ~default:[] (FunDeclId.Map.find_opt id !obligations)
++          in
++          if not (List.mem obligation known) then (
++            obligations := FunDeclId.Map.add id (obligation :: known) !obligations;
++            changed := true)
++      | None -> reject span "unresolved generic or projected collection dictionary"
++    in
+     let resolve span (tr : trait_ref) =
+       match tr.kind with
+       | TraitImpl reference ->
+@@ -92,12 +128,29 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           (impl, generics.trait_refs, parents)
+       | _ -> reject span "unresolved generic or projected collection dictionary"
+     in
++    (* Project parent dictionaries of resolved implementations, so that a
++       caller's instance of a deferred obligation reaches its implementation. *)
++    let rec normalize span (tr : trait_ref) : trait_ref =
++      match tr.kind with
++      | ParentClause (inner, clause) -> (
++          let inner = normalize span inner in
++          match inner.kind with
++          | TraitImpl _ -> (
++              let _, _, parents = resolve span inner in
++              match List.nth_opt parents (TraitClauseId.to_int clause) with
++              | Some parent -> normalize span parent
++              | None -> reject span "missing parent collection dictionary")
++          | _ -> { tr with kind = ParentClause (inner, clause) })
++      | _ -> tr
++    in
+     let one span name refs =
+       match List.filter (fun tr -> ref_name tr = Some name) refs with
+       | [ tr ] -> tr
+       | _ -> reject span ("missing or ambiguous " ^ name ^ " evidence")
+     in
+     let rec check_iterator span seen (tr : trait_ref) =
++      let tr = normalize span tr in
++      if generic_root tr then defer span (Iter tr) else
+       let impl, args, _ = resolve span tr in
+       if List.mem tr seen then
+         reject span "recursive iterator evidence without a finite source";
+@@ -108,7 +161,7 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           List.mem name
+             (List.map (( ^ ) iterator)
+                [ "SliceIter"; "ArrayIntoIter"; "VecIntoIter"; "BTreeIter";
+-                 "BTreeIntoIter"; "Chunks"; "ChunksExact"; "Windows";
++                 "BTreeIntoIter"; "BTreeSetIntoIter"; "BTreeSetIter"; "Chunks"; "ChunksExact"; "Windows";
+                  "Once"; "Chars" ]) -> ()
+       | Some name when
+           List.mem name
+@@ -133,8 +186,25 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                 impl.item_meta.name)
+     in
+     let check_into span tr =
+-      let _, _, parents = resolve span tr in
+-      check_iterator span [] (one span iterator parents)
++      let tr = normalize span tr in
++      if generic_root tr then defer span (Into tr)
++      else
++        let _, _, parents = resolve span tr in
++        check_iterator span [] (one span iterator parents)
++    in
++    let discharge span (callee : fun_decl) (generics : generic_args) =
++      match FunDeclId.Map.find_opt callee.def_id !obligations with
++      | None -> ()
++      | Some required ->
++          let subst =
++            [%add_loc] Substitute.make_subst_from_generics (Some span)
++              callee.generics generics Self
++          in
++          List.iter
++            (function
++              | Iter tr -> check_iterator span [] (Substitute.trait_ref_substitute subst tr)
++              | Into tr -> check_into span (Substitute.trait_ref_substitute subst tr))
++            required
+     in
+     let modeled_collectors =
+       List.map (( ^ ) prefix)
+@@ -160,7 +230,8 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               match
+                 (FunDeclId.Map.find method_ref.binder_value.id evidence.fun_decls).body
+               with
+-              | StructuredBody _ -> false
++              | StructuredBody _ ->
++                  FunDeclId.Map.mem method_ref.binder_value.id !obligations
+               | _ -> reject span "opaque custom FromIterator implementation")
+           | None -> reject span "missing custom FromIterator implementation")
+     in
+@@ -174,6 +245,36 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       let check_collection_input args =
+         check_into span (one span into_iterator args.trait_refs)
+       in
++      (match ptr.kind with
++      | FunId (FRegular id) -> (
++          match FunDeclId.Map.find_opt id evidence.fun_decls with
++          | Some callee -> discharge span callee ptr.generics
++          | None -> ())
++      | TraitMethod (tr, name, _) -> (
++          let tr = normalize span tr in
++          match tr.kind with
++          | TraitImpl reference -> (
++              let reference = native_impl span reference in
++              let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
++              match List.assoc_opt name impl.methods with
++              | Some binder -> (
++                  let method_ref =
++                    Substitute.apply_args_to_binder ptr.generics
++                      Substitute.st_substitute_visitor#visit_fun_decl_ref binder
++                  in
++                  let subst =
++                    [%add_loc] Substitute.make_subst_from_generics (Some span)
++                      impl.generics reference.generics (TraitImpl reference)
++                  in
++                  let generics =
++                    Substitute.generic_args_substitute subst method_ref.generics
++                  in
++                  match FunDeclId.Map.find_opt method_ref.id evidence.fun_decls with
++                  | Some callee -> discharge span callee generics
++                  | None -> ())
++              | None -> ())
++          | _ -> ())
++      | _ -> ());
+       match ptr.kind with
+       | FunId (FRegular id) ->
+           let decl = FunDeclId.Map.find id crate.fun_decls in
+@@ -187,7 +288,9 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                    [ "alloc.vec.FromIteratorVec.from_iter";
+                      "alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
+                      "alloc.collections.btree.set.FromIteratorBTreeSet.from_iter";
+-                     "alloc.vec.ExtendVec.extend" ]) ->
++                     "alloc.vec.ExtendVec.extend";
++                     "alloc.collections.btree.map.ExtendBTreeMap.extend";
++                     "alloc.collections.btree.set.ExtendBTreeSet.extend" ]) ->
+               check_collection_input ptr.generics
+           | Some name when name = prefix ^ "core.result.FromIteratorResult.from_iter" ->
+               if needs_check span [] (one span from_iterator ptr.generics.trait_refs) then
+@@ -209,20 +312,29 @@ let check ~(evidence : crate) (crate : crate) : crate =
+             check_iterator span [] tr
+       | _ -> ()
+     in
+-    FunDeclId.Map.iter
+-      (fun _ (decl : fun_decl) ->
+-        if Option.is_none (fun_name decl) then
+-          match decl.body with
+-          | StructuredBody body ->
+-              let visitor =
+-                object
+-                  inherit [_] iter_statement as super
+-                  method! visit_fn_ptr span ptr = check_ptr span ptr
+-                  method! visit_statement _ st =
+-                    super#visit_statement st.span st
+-                end
+-              in
+-              visitor#visit_block decl.item_meta.span body.body
+-          | _ -> ())
+-      crate.fun_decls;
++    (* Obligations only grow; rescan until every call has seen its callee's
++       complete obligations. *)
++    let rec scan () =
++      changed := false;
++      FunDeclId.Map.iter
++        (fun id (decl : fun_decl) ->
++          if Option.is_none (fun_name decl) then
++            match decl.body with
++            | StructuredBody body ->
++                current := Some id;
++                let visitor =
++                  object
++                    inherit [_] iter_statement as super
++                    method! visit_fn_ptr span ptr = check_ptr span ptr
++                    method! visit_statement _ st =
++                      super#visit_statement st.span st
++                  end
++                in
++                visitor#visit_block decl.item_meta.span body.body;
++                current := None
++            | _ -> ())
++        crate.fun_decls;
++      if !changed then scan ()
++    in
++    scan ();
+     crate

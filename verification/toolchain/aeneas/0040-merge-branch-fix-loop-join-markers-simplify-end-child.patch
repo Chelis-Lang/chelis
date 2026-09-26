@@ -1,0 +1,1390 @@
+# aeneas integration step 40 after cba11f3beb: commit 8dbbd8870e1f1c3358796312c04e7018acd5c75e
+# first parent b56074c3524968fa531d20fa169fc8f1dfb7ee8a, merged 93894e908097c0e74a2f7fda7ead1a19841547d6
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/loop-join-markers' (simplify: end child abstractions which only hold shared borrows)
+
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index 20bc281..145a452 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -2482,6 +2482,39 @@ let abs_is_destructured (span : Meta.span) (ctx : eval_ctx) (abs : abs) : bool =
+ 
+ exception FoundBorrowId of unique_borrow_id
+ exception FoundAbsId of AbsId.id
++exception FoundSharedChildAbsId of AbsId.id
++
++(** Check whether an abstraction only holds shared borrows: no loans (ignored
++    or not), no mutable borrows and no symbolic projections.
++
++    Such an abstraction gives nothing back and consumes nothing when it ends
++    (the regions it owns have no backward function): ending it does not depend
++    on its parent abstractions. Example: the region abstractions of the nested
++    regions of a shared slice iterator, e.g., the regions ['b], ['c] of
++    [Iter<'a, (&'b str, View<'c>)>] once the iterator is dead. *)
++let abs_only_holds_shared_borrows (abs : abs) : bool =
++  let visitor =
++    object
++      inherit [_] iter_abs as super
++      method! visit_ty _ _ = ()
++      method! visit_abs_cont _ _ = ()
++      method! visit_ALoan _ _ = raise Found
++      method! visit_ASymbolic _ _ _ = raise Found
++
++      method! visit_aborrow_content env bc =
++        match bc with
++        | ASharedBorrow _ | AProjSharedBorrow _ | AEndedSharedBorrow ->
++            super#visit_aborrow_content env bc
++        | AMutBorrow _
++        | AIgnoredMutBorrow _
++        | AEndedMutBorrow _
++        | AEndedIgnoredMutBorrow _ -> raise Found
++    end
++  in
++  try
++    visitor#visit_abs () abs;
++    true
++  with Found -> false
+ 
+ (** Check whether a loan projector has no remaining borrowers.
+ 
+@@ -2838,6 +2871,14 @@ let rec simplify_dummy_values_useless_abs_aux (config : config)
+         let v = visitor#visit_tvalue true v in
+         (* No exception was raised: continue *)
+         EBinding (BVar vid, v) :: explore_env ctx env
++    | EAbs abs :: _
++      when simplify_abs && abs.can_end
++           && (not (AbsId.Set.is_empty abs.parents))
++           && (not (AbsId.Set.mem abs.abs_id frozen_abs))
++           && abs_only_holds_shared_borrows abs ->
++        (* A child abstraction which only holds shared borrows can end before
++           its parents (see [abs_only_holds_shared_borrows]) *)
++        raise (FoundSharedChildAbsId abs.abs_id)
+     | EAbs abs :: env
+       when simplify_abs && abs.can_end
+            && AbsId.Set.is_empty abs.parents
+@@ -2916,6 +2957,14 @@ let rec simplify_dummy_values_useless_abs_aux (config : config)
+       (* TODO: generalize so that we can end sub-abstractions *)
+       let ctx, cc = end_abs config span ~snapshots abs_id 0 ctx in
+       comp cc (rec_call ctx)
++  | FoundSharedChildAbsId abs_id ->
++      (* Detach the abstraction from its parents, which stay alive *)
++      let abs = ctx_lookup_abs ctx abs_id in
++      let ctx, _ =
++        ctx_subst_abs span ctx abs_id { abs with parents = AbsId.Set.empty }
++      in
++      let ctx, cc = end_abs config span ~snapshots abs_id 0 ctx in
++      comp cc (rec_call ctx)
+   | FoundBorrowId bid ->
+       let ctx, cc = end_borrow config span ~snapshots bid ctx in
+       comp cc (rec_call ctx)
+diff --git a/tests/lean/LoopExitSharedChildren.lean b/tests/lean/LoopExitSharedChildren.lean
+new file mode 100644
+index 0000000..904e099
+--- /dev/null
++++ b/tests/lean/LoopExitSharedChildren.lean
+@@ -0,0 +1 @@
++import LoopExitSharedChildren.Checks
+diff --git a/tests/lean/LoopExitSharedChildren/Checks.lean b/tests/lean/LoopExitSharedChildren/Checks.lean
+new file mode 100644
+index 0000000..58edf9f
+--- /dev/null
++++ b/tests/lean/LoopExitSharedChildren/Checks.lean
+@@ -0,0 +1,52 @@
++import LoopExitSharedChildren.LoopExitSharedChildren
++
++/-! Evaluate the model of `tests/src/loop-exit-shared-children.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace loop_exit_shared_children.checks
++open Aeneas Aeneas.Std Result
++
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    alloc.vec.Vec α := ⟨xs, h⟩
++def sl {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Slice α := ⟨xs, h⟩
++
++/-- `Ok n` is `inl n`, `Err i` is `inr i` -/
++def resD (r : Result (core.result.Result U32 U32)) : Option (Nat ⊕ Nat) :=
++  match r with
++  | ok (.Ok n) => some (.inl n.val)
++  | ok (.Err i) => some (.inr i.val)
++  | _ => none
++
++/-- `Ok ()` is `none`, `Err e` is `some (key_len, expected, shape)` -/
++def resE (r : Result (core.result.Result Unit MetadataError)) :
++    Option (Option (Nat × Nat × Nat)) :=
++  match r with
++  | ok (.Ok ()) => some none
++  | ok (.Err e) => some (some (e.key_len.val, e.expected.val, e.shape.val))
++  | _ => none
++
++def err (key_len expected shape : Nat) : Option (Option (Nat × Nat × Nat)) :=
++  some (some (key_len, expected, shape))
++
++-- native::duplicates
++#guard resD (first_duplicate (vec [])) == some (.inl 0)
++#guard resD (first_duplicate (vec [(toStr "a", View.Str (toStr "xy")), (toStr "b", View.True)])) == some (.inl 2)
++#guard resD (first_duplicate (vec [(toStr "a", View.Str (toStr "xy")), (toStr "b", View.Str (toStr "z")), (toStr "a", View.True)])) ==
++  some (.inr 2)
++#guard resD (first_duplicate (vec [(toStr "k", View.Name (toStr "n")), (toStr "k", View.Str (toStr "abc"))])) == some (.inr 1)
++
++-- native::entries
++#guard resE (check_entries (vec []) none (sl [])) == some none
++#guard resE (check_entries (vec [(toStr "doc", View.Str (toStr "d")), (toStr "ext", View.True)]) none (sl [])) == some none
++#guard resE (check_entries (vec [(toStr "doc", View.Str (toStr "d")), (toStr "doc", View.Str (toStr "e"))]) none (sl [])) == err 3 0 1
++#guard resE (check_entries (vec [(toStr "unknown", View.True)]) none (sl [])) == err 7 9 0
++#guard resE (check_entries (vec [(toStr "doc", View.True)]) none (sl [])) == err 3 1 0
++#guard resE (check_entries (vec [(toStr "opaque", View.True)]) (some .Def) (sl [])) == some none
++#guard resE (check_entries (vec [(toStr "opaque", View.Str (toStr "s"))]) (some .Def) (sl [])) == err 6 3 7
++#guard resE (check_entries (vec [(toStr "opaque", View.True)]) (some .Fn) (sl [])) == err 6 3 0
++#guard resE (check_entries (vec [(toStr "path", View.Str (toStr "m"))]) (some .Module) (sl [View.Name (toStr "m")])) == some none
++#guard resE (check_entries (vec [(toStr "path", View.Str (toStr "q"))]) (some .Module) (sl [View.Name (toStr "m")])) == err 4 2 1
++#guard resE (check_entries (vec [(toStr "path", View.Str (toStr "m"))]) (some .Module) (sl [])) == err 4 2 1
++
++end loop_exit_shared_children.checks
+diff --git a/tests/lean/LoopExitSharedChildren/LoopExitSharedChildren.lean b/tests/lean/LoopExitSharedChildren/LoopExitSharedChildren.lean
+new file mode 100644
+index 0000000..0daba9b
+--- /dev/null
++++ b/tests/lean/LoopExitSharedChildren/LoopExitSharedChildren.lean
+@@ -0,0 +1,1014 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_exit_shared_children]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_exit_shared_children
++
++/-- [loop_exit_shared_children::Tag]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 18:0-22:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Tag where
++| Def : Tag
++| Module : Tag
++| Fn : Tag
++
++/-- [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Tag}::clone]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:9-17:14
++    Visibility: public -/
++def Tag.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_shared_children.Tag) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.Tag
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Tag}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:9-17:14 -/
++@[reducible]
++def Tag.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_shared_children.Tag := {
++  clone := _root_.loop_exit_shared_children.Tag.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::Copy for loop_exit_shared_children::Tag}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:16-17:20 -/
++@[reducible]
++def Tag.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_shared_children.Tag := {
++  cloneInst := _root_.loop_exit_shared_children.Tag.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::StructuralPartialEq for loop_exit_shared_children::Tag}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:22-17:31 -/
++@[reducible]
++def Tag.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.loop_exit_shared_children.Tag := {
++}
++
++/-- [loop_exit_shared_children::{core::cmp::PartialEq<loop_exit_shared_children::Tag> for loop_exit_shared_children::Tag}::eq]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:22-17:31
++    Visibility: public -/
++def Tag.Insts.CoreCmpPartialEqTag.eq
++  (self : _root_.loop_exit_shared_children.Tag)
++  (other : _root_.loop_exit_shared_children.Tag) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  _root_.Aeneas.Std.Result.ok (self1 = other1)
++
++/-- Trait implementation: [loop_exit_shared_children::{core::cmp::PartialEq<loop_exit_shared_children::Tag> for loop_exit_shared_children::Tag}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:22-17:31 -/
++@[reducible]
++def Tag.Insts.CoreCmpPartialEqTag : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.loop_exit_shared_children.Tag _root_.loop_exit_shared_children.Tag
++  := {
++  eq := _root_.loop_exit_shared_children.Tag.Insts.CoreCmpPartialEqTag.eq
++}
++
++/-- [loop_exit_shared_children::{core::cmp::Eq for loop_exit_shared_children::Tag}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:33-17:35
++    Visibility: public -/
++def Tag.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.loop_exit_shared_children.Tag) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [loop_exit_shared_children::{core::cmp::Eq for loop_exit_shared_children::Tag}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 17:33-17:35 -/
++@[reducible]
++def Tag.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.loop_exit_shared_children.Tag := {
++  partialEqInst :=
++    _root_.loop_exit_shared_children.Tag.Insts.CoreCmpPartialEqTag
++  assert_receiver_is_total_eq :=
++    _root_.loop_exit_shared_children.Tag.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [loop_exit_shared_children::View]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 25:0-29:1
++    Visibility: public -/
++@[discriminant isize]
++inductive View where
++| Name : _root_.Aeneas.Std.Str → View
++| Str : _root_.Aeneas.Std.Str → View
++| True : View
++
++/-- [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::View<'a>}::clone]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 24:9-24:14
++    Visibility: public -/
++def View.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.View
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::View<'a>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 24:9-24:14 -/
++@[reducible]
++def View.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_shared_children.View := {
++  clone := _root_.loop_exit_shared_children.View.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::Copy for loop_exit_shared_children::View<'a>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 24:16-24:20 -/
++@[reducible]
++def View.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_shared_children.View := {
++  cloneInst := _root_.loop_exit_shared_children.View.Insts.CoreCloneClone
++}
++
++/-- [loop_exit_shared_children::{loop_exit_shared_children::View<'a>}::name]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 32:4-37:5
++    Visibility: public -/
++def View.name
++  (self : _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let joined ←
++    match self with
++    | _root_.loop_exit_shared_children.View.Name v =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some v) : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++    | _root_.loop_exit_shared_children.View.Str _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl self : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++    | _root_.loop_exit_shared_children.View.True =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.loop_exit_shared_children.View.True : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok none
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [loop_exit_shared_children::{loop_exit_shared_children::View<'a>}::string]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 38:4-43:5
++    Visibility: public -/
++def View.string
++  (self : _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let joined ←
++    match self with
++    | _root_.loop_exit_shared_children.View.Name _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl self : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++    | _root_.loop_exit_shared_children.View.Str v =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some v) : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++    | _root_.loop_exit_shared_children.View.True =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        _root_.loop_exit_shared_children.View.True : _root_.Sum
++        _root_.loop_exit_shared_children.View (_root_.Option
++        _root_.Aeneas.Std.Str))
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok none
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [loop_exit_shared_children::first_duplicate::closure]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 52:36-52:61 -/
++@[reducible]
++def first_duplicate.closure := _root_.Aeneas.Std.Str
++
++/-- [loop_exit_shared_children::first_duplicate::{core::ops::function::FnMut<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::first_duplicate::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 52:36-52:61 -/
++def
++  first_duplicate.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++  (c : _root_.loop_exit_shared_children.first_duplicate.closure)
++  (tupled_args : (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_exit_shared_children.first_duplicate.closure)
++  := do
++  let (prior, _) := tupled_args
++  let b ←
++    _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++      _root_.Aeneas.Std.core.cmp.PartialEqStr prior c
++  _root_.Aeneas.Std.Result.ok (b, c)
++
++/-- [loop_exit_shared_children::first_duplicate::{core::ops::function::FnOnce<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::first_duplicate::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 52:36-52:61 -/
++def
++  first_duplicate.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool.call_once
++  (c : _root_.loop_exit_shared_children.first_duplicate.closure)
++  (p : (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.loop_exit_shared_children.first_duplicate.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [loop_exit_shared_children::first_duplicate::{core::ops::function::FnOnce<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::first_duplicate::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 52:36-52:61 -/
++@[reducible]
++def
++  first_duplicate.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_exit_shared_children.first_duplicate.closure
++  (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View) _root_.Bool
++  := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_exit_shared_children.first_duplicate.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_exit_shared_children::first_duplicate::{core::ops::function::FnMut<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::first_duplicate::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 52:36-52:61 -/
++@[reducible]
++def
++  first_duplicate.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_exit_shared_children.first_duplicate.closure
++  (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View) _root_.Bool
++  := {
++  FnOnceInst :=
++    _root_.loop_exit_shared_children.first_duplicate.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_exit_shared_children.first_duplicate.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_exit_shared_children::first_duplicate]: loop body 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 51:4-62:1
++    Visibility: public -/
++@[rust_loop_body]
++def first_duplicate_loop.body
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View))
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View))) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++    _root_.loop_exit_shared_children.View))) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.enumerate.IteratorEnumerate.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n))
++  | some p =>
++    let (index, p1) := p
++    let (key, v) := p1
++    let s ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice
++        (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) meta1
++        { «end» := index }
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let (model_state2, _, _) ←
++      _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.any
++        _root_.loop_exit_shared_children.first_duplicate.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool
++        i key
++    if model_state2
++    then
++      let i1 ← lift (UScalar.cast .U32 index)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err i1))
++    else
++      let o ← _root_.loop_exit_shared_children.View.string v
++      let len ←
++        match o with
++        | none => _root_.Aeneas.Std.Result.ok 0#usize
++        | some s1 => _root_.Aeneas.Std.core.str.Str.len s1
++      let i1 ← lift (UScalar.cast .U32 len)
++      let n1 ← lift (core.num.U32.wrapping_add n i1)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, n1))
++
++/-- [loop_exit_shared_children::first_duplicate]: loop 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 51:4-62:1
++    Visibility: public -/
++@[rust_loop]
++def first_duplicate_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)))
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, n1) =>
++       _root_.loop_exit_shared_children.first_duplicate_loop.body meta1 iter1
++       n1 : ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View))) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View))) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)))
++    (iter, n)
++
++/-- [loop_exit_shared_children::first_duplicate]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 49:0-62:1
++    Visibility: public -/
++def first_duplicate
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref meta1
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View)).enumerate i
++  _root_.loop_exit_shared_children.first_duplicate_loop model_state meta1 0#u32
++
++/-- [loop_exit_shared_children::Shape]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 65:0-69:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Shape where
++| Str : Shape
++| Name : Shape
++| True : Shape
++
++/-- [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Shape}::clone]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 64:9-64:14
++    Visibility: public -/
++def Shape.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_shared_children.Shape) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.Shape
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Shape}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 64:9-64:14 -/
++@[reducible]
++def Shape.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_shared_children.Shape := {
++  clone := _root_.loop_exit_shared_children.Shape.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::Copy for loop_exit_shared_children::Shape}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 64:16-64:20 -/
++@[reducible]
++def Shape.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_shared_children.Shape := {
++  cloneInst := _root_.loop_exit_shared_children.Shape.Insts.CoreCloneClone
++}
++
++/-- [loop_exit_shared_children::Placement]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 72:0-76:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Placement where
++| Any : Placement
++| Tag : _root_.loop_exit_shared_children.Tag → Placement
++| Path : Placement
++
++/-- [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Placement}::clone]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 71:9-71:14
++    Visibility: public -/
++def Placement.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_shared_children.Placement) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.Placement
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::Placement}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 71:9-71:14 -/
++@[reducible]
++def Placement.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_shared_children.Placement := {
++  clone :=
++    _root_.loop_exit_shared_children.Placement.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::Copy for loop_exit_shared_children::Placement}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 71:16-71:20 -/
++@[reducible]
++def Placement.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_shared_children.Placement := {
++  cloneInst := _root_.loop_exit_shared_children.Placement.Insts.CoreCloneClone
++}
++
++/-- [loop_exit_shared_children::Rule]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 78:0-83:1
++    Visibility: public -/
++structure Rule where
++  key : _root_.Aeneas.Std.Str
++  shape : _root_.loop_exit_shared_children.Shape
++  placement : _root_.loop_exit_shared_children.Placement
++  expected : _root_.Aeneas.Std.U32
++
++/-- [loop_exit_shared_children::RULES]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 85:0-89:2
++    Visibility: public -/
++@[global_simps, irreducible]
++def RULES
++  : _root_.Aeneas.Std.Array _root_.loop_exit_shared_children.Rule 3#usize :=
++  _root_.Aeneas.Std.Array.make 3#usize [
++    ({
++       key := (_root_.Aeneas.Std.toStr "doc"),
++       shape := _root_.loop_exit_shared_children.Shape.Str,
++       placement := _root_.loop_exit_shared_children.Placement.Any,
++       expected := 1#u32
++     } : _root_.loop_exit_shared_children.Rule),
++    ({
++       key := (_root_.Aeneas.Std.toStr "path"),
++       shape := _root_.loop_exit_shared_children.Shape.Str,
++       placement := _root_.loop_exit_shared_children.Placement.Path,
++       expected := 2#u32
++     } : _root_.loop_exit_shared_children.Rule),
++    ({
++       key := (_root_.Aeneas.Std.toStr "opaque"),
++       shape := _root_.loop_exit_shared_children.Shape.True,
++       placement :=
++         (_root_.loop_exit_shared_children.Placement.Tag
++           _root_.loop_exit_shared_children.Tag.Def),
++       expected := 3#u32
++     } : _root_.loop_exit_shared_children.Rule)
++    ]
++
++/-- [loop_exit_shared_children::KeyClass]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 91:0-95:1
++    Visibility: public -/
++@[discriminant isize]
++inductive KeyClass where
++| Registered : _root_.loop_exit_shared_children.Rule → KeyClass
++| Extension : KeyClass
++| Forbidden : KeyClass
++
++/-- [loop_exit_shared_children::classify]: loop body 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 99:4-106:1
++    Visibility: public -/
++@[rust_loop_body]
++def classify_loop.body
++  (key : _root_.Aeneas.Std.Str) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.loop_exit_shared_children.KeyClass)
++  := do
++  let s ← lift (Array.to_slice _root_.loop_exit_shared_children.RULES)
++  let i1 := _root_.Aeneas.Std.Slice.len s
++  if i < i1
++  then
++    let r ← Array.index_usize _root_.loop_exit_shared_children.RULES i
++    let b ←
++      _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++        _root_.Aeneas.Std.core.cmp.PartialEqStr r.key key
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.loop_exit_shared_children.KeyClass.Registered r))
++    else
++      let i2 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i2)
++  else
++    let i2 ← _root_.Aeneas.Std.core.str.Str.len key
++    let kc ←
++      if i2 > 5#usize
++      then
++        _root_.Aeneas.Std.Result.ok
++          _root_.loop_exit_shared_children.KeyClass.Forbidden
++      else
++        _root_.Aeneas.Std.Result.ok
++          _root_.loop_exit_shared_children.KeyClass.Extension
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done kc)
++
++/-- [loop_exit_shared_children::classify]: loop 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 99:4-106:1
++    Visibility: public -/
++@[rust_loop]
++def classify_loop
++  (key : _root_.Aeneas.Std.Str) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.KeyClass
++  := do
++  loop
++    (fun i1 => _root_.loop_exit_shared_children.classify_loop.body key i1 :
++      _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize
++      _root_.loop_exit_shared_children.KeyClass))
++    i
++
++/-- [loop_exit_shared_children::classify]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 97:0-106:1
++    Visibility: public -/
++@[reducible]
++def classify
++  (key : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.KeyClass
++  := do
++  _root_.loop_exit_shared_children.classify_loop key 0#usize
++
++/-- [loop_exit_shared_children::shape_valid]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 108:0-114:1
++    Visibility: public -/
++def shape_valid
++  (shape : _root_.loop_exit_shared_children.Shape)
++  (v : _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  match shape with
++  | _root_.loop_exit_shared_children.Shape.Str =>
++    let o ← _root_.loop_exit_shared_children.View.string v
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.option.Option.is_some
++      o)
++  | _root_.loop_exit_shared_children.Shape.Name =>
++    let o ← _root_.loop_exit_shared_children.View.name v
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.option.Option.is_some
++      o)
++  | _root_.loop_exit_shared_children.Shape.True =>
++    let joined ←
++      match v with
++      | _root_.loop_exit_shared_children.View.Name _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl v : _root_.Sum
++          _root_.loop_exit_shared_children.View _root_.Bool)
++      | _root_.loop_exit_shared_children.View.Str _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl v : _root_.Sum
++          _root_.loop_exit_shared_children.View _root_.Bool)
++      | _root_.loop_exit_shared_children.View.True =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++          _root_.loop_exit_shared_children.View _root_.Bool)
++    match joined with
++    | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [loop_exit_shared_children::MetadataError]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 117:0-121:1
++    Visibility: public -/
++structure MetadataError where
++  key_len : _root_.Aeneas.Std.Usize
++  expected : _root_.Aeneas.Std.U32
++  shape : _root_.Aeneas.Std.U32
++
++/-- [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::MetadataError}::clone]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:9-116:14
++    Visibility: public -/
++def MetadataError.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_shared_children.MetadataError) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.MetadataError
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_shared_children::{core::clone::Clone for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:9-116:14 -/
++@[reducible]
++def MetadataError.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_shared_children.MetadataError := {
++  clone :=
++    _root_.loop_exit_shared_children.MetadataError.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::Copy for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:16-116:20 -/
++@[reducible]
++def MetadataError.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_shared_children.MetadataError := {
++  cloneInst :=
++    _root_.loop_exit_shared_children.MetadataError.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [loop_exit_shared_children::{core::marker::StructuralPartialEq for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:22-116:31 -/
++@[reducible]
++def MetadataError.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.loop_exit_shared_children.MetadataError := {
++}
++
++/-- [loop_exit_shared_children::{core::cmp::PartialEq<loop_exit_shared_children::MetadataError> for loop_exit_shared_children::MetadataError}::eq]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:22-116:31
++    Visibility: public -/
++def MetadataError.Insts.CoreCmpPartialEqMetadataError.eq
++  (self : _root_.loop_exit_shared_children.MetadataError)
++  (other : _root_.loop_exit_shared_children.MetadataError) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  if self.expected = other.expected
++  then
++    if self.shape = other.shape
++    then _root_.Aeneas.Std.Result.ok (self.key_len = other.key_len)
++    else _root_.Aeneas.Std.Result.ok false
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [loop_exit_shared_children::{core::cmp::PartialEq<loop_exit_shared_children::MetadataError> for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:22-116:31 -/
++@[reducible]
++def MetadataError.Insts.CoreCmpPartialEqMetadataError :
++  _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.loop_exit_shared_children.MetadataError
++  _root_.loop_exit_shared_children.MetadataError := {
++  eq :=
++    _root_.loop_exit_shared_children.MetadataError.Insts.CoreCmpPartialEqMetadataError.eq
++}
++
++/-- [loop_exit_shared_children::{core::cmp::Eq for loop_exit_shared_children::MetadataError}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:33-116:35
++    Visibility: public -/
++def MetadataError.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.loop_exit_shared_children.MetadataError) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [loop_exit_shared_children::{core::cmp::Eq for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:33-116:35 -/
++@[reducible]
++def MetadataError.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.loop_exit_shared_children.MetadataError := {
++  partialEqInst :=
++    _root_.loop_exit_shared_children.MetadataError.Insts.CoreCmpPartialEqMetadataError
++  assert_receiver_is_total_eq :=
++    _root_.loop_exit_shared_children.MetadataError.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [loop_exit_shared_children::{core::fmt::Debug for loop_exit_shared_children::MetadataError}::fmt]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:37-116:42
++    Visibility: public -/
++def MetadataError.Insts.CoreFmtDebug.fmt
++  (self : _root_.loop_exit_shared_children.MetadataError)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugUsize self.key_len
++  let dyn1 := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU32 self.expected
++  let dyn2 :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.shape
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field3_finish f
++    (_root_.Aeneas.Std.toStr "MetadataError") (_root_.Aeneas.Std.toStr
++    "key_len") dyn (_root_.Aeneas.Std.toStr "expected") dyn1
++    (_root_.Aeneas.Std.toStr "shape") dyn2
++
++/-- Trait implementation: [loop_exit_shared_children::{core::fmt::Debug for loop_exit_shared_children::MetadataError}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 116:37-116:42 -/
++@[reducible]
++def MetadataError.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.loop_exit_shared_children.MetadataError := {
++  fmt := _root_.loop_exit_shared_children.MetadataError.Insts.CoreFmtDebug.fmt
++}
++
++/-- [loop_exit_shared_children::error]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 123:0-125:1
++    Visibility: public -/
++def error
++  (key : _root_.Aeneas.Std.Str) (v : _root_.loop_exit_shared_children.View)
++  (expected : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_shared_children.MetadataError
++  := do
++  let i ← _root_.Aeneas.Std.core.str.Str.len key
++  let o ← _root_.loop_exit_shared_children.View.string v
++  let b := _root_.Aeneas.Std.core.option.Option.is_some o
++  if b
++  then _root_.Aeneas.Std.Result.ok { key_len := i, expected, shape := 1#u32 }
++  else _root_.Aeneas.Std.Result.ok { key_len := i, expected, shape := 0#u32 }
++
++/-- [loop_exit_shared_children::check_entries::closure]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 134:36-134:61 -/
++@[reducible]
++def check_entries.closure := _root_.Aeneas.Std.Str
++
++/-- [loop_exit_shared_children::check_entries::{core::ops::function::FnMut<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::check_entries::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 134:36-134:61 -/
++def
++  check_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++  (c : _root_.loop_exit_shared_children.check_entries.closure)
++  (tupled_args : (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_exit_shared_children.check_entries.closure)
++  := do
++  let (prior, _) := tupled_args
++  let b ←
++    _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++      _root_.Aeneas.Std.core.cmp.PartialEqStr prior c
++  _root_.Aeneas.Std.Result.ok (b, c)
++
++/-- [loop_exit_shared_children::check_entries::{core::ops::function::FnOnce<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::check_entries::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 134:36-134:61 -/
++def
++  check_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool.call_once
++  (c : _root_.loop_exit_shared_children.check_entries.closure)
++  (p : (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.loop_exit_shared_children.check_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [loop_exit_shared_children::check_entries::{core::ops::function::FnOnce<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::check_entries::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 134:36-134:61 -/
++@[reducible]
++def
++  check_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_exit_shared_children.check_entries.closure (_root_.Aeneas.Std.Str
++  × _root_.loop_exit_shared_children.View) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_exit_shared_children.check_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_exit_shared_children::check_entries::{core::ops::function::FnMut<(&'_ ((&'_ (str), loop_exit_shared_children::View<'_>))), bool> for loop_exit_shared_children::check_entries::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 134:36-134:61 -/
++@[reducible]
++def
++  check_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_exit_shared_children.check_entries.closure (_root_.Aeneas.Std.Str
++  × _root_.loop_exit_shared_children.View) _root_.Bool := {
++  FnOnceInst :=
++    _root_.loop_exit_shared_children.check_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairSharedStrViewBool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_exit_shared_children.check_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_exit_shared_children::check_entries]: loop body 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 0:0-168:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_entries_loop.body
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View))
++  (children : _root_.Aeneas.Std.Slice _root_.loop_exit_shared_children.View)
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)))
++  (tag : _root_.Option _root_.loop_exit_shared_children.Tag) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++    _root_.loop_exit_shared_children.View))) × (_root_.Option
++    _root_.loop_exit_shared_children.Tag))
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.loop_exit_shared_children.MetadataError))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.enumerate.IteratorEnumerate.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok ()))
++  | some p =>
++    let (index, p1) := p
++    let (key, v) := p1
++    let s ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice
++        (_root_.Aeneas.Std.Str × _root_.loop_exit_shared_children.View)) meta1
++        { «end» := index }
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let (model_state2, _, _) ←
++      _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.any
++        _root_.loop_exit_shared_children.check_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairSharedStrViewBool
++        i key
++    if model_state2
++    then
++      let me ← _root_.loop_exit_shared_children.error key v 0#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err me))
++    else
++      let kc ← _root_.loop_exit_shared_children.classify key
++      match kc with
++      | _root_.loop_exit_shared_children.KeyClass.Registered r =>
++        let (tag1, v1, iter1, placement) ←
++          match r.placement with
++          | _root_.loop_exit_shared_children.Placement.Any =>
++            _root_.Aeneas.Std.Result.ok (tag, v, model_state1, true)
++          | _root_.loop_exit_shared_children.Placement.Tag owner =>
++            do
++            let placement1 ←
++              _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++                _root_.loop_exit_shared_children.Tag.Insts.CoreCmpPartialEqTag
++                tag (some owner)
++            _root_.Aeneas.Std.Result.ok (tag, v, model_state1, placement1)
++          | _root_.loop_exit_shared_children.Placement.Path =>
++            do
++            let (tag2, v2, e, b) ←
++              match tag with
++              | none =>
++                _root_.Aeneas.Std.Result.ok (none, v, model_state1, false)
++              | some t =>
++                do
++                let joined ←
++                  match t with
++                  | _root_.loop_exit_shared_children.Tag.Def =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                      (_root_.loop_exit_shared_children.Tag.Def, model_state1)
++                      : _root_.Sum (_root_.loop_exit_shared_children.Tag ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))))
++                      (_root_.loop_exit_shared_children.Tag ×
++                      _root_.loop_exit_shared_children.View ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))) × _root_.Bool))
++                  | _root_.loop_exit_shared_children.Tag.Module =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                      (_root_.loop_exit_shared_children.Tag.Module, v,
++                      model_state1, true) : _root_.Sum
++                      (_root_.loop_exit_shared_children.Tag ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))))
++                      (_root_.loop_exit_shared_children.Tag ×
++                      _root_.loop_exit_shared_children.View ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))) × _root_.Bool))
++                  | _root_.loop_exit_shared_children.Tag.Fn =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                      (_root_.loop_exit_shared_children.Tag.Fn, model_state1) :
++                      _root_.Sum (_root_.loop_exit_shared_children.Tag ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))))
++                      (_root_.loop_exit_shared_children.Tag ×
++                      _root_.loop_exit_shared_children.View ×
++                      (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                      (_root_.Aeneas.Std.core.slice.iter.Iter
++                      (_root_.Aeneas.Std.Str ×
++                      _root_.loop_exit_shared_children.View))) × _root_.Bool))
++                let (t1, v3, e1, b1) ←
++                  match joined with
++                  | _root_.Sum.inl (t2, e2) =>
++                    _root_.Aeneas.Std.Result.ok (t2, v, e2, false)
++                  | _root_.Sum.inr (exit, exit1, exit2, exit3) =>
++                    _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3)
++                _root_.Aeneas.Std.Result.ok (some t1, v3, e1, b1)
++            let (v3, b1) ←
++              if b
++              then
++                do
++                let o ← _root_.loop_exit_shared_children.View.string v2
++                match o with
++                | none => _root_.Aeneas.Std.Result.ok (v2, false)
++                | some path =>
++                  let o1 ← _root_.Aeneas.Std.core.slice.Slice.first children
++                  let b2 ←
++                    match o1 with
++                    | none => _root_.Aeneas.Std.Result.ok false
++                    | some c =>
++                      do
++                      let o2 ← _root_.loop_exit_shared_children.View.name c
++                      match o2 with
++                      | none => _root_.Aeneas.Std.Result.ok false
++                      | some name1 =>
++                        _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++                          _root_.Aeneas.Std.core.cmp.PartialEqStr path name1
++                  _root_.Aeneas.Std.Result.ok (v2, b2)
++              else _root_.Aeneas.Std.Result.ok (v2, false)
++            _root_.Aeneas.Std.Result.ok (tag2, v3, e, b1)
++        if placement
++        then
++          let b ← _root_.loop_exit_shared_children.shape_valid r.shape v1
++          if b
++          then
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++              (iter1, tag1))
++          else
++            let e ← _root_.loop_exit_shared_children.error key v1 r.expected
++            let b1 ←
++              _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++                _root_.Aeneas.Std.core.cmp.PartialEqStr key
++                (_root_.Aeneas.Std.toStr "opaque")
++            let me ←
++              if b1
++              then
++                do
++                let b2 ←
++                  _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++                    _root_.loop_exit_shared_children.Tag.Insts.CoreCmpPartialEqTag
++                    tag1 (some _root_.loop_exit_shared_children.Tag.Def)
++                if b2
++                then _root_.Aeneas.Std.Result.ok { e with shape := 7#u32 }
++                else _root_.Aeneas.Std.Result.ok e
++              else _root_.Aeneas.Std.Result.ok e
++            _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++              (_root_.Aeneas.Std.core.result.Result.Err me))
++        else
++          let e ← _root_.loop_exit_shared_children.error key v1 r.expected
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              _root_.Aeneas.Std.core.cmp.PartialEqStr key
++              (_root_.Aeneas.Std.toStr "opaque")
++          let me ←
++            if b
++            then
++              do
++              let b1 ←
++                _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++                  _root_.loop_exit_shared_children.Tag.Insts.CoreCmpPartialEqTag
++                  tag1 (some _root_.loop_exit_shared_children.Tag.Def)
++              if b1
++              then _root_.Aeneas.Std.Result.ok { e with shape := 7#u32 }
++              else _root_.Aeneas.Std.Result.ok e
++            else _root_.Aeneas.Std.Result.ok e
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++            (_root_.Aeneas.Std.core.result.Result.Err me))
++      | _root_.loop_exit_shared_children.KeyClass.Extension =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, tag))
++      | _root_.loop_exit_shared_children.KeyClass.Forbidden =>
++        let me ← _root_.loop_exit_shared_children.error key v 9#u32
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Aeneas.Std.core.result.Result.Err me))
++
++/-- [loop_exit_shared_children::check_entries]: loop 0:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 0:0-168:1
++    Visibility: public -/
++@[rust_loop]
++def check_entries_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View)))
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View))
++  (tag : _root_.Option _root_.loop_exit_shared_children.Tag)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.loop_exit_shared_children.MetadataError)
++  := do
++  loop
++    (fun (iter1, tag1) =>
++       _root_.loop_exit_shared_children.check_entries_loop.body meta1 children
++       iter1 tag1 : ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View))) × (_root_.Option
++      _root_.loop_exit_shared_children.Tag)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View))) × (_root_.Option
++      _root_.loop_exit_shared_children.Tag))
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit
++      _root_.loop_exit_shared_children.MetadataError)))
++    (iter, tag)
++
++/-- [loop_exit_shared_children::check_entries]:
++    Source: 'tests/src/loop-exit-shared-children.rs', lines 128:0-168:1
++    Visibility: public -/
++def check_entries
++  (meta1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Str ×
++  _root_.loop_exit_shared_children.View))
++  (tag : _root_.Option _root_.loop_exit_shared_children.Tag)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_exit_shared_children.View) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.loop_exit_shared_children.MetadataError)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref meta1
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.Str ×
++      _root_.loop_exit_shared_children.View)).enumerate i
++  _root_.loop_exit_shared_children.check_entries_loop model_state meta1 tag
++    children
++
++end loop_exit_shared_children
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 195e6b5..7930b5f 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -61,6 +61,7 @@ package «tests» {}
+ @[default_target] lean_lib JoinDuplicate
+ @[default_target] lean_lib ListBorrows
+ @[default_target] lean_lib LoopEntrySharedPayload
++@[default_target] lean_lib LoopExitSharedChildren
+ @[default_target] lean_lib LoopJoinBorrows
+ @[default_target] lean_lib LoopJoinClosures
+ @[default_target] lean_lib JoinStaticNested
+diff --git a/tests/src/loop-exit-shared-children.rs b/tests/src/loop-exit-shared-children.rs
+new file mode 100644
+index 0000000..d55c2a8
+--- /dev/null
++++ b/tests/src/loop-exit-shared-children.rs
+@@ -0,0 +1,207 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopExitSharedChildren
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::cmp
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over the entries of a shared `Vec<(&str, View<'_>)>` which leave the
++//! loop from inside its body (`return`, several exits). Calling `next` on the
++//! slice iterator introduces child abstractions for the nested regions of the
++//! elements, which only hold shared borrows. At a loop exit their parent still
++//! holds loans, so they used to survive (in the joined break context, or in
++//! the context at a later exit only), and matching the contexts at the loop
++//! exits failed. An abstraction which only holds shared borrows gives nothing
++//! back: it ends independently of its parents.
++//! `LoopExitSharedChildren/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++#![allow(dead_code)]
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub enum Tag {
++    Def,
++    Module,
++    Fn,
++}
++
++#[derive(Clone, Copy)]
++pub enum View<'a> {
++    Name(&'a str),
++    Str(&'a str),
++    True,
++}
++
++impl<'a> View<'a> {
++    pub fn name(self) -> Option<&'a str> {
++        match self {
++            View::Name(v) => Some(v),
++            _ => None,
++        }
++    }
++    pub fn string(self) -> Option<&'a str> {
++        match self {
++            View::Str(v) => Some(v),
++            _ => None,
++        }
++    }
++}
++
++pub type Entries<'a> = Vec<(&'a str, View<'a>)>;
++
++/// The first repeated key (its index), or the total length of the values.
++pub fn first_duplicate(meta: &Entries<'_>) -> Result<u32, u32> {
++    let mut n = 0u32;
++    for (index, (key, v)) in meta.iter().enumerate() {
++        if meta[..index].iter().any(|(prior, _)| prior == key) {
++            return Err(index as u32);
++        }
++        let len = match v.string() {
++            Some(s) => s.len(),
++            None => 0,
++        };
++        n = n.wrapping_add(len as u32);
++    }
++    Ok(n)
++}
++
++#[derive(Clone, Copy)]
++pub enum Shape {
++    Str,
++    Name,
++    True,
++}
++
++#[derive(Clone, Copy)]
++pub enum Placement {
++    Any,
++    Tag(Tag),
++    Path,
++}
++
++pub struct Rule {
++    pub key: &'static str,
++    pub shape: Shape,
++    pub placement: Placement,
++    pub expected: u32,
++}
++
++pub static RULES: [Rule; 3] = [
++    Rule { key: "doc", shape: Shape::Str, placement: Placement::Any, expected: 1 },
++    Rule { key: "path", shape: Shape::Str, placement: Placement::Path, expected: 2 },
++    Rule { key: "opaque", shape: Shape::True, placement: Placement::Tag(Tag::Def), expected: 3 },
++];
++
++pub enum KeyClass {
++    Registered(&'static Rule),
++    Extension,
++    Forbidden,
++}
++
++pub fn classify(key: &str) -> KeyClass {
++    let mut i = 0;
++    while i < RULES.len() {
++        if RULES[i].key == key {
++            return KeyClass::Registered(&RULES[i]);
++        }
++        i += 1;
++    }
++    if key.len() > 5 { KeyClass::Forbidden } else { KeyClass::Extension }
++}
++
++pub fn shape_valid(shape: Shape, v: View<'_>) -> bool {
++    match shape {
++        Shape::Str => v.string().is_some(),
++        Shape::Name => v.name().is_some(),
++        Shape::True => matches!(v, View::True),
++    }
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub struct MetadataError {
++    pub key_len: usize,
++    pub expected: u32,
++    pub shape: u32,
++}
++
++pub fn error(key: &str, v: View<'_>, expected: u32) -> MetadataError {
++    MetadataError { key_len: key.len(), expected, shape: if v.string().is_some() { 1 } else { 0 } }
++}
++
++/// The shape of `chelis_deep::metadata::check_entries`.
++pub fn check_entries(
++    meta: &Entries<'_>,
++    tag: Option<Tag>,
++    children: &[View<'_>],
++) -> Result<(), MetadataError> {
++    for (index, (key, v)) in meta.iter().enumerate() {
++        if meta[..index].iter().any(|(prior, _)| prior == key) {
++            return Err(error(key, *v, 0));
++        }
++        let rule = match classify(key) {
++            KeyClass::Extension => continue,
++            KeyClass::Forbidden => return Err(error(key, *v, 9)),
++            KeyClass::Registered(rule) => rule,
++        };
++        let placement = match rule.placement {
++            Placement::Any => true,
++            Placement::Tag(owner) => tag == Some(owner),
++            Placement::Path => {
++                matches!(tag, Some(Tag::Module))
++                    && match v.string() {
++                        Some(path) => match children.first() {
++                            Some(c) => match c.name() {
++                                Some(name) => path == name,
++                                None => false,
++                            },
++                            None => false,
++                        },
++                        None => false,
++                    }
++            }
++        };
++        if !placement || !shape_valid(rule.shape, *v) {
++            let mut e = error(key, *v, rule.expected);
++            if *key == "opaque" && tag == Some(Tag::Def) {
++                e.shape = 7;
++            }
++            return Err(e);
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn err(key_len: usize, expected: u32, shape: u32) -> Result<(), MetadataError> {
++        Err(MetadataError { key_len, expected, shape })
++    }
++
++    #[test]
++    fn duplicates() {
++        assert_eq!(first_duplicate(&vec![]), Ok(0));
++        assert_eq!(first_duplicate(&vec![("a", View::Str("xy")), ("b", View::True)]), Ok(2));
++        assert_eq!(
++            first_duplicate(&vec![("a", View::Str("xy")), ("b", View::Str("z")), ("a", View::True)]),
++            Err(2)
++        );
++        assert_eq!(
++            first_duplicate(&vec![("k", View::Name("n")), ("k", View::Str("abc"))]),
++            Err(1)
++        );
++    }
++
++    #[test]
++    fn entries() {
++        let kids = [View::Name("m")];
++        assert_eq!(check_entries(&vec![], None, &[]), Ok(()));
++        assert_eq!(check_entries(&vec![("doc", View::Str("d")), ("ext", View::True)], None, &[]), Ok(()));
++        assert_eq!(check_entries(&vec![("doc", View::Str("d")), ("doc", View::Str("e"))], None, &[]), err(3, 0, 1));
++        assert_eq!(check_entries(&vec![("unknown", View::True)], None, &[]), err(7, 9, 0));
++        assert_eq!(check_entries(&vec![("doc", View::True)], None, &[]), err(3, 1, 0));
++        assert_eq!(check_entries(&vec![("opaque", View::True)], Some(Tag::Def), &[]), Ok(()));
++        assert_eq!(check_entries(&vec![("opaque", View::Str("s"))], Some(Tag::Def), &[]), err(6, 3, 7));
++        assert_eq!(check_entries(&vec![("opaque", View::True)], Some(Tag::Fn), &[]), err(6, 3, 0));
++        assert_eq!(check_entries(&vec![("path", View::Str("m"))], Some(Tag::Module), &kids), Ok(()));
++        assert_eq!(check_entries(&vec![("path", View::Str("q"))], Some(Tag::Module), &kids), err(4, 2, 1));
++        assert_eq!(check_entries(&vec![("path", View::Str("m"))], Some(Tag::Module), &[]), err(4, 2, 1));
++    }
++}

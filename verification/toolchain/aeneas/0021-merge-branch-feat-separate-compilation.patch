@@ -1,0 +1,1492 @@
+# aeneas integration step 21 after cba11f3beb: commit 547f46df68fd4fd8cf4f57de116e2441f3ff0522
+# first parent d596820b46c948c0202e39936ac9b91c3e23ba59, merged bc3dc5309b65373e5a9cfa0c6624f4c088e993ae
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'feat/separate-compilation'
+
+diff --git a/src/Config.ml b/src/Config.ml
+index 10c5063..7a05028 100644
+--- a/src/Config.ml
++++ b/src/Config.ml
+@@ -46,6 +46,32 @@ let subdir : string option ref = ref None
+ 
+ let set_subdir (s : string) : unit = subdir := Some s
+ 
++(** Separate compilation: canonical naming mode.
++
++    Every extracted name is derived from the full Rust path of the item (its
++    crate included), independently of the crate being extracted, and the
++    generated files are not wrapped in a crate-dependent namespace (only in the
++    one given with [-namespace], if any). Specialized (partially monomorphized)
++    items are disambiguated by a digest of their structural Rust name, which
++    does not depend on the LLBC item ids. Several chunks of one workspace
++    extracted in this mode form one coherent Lean environment. *)
++let canonical_names = ref false
++
++(** Separate compilation: manifests (written by [-emit-manifest] for earlier
++    chunks) listing the items which are already emitted by other Lean modules.
++    Their LLBC declarations are still used, but no declaration is emitted for
++    them: the generated files import their owner modules instead. *)
++let external_manifests : string list ref = ref []
++
++let add_external_manifest (s : string) : unit =
++  external_manifests := !external_manifests @ [ s ]
++
++(** Separate compilation: where to write the manifest of the items emitted by
++    this chunk. *)
++let emit_manifest : string option ref = ref None
++
++let set_emit_manifest (s : string) : unit = emit_manifest := Some s
++
+ (** If [true], we do not generate code and simply borrow-check the program
+     instead. This allows us to relax some sanity checks which are present in the
+     symbolic execution only to make sure we will be able to generate the pure
+diff --git a/src/Main.ml b/src/Main.ml
+index 1d1d88b..fdb3ae7 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -122,6 +122,22 @@ let () =
+         " Lean with -split-files: write function definitions to a chain of \
+          modules FunsPart<i>, starting a new one at a declaration-group \
+          boundary after this many bytes (0 = one Funs module)." );
++      ( "-canonical-names",
++        Arg.Set canonical_names,
++        " Lean: derive every extracted name from the full Rust path of the \
++         item (crate included) and do not wrap the definitions in a \
++         crate-dependent namespace, so that separately extracted chunks of a \
++         workspace form one Lean environment." );
++      ( "-external",
++        Arg.String add_external_manifest,
++        " Lean with -canonical-names: read a manifest written by \
++         -emit-manifest for an earlier chunk. Its items are used but not \
++         emitted; the generated files import their owner modules. May be \
++         repeated." );
++      ( "-emit-manifest",
++        Arg.String set_emit_manifest,
++        " Lean with -canonical-names: write the manifest of the declarations \
++         emitted by this chunk to the given file." );
+       ( "-checks",
+         Arg.Set sanity_checks,
+         " Activate extensive sanity checks (warning: causes a ~100 times slow \
+@@ -453,6 +469,14 @@ let () =
+   if !set_max_heartbeats && not (backend () = Lean) then
+     fail_with_error
+       "The -max-heartbeats option is valid only for the Lean backend";
++  if !canonical_names && not (backend () = Lean) then
++    fail_with_error "The -canonical-names option is valid only for Lean";
++  check_arg_implies
++    (!external_manifests <> [])
++    "-external" !canonical_names "-canonical-names";
++  check_arg_implies
++    (Option.is_some !emit_manifest)
++    "-emit-manifest" !canonical_names "-canonical-names";
+ 
+   check_arg_implies !diagnose_detailed "-diagnose-detailed"
+     !diagnose_micro_passes "-diagnose-micro-passes";
+@@ -566,6 +590,10 @@ let () =
+          without the `--preset=aeneas` option. Please regenerate the crate by \
+          calling Charon with `--preset=aeneas`.\n";
+ 
++      (* Separate compilation: resolve the items emitted by earlier chunks *)
++      SeparateCompilation.init m;
++      if !Errors.error_list <> [] then exit 1;
++
+       (* We don't support mutually recursive definitions with decreases clauses in Lean *)
+       if
+         !opt_backend = Some Lean && !extract_decreases_clauses
+@@ -722,6 +750,10 @@ let () =
+       (* Apply the pre-passes *)
+       let m = Aeneas.PrePasses.apply_passes m in
+ 
++      (* Separate compilation: only the owner chunk translates the bodies of
++         the external functions *)
++      let m = SeparateCompilation.hide_external_bodies m in
++
+       (* Test the unit functions with the concrete interpreter *)
+       if !test_unit_functions then Test.test_unit_functions m;
+ 
+@@ -741,9 +773,15 @@ let () =
+       in
+ 
+       (* Diagnose unknown external definitions when no separate implementation
+-         files are requested, respecting the strict-warning mode. *)
++         files are requested, respecting the strict-warning mode. With separate
++         compilation, external definitions are provided by the manifests of the
++         earlier chunks only. *)
++      let separate_compilation =
++        !external_manifests <> [] || Option.is_some !emit_manifest
++      in
+       let has_errors =
+-        if !extracted_opaque && not !split_files then (
++        if !extracted_opaque && ((not !split_files) || separate_compilation)
++        then (
+           let message =
+             lazy
+               "The crate contains extracted external, unknown definitions: we \
+@@ -756,6 +794,11 @@ let () =
+         else has_errors
+       in
+ 
++      (* Separate compilation: publish the declarations of this chunk *)
++      (match !emit_manifest with
++      | Some file when not has_errors -> SeparateCompilation.write_manifest file
++      | _ -> ());
++
+       (* Print error diagnostics *)
+       (if !print_error_diagnostics && !Errors.error_list <> [] then
+          let
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 674bb72..648ae4d 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1798,7 +1798,11 @@ let simplify_trait_calls (crate : crate) : crate =
+     match id with
+     | IdFun id ->
+         let f = FunDeclId.Map.find id crate.fun_decls in
+-        if is_modeled_function f then (
++        (* The bodies of external functions are emitted by their owner chunk *)
++        if
++          is_modeled_function f
++          || SeparateCompilation.is_external (IdFun f.def_id)
++        then (
+           visitor#visit_generic_params () f.generics;
+           visitor#visit_fun_sig () f.signature)
+         else visitor#visit_fun_decl () f
+diff --git a/src/Translate.ml b/src/Translate.ml
+index bd50416..cdc9f23 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -6,6 +6,7 @@ open Contexts
+ open Builtin
+ module SA = SymbolicAst
+ module Micro = PureMicroPasses
++module SC = SeparateCompilation
+ open TranslateCore
+ open Errors
+ open Parallel
+@@ -572,6 +573,9 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+     Micro.prune_unused_provided_fields crate trait_decls trait_impls
+       pure_translations
+   in
++  let trait_decls, trait_impls =
++    Micro.apply_external_trait_fields trait_decls trait_impls pure_translations
++  in
+ 
+   (* Return *)
+   ( trans_ctx,
+@@ -619,9 +623,15 @@ type gen_config = {
+     definitions that we will map to definitions from the standard library. *)
+ let crate_has_opaque_non_builtin_decls (ctx : gen_ctx) (filter_builtin : bool) :
+     bool * bool =
++  (* The declarations of external items are emitted by other chunks *)
+   let types, funs =
+     LlbcAstUtils.crate_get_opaque_non_builtin_decls ctx.crate filter_builtin
+-      ctx.trans_ctx.type_ctx.to_extract ctx.trans_ctx.fun_ctx.to_extract
++      (TypeDeclId.Map.filter
++         (fun id _ -> not (SC.is_external (IdType id)))
++         ctx.trans_ctx.type_ctx.to_extract)
++      (FunDeclId.Map.filter
++         (fun id _ -> not (SC.is_external (IdFun id)))
++         ctx.trans_ctx.fun_ctx.to_extract)
+   in
+   [%ldebug
+     "- opaque types:\n"
+@@ -637,6 +647,230 @@ let crate_has_opaque_non_builtin_decls (ctx : gen_ctx) (filter_builtin : bool) :
+            funs)];
+   (types <> [], funs <> [])
+ 
++(** {1 Separate compilation}
++
++    The interface of a declaration, as seen by the other chunks: a fingerprint
++    of its translation, printed with the (structural) Rust names of the items it
++    refers to. The fingerprint recorded by the owner chunk must be the one
++    computed from the external view in the other chunks, whose translation does
++    not see the bodies (see [SeparateCompilation.fun_facts]). *)
++
++let sc_env (ctx : gen_ctx) (generics : Pure.generic_params) : PrintPure.fmt_env
++    =
++  { (ExtractBase.extraction_ctx_to_fmt_env ctx) with generics = [ generics ] }
++
++let sc_fun_sig_fingerprint (ctx : gen_ctx) (sg : Pure.fun_sig) : string =
++  let env = sc_env ctx sg.generics in
++  String.concat "\n"
++    [
++      PrintPure.fun_sig_to_string env sg;
++      PrintPure.predicates_to_string env sg.preds;
++      Pure.show_explicit_info sg.explicit_info;
++      Pure.show_known_info sg.known_from_trait_refs;
++      Pure.show_fun_sig_info sg.fwd_info;
++      String.concat ";"
++        (List.map
++           (fun (id, info) ->
++             RegionGroupId.to_string id ^ ":" ^ Pure.show_fun_effect_info info)
++           (RegionGroupId.Map.bindings sg.back_effect_info));
++    ]
++
++let sc_type_fingerprint (ctx : gen_ctx) (d : Pure.type_decl) : string =
++  PrintPure.type_decl_to_string (sc_env ctx d.generics) d
++
++let sc_global_fingerprint (ctx : gen_ctx) (d : Pure.global_decl) : string =
++  let env = sc_env ctx d.generics in
++  String.concat "\n"
++    [
++      PrintPure.generic_params_to_string env d.generics;
++      PrintPure.predicates_to_string env d.preds;
++      Pure.show_explicit_info d.explicit_info;
++      PrintPure.ty_to_string env false d.ty;
++      string_of_bool d.can_fail;
++    ]
++
++let sc_trait_decl_fingerprint (ctx : gen_ctx) (d : Pure.trait_decl) : string =
++  let env = sc_env ctx d.generics in
++  let method_sig (name, (m : Pure.fun_decl_ref Pure.binder)) =
++    name ^ " : "
++    ^
++    match FunDeclId.Map.find_opt m.binder_value.fun_id ctx.trans_funs with
++    | Some trans -> sc_fun_sig_fingerprint ctx trans.f.signature
++    | None -> "<untranslated>"
++  in
++  String.concat "\n"
++    ([
++       PrintPure.generic_params_to_string env d.generics;
++       PrintPure.predicates_to_string env d.preds;
++       Pure.show_explicit_info d.explicit_info;
++     ]
++    @ List.map (PrintPure.trait_clause_to_string env) d.parent_clauses
++    @ List.map
++        (fun (name, ty) -> name ^ " : " ^ PrintPure.ty_to_string env false ty)
++        d.consts
++    @ d.types
++    @ List.map method_sig d.methods)
++
++let sc_trait_impl_fingerprint (ctx : gen_ctx) (d : Pure.trait_impl) : string =
++  let env = sc_env ctx d.generics in
++  String.concat "\n"
++    ([
++       PrintPure.trait_decl_ref_to_string env false d.impl_trait;
++       PrintPure.generic_params_to_string env d.generics;
++       PrintPure.predicates_to_string env d.preds;
++       Pure.show_explicit_info d.explicit_info;
++     ]
++    @ List.map (PrintPure.trait_ref_to_string env false) d.parent_trait_refs
++    @ List.map fst d.consts
++    @ List.map
++        (fun (name, ty) -> name ^ " = " ^ PrintPure.ty_to_string env false ty)
++        d.types
++    @ List.map fst d.methods)
++
++let sc_digest (s : string) : string = Digest.to_hex (Digest.string s)
++
++(** The top-level Lean names of the translation of a Rust function *)
++let sc_fun_lean_names (ctx : gen_ctx) (trans : pure_fun_translation) :
++    string list =
++  List.map
++    (fun (d : Pure.fun_decl) ->
++      ExtractBase.ctx_get None
++        (FunId (FromLlbc (FunId (FRegular d.def_id), d.loop_id)))
++        ctx)
++    ((trans.f :: trans.loops) @ trans.bodies)
++
++let sc_fun_facts (ctx : gen_ctx) (id : FunDeclId.id) : SC.fun_facts =
++  let decl = FunDeclId.Map.find id ctx.trans_ctx.fun_ctx.fun_decls in
++  match FunDeclId.Map.find_opt id ctx.trans_ctx.fun_ctx.fun_infos with
++  | Some info ->
++      {
++        can_fail = info.can_fail;
++        stateful = info.stateful;
++        can_diverge = info.can_diverge;
++        is_rec = info.is_rec;
++        state_inputs = ModelStateInputs.for_decl ctx.crate decl;
++        canonical_body =
++          ModelStateInputs.canonical_body_state_inputs ctx.crate decl;
++      }
++  | None ->
++      [%craise] decl.item_meta.span
++        "Separate compilation: missing function analysis"
++
++(** The Lean name, fingerprint, function facts and trait fields of the
++    translation of an item, if it was translated. *)
++let sc_item_interface (ctx : gen_ctx) (id : item_id) :
++    (string list * string * SC.fun_facts option * string list option) option =
++  match id with
++  | IdType tid ->
++      Option.map
++        (fun d ->
++          ( [ ExtractBase.ctx_get None (TypeId (TAdtId tid)) ctx ],
++            sc_type_fingerprint ctx d,
++            None,
++            None ))
++        (Pure.TypeDeclId.Map.find_opt tid ctx.trans_types)
++  | IdFun fid ->
++      Option.map
++        (fun (trans : pure_fun_translation) ->
++          ( sc_fun_lean_names ctx trans,
++            sc_fun_sig_fingerprint ctx trans.f.signature,
++            Some (sc_fun_facts ctx fid),
++            None ))
++        (FunDeclId.Map.find_opt fid ctx.trans_funs)
++  | IdGlobal gid ->
++      Option.map
++        (fun (d : Pure.global_decl) ->
++          ( [ ExtractBase.ctx_get None (GlobalId gid) ctx ],
++            sc_global_fingerprint ctx d,
++            Some (sc_fun_facts ctx d.body_id),
++            None ))
++        (GlobalDeclId.Map.find_opt gid ctx.trans_globals)
++  | IdTraitDecl tid ->
++      Option.map
++        (fun (d : Pure.trait_decl) ->
++          ( [ ExtractBase.ctx_get None (TraitDeclId tid) ctx ],
++            sc_trait_decl_fingerprint ctx d,
++            None,
++            Some (List.map fst d.methods) ))
++        (TraitDeclId.Map.find_opt tid ctx.trans_trait_decls)
++  | IdTraitImpl tid ->
++      Option.map
++        (fun (d : Pure.trait_impl) ->
++          ( [ ExtractBase.ctx_get None (TraitImplId tid) ctx ],
++            sc_trait_impl_fingerprint ctx d,
++            None,
++            None ))
++        (TraitImplId.Map.find_opt tid ctx.trans_trait_impls)
++
++(** Record a declaration emitted in the current module *)
++let sc_record (ctx : gen_ctx) (id : item_id) : unit =
++  if SC.enabled () then
++    match
++      (SC.item_key ctx.crate id, !SC.current_module, sc_item_interface ctx id)
++    with
++    | Some key, Some lean_module, Some (lean_names, fingerprint, facts, methods)
++      ->
++        SC.record
++          {
++            key;
++            lean_module;
++            lean_names;
++            fingerprint = sc_digest fingerprint;
++            facts;
++            methods;
++          }
++    | _ ->
++        [%craise_opt_span] None
++          "Separate compilation: cannot record a declaration"
++
++(** The external items used by this chunk must be seen exactly as their owner
++    emitted them: same Lean names, same interface. *)
++let sc_check_external_views (ctx : gen_ctx) : unit =
++  let check (id : item_id) =
++    match SC.external_entry id with
++    | None -> ()
++    | Some e -> (
++        match sc_item_interface ctx id with
++        | None -> ()
++        | Some (lean_names, fingerprint, _, methods) -> (
++            let main = List.hd lean_names in
++            if main <> List.hd e.lean_names then
++              SC.fail
++                ("Separate compilation: the Lean name of [" ^ e.key ^ "] is "
++               ^ main ^ " in this chunk but " ^ List.hd e.lean_names
++               ^ " in its owner module " ^ e.lean_module);
++            if sc_digest fingerprint <> e.fingerprint then
++              SC.fail
++                ("Separate compilation: the interface of [" ^ e.key
++               ^ "] in this chunk differs from the one emitted by its owner \
++                  module " ^ e.lean_module ^ ". Interface in this chunk:\n"
++               ^ fingerprint);
++            match (methods, e.methods) with
++            | Some l, Some l' when l <> l' ->
++                SC.fail
++                  ("Separate compilation: the fields of [" ^ e.key
++                 ^ "] differ from the ones of its owner module " ^ e.lean_module
++                  )
++            | _ -> ()))
++  in
++  List.iter
++    (fun g ->
++      List.iter
++        (fun id ->
++          match id with
++          | IdFun fid -> (
++              match FunDeclId.Map.find_opt fid ctx.trans_funs with
++              | Some trans
++                when trans.f.is_global_decl_body
++                     ||
++                     match trans.f.src with
++                     | TraitDeclItem (_, _, false) -> true
++                     | _ -> false -> ()
++              | _ -> check id)
++          | _ -> check id)
++        (Charon.GAstUtils.declaration_group_to_list g))
++    ctx.crate.declarations
++
+ (** Export a type declaration.
+ 
+     It may happen that we have to extract extra information/instructions. For
+@@ -771,6 +1005,9 @@ let export_types_group (fmt : Format.formatter) (config : gen_config)
+       (fun i def ->
+         let kind = kind_from_index i in
+         export_type_extra_info kind def)
++      defs;
++    List.iter
++      (fun (def : Pure.type_decl) -> sc_record ctx (IdType def.def_id))
+       defs)
+ 
+ (** Export a global declaration.
+@@ -813,7 +1050,8 @@ let export_global (fmt : Format.formatter) (config : gen_config) (ctx : gen_ctx)
+        takes care of generating the delimiters.
+     *)
+     let global = GlobalDeclId.Map.find_opt id ctx.trans_globals in
+-    Extract.extract_global_decl ctx fmt global body config.interface)
++    Extract.extract_global_decl ctx fmt global body config.interface;
++    sc_record ctx (IdGlobal id))
+ 
+ (** Utility.
+ 
+@@ -992,18 +1230,27 @@ let export_functions_group (fmt : Format.formatter) (config : gen_config)
+     in
+ 
+     (* Extract the function definitions *)
+-    (if config.extract_fun_decls then
+-       (* Group the mutually recursive definitions *)
+-       let subgroups =
+-         ReorderDecls.group_reorder_fun_decls
+-           ~inline_trait_impls:ctx.inline_trait_impls decls
+-       in
++    if config.extract_fun_decls then (
++      (* Group the mutually recursive definitions *)
++      let subgroups =
++        ReorderDecls.group_reorder_fun_decls
++          ~inline_trait_impls:ctx.inline_trait_impls decls
++      in
+ 
+-       (* Extract the subgroups *)
+-       let export_subgroup (is_rec : bool) (decls : Pure.fun_decl list) : unit =
+-         export_functions_group_scc fmt config ctx is_rec decls
+-       in
+-       List.iter (fun (is_rec, decls) -> export_subgroup is_rec decls) subgroups);
++      (* Extract the subgroups *)
++      let export_subgroup (is_rec : bool) (decls : Pure.fun_decl list) : unit =
++        export_functions_group_scc fmt config ctx is_rec decls
++      in
++      List.iter (fun (is_rec, decls) -> export_subgroup is_rec decls) subgroups;
++      (* Record the Rust functions whose definition was emitted *)
++      List.iter
++        (fun (trans : pure_fun_translation) ->
++          let is_opaque = Option.is_none trans.f.body in
++          if
++            ((not is_opaque) && config.extract_transparent)
++            || (is_opaque && config.extract_opaque)
++          then sc_record ctx (IdFun trans.f.def_id))
++        pure_ls);
+ 
+     (* Insert unit tests for functions marked with #[verify::test] *)
+     List.iter
+@@ -1035,7 +1282,9 @@ let export_trait_decl (fmt : Format.formatter) (_config : gen_config)
+   (* Check if the trait declaration is builtin, in which case we ignore it *)
+   if not (trait_decl_is_builtin ctx trait_decl_id) then (
+     let ctx = { ctx with trait_decl_id = Some trait_decl.def_id } in
+-    if extract_decl then Extract.extract_trait_decl ctx fmt trait_decl;
++    if extract_decl then (
++      Extract.extract_trait_decl ctx fmt trait_decl;
++      sc_record ctx (IdTraitDecl trait_decl_id));
+     if extract_extra_info then
+       Extract.extract_trait_decl_extra_info ctx fmt trait_decl)
+   else ()
+@@ -1049,8 +1298,9 @@ let export_trait_impl (fmt : Format.formatter) (_config : gen_config)
+     [%silent_unwrap_opt_span] None
+       (TraitImplId.Map.find_opt trait_impl_id ctx.trans_trait_impls)
+   in
+-  if not (trait_impl_is_builtin ctx trait_impl_id) then
+-    Extract.extract_trait_impl ctx fmt ~is_rec trait_impl
++  if not (trait_impl_is_builtin ctx trait_impl_id) then (
++    Extract.extract_trait_impl ctx fmt ~is_rec trait_impl;
++    sc_record ctx (IdTraitImpl trait_impl_id))
+ 
+ (** A generic utility to generate the extracted definitions: as we may want to
+     split the definitions between different files (or not), we can control what
+@@ -1239,6 +1489,31 @@ let extract_definitions ?(on_group_done : unit -> unit = fun () -> ())
+         [%craise_opt_span] None
+           "Mixed-recursive declaration groups are not supported"
+   in
++  (* Separate compilation: the groups of external items are emitted by their
++     owner chunk. A group cannot be split between chunks. *)
++  let export_decl_group (dg : declaration_group) : unit =
++    (* Trait method declarations are not emitted on their own *)
++    let ids =
++      List.filter
++        (function
++          | IdFun id -> (
++              match FunDeclId.Map.find_opt id ctx.crate.fun_decls with
++              | Some { src = TraitDeclItem (_, _, false); _ } -> false
++              | _ -> true)
++          | _ -> true)
++        (Charon.GAstUtils.declaration_group_to_list dg)
++    in
++    match List.partition SC.is_external ids with
++    | [], _ -> export_decl_group dg
++    | _, [] -> ()
++    | external_ids, _ ->
++        let keys =
++          List.filter_map (fun id -> SC.item_key ctx.crate id) external_ids
++        in
++        [%craise_opt_span] None
++          ("Separate compilation: a recursive declaration group contains items \
++            emitted by another chunk: " ^ String.concat ", " keys)
++  in
+ 
+   List.iter
+     (fun g ->
+@@ -1265,6 +1540,39 @@ type extract_file_info = {
+           of the file *)
+ }
+ 
++(** Separate compilation: the Lean modules imported by every generated file (the
++    owners of the external items) *)
++let sc_imports : string list ref = ref []
++
++(** Separate compilation: the Lean modules are named after their path relative
++    to the destination directory (the Lean source root). *)
++let sc_dest_dir : string ref = ref ""
++
++let sc_lean_module_of_file (filename : string) : string =
++  let dir = !sc_dest_dir in
++  let prefix = if String.ends_with ~suffix:"/" dir then dir else dir ^ "/" in
++  let rel =
++    if String.starts_with ~prefix filename then
++      String.sub filename (String.length prefix)
++        (String.length filename - String.length prefix)
++    else filename
++  in
++  let rel =
++    Option.value (Filename.chop_suffix_opt ~suffix:".lean" rel) ~default:rel
++  in
++  String.concat "." (List.filter (( <> ) "") (String.split_on_char '/' rel))
++
++(** Set the module which owns the declarations emitted from now on *)
++let sc_enter_file (filename : string) : unit =
++  if SC.enabled () then (
++    let m = sc_lean_module_of_file filename in
++    if List.mem m !sc_imports then
++      SC.fail
++        ("Separate compilation: the module " ^ m
++       ^ " is generated by this chunk but owns external items (a manifest of \
++          this chunk was given with -external)");
++    SC.current_module := Some m)
++
+ (** Print the module header: imports, options and the opened namespace. *)
+ let write_file_header (out : out_channel) (fi : extract_file_info) : unit =
+ 
+@@ -1332,6 +1640,8 @@ let write_file_header (out : out_channel) (fi : extract_file_info) : unit =
+       Printf.fprintf out "Module %s.\n" fi.module_name
+   | Lean ->
+       Printf.fprintf out "import Aeneas\n";
++      (* Separate compilation: the modules owning the external items *)
++      List.iter (fun m -> Printf.fprintf out "import %s\n" m) !sc_imports;
+       (* Add the custom imports *)
+       List.iter (fun m -> Printf.fprintf out "import %s\n" m) fi.custom_imports;
+       (* Add the custom includes *)
+@@ -1360,10 +1670,13 @@ let write_file_header (out : out_channel) (fi : extract_file_info) : unit =
+            /- You can remove the following line by using the CLI option \
+            `-all-computable`: -/\n\
+            noncomputable section\n";
+-      (* If we are inside the namespace: declare it *)
+-      if fi.in_namespace then Printf.fprintf out "\nnamespace %s\n" fi.namespace;
++      (* If we are inside the namespace: declare it (with [-canonical-names],
++         there might be no namespace) *)
++      if fi.in_namespace && fi.namespace <> "" then
++        Printf.fprintf out "\nnamespace %s\n" fi.namespace;
+       (* We might need to open the namespace *)
+-      if fi.open_namespace then Printf.fprintf out "open %s\n" fi.namespace
++      if fi.open_namespace && fi.namespace <> "" then
++        Printf.fprintf out "open %s\n" fi.namespace
+   | HOL4 ->
+       Printf.fprintf out "open primitivesLib divDefLib\n";
+       (* Add the custom imports and includes *)
+@@ -1382,7 +1695,9 @@ let write_file_header (out : out_channel) (fi : extract_file_info) : unit =
+ let write_file_footer (out : out_channel) (fi : extract_file_info) : unit =
+   match Config.backend () with
+   | FStar -> ()
+-  | Lean -> if fi.in_namespace then Printf.fprintf out "end %s\n" fi.namespace
++  | Lean ->
++      if fi.in_namespace && fi.namespace <> "" then
++        Printf.fprintf out "end %s\n" fi.namespace
+   | HOL4 -> Printf.fprintf out "val _ = export_theory ()\n"
+   | Coq -> Printf.fprintf out "End %s.\n" fi.module_name
+ 
+@@ -1401,6 +1716,7 @@ let extract_file (config : gen_config) (ctx : gen_ctx) (fi : extract_file_info)
+     : unit =
+   (* Open the file and create the formatter *)
+   let out = open_out fi.filename in
++  sc_enter_file fi.filename;
+   let fmt = Format.formatter_of_out_channel out in
+   (* The header is printed without the formatter: some instructions like
+      [open MODULE] must be printed on one line. This is ok as long as the header
+@@ -1450,6 +1766,7 @@ let extract_file_chunked (config : gen_config) (ctx : gen_ctx)
+   let open_part () =
+     incr index;
+     let filename, module_name = part !index in
++    sc_enter_file filename;
+     let custom_includes =
+       if !index = 1 then fi.custom_includes else [ snd (part (!index - 1)) ]
+     in
+@@ -1753,6 +2070,15 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+       ctx trans_trait_impls
+   in
+ 
++  (* Separate compilation: check the external views, and import their owners *)
++  sc_dest_dir := dest_dir;
++  if SC.enabled () then (
++    sc_check_external_views ctx;
++    sc_imports :=
++      SC.modules_of
++        (List.concat_map Charon.GAstUtils.declaration_group_to_list
++           ctx.crate.declarations));
++
+   let module_delimiter =
+     match Config.backend () with
+     | FStar -> "."
+@@ -1783,14 +2109,10 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           else crate_name
+         in
+         (* We use the raw crate name for the namespaces, unless the user
+-           has provided one *)
++           has provided one (with [-canonical-names], there is no namespace
++           unless the user provided one) *)
+         let namespace =
+-          match !Config.namespace with
+-          | Some namespace -> namespace
+-          | None -> (
+-              match Config.backend () with
+-              | FStar | Coq | HOL4 -> crate.name
+-              | Lean -> crate.name)
++          Option.value (ExtractBase.lean_namespace crate.name) ~default:""
+         in
+         let full_dest_dir =
+           match subdir with
+@@ -2182,6 +2504,9 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+      in
+      extract_file gen_config ctx file_info);
+ 
++  (* Separate compilation: reject the declarations already emitted elsewhere *)
++  if SC.enabled () then SC.check_emitted ();
++
+   (* Generate the build file *)
+   match Config.backend () with
+   | Coq | FStar | HOL4 ->
+diff --git a/src/dune b/src/dune
+index cfa18e1..9d688d8 100644
+--- a/src/dune
++++ b/src/dune
+@@ -100,6 +100,7 @@
+   RegionsHierarchy
+   ReorderDecls
+   SCC
++  SeparateCompilation
+   Scalars
+   StringUtils
+   Substitute
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index 5895b6c..24646eb 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -794,6 +794,17 @@ let ctx_get (span : Meta.span option) (id : id) (ctx : extraction_ctx) : string
+   let id_to_string (id : id) : string = id_to_string span id ctx in
+   names_maps_get span id_to_string id ctx.names_maps
+ 
++(** The namespace which wraps the extracted definitions: the one given with
++    [-namespace], or else the crate name. With [-canonical-names] the names do
++    not depend on the crate being extracted: only the given namespace (if any)
++    is used. *)
++let lean_namespace (crate_name : string) : string option =
++  if !Config.canonical_names then !Config.namespace
++  else Some (Option.value !Config.namespace ~default:crate_name)
++
++let extraction_namespace (ctx : extraction_ctx) : string option =
++  lean_namespace ctx.crate.name
++
+ (** Declaration names stay relative to the extraction namespace. References to
+     generated globals must instead start at the root: neither a declaration's
+     namespace nor a local binder may capture their first component. Model names
+@@ -822,8 +833,9 @@ let ctx_get_reference (span : Meta.span option) (id : id) (ctx : extraction_ctx)
+       | _ -> false
+     in
+     if generated then
+-      let namespace = Option.value !Config.namespace ~default:ctx.crate.name in
+-      "_root_." ^ namespace ^ "." ^ name
++      match extraction_namespace ctx with
++      | Some namespace -> "_root_." ^ namespace ^ "." ^ name
++      | None -> "_root_." ^ name
+     else name
+ 
+ let ctx_get_global ?(as_reference = true) (span : Meta.span)
+@@ -1628,15 +1640,17 @@ let name_last_elem_as_ident (span : Meta.span) (n : llbc_name) : string =
+ (** Helper
+ 
+     Prepare a name. The first id elem is always the crate: if it is the local
+-    crate, we remove it. We ignore disambiguators (there may be collisions, but
+-    we check if there are). *)
++    crate, we remove it (except with [-canonical-names], where names do not
++    depend on the crate being extracted). We ignore disambiguators (there may be
++    collisions, but we check if there are). *)
+ let ctx_prepare_name (meta : T.item_meta) (ctx : extraction_ctx)
+     (name : llbc_name) : llbc_name =
+   (* Rmk.: initially we only filtered the disambiguators equal to 0 *)
+   match name with
+   | [ _ ] -> name
+   | (PeIdent (crate, _) as id) :: name ->
+-      if crate = ctx.crate.name then name else id :: name
++      if crate = ctx.crate.name && not !Config.canonical_names then name
++      else id :: name
+   | _ ->
+       [%craise] meta.span
+         ("Unexpected name shape: "
+diff --git a/src/extract/ExtractName.ml b/src/extract/ExtractName.ml
+index a6158e2..591731e 100644
+--- a/src/extract/ExtractName.ml
++++ b/src/extract/ExtractName.ml
+@@ -139,7 +139,10 @@ let pattern_to_trait_impl_extract_name = pattern_to_extract_name None
+     cannot: they distinguish declarations with different state signatures.
+     Encode the complete structural name, not a shortened type name or an
+     allocation-order counter. Keep the full digest; ordinary name-collision
+-    checking remains enabled. *)
++    checking remains enabled.
++
++    With [-canonical-names], the digest is computed from the structural name
++    printed without LLBC ids, so that it is the same in every chunk. *)
+ let specialization_suffix (name : Types.name) : string =
+   if
+     List.exists
+@@ -147,7 +150,13 @@ let specialization_suffix (name : Types.name) : string =
+         | Types.PeInstantiated _ -> true
+         | _ -> false)
+       name
+-  then "_specialized_" ^ Digest.to_hex (Digest.string (Types.show_name name))
++  then
++    let structural =
++      if !Config.canonical_names then
++        SeparateCompilation.canonical_name_to_string name
++      else Types.show_name name
++    in
++    "_specialized_" ^ Digest.to_hex (Digest.string structural)
+   else ""
+ 
+ let append_specialization (name : Types.name) (path : string list) =
+diff --git a/src/llbc/FunsAnalysis.ml b/src/llbc/FunsAnalysis.ml
+index 484e603..31fd359 100644
+--- a/src/llbc/FunsAnalysis.ml
++++ b/src/llbc/FunsAnalysis.ml
+@@ -233,13 +233,36 @@ let analyze_module (m : crate) (funs_map : fun_decl FunDeclId.Map.t) :
+         funs
+     in
+     let fun_ids = List.map (fun (d : fun_decl) -> d.def_id) funs in
+-    let fun_ids = FunDeclId.Set.of_list fun_ids in
+-    let info = analyze_fun_decls fun_ids funs in
+-    let info =
+-      if is_recursive_group then { info with is_rec = true; can_diverge = true }
+-      else info
++    let external_facts =
++      List.map SeparateCompilation.external_fun_facts fun_ids
+     in
+-    List.iter (fun (f : fun_decl) -> register_info f.def_id info) funs
++    if List.exists Option.is_some external_facts then
++      (* The owner chunk analyzed the bodies: use its facts *)
++      List.iter2
++        (fun (f : fun_decl) facts ->
++          match facts with
++          | Some (facts : SeparateCompilation.fun_facts) ->
++              register_info f.def_id
++                {
++                  can_fail = facts.can_fail;
++                  stateful = facts.stateful;
++                  can_diverge = facts.can_diverge;
++                  is_rec = facts.is_rec;
++                }
++          | None ->
++              [%craise] f.item_meta.span
++                "Separate compilation: this function belongs to a recursive \
++                 group whose other functions are emitted by another chunk")
++        funs external_facts
++    else
++      let fun_ids = FunDeclId.Set.of_list fun_ids in
++      let info = analyze_fun_decls fun_ids funs in
++      let info =
++        if is_recursive_group then
++          { info with is_rec = true; can_diverge = true }
++        else info
++      in
++      List.iter (fun (f : fun_decl) -> register_info f.def_id info) funs
+   in
+ 
+   let rec analyze_decl_groups (decls : declaration_group list) : unit =
+diff --git a/src/llbc/ModelStateInputs.ml b/src/llbc/ModelStateInputs.ml
+index 7f6c609..85773c1 100644
+--- a/src/llbc/ModelStateInputs.ml
++++ b/src/llbc/ModelStateInputs.ml
+@@ -54,37 +54,43 @@ let rec has_hidden_state (crate : crate) seen ty =
+     Once a method needs hidden generic state, preserve all its owned state
+     inputs, including a concrete receiver modified alongside its callback. *)
+ let for_decl (crate : crate) (decl : fun_decl) =
+-  if Config.backend () <> Config.Lean then []
+-  else
+-    match (decl.src, decl.body) with
+-    | TraitImplItem (_, tr, method_name, _), StructuredBody _ ->
+-        let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
+-        let name =
+-          String.concat "."
+-            ("_root_.Aeneas.Std"
+-            :: List.filter_map
+-                 (function
+-                   | PeIdent (name, _) -> Some name
+-                   | _ -> None)
+-                 trait_decl.item_meta.name)
+-        in
+-        let indices = Option.value ~default:[] (for_method name method_name) in
+-        let owned =
+-          List.filter
+-            (fun index ->
+-              match List.nth decl.signature.inputs index with
+-              | TRef _ -> false
+-              | _ -> true)
+-            indices
+-        in
+-        if
+-          List.exists
+-            (fun index ->
+-              has_hidden_state crate [] (List.nth decl.signature.inputs index))
+-            owned
+-        then owned
+-        else []
+-    | _ -> []
++  match SeparateCompilation.external_fun_facts decl.def_id with
++  | Some facts -> facts.state_inputs
++  | None -> (
++      if Config.backend () <> Config.Lean then []
++      else
++        match (decl.src, decl.body) with
++        | TraitImplItem (_, tr, method_name, _), StructuredBody _ ->
++            let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
++            let name =
++              String.concat "."
++                ("_root_.Aeneas.Std"
++                :: List.filter_map
++                     (function
++                       | PeIdent (name, _) -> Some name
++                       | _ -> None)
++                     trait_decl.item_meta.name)
++            in
++            let indices =
++              Option.value ~default:[] (for_method name method_name)
++            in
++            let owned =
++              List.filter
++                (fun index ->
++                  match List.nth decl.signature.inputs index with
++                  | TRef _ -> false
++                  | _ -> true)
++                indices
++            in
++            if
++              List.exists
++                (fun index ->
++                  has_hidden_state crate []
++                    (List.nth decl.signature.inputs index))
++                owned
++            then owned
++            else []
++        | _ -> [])
+ 
+ (** A translated body can be used as a canonical state boundary only when its
+     native signature contributes no concrete mutable-borrow continuations.
+@@ -139,26 +145,30 @@ let rec has_no_native_mutable_abi (crate : crate) seen ty =
+     which happens to be owned. Borrowed receivers and native backward results
+     must keep their original region-indexed ABI. *)
+ let canonical_body_state_inputs (crate : crate) (decl : fun_decl) =
+-  let states = for_decl crate decl in
+-  match (decl.src, decl.body) with
+-  | TraitImplItem (_, tr, method_name, _), StructuredBody _ -> (
+-      let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
+-      let name =
+-        String.concat "."
+-          ("_root_.Aeneas.Std"
+-          :: List.filter_map
+-               (function
+-                 | PeIdent (name, _) -> Some name
+-                 | _ -> None)
+-               trait_decl.item_meta.name)
+-      in
+-      match for_method name method_name with
+-      | Some indices
+-        when indices <> [] && indices = states
+-             && (!Config.simplify_merged_fwd_backs || decl.generics.regions = [])
+-             && List.for_all
+-                  (has_no_native_mutable_abi crate [])
+-                  (decl.signature.output :: decl.signature.inputs) ->
+-          Some indices
++  match SeparateCompilation.external_fun_facts decl.def_id with
++  | Some facts -> facts.canonical_body
++  | None -> (
++      let states = for_decl crate decl in
++      match (decl.src, decl.body) with
++      | TraitImplItem (_, tr, method_name, _), StructuredBody _ -> (
++          let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
++          let name =
++            String.concat "."
++              ("_root_.Aeneas.Std"
++              :: List.filter_map
++                   (function
++                     | PeIdent (name, _) -> Some name
++                     | _ -> None)
++                   trait_decl.item_meta.name)
++          in
++          match for_method name method_name with
++          | Some indices
++            when indices <> [] && indices = states
++                 && (!Config.simplify_merged_fwd_backs
++                    || decl.generics.regions = [])
++                 && List.for_all
++                      (has_no_native_mutable_abi crate [])
++                      (decl.signature.output :: decl.signature.inputs) ->
++              Some indices
++          | _ -> None)
+       | _ -> None)
+-  | _ -> None
+diff --git a/src/llbc/SeparateCompilation.ml b/src/llbc/SeparateCompilation.ml
+new file mode 100644
+index 0000000..7b12be7
+--- /dev/null
++++ b/src/llbc/SeparateCompilation.ml
+@@ -0,0 +1,420 @@
++(** Separate compilation of a workspace into chunks forming one Lean
++    environment.
++
++    Every item is identified across chunks by a {e key}: its kind and its
++    structural Rust name, printed without any LLBC item id (instantiated path
++    elements included), so that the key of an item is the same in every LLBC
++    which contains it. A chunk extracted with [-emit-manifest] records, for
++    every declaration it emits, its key, the Lean module which owns it, its Lean
++    names, a fingerprint of its translated interface, and the facts that the
++    translation of callers derives from its body. A later chunk given this
++    manifest with [-external] keeps the LLBC declarations of these items (to
++    translate the uses) but does not emit them: it checks that its own view of
++    their interfaces is the one of the owner and imports the owner modules.
++
++    Opaque functions which are not listed in a manifest remain unknown external
++    definitions, which fail closed exactly as without these options. *)
++
++open Types
++open LlbcAst
++
++let log = Logging.translate_log
++
++(** Facts about a function that the translation of its callers (and its own
++    signature) derives from its body. External functions may be opaque in a
++    later chunk: they use the owner's facts. *)
++type fun_facts = {
++  can_fail : bool;
++  stateful : bool;
++  can_diverge : bool;
++  is_rec : bool;
++  state_inputs : int list;
++      (** See [ModelStateInputs.for_decl] (input positions whose final state is
++          an output of the translated signature) *)
++  canonical_body : int list option;
++      (** See [ModelStateInputs.canonical_body_state_inputs] *)
++}
++
++type entry = {
++  key : string;
++  lean_module : string;  (** The Lean module which emits the declaration *)
++  lean_names : string list;
++      (** The top-level Lean names of the declaration, the main one first
++          (function declarations also emit their loops) *)
++  fingerprint : string;
++      (** Digest of the translated interface (see [Translate]) *)
++  facts : fun_facts option;
++      (** Functions and globals (facts of the initializer) *)
++  methods : string list option;
++      (** Trait declarations: the methods which are fields of the Lean structure
++      *)
++}
++
++let manifest_version = 1
++
++(** {1 Canonical names} *)
++
++let canonical_env : Charon.Print.fmt_env option ref = ref None
++
++let path_elem_to_string (env : Charon.Print.fmt_env) (e : path_elem) : string =
++  match e with
++  | PeInstantiated binder ->
++      (* Contrary to [Charon.Print.path_elem_to_string], also print the trait
++         references of the instantiation: they are part of its identity. *)
++      let env =
++        Charon.PrintUtils.fmt_env_push_generics_and_preds env
++          binder.binder_params
++      in
++      let params, trait_refs =
++        Charon.Print.generic_args_to_strings env binder.binder_value
++      in
++      "<" ^ String.concat ", " params ^ ">["
++      ^ String.concat ", " trait_refs
++      ^ "]"
++  | _ -> Charon.Print.path_elem_to_string env e
++
++let name_to_string_with (env : Charon.Print.fmt_env) (name : name) : string =
++  String.concat "::" (List.map (path_elem_to_string env) name)
++
++(** The structural Rust name of an item, independent of the LLBC ids. *)
++let canonical_name_to_string (name : name) : string =
++  match !canonical_env with
++  | Some env -> name_to_string_with env name
++  | None ->
++      [%craise_opt_span] None
++        "Internal error: the canonical naming environment is not initialized"
++
++let item_meta (crate : crate) (id : item_id) : item_meta option =
++  match id with
++  | IdType id ->
++      Option.map
++        (fun (d : type_decl) -> d.item_meta)
++        (TypeDeclId.Map.find_opt id crate.type_decls)
++  | IdFun id ->
++      Option.map
++        (fun (d : fun_decl) -> d.item_meta)
++        (FunDeclId.Map.find_opt id crate.fun_decls)
++  | IdGlobal id ->
++      Option.map
++        (fun (d : global_decl) -> d.item_meta)
++        (GlobalDeclId.Map.find_opt id crate.global_decls)
++  | IdTraitDecl id ->
++      Option.map
++        (fun (d : trait_decl) -> d.item_meta)
++        (TraitDeclId.Map.find_opt id crate.trait_decls)
++  | IdTraitImpl id ->
++      Option.map
++        (fun (d : trait_impl) -> d.item_meta)
++        (TraitImplId.Map.find_opt id crate.trait_impls)
++
++let kind_to_string (id : item_id) : string =
++  match id with
++  | IdType _ -> "type"
++  | IdFun _ -> "fun"
++  | IdGlobal _ -> "global"
++  | IdTraitDecl _ -> "trait_decl"
++  | IdTraitImpl _ -> "trait_impl"
++
++let item_key (crate : crate) (id : item_id) : string option =
++  Option.map
++    (fun (meta : item_meta) ->
++      kind_to_string id ^ " " ^ canonical_name_to_string meta.name)
++    (item_meta crate id)
++
++(** {1 State} *)
++
++(** Entries loaded from the [-external] manifests, by key *)
++let loaded : (string, entry) Hashtbl.t = Hashtbl.create 1024
++
++(** Keys of the loaded entries, by Lean name *)
++let loaded_names : (string, string) Hashtbl.t = Hashtbl.create 1024
++
++(** External items of the current crate *)
++let externals : (item_id, entry) Hashtbl.t = Hashtbl.create 1024
++
++(** Entries emitted by the current chunk, by key, in emission order *)
++let emitted : (string, entry) Hashtbl.t = Hashtbl.create 1024
++
++let emitted_order : string list ref = ref []
++
++(** The Lean module of the file currently being generated *)
++let current_module : string option ref = ref None
++
++let enabled () : bool = !Config.canonical_names
++let is_external (id : item_id) : bool = Hashtbl.mem externals id
++let external_entry (id : item_id) : entry option = Hashtbl.find_opt externals id
++
++let external_fun_facts (id : FunDeclId.id) : fun_facts option =
++  match Hashtbl.find_opt externals (IdFun id) with
++  | Some { facts = Some facts; _ } -> Some facts
++  | _ -> None
++
++(** {1 Manifests} *)
++
++(** Register an error. The run fails (and writes no manifest), but all the
++    inconsistencies are reported, even with [-abort-on-error]. *)
++let fail (msg : string) : unit = Errors.push_error __FILE__ __LINE__ None msg
++
++let facts_to_json (f : fun_facts) : Yojson.Basic.t =
++  `Assoc
++    [
++      ("can_fail", `Bool f.can_fail);
++      ("stateful", `Bool f.stateful);
++      ("can_diverge", `Bool f.can_diverge);
++      ("is_rec", `Bool f.is_rec);
++      ("state_inputs", `List (List.map (fun i -> `Int i) f.state_inputs));
++      ( "canonical_body",
++        match f.canonical_body with
++        | None -> `Null
++        | Some l -> `List (List.map (fun i -> `Int i) l) );
++    ]
++
++let entry_to_json (e : entry) : Yojson.Basic.t =
++  let strings l = `List (List.map (fun s -> `String s) l) in
++  `Assoc
++    ([
++       ("key", `String e.key);
++       ("module", `String e.lean_module);
++       ("names", strings e.lean_names);
++       ("fingerprint", `String e.fingerprint);
++     ]
++    @ (match e.facts with
++      | None -> []
++      | Some f -> [ ("facts", facts_to_json f) ])
++    @
++    match e.methods with
++    | None -> []
++    | Some l -> [ ("methods", strings l) ])
++
++exception Malformed of string
++
++let facts_of_json (js : Yojson.Basic.t) : fun_facts =
++  let open Yojson.Basic.Util in
++  let ints js = List.map to_int (to_list js) in
++  {
++    can_fail = to_bool (member "can_fail" js);
++    stateful = to_bool (member "stateful" js);
++    can_diverge = to_bool (member "can_diverge" js);
++    is_rec = to_bool (member "is_rec" js);
++    state_inputs = ints (member "state_inputs" js);
++    canonical_body =
++      (match member "canonical_body" js with
++      | `Null -> None
++      | l -> Some (ints l));
++  }
++
++let entry_of_json (js : Yojson.Basic.t) : entry =
++  let open Yojson.Basic.Util in
++  let strings js = List.map to_string (to_list js) in
++  let lean_names = strings (member "names" js) in
++  if lean_names = [] then raise (Malformed "an entry has no Lean name");
++  {
++    key = to_string (member "key" js);
++    lean_module = to_string (member "module" js);
++    lean_names;
++    fingerprint = to_string (member "fingerprint" js);
++    facts =
++      (match member "facts" js with
++      | `Null -> None
++      | f -> Some (facts_of_json f));
++    methods =
++      (match member "methods" js with
++      | `Null -> None
++      | l -> Some (strings l));
++  }
++
++let namespace_to_json () : Yojson.Basic.t =
++  match !Config.namespace with
++  | None -> `Null
++  | Some ns -> `String ns
++
++(** Register the entries of a manifest. The same key may be listed by several
++    manifests only if it has the same owner (e.g., a manifest including an
++    earlier one); two owners for one key, or one Lean name for two keys, is a
++    duplicate emission. *)
++let add_loaded (file : string) (e : entry) : unit =
++  (match Hashtbl.find_opt loaded e.key with
++  | Some prev when prev.lean_module <> e.lean_module ->
++      fail
++        ("Separate compilation: duplicate emission of [" ^ e.key
++       ^ "] by the Lean modules " ^ prev.lean_module ^ " and " ^ e.lean_module
++       ^ " (manifest " ^ file ^ ")")
++  | Some prev when prev <> e ->
++      fail
++        ("Separate compilation: inconsistent manifest entries for [" ^ e.key
++       ^ "] (manifest " ^ file ^ ")")
++  | _ -> Hashtbl.replace loaded e.key e);
++  List.iter
++    (fun n ->
++      match Hashtbl.find_opt loaded_names n with
++      | Some key when key <> e.key ->
++          fail
++            ("Separate compilation: duplicate emission of the Lean name " ^ n
++           ^ " for [" ^ key ^ "] and [" ^ e.key ^ "] (manifest " ^ file ^ ")")
++      | _ -> Hashtbl.replace loaded_names n e.key)
++    e.lean_names
++
++let load_manifest (file : string) : unit =
++  try
++    let js = Yojson.Basic.from_file file in
++    let open Yojson.Basic.Util in
++    if to_int (member "version" js) <> manifest_version then
++      raise (Malformed "unsupported version");
++    if member "namespace" js <> namespace_to_json () then
++      fail
++        ("Separate compilation: the manifest " ^ file
++       ^ " was generated for a different -namespace");
++    List.iter
++      (fun e -> add_loaded file (entry_of_json e))
++      (to_list (member "entries" js))
++  with
++  | Yojson.Json_error msg | Malformed msg ->
++      fail ("Separate compilation: malformed manifest " ^ file ^ ": " ^ msg)
++  | Yojson.Basic.Util.Type_error (msg, _) ->
++      fail ("Separate compilation: malformed manifest " ^ file ^ ": " ^ msg)
++  | Sys_error msg ->
++      fail
++        ("Separate compilation: cannot read the manifest " ^ file ^ ": " ^ msg)
++
++(** Initialize the canonical names, load the manifests and resolve the external
++    items of the crate. To be called on the crate loaded from the LLBC. *)
++let init (crate : crate) : unit =
++  if enabled () then (
++    canonical_env := Some (Charon.Print.crate_to_fmt_env crate);
++    List.iter load_manifest !Config.external_manifests;
++    if Hashtbl.length loaded > 0 then (
++      let resolve (id : item_id) : entry option =
++        match item_key crate id with
++        | Some key -> (
++            match Hashtbl.find_opt loaded key with
++            | Some e ->
++                Hashtbl.replace externals id e;
++                Some e
++            | None -> None)
++        | None -> None
++      in
++      TypeDeclId.Map.iter
++        (fun id _ -> ignore (resolve (IdType id)))
++        crate.type_decls;
++      FunDeclId.Map.iter
++        (fun id (d : fun_decl) ->
++          (* Globals initializers are emitted with (and resolved through) their
++             global *)
++          if Option.is_none d.is_global_initializer then
++            ignore (resolve (IdFun id)))
++        crate.fun_decls;
++      GlobalDeclId.Map.iter
++        (fun id (d : global_decl) ->
++          match resolve (IdGlobal id) with
++          | Some e -> Hashtbl.replace externals (IdFun d.init) e
++          | None -> ())
++        crate.global_decls;
++      TraitDeclId.Map.iter
++        (fun id _ -> ignore (resolve (IdTraitDecl id)))
++        crate.trait_decls;
++      TraitImplId.Map.iter
++        (fun id _ -> ignore (resolve (IdTraitImpl id)))
++        crate.trait_impls;
++      log#linfo
++        (lazy
++          ("Separate compilation: "
++          ^ string_of_int (Hashtbl.length externals)
++          ^ " external items")));
++    (* An external function carries the owner's facts *)
++    Hashtbl.iter
++      (fun id (e : entry) ->
++        match (id, e.facts) with
++        | IdFun _, None ->
++            fail
++              ("Separate compilation: the manifest entry of [" ^ e.key
++             ^ "] has no function facts")
++        | _ -> ())
++      externals)
++
++(** Only the owner chunk translates the body of an external function. *)
++let hide_external_bodies (crate : crate) : crate =
++  if Hashtbl.length externals = 0 then crate
++  else
++    let fun_decls =
++      FunDeclId.Map.map
++        (fun (f : fun_decl) ->
++          if is_external (IdFun f.def_id) then { f with body = OpaqueBody }
++          else f)
++        crate.fun_decls
++    in
++    { crate with fun_decls }
++
++(** The owner modules of the given external items, sorted *)
++let modules_of (ids : item_id list) : string list =
++  List.sort_uniq compare
++    (List.filter_map
++       (fun id -> Option.map (fun e -> e.lean_module) (external_entry id))
++       ids)
++
++(** {1 Emission} *)
++
++(** Record a declaration emitted by the current chunk. Function declarations are
++    recorded once per emitted Lean definition (loops included): the Lean names
++    accumulate. *)
++let record (e : entry) : unit =
++  match Hashtbl.find_opt emitted e.key with
++  | None ->
++      Hashtbl.replace emitted e.key e;
++      emitted_order := e.key :: !emitted_order
++  | Some prev ->
++      if prev.lean_module <> e.lean_module then
++        fail
++          ("Separate compilation: [" ^ e.key
++         ^ "] is emitted by the Lean modules " ^ prev.lean_module ^ " and "
++         ^ e.lean_module);
++      let names =
++        prev.lean_names
++        @ List.filter (fun n -> not (List.mem n prev.lean_names)) e.lean_names
++      in
++      Hashtbl.replace emitted e.key { prev with lean_names = names }
++
++(** Reject the declarations of this chunk which are already emitted by another
++    module. *)
++let check_emitted () : unit =
++  List.iter
++    (fun key ->
++      let e = Hashtbl.find emitted key in
++      (match Hashtbl.find_opt loaded key with
++      | Some prev ->
++          fail
++            ("Separate compilation: duplicate emission of [" ^ key
++           ^ "], already emitted by " ^ prev.lean_module)
++      | None -> ());
++      List.iter
++        (fun n ->
++          match Hashtbl.find_opt loaded_names n with
++          | Some other ->
++              let owner = (Hashtbl.find loaded other).lean_module in
++              fail
++                ("Separate compilation: duplicate emission of the Lean name "
++               ^ n ^ " for [" ^ key ^ "]: already emitted by " ^ owner
++               ^ " for [" ^ other ^ "]")
++          | None -> ())
++        e.lean_names)
++    (List.rev !emitted_order)
++
++let write_manifest (file : string) : unit =
++  let entries =
++    List.map
++      (fun key -> entry_to_json (Hashtbl.find emitted key))
++      (List.rev !emitted_order)
++  in
++  let js =
++    `Assoc
++      [
++        ("version", `Int manifest_version);
++        ("namespace", namespace_to_json ());
++        ("entries", `List entries);
++      ]
++  in
++  Yojson.Basic.to_file file js;
++  log#linfo
++    (lazy
++      ("Separate compilation: wrote the manifest " ^ file ^ " ("
++      ^ string_of_int (List.length entries)
++      ^ " declarations)"))
+diff --git a/src/pure/PureMicroPasses.ml b/src/pure/PureMicroPasses.ml
+index a3278e3..8eff053 100644
+--- a/src/pure/PureMicroPasses.ml
++++ b/src/pure/PureMicroPasses.ml
+@@ -24,8 +24,11 @@ let prune_unused_provided_fields (crate : LlbcAst.crate)
+     let candidates =
+       List.fold_left
+         (fun candidates (decl : trait_decl) ->
+-          if decl.builtin_info <> None || not decl.item_meta.is_local then
+-            candidates
++          if
++            decl.builtin_info <> None
++            || (not decl.item_meta.is_local)
++            || SeparateCompilation.is_external (IdTraitDecl decl.def_id)
++          then candidates
+           else
+             let methods =
+               List.filter_map
+@@ -48,8 +51,10 @@ let prune_unused_provided_fields (crate : LlbcAst.crate)
+       let local_traits =
+         List.fold_left
+           (fun ids (decl : trait_decl) ->
+-            if decl.builtin_info = None && decl.item_meta.is_local then
+-              TraitDeclId.Set.add decl.def_id ids
++            if
++              decl.builtin_info = None && decl.item_meta.is_local
++              && not (SeparateCompilation.is_external (IdTraitDecl decl.def_id))
++            then TraitDeclId.Set.add decl.def_id ids
+             else ids)
+           TraitDeclId.Set.empty decls
+       in
+@@ -133,6 +138,82 @@ let prune_unused_provided_fields (crate : LlbcAst.crate)
+         in
+         (decls, impls)
+ 
++(** Separate compilation: the fields of an external trait declaration are the
++    ones the owner chunk kept (see [prune_unused_provided_fields]), for the
++    external declaration and for the implementations of this chunk. A method
++    call of this chunk through a pruned field fails closed. *)
++let apply_external_trait_fields (decls : trait_decl list)
++    (impls : trait_impl list) (funs : pure_fun_translation list) :
++    trait_decl list * trait_impl list =
++  let fields =
++    List.fold_left
++      (fun m (decl : trait_decl) ->
++        match SeparateCompilation.external_entry (IdTraitDecl decl.def_id) with
++        | Some { methods = Some methods; _ } ->
++            TraitDeclId.Map.add decl.def_id methods m
++        | Some e ->
++            [%craise] decl.item_meta.span
++              ("Separate compilation: the manifest entry of [" ^ e.key
++             ^ "] has no method list")
++        | None -> m)
++      TraitDeclId.Map.empty decls
++  in
++  if TraitDeclId.Map.is_empty fields then (decls, impls)
++  else
++    let keep id name =
++      match TraitDeclId.Map.find_opt id fields with
++      | None -> true
++      | Some methods -> List.mem name methods
++    in
++    let visitor =
++      object
++        inherit [_] iter_expr
++
++        method! visit_qualif span q =
++          match q.id with
++          | FunOrOp (Fun (FromLlbc (TraitMethod (tr, name, _), _)))
++            when not (keep tr.trait_decl_ref.trait_decl_id name) ->
++              [%craise] span
++                ("Separate compilation: the method " ^ name
++               ^ " is not a field of the external trait declaration (the owner \
++                  chunk pruned it as unused)")
++          | _ -> ()
++      end
++    in
++    List.iter
++      (fun (f : pure_fun_translation) ->
++        List.iter
++          (fun (d : fun_decl) ->
++            Option.iter
++              (fun (b : fun_body) ->
++                visitor#visit_texpr d.item_meta.span b.body)
++              d.body)
++          ((f.f :: f.loops) @ f.bodies))
++      funs;
++    let decls =
++      List.map
++        (fun (decl : trait_decl) ->
++          {
++            decl with
++            methods =
++              List.filter (fun (name, _) -> keep decl.def_id name) decl.methods;
++          })
++        decls
++    in
++    let impls =
++      List.map
++        (fun (impl : trait_impl) ->
++          {
++            impl with
++            methods =
++              List.filter
++                (fun (name, _) -> keep impl.impl_trait.trait_decl_id name)
++                impl.methods;
++          })
++        impls
++    in
++    (decls, impls)
++
+ (* TODO: reorder the branches of the matches/switche
+    TODO: we might want to leverage more the assignment meta-data, for
+    aggregates for instance. *)

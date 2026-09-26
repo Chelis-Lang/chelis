@@ -1,0 +1,33 @@
+# charon integration step 24 after 546078ea5d: commit bb8351878c6160d6d1742d7f857482aed6e0259c
+# first parent ece64982bc0b300466e3462adb4ea14a5f15aa40
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: merged multi-target file table keeps each file's id equal to its index
+#
+# CrateMerger pushed a clone of each newly seen file, whose `id` field still
+# held its index in the per-target crate. The merged table then contained
+# duplicate ids and lacked others that item spans refer to (e.g. in
+# multi-target-from-symcrypt: ids ..., 28, 15, 27, 28, 29, ... and spans using
+# file 33). charon-ml registers every file under its recorded id, so such an
+# LLBC only loaded while stale entries of a previously decoded file were still
+# in charon-ml's shared file table; with per-file decoding tables it fails with
+# Not_found. Push the file with its new id.
+
+diff --git a/src/export/multi_target.rs b/src/export/multi_target.rs
+index 9821579..2cebf34 100644
+--- a/src/export/multi_target.rs
++++ b/src/export/multi_target.rs
+@@ -87,7 +87,12 @@ impl CrateMerger {
+                 if let Some(&existing_id) = self.file_name_to_id.get(&file.name) {
+                     existing_id
+                 } else {
+-                    let new_id = self.merged.translated.files.push(file.clone());
++                    // The file records its own id, which must be its index in the merged table.
++                    let new_id = self
++                        .merged
++                        .translated
++                        .files
++                        .push_with(|id| File { id, ..file.clone() });
+                     self.file_name_to_id.insert(file.name.clone(), new_id);
+                     new_id
+                 }

@@ -164,14 +164,20 @@ class Run:
 
 
 def stage_environment(context: Run):
+    # The checkout root pins no Lean toolchain, so elan runs the pinned one explicitly
+    # instead of relying on a user-configured default.
+    lean = "+" + TOOLCHAIN["lean"]
+    lean_version = TOOLCHAIN["lean"].rsplit(":v", 1)[1]
     versions = {
         "rustc": run(["rustc", "--version"], capture=True).strip(),
-        "lean": run(["lean", "--version"], capture=True).strip(),
-        "lake": run(["lake", "--version"], capture=True).strip(),
+        "lean": run(["lean", lean, "--version"], capture=True).strip(),
+        "lake": run(["lake", lean, "--version"], capture=True).strip(),
         "python": sys.version.split()[0],
     }
     if not versions["rustc"].startswith("rustc 1.98.0"):
         raise AcceptanceFailure(f"unexpected native compiler: {versions['rustc']}")
+    if not versions["lean"].startswith(f"Lean (version {lean_version},"):
+        raise AcceptanceFailure(f"unexpected Lean toolchain: {versions['lean']}")
     lacadile = context.args.lacadile.resolve()
     revision = run(["git", "-C", lacadile, "rev-parse", "HEAD"], capture=True).strip()
     if revision != TOOLCHAIN["lacadile"]["revision"]:

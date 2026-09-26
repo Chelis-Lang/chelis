@@ -1,0 +1,343 @@
+# charon integration step 21 after 546078ea5d: commit ac36b347d2d19dedcac134e731ff06b75031c945
+# first parent dc811b035115954da6c1db36a7c4f12b9d23bbd0
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: generate-ml decodes opaque fields that contain hash-consed values
+#
+# The Rust serializer deduplicates Ty and TraitRef values across the whole file:
+# the first occurrence carries the value and its key, later ones only the key.
+# The generated OCaml decoder skipped #[charon::opaque] fields without decoding
+# them, so keys first defined inside such a field were never registered and a
+# later {"Deduplicated": k} failed with 'Hash-consing key not found'.
+#
+# TraitAssocTyImpl.implied_trait_refs is such a field. Its doc claimed it is
+# empty after lift_associated_item_clauses, but that pass only lifts clauses of
+# non-generic associated types; GATs such as Pattern::Searcher<'a> keep them
+# (e.g. the Searcher<'a> bound of impl Pattern for &str, reached from
+# str::starts_with).
+#
+# generate-ml now decodes, and discards, every opaque field whose type can reach
+# HashConsed; other opaque fields (Binder.kind, Body.comments) stay skipped. The
+# OCaml types are unchanged. Fix the doc comment. The ml-gat-implied-trait-refs
+# ui test emits a deduplicated llbc that the charon-ml deserialization test
+# loads.
+
+diff --git a/src/ast/gast.rs b/src/ast/gast.rs
+index 49da835..c8f5d6d 100644
+--- a/src/ast/gast.rs
++++ b/src/ast/gast.rs
+@@ -441,8 +441,10 @@ pub struct TraitImpl {
+ #[derive(Debug, Clone, PartialEq, Eq, Hash, SerializeState, DeserializeState, Drive, DriveMut)]
+ pub struct TraitAssocTyImpl {
+     pub value: Ty,
+-    /// This matches the corresponding vector in `TraitAssocTy`. In the same way, this is empty
+-    /// after the `lift_associated_item_clauses` pass.
++    /// This matches the corresponding vector in `TraitAssocTy`. In the same way, the
++    /// `lift_associated_item_clauses` pass empties it, except for generic associated types (e.g.
++    /// `Pattern::Searcher<'a>`), whose clauses may mention the type's own parameters. The OCaml
++    /// type omits this field; charon-ml still decodes it, because it contains hash-consed values.
+     #[charon::opaque]
+     pub implied_trait_refs: IndexVec<TraitClauseId, TraitRef>,
+ }
+diff --git a/src/bin/generate-ml/of_json.rs b/src/bin/generate-ml/of_json.rs
+index f12b001..ae8a08d 100644
+--- a/src/bin/generate-ml/of_json.rs
++++ b/src/bin/generate-ml/of_json.rs
+@@ -1,4 +1,4 @@
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ 
+ use charon_lib::ast::*;
+ use indoc::indoc;
+@@ -187,15 +187,48 @@ impl<'a> GenerateCtx<'a> {
+         }
+     }
+ 
++    /// Whether values of this type may contain hash-consed values (`Ty`, `TraitRef`). The Rust
++    /// serializer deduplicates those across the whole file: the first occurrence carries the value
++    /// and its key, later occurrences only the key. The decoder must therefore visit every such
++    /// value in serialization order, including values of fields that OCaml does not keep.
++    fn may_contain_hash_consed(&self, ty: &Ty) -> bool {
++        let hash_consed = self.name_to_type["HashConsed"].def_id;
++        let mut stack = vec![];
++        ty.dyn_visit(|id: &TypeDeclId| stack.push(*id));
++        let mut seen = HashSet::new();
++        while let Some(id) = stack.pop() {
++            if id == hash_consed {
++                return true;
++            }
++            if seen.insert(id)
++                && let Some(contained) = self.type_tree.get(&id)
++            {
++                stack.extend(contained.iter().copied());
++            }
++        }
++        false
++    }
++
++    /// Opaque fields are absent from the OCaml types. Their JSON is still decoded (and the result
++    /// discarded) when it may register hash-consing keys that later parts of the file refer to;
++    /// only the other opaque fields are skipped without decoding.
++    fn skip_field(&self, f: &Field) -> bool {
++        f.is_opaque() && !self.may_contain_hash_consed(&f.ty)
++    }
++
+     fn convert_vars<'b>(&self, fields: impl IntoIterator<Item = &'b Field>) -> String {
+         fields
+             .into_iter()
+-            .filter(|f| !f.is_opaque())
++            .filter(|f| !self.skip_field(f))
+             .map(|f| {
+                 let name = make_ocaml_ident(f.name.as_deref().unwrap());
+-                let rename = make_ocaml_ident(f.renamed_name().unwrap());
+                 let convert = self.type_to_ocaml_call(&f.ty);
+-                format!("let* {rename} = {convert} ctx {name} in")
++                if f.is_opaque() {
++                    format!("let* _ = {convert} ctx {name} in")
++                } else {
++                    let rename = make_ocaml_ident(f.renamed_name().unwrap());
++                    format!("let* {rename} = {convert} ctx {name} in")
++                }
+             })
+             .join("\n")
+     }
+@@ -291,7 +324,7 @@ impl<'a> GenerateCtx<'a> {
+                     .iter()
+                     .map(|f| {
+                         let name = f.name.as_ref().unwrap();
+-                        let var = if f.is_opaque() {
++                        let var = if self.skip_field(f) {
+                             "_"
+                         } else {
+                             &make_ocaml_ident(name)
+@@ -342,7 +375,7 @@ impl<'a> GenerateCtx<'a> {
+                                     .iter()
+                                     .map(|f| {
+                                         let name = f.name.as_ref().unwrap();
+-                                        let var = if f.is_opaque() {
++                                        let var = if self.skip_field(f) {
+                                             "_"
+                                         } else {
+                                             &make_ocaml_ident(name)
+diff --git a/tests/ui/ml-gat-implied-trait-refs.out b/tests/ui/ml-gat-implied-trait-refs.out
+new file mode 100644
+index 0000000..7867905
+--- /dev/null
++++ b/tests/ui/ml-gat-implied-trait-refs.out
+@@ -0,0 +1,174 @@
++# Final LLBC before serialization:
++
++// Full name: core::clone::Clone
++#[lang_item("clone")]
++pub trait Clone<Self>
++{
++    fn clone<'_0_1> = core::clone::Clone::clone<'_0_1, Self>[Self]
++    non-dyn-compatible
++}
++
++#[lang_item("clone_fn")]
++pub fn core::clone::Clone::clone<'_0, Self>(_1: &'_0 Self) -> Self
++where
++    [@TraitClause0]: Clone<Self>,
++= <opaque>
++
++// Full name: core::str::pattern::SearchStep
++pub enum SearchStep {
++  Match(usize, usize),
++  Reject(usize, usize),
++  Done,
++}
++
++// Full name: core::str::pattern::Searcher
++pub trait Searcher<'a, Self>
++{
++    fn haystack<'_0_1> = core::str::pattern::Searcher::haystack<'a, '_0_1, Self>[Self]
++    fn next<'_0_1> = core::str::pattern::Searcher::next<'a, '_0_1, Self>[Self]
++    vtable: core::str::pattern::Searcher::{vtable}<'a>
++}
++
++// Full name: core::str::pattern::Pattern
++pub trait Pattern<Self>
++{
++    type Searcher<'a>
++    where
++        implied_clause_0 : [@TraitClause0_1]: Searcher<'a, Self::Searcher>
++
++    fn into_searcher<'_0_1> = core::str::pattern::Pattern::into_searcher<'_0_1, Self>[Self]
++    non-dyn-compatible
++}
++
++// Full name: core::str::{Str}::starts_with
++#[lang_item("str_starts_with")]
++pub fn starts_with<'_0, P>(_1: &'_0 Str, _2: P) -> bool
++where
++    [@TraitClause0]: Pattern<P>,
++= <opaque>
++
++pub fn core::str::pattern::Pattern::into_searcher<'_0, Self>(_1: Self, _2: &'_0 Str) -> @TraitClause0::Searcher
++where
++    [@TraitClause0]: Pattern<Self>,
++= <opaque>
++
++pub fn core::str::pattern::Searcher::haystack<'a, '_1, Self>(_1: &'_1 Self) -> &'a Str
++where
++    [@TraitClause0]: Searcher<'a, Self>,
++= <opaque>
++
++pub fn core::str::pattern::Searcher::next<'a, '_1, Self>(_1: &'_1 mut Self) -> SearchStep
++where
++    [@TraitClause0]: Searcher<'a, Self>,
++= <opaque>
++
++// Full name: core::str::pattern::StrSearcher
++pub opaque type StrSearcher<'a, 'b>
++
++// Full name: core::str::pattern::{impl Searcher<'a> for StrSearcher<'a, 'b>}::next
++pub fn {impl Searcher<'a> for StrSearcher<'a, 'b>}::next<'a, 'b, '_2>(_1: &'_2 mut StrSearcher<'a, 'b>) -> SearchStep
++= <opaque>
++
++// Full name: core::str::pattern::{impl Searcher<'a> for StrSearcher<'a, 'b>}::haystack
++pub fn {impl Searcher<'a> for StrSearcher<'a, 'b>}::haystack<'a, 'b, '_2>(_1: &'_2 StrSearcher<'a, 'b>) -> &'a Str
++= <opaque>
++
++// Full name: core::str::pattern::{impl Searcher<'a> for StrSearcher<'a, 'b>}
++impl<'a, 'b> Searcher<'a> for StrSearcher<'a, 'b> {
++    fn haystack<'_0_1> = {impl Searcher<'a> for StrSearcher<'a, 'b>}::haystack<'a, 'b, '_0_1>
++    fn next<'_0_1> = {impl Searcher<'a> for StrSearcher<'a, 'b>}::next<'a, 'b, '_0_1>
++    vtable: {impl Searcher<'a> for StrSearcher<'a, 'b>}::{vtable}<'a, 'b>
++}
++
++// Full name: core::str::pattern::{impl Pattern for &'b Str}::into_searcher
++pub fn {impl Pattern for &'b Str}::into_searcher<'b, '_1>(_1: &'b Str, _2: &'_1 Str) -> StrSearcher<'_1, 'b>
++= <opaque>
++
++// Full name: core::str::pattern::{impl Pattern for &'b Str}
++impl<'b> Pattern for &'b Str {
++    type Searcher<'a> = StrSearcher<'a, 'b>
++    fn into_searcher<'_0_1> = {impl Pattern for &'b Str}::into_searcher<'b, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::is_gpu
++pub fn is_gpu<'_0>(device_1: &'_0 Str) -> bool
++{
++    let _0: bool; // return
++    let device_1: &'1 Str; // arg #1
++    let _2: &'2 Str; // anonymous local
++
++    storage_live(_2)
++    _2 = &(*device_1) with_metadata(copy device_1.metadata)
++    _0 = starts_with<'8, &'3 Str>[{impl Pattern for &'b Str}<'3>](move _2, const "gpu")
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::Item
++pub struct Item {}
++
++// Full name: test_crate::{impl Clone for Item}::clone
++pub fn {impl Clone for Item}::clone<'_0>(self_1: &'_0 Item) -> Item
++{
++    let _0: Item; // return
++    let self_1: &'1 Item; // arg #1
++
++    _0 = Item {  }
++    return
++}
++
++// Full name: test_crate::{impl Clone for Item}
++impl Clone for Item {
++    fn clone<'_0_1> = {impl Clone for Item}::clone<'_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::Lend
++pub trait Lend<Self>
++{
++    type Borrowed<'a, Self : 'a>
++    where
++        implied_clause_0 : [@TraitClause0_1]: Clone<Self::Borrowed>
++
++    fn lend<'_0_1> = test_crate::Lend::lend<'_0_1, Self>[Self]
++    non-dyn-compatible
++}
++
++pub fn test_crate::Lend::lend<'_0, Self>(_1: &'_0 Self) -> @TraitClause0::Borrowed
++where
++    [@TraitClause0]: Lend<Self>,
++= <method_without_default_body>
++
++// Full name: test_crate::{impl Lend for Item}::lend
++pub fn {impl Lend for Item}::lend<'_0>(self_1: &'_0 Item) -> Item
++{
++    let _0: Item; // return
++    let self_1: &'1 Item; // arg #1
++
++    _0 = Item {  }
++    return
++}
++
++// Full name: test_crate::{impl Lend for Item}
++impl Lend for Item {
++    type Borrowed<'a> = Item
++    fn lend<'_0_1> = {impl Lend for Item}::lend<'_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::Dup
++pub trait Dup<Self>
++{
++    parent_clause0 : [@TraitClause0]: Clone<Self>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{impl Dup for Item}
++impl Dup for Item {
++    parent_clause0 = {impl Clone for Item}
++    non-dyn-compatible
++}
++
++
++
+diff --git a/tests/ui/ml-gat-implied-trait-refs.rs b/tests/ui/ml-gat-implied-trait-refs.rs
+new file mode 100644
+index 0000000..55f9501
+--- /dev/null
++++ b/tests/ui/ml-gat-implied-trait-refs.rs
+@@ -0,0 +1,36 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --lift-associated-types=*
++//! The implied trait refs of generic associated types stay on the associated type (they cannot be
++//! lifted to the trait), in a field that charon-ml omits from its types. Hash-consed values that
++//! first occur there are referred to by key afterwards, so charon-ml must still decode that field;
++//! the charon-ml deserialization test loads this file's llbc, which (unlike with the tests preset)
++//! is deduplicated.
++
++/// `impl Pattern for &str` has `type Searcher<'a> = StrSearcher<'a, 'b>`, whose implied
++/// `Searcher<'a>` bound is a trait ref also used by later impls.
++pub fn is_gpu(device: &str) -> bool {
++    device.starts_with("gpu")
++}
++
++#[derive(Clone)]
++pub struct Item;
++
++pub trait Lend {
++    type Borrowed<'a>: Clone
++    where
++        Self: 'a;
++    fn lend(&self) -> Self::Borrowed<'_>;
++}
++
++/// The implied `Item: Clone` ref of `Borrowed` is the first occurrence of that trait ref.
++impl Lend for Item {
++    type Borrowed<'a> = Item;
++    fn lend(&self) -> Item {
++        Item
++    }
++}
++
++pub trait Dup: Clone {}
++
++/// The parent clause `Item: Clone` refers to the trait ref above by its hash-consing key.
++impl Dup for Item {}

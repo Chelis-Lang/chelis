@@ -1,0 +1,1078 @@
+# aeneas integration step 36 after cba11f3beb: commit 7754c5863b1c26361b2888080b1bfe00f84b59a7
+# first parent 5f6fa82e1f55ef5c49d7397072a71c3d5cb65c18, merged 9fff2ba03a2d94a0fe3e1f3fcb4dcd05474bf520
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/loop-join-markers' (filter/find closure loop joins, joins of 'static nested borrows)
+
+diff --git a/src/interp/InterpJoin.ml b/src/interp/InterpJoin.ml
+index a54a7e1..a75f9e3 100644
+--- a/src/interp/InterpJoin.ml
++++ b/src/interp/InterpJoin.ml
+@@ -177,8 +177,13 @@ let reborrow_ashared_loans (span : Meta.span) (loop_id : LoopId.id option)
+     (* We need a fresh region for the new abstraction *)
+     let nrid = ctx.fresh_region_id () in
+ 
+-    (* Prepare the shared value *)
++    (* Prepare the shared value. The abstractions which own the nested
++       regions of the copied symbolic values are the children of the
++       abstraction owning the outer reborrow, as for the region groups of a
++       function call: an inner region outlives the outer one. *)
++    let num_fresh = List.length !fresh_absl in
+     let nsv = mk_value_with_fresh_sids_no_shared_loans sv in
++    let num_inner = List.length !fresh_absl - num_fresh in
+ 
+     (* Introduce the new abstraction for the shared values *)
+     let rty = retained_value_rty span ctx nsv in
+@@ -227,6 +232,13 @@ let reborrow_ashared_loans (span : Meta.span) (loop_id : LoopId.id option)
+         cont;
+       }
+     in
++    fresh_absl :=
++      List.mapi
++        (fun i (abs : abs) ->
++          if i < num_inner then
++            { abs with parents = AbsId.Set.add fresh_abs.abs_id abs.parents }
++          else abs)
++        !fresh_absl;
+     fresh_absl := fresh_abs :: !fresh_absl;
+     (nlid, nsid)
+   in
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 1775165..2c4972c 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -451,13 +451,20 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+             [%craise_recover] M.recover M.span "Unimplemented"
+       end
+     | VSymbolic sv0, VSymbolic sv1 ->
++        (* Joining a symbolic value with itself introduces nothing, and nested
++           borrows whose regions are all ['static] (the type has no region
++           arguments, e.g. an enum with a [&'static [&'static str]] field)
++           have no lender to track: neither needs a region abstraction. *)
++        let unsupported_nested ctx (v : tvalue) =
++          sv0 <> sv1
++          && (not (ty_no_regions v.ty))
++          && ety_has_nested_borrows (Some span) ctx.type_ctx.type_infos v.ty
++        in
+         [%cassert_recover] M.recover M.span
+-          (not
+-             (ety_has_nested_borrows (Some span) ctx0.type_ctx.type_infos v0.ty))
++          (not (unsupported_nested ctx0 v0))
+           "Nested borrows are not supported yet.";
+         [%cassert_recover] M.recover M.span
+-          (not
+-             (ety_has_nested_borrows (Some span) ctx1.type_ctx.type_infos v1.ty))
++          (not (unsupported_nested ctx1 v1))
+           "Nested borrows are not supported yet.";
+         (* Match *)
+         M.match_symbolic_values match_rec ctx0 ctx1 sv0 sv1
+@@ -1193,8 +1200,12 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+   let match_distinct_adts (_ : tvalue_matcher) (ctx0 : eval_ctx)
+       (ctx1 : eval_ctx) (ty : ety) (ty0 : ty) (adt0 : adt_value) (ty1 : ty)
+       (adt1 : adt_value) : tvalue =
++    (* Nested borrows whose regions are all ['static] (the type has no region
++       arguments) have no lender to track: the join introduces no region
++       abstraction for them. *)
+     [%cassert_recover] S.recover span
+-      (not (ety_has_nested_borrows (Some span) ctx0.type_ctx.type_infos ty))
++      (ty_no_regions ty
++      || not (ety_has_nested_borrows (Some span) ctx0.type_ctx.type_infos ty))
+       "Nested borrows are not supported yet.";
+ 
+     let v0 : tvalue = { value = VAdt adt0; ty = ty0 } in
+@@ -1549,11 +1560,12 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       sv0)
+     else (
+       (* The caller should have checked that the symbolic values don't contain
+-         nested borrows, but we can check more *)
++         nested borrows (other than ['static] ones), but we can check more *)
+       [%sanity_check_recover] S.recover span
+-        (not
+-           (ety_has_nested_borrows (Some span) ctx0.type_ctx.type_infos
+-              sv0.sv_ty));
++        (ty_no_regions sv0.sv_ty
++        || not
++             (ety_has_nested_borrows (Some span) ctx0.type_ctx.type_infos
++                sv0.sv_ty));
+       (* TODO: the symbolic values may contain bottoms: we're being conservatice,
+          and fail (for now) if part of a symbolic value contains a bottom.
+          A more general approach would be to introduce a symbolic value
+diff --git a/src/interp/InterpReduceCollapse.ml b/src/interp/InterpReduceCollapse.ml
+index bee4414..a3a7de6 100644
+--- a/src/interp/InterpReduceCollapse.ml
++++ b/src/interp/InterpReduceCollapse.ml
+@@ -21,7 +21,7 @@ let log = Logging.reduce_collapse_log
+     removes ownership bookkeeping without discarding either continuation.
+ 
+     TODO: will not be necessary once we destructure the avalues. *)
+-let eliminate_shared_loans (span : Meta.span) (ctx : eval_ctx) : eval_ctx =
++let eliminate_shared_loans_once (span : Meta.span) (ctx : eval_ctx) : eval_ctx =
+   (* Compute the set of shared borrows *)
+   let ids, _ = compute_ctx_ids ctx in
+   let shared_borrows = ids.non_unique_shared_borrow_ids in
+@@ -83,6 +83,13 @@ let eliminate_shared_loans (span : Meta.span) (ctx : eval_ctx) : eval_ctx =
+   (* *)
+   ctx
+ 
++(** Eliminating a shared loan also drops the borrows retained in its payload
++    (e.g. the [&'b T] captured by a closure lent as [&'a F<'b>]): the loans of
++    those borrows may become unborrowed in turn, so we iterate. *)
++let rec eliminate_shared_loans (span : Meta.span) (ctx : eval_ctx) : eval_ctx =
++  let nctx = eliminate_shared_loans_once span ctx in
++  if nctx.env = ctx.env then nctx else eliminate_shared_loans span nctx
++
+ (** Compute the set of shared loans and shared loan projectors without markers
+     appearing in the context *)
+ let get_non_marked_shared_loans _span (ctx : eval_ctx) :
+@@ -1868,12 +1875,22 @@ let normalize_released_shared_payloads span fresh_abs_kind ~with_abs_conts
+     with Found -> false
+   in
+   let transferred = ref [] in
++  (* The payload's borrows live in the regions of the loan's referent type.
++     When a child abstraction owns some of them (the referent has nested
++     regions, e.g. [&'a F<'b>] for a closure capturing [&'b T]), those
++     borrows are nested ownership: they are not inputs of this holder. *)
++  let referent_regions_owned (ty : ty) =
++    match ty with
++    | TRef (_, referent, _) ->
++        RegionId.Set.subset (ty_regions referent) abs.regions.owned
++    | _ -> false
++  in
+   let avalues =
+     List.map
+       (fun (av : tavalue) ->
+         match av.value with
+         | ALoan (AEndedSharedLoan (pm, payload, child))
+-          when can_transfer payload ->
++          when can_transfer payload && referent_regions_owned av.ty ->
+             let owners =
+               convert_value_to_abstractions span fresh_abs_kind
+                 ~can_end:abs.can_end (lookup_ctx pm) payload
+@@ -2226,7 +2243,15 @@ let add_shared_borrows (span : Meta.span)
+   let update
+       ((abs_id, i, pm, borrow_or_proj, ty) :
+         abs_id * int * proj_marker * borrow_or_proj * ty) : unit =
+-    let abs = ctx_lookup_abs !ctx abs_id in
++    let abs =
++      match ctx_lookup_abs_opt !ctx abs_id with
++      | Some abs -> abs
++      | None ->
++          [%craise] span
++            ("Could not find the abstraction abs@" ^ AbsId.to_string abs_id
++           ^ " in which to introduce a shared borrow (marker "
++            ^ show_proj_marker pm ^ ") in:\n" ^ eval_ctx_to_string !ctx)
++    in
+     let rid = RegionId.Set.choose abs.regions.owned in
+     let r : region = RVar (Free rid) in
+     let rec update_avalues (i : int) (avl : tavalue list) : tavalue list =
+diff --git a/tests/lean/JoinStaticNested.lean b/tests/lean/JoinStaticNested.lean
+new file mode 100644
+index 0000000..19fd812
+--- /dev/null
++++ b/tests/lean/JoinStaticNested.lean
+@@ -0,0 +1 @@
++import JoinStaticNested.Checks
+diff --git a/tests/lean/JoinStaticNested/Checks.lean b/tests/lean/JoinStaticNested/Checks.lean
+new file mode 100644
+index 0000000..0161aff
+--- /dev/null
++++ b/tests/lean/JoinStaticNested/Checks.lean
+@@ -0,0 +1,45 @@
++import JoinStaticNested.JoinStaticNested
++
++/-! Evaluate the model of `tests/src/join-static-nested.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace join_static_nested.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def us (xs : List Nat) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def resB (r : Result Bool) : Option Bool :=
++  match r with
++  | ok b => some b
++  | _ => none
++
++def resN (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++/-- `shape_of 0`, i.e. `Shape::Choices(&CHOICES)`. -/
++def early0 (k : Nat) : Result Bool := do
++  let s ← shape_of (u 0)
++  early_accept s (u k)
++
++def below0 (k : Nat) : Result U32 := do
++  let s ← shape_of (u 0)
++  score_below s (u k)
++
++#guard resB (early_accept Shape.Plain (u 3)) == some true
++#guard resB (early0 9) == some true
++#guard resB (early0 4) == some false
++#guard resB (early_accept Shape.Plain (u 1)) == some false
++#guard resN (total_weight (us [])) == some 0
++#guard resN (total_weight (us [5, 0, 7])) == some 8
++#guard resN (total_weight (us [2, 3])) == some 7
++#guard resN (below0 9) == some 1
++#guard resN (below0 5) == some 0
++#guard resN (score_below Shape.Plain (u 50)) == some 50
++#guard resN (score_below Shape.Plain (u 100)) == some 0
++
++end join_static_nested.checks
+diff --git a/tests/lean/JoinStaticNested/JoinStaticNested.lean b/tests/lean/JoinStaticNested/JoinStaticNested.lean
+new file mode 100644
+index 0000000..c8e3cce
+--- /dev/null
++++ b/tests/lean/JoinStaticNested/JoinStaticNested.lean
+@@ -0,0 +1,178 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_static_nested]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_static_nested
++
++/-- [join_static_nested::Shape]
++    Source: 'tests/src/join-static-nested.rs', lines 14:0-17:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Shape where
++| Plain : Shape
++| Choices : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 → Shape
++
++/-- [join_static_nested::{core::clone::Clone for join_static_nested::Shape}::clone]:
++    Source: 'tests/src/join-static-nested.rs', lines 13:9-13:14
++    Visibility: public -/
++def Shape.Insts.CoreCloneClone.clone
++  (self : _root_.join_static_nested.Shape) :
++  _root_.Aeneas.Std.Result _root_.join_static_nested.Shape
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [join_static_nested::{core::clone::Clone for join_static_nested::Shape}]
++    Source: 'tests/src/join-static-nested.rs', lines 13:9-13:14 -/
++@[reducible]
++def Shape.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.join_static_nested.Shape := {
++  clone := _root_.join_static_nested.Shape.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [join_static_nested::{core::marker::Copy for join_static_nested::Shape}]
++    Source: 'tests/src/join-static-nested.rs', lines 13:16-13:20 -/
++@[reducible]
++def Shape.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.join_static_nested.Shape := {
++  cloneInst := _root_.join_static_nested.Shape.Insts.CoreCloneClone
++}
++
++/-- [join_static_nested::CHOICES]
++    Source: 'tests/src/join-static-nested.rs', lines 19:0-19:41
++    Visibility: public -/
++@[global_simps, irreducible]
++def CHOICES : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize :=
++  _root_.Aeneas.Std.Array.make 2#usize [ 4#u32, 9#u32 ]
++
++/-- [join_static_nested::shape_of]:
++    Source: 'tests/src/join-static-nested.rs', lines 21:0-23:1
++    Visibility: public -/
++def shape_of
++  (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.join_static_nested.Shape
++  := do
++  if k = 0#u32
++  then
++    let s ← lift (Array.to_slice _root_.join_static_nested.CHOICES)
++    _root_.Aeneas.Std.Result.ok (_root_.join_static_nested.Shape.Choices s)
++  else _root_.Aeneas.Std.Result.ok _root_.join_static_nested.Shape.Plain
++
++/-- [join_static_nested::weight]:
++    Source: 'tests/src/join-static-nested.rs', lines 25:0-30:1
++    Visibility: public -/
++def weight
++  (s : _root_.join_static_nested.Shape) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match s with
++  | _root_.join_static_nested.Shape.Plain => _root_.Aeneas.Std.Result.ok k
++  | _root_.join_static_nested.Shape.Choices c => Slice.index_usize c 0#usize
++
++/-- [join_static_nested::early_accept]:
++    Source: 'tests/src/join-static-nested.rs', lines 33:0-41:1
++    Visibility: public -/
++def early_accept
++  (shape : _root_.join_static_nested.Shape) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let b ←
++    match k with
++    | 0#uscalar => _root_.Aeneas.Std.Result.ok true
++    | 3#uscalar => _root_.Aeneas.Std.Result.ok true
++    | _ => _root_.Aeneas.Std.Result.ok false
++  if b
++  then _root_.Aeneas.Std.Result.ok true
++  else
++    match shape with
++    | _root_.join_static_nested.Shape.Plain =>
++      _root_.Aeneas.Std.Result.ok (k > 1#u32)
++    | _root_.join_static_nested.Shape.Choices c =>
++      let i ← Slice.index_usize c 1#usize
++      _root_.Aeneas.Std.Result.ok (i = k)
++
++/-- [join_static_nested::total_weight]: loop body 0:
++    Source: 'tests/src/join-static-nested.rs', lines 47:4-50:5
++    Visibility: public -/
++@[rust_loop_body]
++def total_weight_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (shape : _root_.join_static_nested.Shape) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.join_static_nested.Shape × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some k =>
++    let i ← _root_.join_static_nested.weight shape k
++    let n1 ← lift (core.num.U32.wrapping_add n i)
++    let shape1 ← _root_.join_static_nested.shape_of k
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, shape1, n1))
++
++/-- [join_static_nested::total_weight]: loop 0:
++    Source: 'tests/src/join-static-nested.rs', lines 47:4-50:5
++    Visibility: public -/
++@[rust_loop]
++def total_weight_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (shape : _root_.join_static_nested.Shape) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, shape1, n1) =>
++       _root_.join_static_nested.total_weight_loop.body iter1 shape1 n1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.join_static_nested.Shape × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.join_static_nested.Shape × _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.U32))
++    (iter, shape, n)
++
++/-- [join_static_nested::total_weight]:
++    Source: 'tests/src/join-static-nested.rs', lines 44:0-52:1
++    Visibility: public -/
++def total_weight
++  (keys : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let shape ← _root_.join_static_nested.shape_of 0#u32
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter keys
++  _root_.join_static_nested.total_weight_loop model_state shape 0#u32
++
++/-- [join_static_nested::score_below]:
++    Source: 'tests/src/join-static-nested.rs', lines 55:0-67:1
++    Visibility: public -/
++def score_below
++  (shape : _root_.join_static_nested.Shape) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let r ←
++    match shape with
++    | _root_.join_static_nested.Shape.Plain => _root_.Aeneas.Std.Result.ok k
++    | _root_.join_static_nested.Shape.Choices c =>
++      do
++      let b ←
++        _root_.Aeneas.Std.core.slice.Slice.contains
++          (_root_.Aeneas.Std.core.cmp.PartialEqShared core.cmp.PartialEqU32) c
++          k
++      if b
++      then _root_.Aeneas.Std.Result.ok 1#u32
++      else _root_.Aeneas.Std.Result.ok 0#u32
++  if k < 100#u32
++  then _root_.Aeneas.Std.Result.ok r
++  else _root_.Aeneas.Std.Result.ok 0#u32
++
++end join_static_nested
+diff --git a/tests/lean/LoopJoinClosures.lean b/tests/lean/LoopJoinClosures.lean
+new file mode 100644
+index 0000000..4fc27ac
+--- /dev/null
++++ b/tests/lean/LoopJoinClosures.lean
+@@ -0,0 +1 @@
++import LoopJoinClosures.Checks
+diff --git a/tests/lean/LoopJoinClosures/Checks.lean b/tests/lean/LoopJoinClosures/Checks.lean
+new file mode 100644
+index 0000000..6ca1573
+--- /dev/null
++++ b/tests/lean/LoopJoinClosures/Checks.lean
+@@ -0,0 +1,45 @@
++import LoopJoinClosures.LoopJoinClosures
++
++/-! Evaluate the model of `tests/src/loop-join-closures.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace loop_join_closures.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def vec {α : Type} (xs : List α) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) :
++    alloc.vec.Vec α :=
++  ⟨xs, h⟩
++
++/-- A vector of `(key, value)` pairs; the references to the keys are erased. -/
++def pairs (xs : List (Nat × Nat)) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) :
++    alloc.vec.Vec (U32 × U32) :=
++  ⟨xs.map (fun (k, v) => (u k, u v)), by simpa using h⟩
++
++def res1 (r : Result (Bool × alloc.vec.Vec U32)) : Option (Bool × List Nat) :=
++  match r with
++  | ok (b, v) => some (b, v.val.map (·.val))
++  | _ => none
++
++def res2 (r : Result (Bool × alloc.vec.Vec (U32 × U32))) : Option (Bool × List (Nat × Nat)) :=
++  match r with
++  | ok (b, v) => some (b, v.val.map (fun (x, y) => (x.val, y.val)))
++  | _ => none
++
++-- native::filter_closure
++#guard res1 (push_relevant (pairs [(1, 10), (5, 20), (7, 30)]) true (vec [u 0]))
++  == some (true, [0, 20, 30])
++#guard res1 (push_relevant (pairs [(1, 10), (5, 20), (7, 30)]) false (vec []))
++  == some (true, [10, 20, 30])
++#guard res1 (push_relevant (pairs []) true (vec [u 4])) == some (true, [4])
++
++-- native::find_closure
++#guard res2 (pair_entries (pairs [(2, 10), (1, 20)]) (pairs [(1, 5), (2, 6), (1, 7)]) (vec []))
++  == some (true, [(10, 6), (20, 5)])
++#guard res2 (pair_entries (pairs [(1, 10), (3, 20), (2, 30)]) (pairs [(1, 5), (2, 6), (1, 7)])
++    (vec [(u 0, u 0)]))
++  == some (false, [(0, 0), (10, 5)])
++#guard res2 (pair_entries (pairs []) (pairs [(1, 5), (2, 6), (1, 7)]) (vec [])) == some (true, [])
++
++end loop_join_closures.checks
+diff --git a/tests/lean/LoopJoinClosures/LoopJoinClosures.lean b/tests/lean/LoopJoinClosures/LoopJoinClosures.lean
+new file mode 100644
+index 0000000..9c71fa1
+--- /dev/null
++++ b/tests/lean/LoopJoinClosures/LoopJoinClosures.lean
+@@ -0,0 +1,418 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_join_closures]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_join_closures
++
++/-- [loop_join_closures::push_relevant::closure]
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++@[reducible]
++def push_relevant.closure := _root_.Bool
++
++/-- [loop_join_closures::push_relevant::closure#1]
++    Source: 'tests/src/loop-join-closures.rs', lines 17:41-17:65 -/
++@[reducible]
++def push_relevant.closure_1 := _root_.loop_join_closures.push_relevant.closure
++
++/-- [loop_join_closures::push_relevant::{core::ops::function::Fn<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}::call]:
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++def push_relevant.closure.Insts.CoreOpsFunctionFnTupleSharedU32Bool.call
++  (c : _root_.loop_join_closures.push_relevant.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  if c
++  then _root_.Aeneas.Std.Result.ok (tupled_args > 3#u32)
++  else _root_.Aeneas.Std.Result.ok true
++
++/-- [loop_join_closures::push_relevant::{core::ops::function::FnMut<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::push_relevant::closure#1<0, 1>}::call_mut]:
++    Source: 'tests/src/loop-join-closures.rs', lines 17:41-17:65 -/
++def
++  push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++  (c : _root_.loop_join_closures.push_relevant.closure_1)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_join_closures.push_relevant.closure_1)
++  := do
++  let (key, _) := tupled_args
++  let b ←
++    _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnTupleSharedU32Bool.call
++      c key
++  _root_.Aeneas.Std.Result.ok (b, c)
++
++/-- [loop_join_closures::push_relevant::{core::ops::function::FnOnce<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::push_relevant::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/loop-join-closures.rs', lines 17:41-17:65 -/
++def
++  push_relevant.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool.call_once
++  (c : _root_.loop_join_closures.push_relevant.closure_1)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [loop_join_closures::push_relevant::{core::ops::function::FnOnce<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::push_relevant::closure#1<0, 1>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 17:41-17:65 -/
++@[reducible]
++def
++  push_relevant.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_join_closures.push_relevant.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_join_closures::push_relevant::{core::ops::function::FnMut<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::push_relevant::closure#1<0, 1>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 17:41-17:65 -/
++@[reducible]
++def
++  push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_join_closures.push_relevant.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Bool := {
++  FnOnceInst :=
++    _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_join_closures::push_relevant]: loop body 0:
++    Source: 'tests/src/loop-join-closures.rs', lines 17:4-19:5
++    Visibility: public -/
++@[rust_loop_body]
++def push_relevant_loop.body
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) _root_.loop_join_closures.push_relevant.closure_1) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)) _root_.loop_join_closures.push_relevant.closure_1))
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let c := iter.predicate
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.filter.IteratorFilter.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++      _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool
++      { iter with predicate := c }
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done pending)
++  | some p =>
++    let (_, value) := p
++    let pending1 ← _root_.Aeneas.Std.alloc.vec.Vec.push pending value
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (pending1,
++      model_state1))
++
++/-- [loop_join_closures::push_relevant]: loop 0:
++    Source: 'tests/src/loop-join-closures.rs', lines 17:4-19:5
++    Visibility: public -/
++@[rust_loop]
++def push_relevant_loop
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++  (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) _root_.loop_join_closures.push_relevant.closure_1) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (pending1, iter1) => _root_.loop_join_closures.push_relevant_loop.body
++       pending1 iter1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))
++      _root_.loop_join_closures.push_relevant.closure_1)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))
++      _root_.loop_join_closures.push_relevant.closure_1))
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (pending, iter)
++
++/-- [loop_join_closures::push_relevant]:
++    Source: 'tests/src/loop-join-closures.rs', lines 15:0-21:1
++    Visibility: public -/
++def push_relevant
++  (a : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (metadata : _root_.Bool)
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref a
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++      _root_.loop_join_closures.push_relevant.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool
++      i metadata
++  let c := model_state.predicate
++  let pending1 ←
++    _root_.loop_join_closures.push_relevant_loop pending
++      { model_state with predicate := c }
++  _root_.Aeneas.Std.Result.ok (true, pending1)
++
++/-- [loop_join_closures::push_relevant::{core::ops::function::FnMut<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}::call_mut]:
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++def push_relevant.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++  (state : _root_.loop_join_closures.push_relevant.closure)
++  (args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_join_closures.push_relevant.closure)
++  := do
++  let b ←
++    _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnTupleSharedU32Bool.call
++      state args
++  _root_.Aeneas.Std.Result.ok (b, state)
++
++/-- [loop_join_closures::push_relevant::{core::ops::function::FnOnce<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}::call_once]:
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++def
++  push_relevant.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  (c : _root_.loop_join_closures.push_relevant.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [loop_join_closures::push_relevant::{core::ops::function::FnOnce<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++@[reducible]
++def push_relevant.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_join_closures.push_relevant.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_join_closures::push_relevant::{core::ops::function::FnMut<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++@[reducible]
++def push_relevant.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_join_closures.push_relevant.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [loop_join_closures::push_relevant::{core::ops::function::Fn<(&'_ (u32)), bool> for loop_join_closures::push_relevant::closure<0>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 16:19-16:52 -/
++@[reducible]
++def push_relevant.closure.Insts.CoreOpsFunctionFnTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.loop_join_closures.push_relevant.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnMutInst :=
++    _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_join_closures.push_relevant.closure.Insts.CoreOpsFunctionFnTupleSharedU32Bool.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- [loop_join_closures::pair_entries::closure]
++    Source: 'tests/src/loop-join-closures.rs', lines 32:45-32:78 -/
++@[reducible]
++def pair_entries.closure := _root_.Aeneas.Std.U32
++
++/-- [loop_join_closures::pair_entries::{core::ops::function::FnMut<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::pair_entries::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/loop-join-closures.rs', lines 32:45-32:78 -/
++def
++  pair_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++  (c : _root_.loop_join_closures.pair_entries.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_join_closures.pair_entries.closure)
++  := do
++  let (other_key, _) := tupled_args
++  let b ←
++    _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq core.cmp.PartialEqU32
++      other_key c
++  _root_.Aeneas.Std.Result.ok (b, c)
++
++/-- [loop_join_closures::pair_entries::{core::ops::function::FnOnce<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::pair_entries::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/loop-join-closures.rs', lines 32:45-32:78 -/
++def
++  pair_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool.call_once
++  (c : _root_.loop_join_closures.pair_entries.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.loop_join_closures.pair_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [loop_join_closures::pair_entries::{core::ops::function::FnOnce<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::pair_entries::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 32:45-32:78 -/
++@[reducible]
++def
++  pair_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_join_closures.pair_entries.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_join_closures.pair_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_join_closures::pair_entries::{core::ops::function::FnMut<(&'_ (&'_ ((&'_ (u32), u32)))), bool> for loop_join_closures::pair_entries::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-join-closures.rs', lines 32:45-32:78 -/
++@[reducible]
++def
++  pair_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_join_closures.pair_entries.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Bool := {
++  FnOnceInst :=
++    _root_.loop_join_closures.pair_entries.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedPairSharedU32U32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_join_closures.pair_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_join_closures::pair_entries]: loop body 0:
++    Source: 'tests/src/loop-join-closures.rs', lines 31:4-38:1
++    Visibility: public -/
++@[rust_loop_body]
++def pair_entries_loop.body
++  (b : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))) (_root_.Bool ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (true,
++      pending))
++  | some p =>
++    let (key, value) := p
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref b
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let (model_state2, _, _) ←
++      _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.find
++        _root_.loop_join_closures.pair_entries.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedPairSharedU32U32Bool
++        i key
++    match model_state2 with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (false,
++        pending))
++    | some p1 =>
++      let (_, other) := p1
++      let pending1 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push pending (value, other)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, pending1))
++
++/-- [loop_join_closures::pair_entries]: loop 0:
++    Source: 'tests/src/loop-join-closures.rs', lines 31:4-38:1
++    Visibility: public -/
++@[rust_loop]
++def pair_entries_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (b : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++  := do
++  loop
++    (fun (iter1, pending1) => _root_.loop_join_closures.pair_entries_loop.body
++       b iter1 pending1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))) (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))))
++    (iter, pending)
++
++/-- [loop_join_closures::pair_entries]:
++    Source: 'tests/src/loop-join-closures.rs', lines 26:0-38:1
++    Visibility: public -/
++def pair_entries
++  (a : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (b : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32))
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Bool × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref a
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.loop_join_closures.pair_entries_loop iter b pending
++
++end loop_join_closures
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ca07d0a..bdf7d98 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -59,6 +59,8 @@ package «tests» {}
+ @[default_target] lean_lib JoinDuplicate
+ @[default_target] lean_lib ListBorrows
+ @[default_target] lean_lib LoopJoinBorrows
++@[default_target] lean_lib LoopJoinClosures
++@[default_target] lean_lib JoinStaticNested
+ @[default_target] lean_lib LoopSharedLoanInJoin
+ @[default_target] lean_lib Loops
+ @[default_target] lean_lib LoopsRec
+diff --git a/tests/src/join-static-nested.rs b/tests/src/join-static-nested.rs
+new file mode 100644
+index 0000000..4211ca0
+--- /dev/null
++++ b/tests/src/join-static-nested.rs
+@@ -0,0 +1,87 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinStaticNested
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::cmp
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Joins of values whose type has nested borrows which are all `'static`
++//! (an enum without region parameters holding a `&'static [&'static u32]`):
++//! a symbolic value joined with itself after a branch, symbolic values
++//! updated at every iteration of a loop, and distinct variants joined after a
++//! `match`.
++//! `JoinStaticNested/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++#[derive(Clone, Copy)]
++pub enum Shape {
++    Plain,
++    Choices(&'static [&'static u32]),
++}
++
++pub static CHOICES: [&u32; 2] = [&4, &9];
++
++pub fn shape_of(k: u32) -> Shape {
++    if k == 0 { Shape::Choices(&CHOICES) } else { Shape::Plain }
++}
++
++pub fn weight(s: Shape, k: u32) -> u32 {
++    match s {
++        Shape::Plain => k,
++        Shape::Choices(c) => *c[0],
++    }
++}
++
++/// `shape` is unchanged by the early-return branch.
++pub fn early_accept(shape: Shape, k: u32) -> bool {
++    if matches!(k, 0 | 3) {
++        return true;
++    }
++    match shape {
++        Shape::Plain => k > 1,
++        Shape::Choices(c) => *c[1] == k,
++    }
++}
++
++/// `shape` is a different symbolic value at every iteration.
++pub fn total_weight(keys: &[u32]) -> u32 {
++    let mut shape = shape_of(0);
++    let mut n = 0u32;
++    for k in keys {
++        n = n.wrapping_add(weight(shape, *k));
++        shape = shape_of(*k);
++    }
++    n
++}
++
++/// The arms of the `match` leave `shape` expanded to distinct variants.
++pub fn score_below(shape: Shape, k: u32) -> u32 {
++    let r = match shape {
++        Shape::Plain => k,
++        Shape::Choices(c) => {
++            if c.contains(&&k) {
++                1
++            } else {
++                0
++            }
++        }
++    };
++    if k < 100 { r } else { 0 }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn static_nested() {
++        assert!(early_accept(Shape::Plain, 3));
++        assert!(early_accept(shape_of(0), 9));
++        assert!(!early_accept(shape_of(0), 4));
++        assert!(!early_accept(Shape::Plain, 1));
++        assert_eq!(total_weight(&[]), 0);
++        assert_eq!(total_weight(&[5, 0, 7]), 4 + 0 + 4);
++        assert_eq!(total_weight(&[2, 3]), 4 + 3);
++        assert_eq!(score_below(shape_of(0), 9), 1);
++        assert_eq!(score_below(shape_of(0), 5), 0);
++        assert_eq!(score_below(Shape::Plain, 50), 50);
++        assert_eq!(score_below(Shape::Plain, 100), 0);
++    }
++}
+diff --git a/tests/src/loop-join-closures.rs b/tests/src/loop-join-closures.rs
+new file mode 100644
+index 0000000..574eaf0
+--- /dev/null
++++ b/tests/src/loop-join-closures.rs
+@@ -0,0 +1,75 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopJoinClosures
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::filter::Filter --include core::option::{core::option::Option} --include core::cmp
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over slices of pairs holding references (nested regions), which call
++//! closures: a `filter` whose predicate calls another closure capturing a
++//! local (so the adapter holds `&'a F<'b>`), and a `find` on a second
++//! vector at every iteration (its shared borrow is reborrowed with nested
++//! regions at the loop entry).
++//! `LoopJoinClosures/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++/// Pushes the values whose key passes `relevant`: every value if
++/// `!metadata`, otherwise the values whose key is greater than 3.
++pub fn push_relevant<'a>(a: &Vec<(&'a u32, u32)>, metadata: bool, pending: &mut Vec<u32>) -> bool {
++    let relevant = |key: &u32| !metadata || *key > 3;
++    for (_key, value) in a.iter().filter(|(key, _)| relevant(key)) {
++        pending.push(*value);
++    }
++    true
++}
++
++/// Pairs the value of every entry of `a` with the value of the first entry of
++/// `b` which has an equal key; returns `false` (keeping the pairs pushed so
++/// far) at the first key of `a` missing from `b`.
++pub fn pair_entries<'a, 'b>(
++    a: &Vec<(&'a u32, u32)>,
++    b: &Vec<(&'b u32, u32)>,
++    pending: &mut Vec<(u32, u32)>,
++) -> bool {
++    for (key, value) in a.iter() {
++        let Some((_, other)) = b.iter().find(|(other_key, _)| other_key == key) else {
++            return false;
++        };
++        pending.push((*value, *other));
++    }
++    true
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn filter_closure() {
++        let (k1, k5, k7) = (1, 5, 7);
++        let a = vec![(&k1, 10), (&k5, 20), (&k7, 30)];
++        let mut pending = vec![0];
++        assert!(push_relevant(&a, true, &mut pending));
++        assert_eq!(pending, vec![0, 20, 30]);
++        let mut pending = vec![];
++        assert!(push_relevant(&a, false, &mut pending));
++        assert_eq!(pending, vec![10, 20, 30]);
++        let mut pending = vec![4];
++        assert!(push_relevant(&vec![], true, &mut pending));
++        assert_eq!(pending, vec![4]);
++    }
++
++    #[test]
++    fn find_closure() {
++        let (k1, k2, k3) = (1, 2, 3);
++        let a = vec![(&k2, 10), (&k1, 20)];
++        let b = vec![(&k1, 5), (&k2, 6), (&k1, 7)];
++        let mut pending = vec![];
++        assert!(pair_entries(&a, &b, &mut pending));
++        assert_eq!(pending, vec![(10, 6), (20, 5)]);
++        let a = vec![(&k1, 10), (&k3, 20), (&k2, 30)];
++        let mut pending = vec![(0, 0)];
++        assert!(!pair_entries(&a, &b, &mut pending));
++        assert_eq!(pending, vec![(0, 0), (10, 5)]);
++        let mut pending = vec![];
++        assert!(pair_entries(&vec![], &b, &mut pending));
++        assert_eq!(pending, vec![]);
++    }
++}

@@ -1,0 +1,367 @@
+# charon integration step 16 after 546078ea5d: commit dd8057477216c51a66a902e1bea402633c84b3c0
+# first parent 4a4bd6d67af03506debc2693d6ec6b44c8df019f
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: only strict start-from selections must declare an item
+#
+# 153a39d made every start-from selection that declares no item an error. That also fired for
+# `--start-from-if-exists` patterns that resolve to nothing, and for the implicit default `crate`
+# selection of a crate that defines no item. Record whether each selection is strict: explicit
+# `--start-from` patterns, `--start-from-attribute` and `--start-from-pub` are; if-exists patterns
+# and the implicit `crate` are not. Report the error without a misleading dummy span.
+#
+# start_from.out now declares the items the std-path patterns select (`std::iter::once`,
+# `std::clone::Clone::clone_from`, `std::slice::Iter::as_slice`, `u32::wrapping_add`) and their
+# dependencies: re-matching the patterns against the items' Charon names (`core::...`) never
+# declared them, so these selections silently yielded nothing.
+
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index 6206af1..ce10013 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -25,7 +25,7 @@ use crate::hax;
+ use crate::hax::SInto;
+ use charon_lib::ast::*;
+ use charon_lib::options::{CliOpts, StartFrom, TranslateOptions};
+-use charon_lib::transform::TransformCtx;
++use charon_lib::transform::{StartFromSelection, TransformCtx};
+ use macros::VariantIndexArity;
+ 
+ /// The id of an untranslated item. Note that a given `DefId` may show up as multiple different
+@@ -373,7 +373,7 @@ impl<'tcx> TranslateCtx<'tcx> {
+     /// the definitions it resolved to or for their descendants (module contents, inherent impl
+     /// methods, whole external crates). Declarations are rooted at these ids, not at items whose
+     /// names happen to match the patterns again.
+-    fn start_from_roots(&self) -> Vec<(String, Vec<ItemId>)> {
++    fn start_from_roots(&self) -> Vec<StartFromSelection> {
+         let tcx = self.tcx;
+         let mut ids: Vec<(ItemId, rustc_hir::def_id::DefId)> = self
+             .module_item_ids
+@@ -383,23 +383,26 @@ impl<'tcx> TranslateCtx<'tcx> {
+         ids.sort_by_key(|(id, _)| *id);
+         self.start_from_def_ids
+             .iter()
+-            .map(|(label, resolved)| {
+-                let roots = ids
++            .map(|(label, strict, resolved)| StartFromSelection {
++                label: label.clone(),
++                strict: *strict,
++                items: ids
+                     .iter()
+                     .filter(|(_, def_id)| {
+-                        resolved.iter().any(|root| tcx.is_descendant_of(*def_id, *root))
++                        resolved
++                            .iter()
++                            .any(|root| tcx.is_descendant_of(*def_id, *root))
+                     })
+                     .map(|(id, _)| *id)
+-                    .collect();
+-                (label.clone(), roots)
++                    .collect(),
+             })
+             .collect()
+     }
+ 
+     /// When `CHARON_COVERAGE_REPORT` names a file, write the auditable root/translation coverage
+     /// of this run as JSON: per crate, the definitions enumerated as roots; and per crate and
+-    /// item kind, the items that were translated, those processed without producing an item, and those
+-    /// registered as references but never needed (unused methods, unneeded vtables).
++    /// item kind, the items that were translated, those processed without producing an item, and
++    /// those registered as references but never needed (unused methods, unneeded vtables).
+     pub fn write_coverage_report(&self) {
+         let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
+             return;
+@@ -419,7 +422,11 @@ impl<'tcx> TranslateCtx<'tcx> {
+             roots
+                 .entry(tcx.crate_name(def_id.krate).to_string())
+                 .or_default()
+-                .push(format!("{:?} {}", tcx.def_kind(def_id), tcx.def_path_str(def_id)));
++                .push(format!(
++                    "{:?} {}",
++                    tcx.def_kind(def_id),
++                    tcx.def_path_str(def_id)
++                ));
+         }
+         type ByKind = BTreeMap<String, Vec<String>>;
+         let mut translated: BTreeMap<String, ByKind> = BTreeMap::new();
+@@ -457,7 +464,10 @@ impl<'tcx> TranslateCtx<'tcx> {
+         });
+         let text = serde_json::to_string_pretty(&report).unwrap();
+         std::fs::write(&path, text).unwrap_or_else(|error| {
+-            panic!("cannot write coverage report {}: {error}", path.to_string_lossy())
++            panic!(
++                "cannot write coverage report {}: {error}",
++                path.to_string_lossy()
++            )
+         });
+     }
+ 
+@@ -946,7 +956,11 @@ pub fn translate<'tcx>(
+             StartFrom::Pattern { pattern, strict } => {
+                 match super::resolve_path::def_path_def_ids(&ctx.hax_state, &pattern, strict) {
+                     Ok(resolved) => {
+-                        ctx.start_from_def_ids.push((pattern.to_string(), resolved.clone()));
++                        ctx.start_from_def_ids.push((
++                            pattern.to_string(),
++                            strict,
++                            resolved.clone(),
++                        ));
+                         for def_id in resolved {
+                             if !def_id.is_local() && def_id.is_crate_root() {
+                                 // An external crate root: its nameable children miss impls and
+@@ -986,7 +1000,8 @@ pub fn translate<'tcx>(
+                 for ldid in tcx.hir_crate_items(()).definitions() {
+                     add_if_attr_matches(ldid)
+                 }
+-                ctx.start_from_def_ids.push((format!("#[{attr_name}]"), selected));
++                ctx.start_from_def_ids
++                    .push((format!("#[{attr_name}]"), true, selected));
+             }
+             StartFrom::Pub => {
+                 let mut selected = Vec::new();
+@@ -1002,7 +1017,8 @@ pub fn translate<'tcx>(
+                 for ldid in tcx.hir_crate_items(()).definitions() {
+                     add_if_matches(ldid)
+                 }
+-                ctx.start_from_def_ids.push(("pub".to_string(), selected));
++                ctx.start_from_def_ids
++                    .push(("pub".to_string(), true, selected));
+             }
+         }
+     }
+diff --git a/src/bin/charon-driver/translate/translate_ctx.rs b/src/bin/charon-driver/translate/translate_ctx.rs
+index 9a3b5c7..245e765 100644
+--- a/src/bin/charon-driver/translate/translate_ctx.rs
++++ b/src/bin/charon-driver/translate/translate_ctx.rs
+@@ -76,8 +76,9 @@ pub struct TranslateCtx<'tcx> {
+     pub closure_capture_params: HashMap<hax::DefId, ClosureCaptureParams>,
+     /// The definitions `--start-from` patterns enumerated, for the coverage report.
+     pub coverage_roots: Vec<rustc_hir::def_id::DefId>,
+-    /// The definitions each start-from selection resolved to.
+-    pub start_from_def_ids: Vec<(String, Vec<rustc_hir::def_id::DefId>)>,
++    /// For each start-from selection: its label, whether it is strict (see
++    /// `StartFromSelection::strict`), and the definitions it resolved to.
++    pub start_from_def_ids: Vec<(String, bool, Vec<rustc_hir::def_id::DefId>)>,
+     /// The items registered as module items: start-from items and, recursively, the contents of
+     /// the modules and inherent impls among them.
+     pub module_item_ids: HashSet<ItemId>,
+diff --git a/src/options.rs b/src/options.rs
+index ab3233d..f92dd37 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -457,8 +457,9 @@ impl CliOpts {
+ /// Predicates that determine wihch items to use as starting point for translation.
+ #[derive(Debug, Clone, EnumAsGetters)]
+ pub enum StartFrom {
+-    /// Item identified by a pattern/path. If strict is true, then failing to
+-    /// find an item matching the pattern is an error; otherwise, we just ignore this pattern.
++    /// Item identified by a pattern/path. If strict is true, then failing to find an item
++    /// matching the pattern is an error, and so is selecting no item that ends up declared in the
++    /// output; otherwise, we just ignore this pattern.
+     Pattern { pattern: NamePattern, strict: bool },
+     /// Item annotated with the given attribute.
+     Attribute(String),
+@@ -586,9 +587,10 @@ impl TranslateOptions {
+             start_from.push(StartFrom::Pub);
+         }
+         if start_from.is_empty() {
++            // Not strict: translating a crate that defines no item is not an error.
+             start_from.push(StartFrom::Pattern {
+                 pattern: parse_pattern("crate").unwrap(),
+-                strict: true,
++                strict: false,
+             });
+         }
+ 
+diff --git a/src/transform/add_missing_info/reorder_decls.rs b/src/transform/add_missing_info/reorder_decls.rs
+index 0f48dcf..f66cb18 100644
+--- a/src/transform/add_missing_info/reorder_decls.rs
++++ b/src/transform/add_missing_info/reorder_decls.rs
+@@ -317,7 +317,7 @@ fn compute_declarations_graph(ctx: &TransformCtx) -> DiGraphMap<ItemId, ()> {
+                 .any(|pat| pat.matches(&ctx.translated, item.item_meta()))
+         })
+         .map(|item| item.id())
+-        .chain(ctx.start_from_roots.iter().flat_map(|(_, ids)| ids.iter().copied()))
++        .chain(ctx.start_from_roots.iter().flat_map(|sel| sel.items.iter().copied()))
+         .collect();
+ 
+     // Explore reachable items.
+@@ -476,19 +476,20 @@ pub struct Transform;
+ impl TransformPass for Transform {
+     fn transform_ctx(&self, ctx: &mut TransformCtx) {
+         let reordered_decls = compute_reordered_decls(ctx);
+-        // A selection none of whose items is declared would silently yield an empty model.
++        // A strict selection none of whose items is declared would silently yield an empty model.
+         let declared: HashSet<ItemId> = reordered_decls
+             .iter()
+             .flat_map(|group| group.get_ids())
+             .collect();
+-        for (selection, roots) in &ctx.start_from_roots {
+-            if !roots.iter().any(|id| declared.contains(id)) {
++        for selection in &ctx.start_from_roots {
++            if selection.strict && !selection.items.iter().any(|id| declared.contains(id)) {
+                 register_error!(
+-                    ctx,
+-                    Span::dummy(),
+-                    "start-from selection `{selection}` selected no item that is declared in the \
+-                     output ({} translated items)",
+-                    roots.len()
++                    ctx.errors.borrow_mut(),
++                    no_crate,
++                    "start-from selection `{}` selected no item that is declared in the output \
++                     ({} items selected)",
++                    selection.label,
++                    selection.items.len()
+                 );
+             }
+         }
+diff --git a/src/transform/ctx.rs b/src/transform/ctx.rs
+index b294062..824ce5d 100644
+--- a/src/transform/ctx.rs
++++ b/src/transform/ctx.rs
+@@ -17,9 +17,21 @@ pub struct TransformCtx {
+     pub translated: TranslatedCrate,
+     /// Context for tracking and reporting errors.
+     pub errors: RefCell<ErrorCtx>,
+-    /// For each start-from pattern (or `--start-from-attribute`/`--start-from-pub` selection),
+-    /// the translated items it selected. These are the roots of the declaration graph.
+-    pub start_from_roots: Vec<(String, Vec<ItemId>)>,
++    /// What each start-from selection selected. The selected items are the roots of the
++    /// declaration graph.
++    pub start_from_roots: Vec<StartFromSelection>,
++}
++
++/// The translated items a start-from selection (a `--start-from`/`--start-from-if-exists`
++/// pattern, `--start-from-attribute` or `--start-from-pub`) selected.
++pub struct StartFromSelection {
++    /// The pattern, `#[attribute]` or `pub`.
++    pub label: String,
++    /// Whether the selection must select an item that ends up declared in the output: all
++    /// selections but `--start-from-if-exists` patterns and the implicit default `crate`.
++    pub strict: bool,
++    /// The selected items.
++    pub items: Vec<ItemId>,
+ }
+ 
+ /// A pass that modifies ullbc bodies.
+diff --git a/src/transform/mod.rs b/src/transform/mod.rs
+index 3909260..c7b1ba3 100644
+--- a/src/transform/mod.rs
++++ b/src/transform/mod.rs
+@@ -68,7 +68,7 @@ pub mod control_flow {
+ }
+ 
+ use Pass::*;
+-pub use ctx::TransformCtx;
++pub use ctx::{StartFromSelection, TransformCtx};
+ use ctx::{FusedUllbcPass, LlbcPass, TransformPass, UllbcPass};
+ 
+ /// Item and type cleanup passes.
+diff --git a/tests/ui/filtering/start_from.out b/tests/ui/filtering/start_from.out
+index 824952b..4f90bfb 100644
+--- a/tests/ui/filtering/start_from.out
++++ b/tests/ui/filtering/start_from.out
+@@ -4,6 +4,79 @@
+ #[lang_item("meta_sized")]
+ pub trait MetaSized<Self>
+ 
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::clone::Clone
++#[lang_item("clone")]
++pub trait Clone<Self>
++{
++    parent_clause0 : [@TraitClause0]: Sized<Self>
++    fn clone<'_0_1> = clone<'_0_1, Self>[Self]
++    non-dyn-compatible
++}
++
++// Full name: core::clone::Clone::clone
++#[lang_item("clone_fn")]
++pub fn clone<'_0, Self>(_1: &'_0 Self) -> Self
++where
++    [@TraitClause0]: Clone<Self>,
++= <opaque>
++
++// Full name: core::marker::Destruct
++#[lang_item("destruct")]
++pub trait Destruct<Self>
++{
++    fn drop_in_place = drop_in_place<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::clone::Clone::clone_from
++pub fn clone_from<'_0, '_1, Self>(_1: &'_0 mut Self, _2: &'_1 Self)
++where
++    [@TraitClause0]: Clone<Self>,
++    [@TraitClause1]: Destruct<Self>,
++= <opaque>
++
++// Full name: core::iter::sources::once::Once
++#[lang_item("IterOnce")]
++pub opaque type Once<T>
++where
++    [@TraitClause0]: Sized<T>,
++
++// Full name: core::iter::sources::once::once
++pub fn once<T>(_1: T) -> Once<T>[@TraitClause0]
++where
++    [@TraitClause0]: Sized<T>,
++= <opaque>
++
++// Full name: core::marker::Destruct::drop_in_place
++unsafe fn drop_in_place<Self>(_1: *mut Self)
++= <opaque>
++
++// Full name: core::num::{u32}::wrapping_add
++pub fn wrapping_add(_1: u32, _2: u32) -> u32
++= <opaque>
++
++// Full name: core::slice::iter::Iter
++#[lang_item("SliceIter")]
++pub opaque type Iter<'a, T>
++where
++    [@TraitClause0]: Sized<T>,
++    T : 'a,
++    T : 'a,
++
++// Full name: core::slice::iter::{Iter<'a, T>[@TraitClause0]}::as_slice
++pub fn as_slice<'a, '_1, T>(_1: &'_1 Iter<'a, T>[@TraitClause0]) -> &'a [T]
++where
++    [@TraitClause0]: Sized<T>,
++= <opaque>
++
+ fn test_crate::module1::do_translate()
+ {
+     let _0: (); // return
+diff --git a/tests/ui/filtering/start_from_empty_selection.out b/tests/ui/filtering/start_from_empty_selection.out
+new file mode 100644
+index 0000000..6324898
+--- /dev/null
++++ b/tests/ui/filtering/start_from_empty_selection.out
+@@ -0,0 +1,3 @@
++error: start-from selection `crate::empty` selected no item that is declared in the output (0 items selected)
++
++ERROR Charon failed to translate this code (1 errors)
+diff --git a/tests/ui/filtering/start_from_empty_selection.rs b/tests/ui/filtering/start_from_empty_selection.rs
+new file mode 100644
+index 0000000..b288526
+--- /dev/null
++++ b/tests/ui/filtering/start_from_empty_selection.rs
+@@ -0,0 +1,9 @@
++//@ known-failure
++//@ charon-arg=--start-from=crate::empty
++//@ charon-arg=--start-from=crate::nonempty
++// A strict selection none of whose items ends up declared is an error: an empty model would
++// otherwise pass silently.
++mod empty {}
++mod nonempty {
++    fn f() {}
++}

@@ -1,0 +1,64 @@
+# charon integration step 8 after 546078ea5d: commit 428e107753e8af06f9005c3eb4fa122027708e01
+# first parent b243503033c0ff333e2210c305fd442abb4d8ae0
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: shift merged clause ids before substituting shape arguments
+
+diff --git a/src/ast/types_utils.rs b/src/ast/types_utils.rs
+index 4af875d..3f50215 100644
+--- a/src/ast/types_utils.rs
++++ b/src/ast/types_utils.rs
+@@ -142,10 +142,14 @@ impl GenericParams {
+         self.trait_type_constraints.extend(trait_type_constraints);
+     }
+ 
+-    /// Take the predicates from the another `GenericParams`. This assumes that the two
+-    /// `GenericParams` are independent, hence will shift clause ids if `other` has any
+-    /// trait refs that reference its own clauses.
+-    pub fn merge_predicates_from(&mut self, mut other: GenericParams) {
++    /// Take the predicates from another, independent `GenericParams`, instantiating its explicit
++    /// params with `explicits` (arguments expressed in the scope of `self`).
++    ///
++    /// The predicates of `other` may refer to its own trait clauses; these references are shifted
++    /// to the positions the clauses take in `self`. The shift must happen before substitution:
++    /// `explicits` may already mention clauses of `self` (e.g. a type argument that is itself an
++    /// ADT applied to a clause of `self`), and those references must stay untouched.
++    pub fn merge_predicates_from(&mut self, mut other: GenericParams, explicits: &GenericArgs) {
+         // Drop the explicits params.
+         other.types.clear();
+         other.regions.clear();
+@@ -155,7 +159,6 @@ impl GenericParams {
+         impl VarsVisitor for ShiftClausesVisitor {
+             fn visit_clause_var(&mut self, v: ClauseDbVar) -> Option<TraitRefKind> {
+                 if let DeBruijnVar::Bound(DeBruijnId::ZERO, clause_id) = v {
+-                    // Replace clause 0 and decrement the others.
+                     Some(TraitRefKind::Clause(DeBruijnVar::Bound(
+                         DeBruijnId::ZERO,
+                         clause_id + self.0,
+@@ -167,7 +170,7 @@ impl GenericParams {
+         }
+         let num_clauses = self.trait_clauses.len();
+         other.visit_vars(&mut ShiftClausesVisitor(num_clauses));
+-        self.take_predicates_from(other);
++        self.take_predicates_from(other.substitute_explicits(explicits));
+     }
+ }
+ 
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index 21a3fd5..cd233ba 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -327,11 +327,8 @@ impl<'pm, 'ctx> VisitAstMut for MutabilityShapeBuilder<'pm, 'ctx> {
+ 
+             // Add the target predicates (properly substituted) to the new item params.
+             let num_clauses_before_merge = self.params.trait_clauses.len();
+-            self.params.merge_predicates_from(
+-                target_params
+-                    .clone()
+-                    .substitute_explicits(&shifted_generics),
+-            );
++            self.params
++                .merge_predicates_from(target_params.clone(), &shifted_generics);
+ 
+             // Record the trait arguments in the output `GenericArgs`.
+             self.extracted

@@ -1,0 +1,474 @@
+# charon integration step 38 after 546078ea5d: commit c6b2825aac2708f682b9e8b71ea61dde2eb70ba7
+# first parent 83bc6c3233616149764128c8428c558484fa2938
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: partial monomorphization instantiates opaque generic items with their contents
+#
+# Under --monomorphize-mut, a generic function (or closure method, defaulted method, or a type
+# partial monomorphization specializes) that an --opaque pattern makes opaque keeps its translated
+# contents. The instances partial monomorphization creates for the `&mut` arguments used by this
+# crate are transparent and keep the body (or fields); the generic item itself is made opaque again
+# after the pass. This lets a separately translated chunk list the items of earlier chunks as opaque
+# and still get bodies for the instances it needs. #[charon::opaque] items stay opaque. UI test
+# monomorphize-mut-opaque.
+
+diff --git a/src/bin/charon-driver/translate/translate_closures.rs b/src/bin/charon-driver/translate/translate_closures.rs
+index ca48a6a..4d156f6 100644
+--- a/src/bin/charon-driver/translate/translate_closures.rs
++++ b/src/bin/charon-driver/translate/translate_closures.rs
+@@ -651,9 +651,13 @@ impl ItemTransCtx<'_, '_> {
+                 .collect(),
+         );
+ 
+-        let body = if item_meta.opacity.with_private_contents().is_opaque() {
++        let mono_template = self.keeps_contents_for_mono(&item_meta);
++        let body = if item_meta.opacity.with_private_contents().is_opaque() && !mono_template {
+             Body::Opaque
+         } else {
++            if mono_template {
++                self.t_ctx.mono_templates.insert(def_id.into());
++            }
+             self.translate_closure_method_body(span, def, target_kind, args, &signature)?
+         };
+ 
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index 99f7212..628abad 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -1076,6 +1076,7 @@ pub fn translate<'tcx>(
+         coverage_roots: Default::default(),
+         start_from_def_ids: Default::default(),
+         module_item_ids: Default::default(),
++        mono_templates: Default::default(),
+     };
+     ctx.register_target_info();
+ 
+@@ -1269,6 +1270,7 @@ pub fn translate<'tcx>(
+         translated: ctx.translated,
+         errors: ctx.errors,
+         start_from_roots,
++        mono_templates: ctx.mono_templates,
+     })
+ }
+ 
+diff --git a/src/bin/charon-driver/translate/translate_ctx.rs b/src/bin/charon-driver/translate/translate_ctx.rs
+index 8139ae7..5a9a84d 100644
+--- a/src/bin/charon-driver/translate/translate_ctx.rs
++++ b/src/bin/charon-driver/translate/translate_ctx.rs
+@@ -83,6 +83,9 @@ pub struct TranslateCtx<'tcx> {
+     /// The items registered as module items: start-from items and, recursively, the contents of
+     /// the modules and inherent impls among them.
+     pub module_item_ids: HashSet<ItemId>,
++    /// Opaque items whose contents were translated for partial monomorphization (see
++    /// `keeps_contents_for_mono`).
++    pub mono_templates: HashSet<ItemId>,
+ }
+ 
+ /// How the upvar region params of a closure item relate to the capture region occurrences of its
+diff --git a/src/bin/charon-driver/translate/translate_items.rs b/src/bin/charon-driver/translate/translate_items.rs
+index 7638197..da8a03a 100644
+--- a/src/bin/charon-driver/translate/translate_items.rs
++++ b/src/bin/charon-driver/translate/translate_items.rs
+@@ -5,6 +5,7 @@ use crate::hax::SInto;
+ use charon_lib::ast::ullbc_ast_utils::BodyBuilder;
+ use charon_lib::ast::*;
+ use charon_lib::formatter::IntoFormatter;
++use charon_lib::options::MonomorphizeMut;
+ use charon_lib::pretty::FmtWithCtx;
+ use derive_generic_visitor::Visitor;
+ use itertools::Itertools;
+@@ -484,9 +485,20 @@ impl ItemTransCtx<'_, '_> {
+ 
+         let mut repr: Option<ReprOptions> = None;
+ 
++        // Partial monomorphization specializes types when asked to, and closures (which keep
++        // their trait clauses) in any case.
++        let mono_template = self.keeps_contents_for_mono(&item_meta)
++            && (matches!(
++                self.t_ctx.options.monomorphize_mut,
++                Some(MonomorphizeMut::All)
++            ) || matches!(def.kind, hax::FullDefKind::Closure { .. }));
++        if mono_template {
++            self.t_ctx.mono_templates.insert(trans_id.into());
++        }
++
+         // Translate type body
+         let kind = match &def.kind {
+-            _ if item_meta.opacity.is_opaque() => Ok(TypeDeclKind::Opaque),
++            _ if item_meta.opacity.is_opaque() && !mono_template => Ok(TypeDeclKind::Opaque),
+             hax::FullDefKind::OpaqueTy | hax::FullDefKind::ForeignTy => Ok(TypeDeclKind::Opaque),
+             hax::FullDefKind::TyAlias { ty, .. } => {
+                 // Don't error on missing trait refs.
+@@ -525,6 +537,24 @@ impl ItemTransCtx<'_, '_> {
+         Ok(type_def)
+     }
+ 
++    /// Under `--monomorphize-mut`, a generic item that an `--opaque` pattern makes opaque (e.g. an
++    /// item that another, separately translated, part of the code base defines) keeps its
++    /// contents: partial monomorphization instantiates it for the `&mut` arguments used here, and
++    /// these instances need its body (or fields). The partial monomorphization pass makes the item
++    /// itself opaque again once the instances exist (see `TransformCtx::mono_templates`).
++    /// `#[charon::opaque]` items stay opaque.
++    pub(crate) fn keeps_contents_for_mono(&self, item_meta: &ItemMeta) -> bool {
++        self.t_ctx.options.monomorphize_mut.is_some()
++            && item_meta.opacity == ItemOpacity::Opaque
++            && self.t_ctx.opacity_for_name(&item_meta.name) == ItemOpacity::Opaque
++            && !item_meta
++                .attr_info
++                .attributes
++                .iter()
++                .any(|attr| attr.is_opaque())
++            && !self.outermost_generics().types.is_empty()
++    }
++
+     /// Translate one function.
+     #[tracing::instrument(skip(self, item_meta, def))]
+     pub fn translate_fun_decl(
+@@ -604,16 +634,20 @@ impl ItemTransCtx<'_, '_> {
+         let is_global_initializer = is_global_initializer
+             .then(|| self.register_item(span, def.this(), TransItemSourceKind::Global));
+ 
++        let mono_template = self.keeps_contents_for_mono(&item_meta);
+         let body = if let Some(name) = intrinsic_name {
+             let arg_names = self.translate_argument_names(span, def, signature.inputs.len());
+             Body::Intrinsic { name, arg_names }
+         } else if let Some(name) = self.t_ctx.extern_item_symbol_name(def) {
+             Body::Extern(name)
+-        } else if item_meta.opacity.with_private_contents().is_opaque() {
++        } else if item_meta.opacity.with_private_contents().is_opaque() && !mono_template {
+             Body::Opaque
+         } else if is_trait_method_decl_without_default {
+             Body::TraitMethodWithoutDefault
+         } else {
++            if mono_template {
++                self.t_ctx.mono_templates.insert(def_id.into());
++            }
+             // Translate the MIR body for this definition.
+             self.translate_def_body(item_meta.span, def)
+         };
+@@ -1520,7 +1554,11 @@ impl ItemTransCtx<'_, '_> {
+         } else {
+             unreachable!()
+         };
+-        if !item_meta.opacity.is_transparent() {
++        if self.keeps_contents_for_mono(&fun_decl.item_meta)
++            && !matches!(fun_decl.body, Body::Opaque)
++        {
++            self.t_ctx.mono_templates.insert(def_id.into());
++        } else if !fun_decl.item_meta.opacity.is_transparent() {
+             fun_decl.body = Body::Opaque;
+         }
+ 
+diff --git a/src/export/multi_target.rs b/src/export/multi_target.rs
+index 2cebf34..65b99d5 100644
+--- a/src/export/multi_target.rs
++++ b/src/export/multi_target.rs
+@@ -31,6 +31,7 @@ pub fn merge(options: CliOpts, krates: Vec<CrateData>) -> CrateData {
+         errors: RefCell::new(error_ctx),
+         // The merged crates were already filtered by their own roots.
+         start_from_roots: Vec::new(),
++        mono_templates: Default::default(),
+     };
+     crate::transform::add_missing_info::reorder_decls::Transform.transform_ctx(&mut ctx);
+     merged.translated = ctx.translated;
+diff --git a/src/transform/ctx.rs b/src/transform/ctx.rs
+index 824ce5d..91d7e3b 100644
+--- a/src/transform/ctx.rs
++++ b/src/transform/ctx.rs
+@@ -6,6 +6,7 @@ use crate::options::TranslateOptions;
+ use crate::pretty::FmtWithCtx;
+ use crate::ullbc_ast;
+ use std::cell::RefCell;
++use std::collections::HashSet;
+ use std::{fmt, mem};
+ 
+ /// Simpler context used for rustc-independent code transformation. This only depends on rustc for
+@@ -20,6 +21,9 @@ pub struct TransformCtx {
+     /// What each start-from selection selected. The selected items are the roots of the
+     /// declaration graph.
+     pub start_from_roots: Vec<StartFromSelection>,
++    /// Opaque generic items whose contents were translated only so that partial
++    /// monomorphization can instantiate them; that pass makes them opaque again.
++    pub mono_templates: HashSet<ItemId>,
+ }
+ 
+ /// The translated items a start-from selection (a `--start-from`/`--start-from-if-exists`
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index 56cdfb8..a016690 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -602,6 +602,11 @@ impl<'a> PartialMonomorphizer<'a> {
+         decl_mut.set_id(new_id);
+         *decl_mut.generic_params() = shape.params.clone();
+ 
++        // The instance of an opaque item kept for instantiation (see `mono_templates`) belongs to
++        // this crate: it keeps the contents.
++        if self.ctx.mono_templates.contains(orig_id) {
++            decl_mut.item_meta().opacity = ItemOpacity::Transparent;
++        }
+         let name_ref = &mut decl_mut.item_meta().name;
+         *name_ref = mem::take::<crate::ast::Name>(name_ref).instantiate(shape.clone());
+         self.ctx
+@@ -715,5 +720,13 @@ impl TransformPass for Transform {
+             // Put the item back.
+             visitor.ctx.translated.set_item_slot(id, decl);
+         }
++        // The items kept for instantiation are opaque.
++        for id in mem::take(&mut ctx.mono_templates) {
++            match ctx.translated.get_item_mut(id) {
++                Some(ItemRefMut::Fun(decl)) => decl.body = Body::Opaque,
++                Some(ItemRefMut::Type(decl)) => decl.kind = TypeDeclKind::Opaque,
++                _ => {}
++            }
++        }
+     }
+ }
+diff --git a/tests/ui/monomorphize-mut-opaque.out b/tests/ui/monomorphize-mut-opaque.out
+new file mode 100644
+index 0000000..f4e0f58
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-opaque.out
+@@ -0,0 +1,218 @@
++# Final LLBC before serialization:
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args, Self_Output>
++{
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args, Self_Output>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self_Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnOnce<Self, Args, Self_Clause0_Output>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args, Self_Clause0_Output>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self_Clause0_Output>
++}
++
++#[lang_item("fn_once")]
++pub trait core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++{
++    fn call_once = core::ops::function::FnOnce::call_once::<_, (&_ mut _,), _><'_0, T0, T1, T2>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<(&'_0 mut T1,), T2>
++}
++
++#[lang_item("fn_mut")]
++pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++{
++    parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1,), T2>
++}
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
++where
++    [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 mut T0, _2: (&'_1 mut T1,)) -> T2
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
++where
++    [@TraitClause0]: FnOnce<Self, Args, Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once::<_, (&_ mut _,), _><'_0, T0, T1, T2>(_1: T0, _2: (&'_0 mut T1,)) -> T2
++where
++    [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++struct test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T1, T0, ()>,
++{
++  &'_0 mut T1,
++}
++
++opaque type test_crate::external::closure<'_0, T, T1>
++where
++    [@TraitClause0]: FnMut<T1, (T,), ()>,
++
++fn test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,
++{
++    let _0: (); // return
++    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0]; // arg #1
++    let tupled_args_2: (&'_2 mut T0,); // arg #2
++    let y_3: &'_2 mut T0; // local
++    let _4: &'3 mut T1; // anonymous local
++    let _5: (&'_2 mut T0,); // anonymous local
++    let _6: &'_2 mut T0; // anonymous local
++
++    storage_live(y_3)
++    _0 = ()
++    y_3 = move tupled_args_2.0
++    storage_live(_4)
++    _4 = &mut (*((*_1)).0)
++    storage_live(_5)
++    storage_live(_6)
++    _6 = move y_3
++    _5 = (move _6,)
++    _0 = @TraitClause0::call_mut<'6>(move _4, move _5)
++    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] _6
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(_4)
++    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] y_3
++    return
++}
++
++pub fn test_crate::external::<&_ mut _, _><'_0, T0, T1>(x_1: &'_0 mut T0, f_2: T1)
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T1, T0, ()>,
++{
++    let _0: (); // return
++    let x_1: &'_0 mut T0; // arg #1
++    let f_2: T1; // arg #2
++    let g_3: test_crate::external::closure::<_, &_ mut _, _><'1, '_0, T0, T1>[@TraitClause0]; // local
++    let _4: &'3 mut T1; // anonymous local
++    let _5: &'6 mut test_crate::external::closure::<_, &_ mut _, _><'7, '_0, T0, T1>[@TraitClause0]; // anonymous local
++    let _6: (&'_0 mut T0,); // anonymous local
++    let _7: &'_0 mut T0; // anonymous local
++
++    _0 = ()
++    storage_live(g_3)
++    storage_live(_4)
++    _4 = &mut f_2
++    g_3 = test_crate::external::closure::<_, &_ mut _, _> { 0: move _4 }
++    storage_dead(_4)
++    storage_live(_5)
++    _5 = &mut g_3
++    storage_live(_6)
++    storage_live(_7)
++    _7 = move x_1
++    _6 = (move _7,)
++    _0 = test_crate::external::{impl core::ops::function::FnMut::<test_crate::external::closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '13, '_0, T0, T1>[@TraitClause0](move _5, move _6)
++    conditional_drop[{built_in impl Destruct for &'_0 mut T0}] _7
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(g_3)
++    conditional_drop[{built_in impl Destruct for T1}] f_2
++    conditional_drop[{built_in impl Destruct for &'_0 mut T0}] x_1
++    return
++}
++
++struct test_crate::user::closure {}
++
++// Full name: test_crate::user::{impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_mut
++fn {impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_mut<'_0, '_1>(_1: &'_1 mut test_crate::user::closure, tupled_args_2: (&'_0 mut u32,))
++{
++    let _0: (); // return
++    let _1: &'1 mut test_crate::user::closure; // arg #1
++    let tupled_args_2: (&'_0 mut u32,); // arg #2
++    let r_3: &'2 mut u32; // local
++    let _4: u32; // anonymous local
++
++    storage_live(r_3)
++    storage_live(_4)
++    _0 = ()
++    r_3 = move tupled_args_2.0
++    _4 = copy (*r_3) panic.+ const 1 : u32
++    (*r_3) = move _4
++    _0 = ()
++    return
++}
++
++// Full name: test_crate::user::{impl core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_once
++fn {impl core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_once<'_0>(_1: test_crate::user::closure, _2: (&'_0 mut u32,))
++{
++    let _0: (); // return
++    let _1: test_crate::user::closure; // arg #1
++    let _2: (&'0 mut u32,); // arg #2
++    let _3: &'2 mut test_crate::user::closure; // anonymous local
++
++    storage_live(_3)
++    _0 = ()
++    _3 = &mut _1
++    _0 = {impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_mut<'_0, '8>(move _3, move _2)
++    drop[{impl#5}] _1
++    return
++}
++
++// Full name: test_crate::user::{impl core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}
++impl<'_0> core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure {
++    fn call_once = {impl core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_once<'_0>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}
++impl<'_0> core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure {
++    parent_clause0 = {impl core::ops::function::FnOnce::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}<'_0>
++    fn call_mut<'_0_1> = {impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}::call_mut<'_0, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user
++pub fn user<'_0>(v_1: &'_0 mut u32)
++{
++    let _0: (); // return
++    let v_1: &'1 mut u32; // arg #1
++    let _2: (); // anonymous local
++    let _3: &'2 mut u32; // anonymous local
++    let _4: test_crate::user::closure; // anonymous local
++
++    _0 = ()
++    storage_live(_2)
++    storage_live(_3)
++    _3 = move v_1
++    storage_live(_4)
++    _4 = test_crate::user::closure {  }
++    _2 = test_crate::external::<&_ mut _, _><'3, u32, test_crate::user::closure>[{impl core::ops::function::FnMut::<_, (&_ mut _,), _><'_, u32, ()> for test_crate::user::closure}<'7>](move _3, move _4)
++    storage_dead(_4)
++    storage_dead(_3)
++    storage_dead(_2)
++    _0 = ()
++    return
++}
++
++
++
+diff --git a/tests/ui/monomorphize-mut-opaque.rs b/tests/ui/monomorphize-mut-opaque.rs
+new file mode 100644
+index 0000000..e0fad8f
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-opaque.rs
+@@ -0,0 +1,19 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++//@ charon-arg=--opaque=test_crate::external
++//@ charon-arg=--start-from=test_crate::user
++// A generic function made opaque by `--opaque` (e.g. because another, separately translated part
++// of the code base defines it) stays opaque, but the instance partial monomorphization creates
++// for the `&mut` argument used here keeps its body, as do the instances of its closures.
++pub fn external<T>(x: T, mut f: impl FnMut(T)) {
++    let mut g = |y: T| f(y);
++    g(x)
++}
++
++pub fn opaque_only<T>(x: T) -> T {
++    x
++}
++
++pub fn user(v: &mut u32) {
++    external(v, |r: &mut u32| *r += 1);
++}

@@ -1,0 +1,1062 @@
+# charon integration step 5 after 546078ea5d: commit 9bb3a3d6c062037f75e1ad9cc9d4d04662a76be3
+# first parent e5fab3cf55029026efdc6c7bf05dfae4480c43a1
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon-closure-regions
+
+diff --git a/src/bin/charon-driver/closure_regions.rs b/src/bin/charon-driver/closure_regions.rs
+new file mode 100644
+index 0000000..fc43db9
+--- /dev/null
++++ b/src/bin/charon-driver/closure_regions.rs
+@@ -0,0 +1,150 @@
++//! Preserve closure lifetime requirements before rustc steals the MIR.
++//!
++//! Closure signatures erase free lifetimes independently at each occurrence.
++//! Freshening these occurrences is necessary, but their borrowck constraints
++//! must accompany them: they are not independent lifetime parameters.
++use rustc_borrowck::consumers::{ConsumerOptions, get_bodies_with_borrowck_facts};
++use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
++use rustc_hir::def::DefKind;
++use rustc_hir::def_id::LocalDefId;
++use rustc_middle::ty::{self, TyCtxt};
++use std::sync::{LazyLock, Mutex};
++
++#[derive(Clone, Debug)]
++pub struct ClosureRegionRelations {
++    pub signature_regions: usize,
++    pub capture_regions: usize,
++    /// Indices into the free regions of the signature followed by the captures.
++    pub outlives: Vec<(usize, usize)>,
++}
++
++static RELATIONS: LazyLock<Mutex<FxHashMap<LocalDefId, ClosureRegionRelations>>> =
++    LazyLock::new(|| Mutex::new(FxHashMap::default()));
++static CLOSURE_ROOTS: Mutex<Option<FxHashSet<LocalDefId>>> = Mutex::new(None);
++
++pub fn clear() {
++    RELATIONS.lock().expect("closure-region cache poisoned").clear();
++    *CLOSURE_ROOTS.lock().expect("closure-region cache poisoned") = None;
++}
++
++pub fn lookup(def_id: LocalDefId) -> Option<ClosureRegionRelations> {
++    RELATIONS.lock().expect("closure-region cache poisoned").get(&def_id).cloned()
++}
++
++type BorrowckProvider = for<'tcx> fn(
++    TyCtxt<'tcx>,
++    LocalDefId,
++) -> Result<
++    &'tcx FxIndexMap<LocalDefId, ty::DefinitionSiteHiddenType<'tcx>>,
++    rustc_errors::ErrorGuaranteed,
++>;
++static ORIGINAL_BORROWCK: Mutex<Option<BorrowckProvider>> = Mutex::new(None);
++
++pub fn install(providers: &mut rustc_middle::util::Providers) {
++    *ORIGINAL_BORROWCK.lock().expect("closure-region cache poisoned") = Some(providers.queries.mir_borrowck);
++    providers.queries.mir_borrowck = |tcx, root| {
++        // Preserve the provider's diagnostics and opaque-type inference result.
++        // It borrows MIR; subsequent compiler passes steal it only after this
++        // query returns. Do not try to infer a contract for rejected code.
++        let original = ORIGINAL_BORROWCK.lock().expect("closure-region cache poisoned").expect("missing borrowck provider");
++        let result = original(tcx, root)?;
++        capture(tcx, root);
++        Ok(result)
++    };
++}
++
++pub fn capture<'tcx>(tcx: TyCtxt<'tcx>, root: LocalDefId) {
++    // Most roots have no closure, and do not need the consumer's second MIR
++    // type-check. The ordinary mir_borrowck provider still runs for every root.
++    let has_closures = {
++        let mut roots = CLOSURE_ROOTS.lock().expect("closure-region cache poisoned");
++        roots.get_or_insert_with(|| {
++            tcx.hir_body_owners()
++                .filter(|&id| matches!(tcx.def_kind(id), DefKind::Closure))
++                .map(|id| tcx.typeck_root_def_id(id.to_def_id()).expect_local())
++                .collect()
++        }).contains(&root)
++    };
++    if !has_closures {
++        return;
++    }
++    let bodies = get_bodies_with_borrowck_facts(
++        tcx,
++        root,
++        ConsumerOptions::PoloniusInputFacts,
++    );
++    for (id, facts) in bodies {
++        if !matches!(tcx.def_kind(id), DefKind::Closure) {
++            continue;
++        }
++        let mut self_ty = facts.body.local_decls[rustc_middle::mir::Local::from_usize(1)].ty;
++        while let ty::Ref(_, inner, _) = self_ty.kind() {
++            self_ty = *inner;
++        }
++        let ty::Closure(_, args) = self_ty.kind() else {
++            // Coroutine closures have a different environment/signature layout.
++            continue;
++        };
++        let args = args.as_closure();
++        let mut regions = Vec::new();
++        let mut collect = |r: ty::Region<'tcx>, _| {
++            let vid = match r.kind() {
++                ty::ReVar(vid) => vid,
++                ty::ReStatic => ty::RegionVid::from_usize(0),
++                _ => panic!("unexpected free closure borrowck region: {r:?}"),
++            };
++            regions.push(vid);
++            r
++        };
++        ty::fold_regions(tcx, args.sig(), &mut collect);
++        let signature_regions = regions.len();
++        ty::fold_regions(tcx, args.upvar_tys(), |r, _| {
++            let vid = match r.kind() {
++                ty::ReVar(vid) => vid,
++                ty::ReStatic => ty::RegionVid::from_usize(0),
++                _ => panic!("unexpected free capture borrowck region: {r:?}"),
++            };
++            regions.push(vid);
++            r
++        });
++        let capture_regions = regions.len() - signature_regions;
++        let sccs = facts.region_inference_context.constraint_sccs();
++        // The SCC graph contains MIR constraints, but rustc stores assumed
++        // universal-region relations (including implied well-formedness bounds
++        // on captured references) separately. The Polonius input exporter
++        // exposes their exact outlives base edges; requesting these facts does
++        // not run Polonius. Include them before taking transitive closure.
++        let input_facts = facts.input_facts.as_ref()
++            .expect("missing requested closure borrowck input facts");
++        let mut universal_successors = FxHashMap::<_, Vec<_>>::default();
++        for &(longer, shorter) in &input_facts.known_placeholder_subset {
++            let longer = sccs.scc(ty::RegionVid::from(longer));
++            let shorter = sccs.scc(ty::RegionVid::from(shorter));
++            universal_successors.entry(longer).or_default().push(shorter);
++        }
++        let mut outlives = Vec::new();
++        for (i, &region) in regions.iter().enumerate() {
++            // Use actual constraint paths, not inclusion of inferred local
++            // liveness sets (unrelated locals can have equal liveness sets).
++            let mut seen = FxHashSet::default();
++            let mut pending = vec![sccs.scc(region)];
++            while let Some(scc) = pending.pop() {
++                if seen.insert(scc) {
++                    pending.extend_from_slice(sccs.successors(scc));
++                    if let Some(successors) = universal_successors.get(&scc) {
++                        pending.extend_from_slice(successors);
++                    }
++                }
++            }
++            for (j, &other) in regions.iter().enumerate() {
++                if i != j && seen.contains(&sccs.scc(other)) {
++                    outlives.push((i, j));
++                }
++            }
++        }
++        RELATIONS.lock().expect("closure-region cache poisoned").insert(
++            id,
++            ClosureRegionRelations { signature_regions, capture_regions, outlives },
++        );
++    }
++}
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index da8e95d..c142873 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -64,6 +64,7 @@ fn skip_borrowck_if_set(providers: &mut Providers) {
+ 
+ fn setup_compiler(config: &mut Config, options: &CliOpts, do_translate: bool) {
+     if do_translate {
++        crate::closure_regions::clear();
+         if options.skip_borrowck {
+             // We use a static to be able to pass data to `override_queries`.
+             set_skip_borrowck();
+@@ -71,6 +72,9 @@ fn setup_compiler(config: &mut Config, options: &CliOpts, do_translate: bool) {
+ 
+         config.override_queries = Some(|_sess, providers| {
+             skip_borrowck_if_set(providers);
++            if !SKIP_BORROWCK.load(Ordering::SeqCst) {
++                crate::closure_regions::install(providers);
++            }
+ 
+             // TODO: catch the MIR in-flight to avoid stealing issues?
+             // providers.mir_built = |tcx, def_id| {
+diff --git a/src/bin/charon-driver/hax/types/new/full_def.rs b/src/bin/charon-driver/hax/types/new/full_def.rs
+index f069215..5e8433a 100644
+--- a/src/bin/charon-driver/hax/types/new/full_def.rs
++++ b/src/bin/charon-driver/hax/types/new/full_def.rs
+@@ -883,7 +883,7 @@ where
+                 param_env: get_param_env(s, args),
+                 is_const: tcx.constness(def_id) == rustc_hir::Constness::Const,
+                 inline: tcx.codegen_fn_attrs(def_id).inline.sinto(s),
+-                args: ClosureArgs::sfrom(s, def_id, closure_args),
++                args: ClosureArgs::sfrom(s, def_id, closure_args, true),
+                 destruct_impl: virtual_impl_for(
+                     s,
+                     ty::TraitRef::new(tcx, destruct_trait, [type_of_self()]),
+diff --git a/src/bin/charon-driver/hax/types/ty.rs b/src/bin/charon-driver/hax/types/ty.rs
+index 6aa2df0..2c97d82 100644
+--- a/src/bin/charon-driver/hax/types/ty.rs
++++ b/src/bin/charon-driver/hax/types/ty.rs
+@@ -793,7 +793,7 @@ pub enum TyKind {
+ 
+     #[custom_arm(
+         ty::TyKind::Closure (def_id, generics) => {
+-            TyKind::Closure(ClosureArgs::sfrom(s, *def_id, generics))
++            TyKind::Closure(ClosureArgs::sfrom(s, *def_id, generics, false))
+         },
+     )]
+     Closure(ClosureArgs),
+@@ -1432,6 +1432,14 @@ pub enum AliasRelationDirection {
+     Subtype,
+ }
+ 
++/// A free region occurrence in a closure's signature or captured environment.
++#[derive(Clone, Debug, Hash, PartialEq, Eq)]
++pub enum ClosureRegion {
++    Signature(Region),
++    Capture(Region),
++    ErasedCapture(usize),
++}
++
+ /// Reflects [`ty::ClosureArgs`]
+ #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+ 
+@@ -1444,6 +1452,9 @@ pub struct ClosureArgs {
+     pub fn_sig: PolyFnSig,
+     /// The set of captured variables. Together they form the state of the closure.
+     pub upvar_tys: Vec<Ty>,
++    /// Real borrowck requirements between the independently freshened regions.
++    pub region_outlives: Vec<(ClosureRegion, ClosureRegion)>,
++    pub erased_capture_regions: usize,
+ }
+ 
+ impl ClosureArgs {
+@@ -1466,7 +1477,12 @@ impl ClosureArgs {
+ 
+ impl ClosureArgs {
+     // Manual implementation because we need the `def_id` of the closure.
+-    pub fn sfrom<'tcx, S>(s: &S, def_id: RDefId, from: ty::GenericArgsRef<'tcx>) -> Self
++    pub fn sfrom<'tcx, S>(
++        s: &S,
++        def_id: RDefId,
++        from: ty::GenericArgsRef<'tcx>,
++        for_definition: bool,
++    ) -> Self
+     where
+         S: UnderOwnerState<'tcx>,
+     {
+@@ -1478,6 +1494,7 @@ impl ClosureArgs {
+             tcx: ty::TyCtxt<'tcx>,
+             depth: u32,
+             bound_vars: Vec<ty::BoundVariableKind<'tcx>>,
++            free_regions: Vec<ty::Region<'tcx>>,
+         }
+ 
+         impl<'tcx> ty::TypeFolder<ty::TyCtxt<'tcx>> for RegionUnEraserVisitor<'tcx> {
+@@ -1508,12 +1525,20 @@ impl ClosureArgs {
+                     };
+                     self.bound_vars
+                         .push(ty::BoundVariableKind::Region(bound_region.kind));
++                    self.free_regions.push(ty::Region::new_bound(
++                        self.tcx,
++                        ty::DebruijnIndex::from(0usize),
++                        bound_region,
++                    ));
+                     ty::Region::new_bound(
+                         self.tcx,
+                         ty::DebruijnIndex::from(self.depth),
+                         bound_region,
+                     )
+                 } else {
++                    if !matches!(r.kind(), ty::ReBound(..)) {
++                        self.free_regions.push(r);
++                    }
+                     r
+                 }
+             }
+@@ -1529,22 +1554,81 @@ impl ClosureArgs {
+         };
+         let sig = closure.sig();
+         let sig = tcx.signature_unclosure(sig, rustc_hir::Safety::Safe);
++        let original_signature_bound_vars = sig.bound_vars().len();
+         // Add bound variables for each erased region in the signature.
+-        let sig = {
++        let (sig, mut regions) = {
+             let mut visitor = RegionUnEraserVisitor {
+                 tcx,
+                 depth: 0,
+                 bound_vars: sig.bound_vars().iter().collect(),
++                free_regions: Vec::new(),
+             };
+             let unbound_sig = sig.skip_binder().fold_with(&mut visitor);
+             let bound_vars = tcx.mk_bound_variable_kinds(&visitor.bound_vars);
+-            ty::Binder::bind_with_vars(unbound_sig, bound_vars)
++            (
++                ty::Binder::bind_with_vars(unbound_sig, bound_vars),
++                visitor.free_regions.into_iter()
++                    .map(|r| ClosureRegion::Signature(r.sinto(s)))
++                    .collect::<Vec<_>>(),
++            )
++        };
++        let erased_signature_regions = sig.bound_vars().len() - original_signature_bound_vars;
++        let signature_regions = regions.len();
++        let mut erased_capture_regions = 0;
++        ty::fold_regions(tcx, closure.upvar_tys(), |r, _| {
++            let region = if r.is_erased() {
++                let index = erased_capture_regions;
++                erased_capture_regions += 1;
++                ClosureRegion::ErasedCapture(index)
++            } else {
++                ClosureRegion::Capture(r.sinto(s))
++            };
++            regions.push(region);
++            r
++        });
++        let region_outlives = if !for_definition {
++            // Use-site arguments may instantiate type parameters with types
++            // containing additional lifetimes. Requirements belong to the
++            // generic declaration, not this instantiated occurrence.
++            Vec::new()
++        } else if let Some(local_id) = def_id.as_local() {
++            // Query the root, not the closure: rustc checks nested bodies with
++            // their root and no longer exposes closure requirements in its
++            // query result. The driver retained them before MIR was stolen.
++            let root = tcx.typeck_root_def_id(def_id).expect_local();
++            let _ = tcx.mir_borrowck(root);
++            let facts = crate::closure_regions::lookup(local_id).unwrap_or_else(|| {
++                panic!("missing borrowck closure region facts for {def_id:?}; \
++                    translation requires the mir_borrowck consumer hook")
++            });
++            assert_eq!(facts.signature_regions, signature_regions);
++            assert_eq!(facts.capture_regions, regions.len() - signature_regions);
++            facts.outlives.into_iter()
++                .map(|(longer, shorter)| (regions[longer].clone(), regions[shorter].clone()))
++                .collect()
++        } else {
++            // Named and static regions retain their identities in the types,
++            // and the closure inherits its parent's predicates through its
++            // parameter environment. No relationship needs restoring if there
++            // is at most one free region occurrence either: the local collector
++            // can only emit pairs of distinct occurrences. Otherwise freshening
++            // any erased region requires metadata unavailable for external bodies.
++            assert!(
++                regions.len() <= 1
++                    || (erased_signature_regions == 0 && erased_capture_regions == 0),
++                "rustc does not export closure region requirements for external body {def_id:?} \
++                 with {erased_signature_regions} erased signature regions and \
++                 {erased_capture_regions} erased capture regions; free regions: {regions:?}",
++            );
++            Vec::new()
+         };
+         ClosureArgs {
+             item,
+             kind: closure.kind().sinto(s),
+             fn_sig: sig.sinto(s),
+             upvar_tys: closure.upvar_tys().sinto(s),
++            region_outlives,
++            erased_capture_regions,
+         }
+     }
+ }
+diff --git a/src/bin/charon-driver/main.rs b/src/bin/charon-driver/main.rs
+index ce0b801..f2bcfa4 100644
+--- a/src/bin/charon-driver/main.rs
++++ b/src/bin/charon-driver/main.rs
+@@ -22,6 +22,7 @@ extern crate rustc_abi;
+ extern crate rustc_apfloat;
+ extern crate rustc_ast;
+ extern crate rustc_ast_pretty;
++extern crate rustc_borrowck;
+ extern crate rustc_const_eval;
+ extern crate rustc_data_structures;
+ extern crate rustc_driver;
+@@ -46,6 +47,7 @@ extern crate rustc_type_ir;
+ extern crate charon_lib;
+ 
+ mod driver;
++mod closure_regions;
+ #[macro_use]
+ pub mod hax;
+ mod translate;
+diff --git a/src/bin/charon-driver/translate/translate_bodies.rs b/src/bin/charon-driver/translate/translate_bodies.rs
+index 73471de..2f5f70d 100644
+--- a/src/bin/charon-driver/translate/translate_bodies.rs
++++ b/src/bin/charon-driver/translate/translate_bodies.rs
+@@ -871,7 +871,7 @@ impl<'tcx> BlockTransCtx<'tcx, '_, '_, '_> {
+                         Ok(Rvalue::Aggregate(akind, operands_t))
+                     }
+                     mir::AggregateKind::Closure(def_id, generics) => {
+-                        let args = hax::ClosureArgs::sfrom(&self.hax_state, *def_id, generics);
++                        let args = hax::ClosureArgs::sfrom(&self.hax_state, *def_id, generics, false);
+                         let tref = self.translate_closure_type_ref(span, &args)?;
+                         let akind = AggregateKind::Adt(tref, None, None);
+                         Ok(Rvalue::Aggregate(akind, operands_t))
+diff --git a/src/bin/charon-driver/translate/translate_closures.rs b/src/bin/charon-driver/translate/translate_closures.rs
+index f6db0a3..3c2b763 100644
+--- a/src/bin/charon-driver/translate/translate_closures.rs
++++ b/src/bin/charon-driver/translate/translate_closures.rs
+@@ -240,6 +240,47 @@ impl ItemTransCtx<'_, '_> {
+             .try_collect()
+     }
+ 
++    /// Restore the requirements proved by rustc for independently freshened
++    /// signature and capture lifetimes. Captures also need their mutual
++    /// requirements on the closure ADT, which has no signature lifetime params.
++    pub fn translate_closure_region_outlives(
++        &mut self,
++        span: Span,
++        args: &hax::ClosureArgs,
++        include_signature: bool,
++    ) -> Result<(), Error> {
++        assert_eq!(
++            args.erased_capture_regions,
++            self.the_only_binder().closure_upvar_regions.len(),
++            "closure capture lifetime traversal changed during type translation",
++        );
++        let mut translate = |region: &hax::ClosureRegion| -> Result<Option<Region>, Error> {
++            Ok(Some(match region {
++                hax::ClosureRegion::Signature(_) if !include_signature => return Ok(None),
++                hax::ClosureRegion::Signature(r) | hax::ClosureRegion::Capture(r) => {
++                    self.translate_region(span, r)?
++                }
++                hax::ClosureRegion::ErasedCapture(index) => {
++                    let id = self.the_only_binder().closure_upvar_regions[*index];
++                    Region::Var(DeBruijnVar::new_at_zero(id))
++                }
++            }))
++        };
++        let mut predicates = Vec::new();
++        for (longer, shorter) in &args.region_outlives {
++            if let (Some(longer), Some(shorter)) = (translate(longer)?, translate(shorter)?) {
++                if longer != shorter {
++                    let pred = RegionBinder::empty(OutlivesPred(longer, shorter));
++                    if !predicates.contains(&pred) {
++                        predicates.push(pred);
++                    }
++                }
++            }
++        }
++        self.innermost_generics_mut().regions_outlive.extend(predicates);
++        Ok(())
++    }
++
+     pub fn translate_closure_adt(
+         &mut self,
+         span: Span,
+diff --git a/src/bin/charon-driver/translate/translate_generics.rs b/src/bin/charon-driver/translate/translate_generics.rs
+index 5fb48f8..68f9ed9 100644
+--- a/src/bin/charon-driver/translate/translate_generics.rs
++++ b/src/bin/charon-driver/translate/translate_generics.rs
+@@ -464,6 +464,13 @@ impl<'tcx, 'ctx> ItemTransCtx<'tcx, 'ctx> {
+                     .push_with(|index| RegionParam::new(index, None));
+                 self.the_only_binder_mut().closure_call_method_region = Some(rid);
+             }
++            let include_signature = matches!(
++                kind,
++                TransItemSourceKind::TraitImpl(TraitImplSource::Closure(..))
++                    | TransItemSourceKind::ClosureMethod(..)
++                    | TransItemSourceKind::ClosureAsFnCast
++            );
++            self.translate_closure_region_outlives(span, args, include_signature)?;
+         }
+ 
+         self.innermost_binder_mut().params.check_consistency();
+diff --git a/src/name_matcher/mod.rs b/src/name_matcher/mod.rs
+index 15192df..7da9afb 100644
+--- a/src/name_matcher/mod.rs
++++ b/src/name_matcher/mod.rs
+@@ -247,9 +247,8 @@ impl PatElem {
+                     pat_ident == ident || (pat_ident == "crate" && ident == &ctx.crate_name);
+                 same_ident && PatTy::matches_generics(ctx, generics, args)
+             }
+-            (PatElem::Impl(_pat), PathElem::Impl(ImplElem::Ty(..))) => {
+-                // TODO
+-                false
++            (PatElem::Impl(pat), PathElem::Impl(ImplElem::Ty(ty))) => {
++                pat.matches_ty(ctx, &ty.skip_binder)
+             }
+             (PatElem::Impl(pat), PathElem::Impl(ImplElem::Trait(impl_id))) => {
+                 let Some(timpl) = ctx.trait_impls.get(*impl_id) else {
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index 2a69471..21a3fd5 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -29,6 +29,115 @@ use crate::{transform::TransformCtx, ullbc_ast::*};
+ 
+ type MutabilityShape = Binder<GenericArgs>;
+ 
++/// Only runtime fields contribute captured state. In particular, closure types
++/// can retain enclosing lifetime/type parameters without storing any of them.
++#[derive(Clone, Default, PartialEq, Eq)]
++struct RuntimeTypeShape {
++    contains_mut: bool,
++    type_params: HashSet<TypeVarId>,
++}
++
++impl RuntimeTypeShape {
++    fn collect(&mut self, ty: &Ty, known: &HashMap<TypeDeclId, Self>) {
++        match ty.kind() {
++            TyKind::Ref(_, inner, kind) => {
++                self.contains_mut |= *kind == RefKind::Mut;
++                self.collect(inner, known);
++            }
++            TyKind::RawPtr(inner, _) | TyKind::Array(inner, _) | TyKind::Slice(inner) => {
++                self.collect(inner, known);
++            }
++            TyKind::TypeVar(DeBruijnVar::Bound(depth, id)) if *depth == DeBruijnId::zero() => {
++                self.type_params.insert(*id);
++            }
++            TyKind::TypeVar(DeBruijnVar::Free(id)) => {
++                self.type_params.insert(*id);
++            }
++            TyKind::Adt(tref) => {
++                let shape = match tref.id {
++                    TypeId::Adt(id) => known.get(&id),
++                    _ => None,
++                };
++                if let Some(shape) = shape {
++                    self.contains_mut |= shape.contains_mut;
++                    for id in &shape.type_params {
++                        if let Some(ty) = tref.generics.types.get(*id) {
++                            self.collect(ty, known);
++                        }
++                    }
++                } else {
++                    for ty in &tref.generics.types {
++                        self.collect(ty, known);
++                    }
++                }
++            }
++            // Function signatures and trait evidence are not stored captures.
++            TyKind::FnDef(..)
++            | TyKind::FnPtr(..)
++            | TyKind::DynTrait(_)
++            | TyKind::TypeVar(_)
++            | TyKind::Literal(_)
++            | TyKind::Never
++            | TyKind::TraitType(..)
++            | TyKind::PtrMetadata(..)
++            | TyKind::Error(_) => {}
++        }
++    }
++
++    fn compute(ctx: &TransformCtx) -> HashMap<TypeDeclId, Self> {
++        let mut shapes: HashMap<_, _> = ctx
++            .translated
++            .type_decls
++            .iter()
++            .map(|decl| {
++                let shape = match decl.kind {
++                    TypeDeclKind::Opaque | TypeDeclKind::Error(_) => Self {
++                        // Unknown opaque storage still requires conservative ownership.
++                        contains_mut: decl
++                            .generics
++                            .regions
++                            .iter()
++                            .any(|r| !r.mutability.is_shared()),
++                        type_params: decl.generics.types.indices().collect(),
++                    },
++                    _ => Self::default(),
++                };
++                (decl.def_id, shape)
++            })
++            .collect();
++        loop {
++            let mut changed = false;
++            for decl in ctx.translated.type_decls.iter() {
++                let mut shape = Self::default();
++                match &decl.kind {
++                    TypeDeclKind::Struct(fields) | TypeDeclKind::Union(fields) => {
++                        for field in fields {
++                            shape.collect(&field.ty, &shapes);
++                        }
++                    }
++                    TypeDeclKind::Enum(variants) => {
++                        for variant in variants {
++                            for field in &variant.fields {
++                                shape.collect(&field.ty, &shapes);
++                            }
++                        }
++                    }
++                    TypeDeclKind::Alias(ty) => shape.collect(ty, &shapes),
++                    TypeDeclKind::Opaque | TypeDeclKind::Error(_) => continue,
++                }
++                let previous = shapes.get_mut(&decl.def_id).unwrap();
++                if *previous != shape {
++                    *previous = shape;
++                    changed = true;
++                }
++            }
++            if !changed {
++                return shapes;
++            }
++        }
++    }
++}
++
+ /// See the docs of `MutabilityShapeBuilder::compute_shape`.
+ #[derive(Visitor)]
+ struct MutabilityShapeBuilder<'pm, 'ctx> {
+@@ -269,6 +378,8 @@ struct PartialMonomorphizer<'a> {
+     specialize_adts: bool,
+     /// Types that contain mutable references.
+     infected_types: HashSet<TypeDeclId>,
++    /// Runtime generic dependencies, excluding signature and predicate metadata.
++    runtime_type_shapes: HashMap<TypeDeclId, RuntimeTypeShape>,
+     /// Map of generic params for each item. We can't use `ctx.translated` because while iterating
+     /// over items the current item isn't available anymore, which would break recursive types.
+     /// This also makes it possible to record the generics of our to-be-added items without adding
+@@ -286,20 +397,10 @@ struct PartialMonomorphizer<'a> {
+ 
+ impl<'a> PartialMonomorphizer<'a> {
+     pub fn new(ctx: &'a mut TransformCtx, specialize_adts: bool) -> Self {
+-        // Compute the types that contain `&mut` (even indirectly). We actually can ignore
+-        // `&'static mut`, so we simply rely on our "lifetime mutability" computation.
+-        let infected_types: HashSet<_> = ctx
+-            .translated
+-            .type_decls
++        let runtime_type_shapes = RuntimeTypeShape::compute(ctx);
++        let infected_types = runtime_type_shapes
+             .iter()
+-            .filter(|tdecl| {
+-                tdecl
+-                    .generics
+-                    .regions
+-                    .iter()
+-                    .any(|r| r.mutability.is_mutable())
+-            })
+-            .map(|tdecl| tdecl.def_id)
++            .filter_map(|(id, shape)| shape.contains_mut.then_some(*id))
+             .collect();
+ 
+         // Record the generic params of all items.
+@@ -316,6 +417,7 @@ impl<'a> PartialMonomorphizer<'a> {
+             span: Span::dummy(),
+             specialize_adts,
+             infected_types,
++            runtime_type_shapes,
+             generic_params,
+             to_process,
+             partial_mono_shapes: SeqHashMap::default(),
+@@ -332,20 +434,28 @@ impl<'a> PartialMonomorphizer<'a> {
+             | TyKind::RawPtr(ty, _)
+             | TyKind::Array(ty, _)
+             | TyKind::Slice(ty) => self.is_infected(ty),
+-            TyKind::Adt(tref) if let TypeId::Adt(id) = tref.id => {
+-                let ty_infected = self.infected_types.contains(&id);
+-                let args_infected = if self.specialize_adts {
+-                    // Since we make sure to only call the method on a processed type, any type
+-                    // with infected arguments would have been replaced with a fresh instantiated
+-                    // (and infected type). Hence we don't need to check the arguments here, only
+-                    // the type id.
+-                    false
+-                } else {
+-                    tref.generics.types.iter().any(|ty| self.is_infected(ty))
++            TyKind::Adt(tref) => {
++                let id = match tref.id {
++                    TypeId::Adt(id) => Some(id),
++                    _ => None,
+                 };
+-                ty_infected || args_infected
++                if id.is_some_and(|id| self.infected_types.contains(&id)) {
++                    return true;
++                }
++                if self.specialize_adts && id.is_some() {
++                    // Nested ADT arguments have already been specialized.
++                    return false;
++                }
++                match id.and_then(|id| self.runtime_type_shapes.get(&id)) {
++                    Some(shape) => shape.type_params.iter().any(|id| {
++                        tref.generics
++                            .types
++                            .get(*id)
++                            .is_some_and(|ty| self.is_infected(ty))
++                    }),
++                    None => tref.generics.types.iter().any(|ty| self.is_infected(ty)),
++                }
+             }
+-            TyKind::Adt(..) => false,
+             // A function pointer/item by itself doesn't carry any mutable reference, even if it
+             // uses some in its signature. Compare with closures: a closure without captures
+             // doesn't trigger partial mono regardless of its signature.
+@@ -430,6 +540,32 @@ impl<'a> PartialMonomorphizer<'a> {
+         })
+     }
+ 
++    /// A conditional default can constrain `Self` more precisely than the enclosing
++    /// trait (for example, `Iterator::copied` requires `Item = &T`). After lifting
++    /// associated types, the method's function item expects that stronger predicate
++    /// for its implicit Self argument too. Use the actual method-local witness,
++    /// rather than specializing the enclosing, weaker Self dictionary.
++    fn rebind_method_self_witnesses(&self, params: &GenericParams, method: &mut FunDeclRef) {
++        let Some(target_params) = self.generic_params.get(&method.id.into()) else {
++            return;
++        };
++        let expected = target_params
++            .trait_clauses
++            .clone()
++            .substitute_with_self(&method.generics, &TraitRefKind::SelfId);
++        for (clause, argument) in expected.iter().zip(method.generics.trait_refs.iter_mut()) {
++            if matches!(argument.kind, TraitRefKind::SelfId)
++                && argument.trait_decl_ref != clause.trait_
++                && let Some(witness) = params
++                    .trait_clauses
++                    .iter()
++                    .find(|candidate| candidate.trait_ == clause.trait_)
++            {
++                *argument = witness.identity_tref();
++            }
++        }
++    }
++
+     /// Traverse the item, replacing any type instantiations we don't want with references to
+     /// soon-to-be-created partially-monomorphized types. This does not access the items in
+     /// `self.translated`, which may be missing since we took `item` out for processing.
+@@ -477,6 +613,16 @@ impl VisitAstMut for PartialMonomorphizer<'_> {
+         VisitWithSpan::new(self).visit(x)
+     }
+ 
++    fn enter_trait_decl(&mut self, decl: &mut TraitDecl) {
++        for method in &mut decl.methods {
++            self.rebind_method_self_witnesses(&method.params, &mut method.skip_binder.item);
++        }
++    }
++    fn enter_trait_impl(&mut self, decl: &mut TraitImpl) {
++        for (_, method) in &mut decl.methods {
++            self.rebind_method_self_witnesses(&method.params, &mut method.skip_binder);
++        }
++    }
+     fn exit_type_decl_ref(&mut self, x: &mut TypeDeclRef) {
+         if self.specialize_adts
+             && let TypeId::Adt(id) = x.id
+diff --git a/tests/ui/simple/closure-with-non-upvar-lifetime.out b/tests/ui/simple/closure-with-non-upvar-lifetime.out
+index d452899..7f77713 100644
+--- a/tests/ui/simple/closure-with-non-upvar-lifetime.out
++++ b/tests/ui/simple/closure-with-non-upvar-lifetime.out
+@@ -96,12 +96,17 @@ fn UNIT_METADATA()
+ const UNIT_METADATA: () = UNIT_METADATA()
+ 
+ // Full name: test_crate::call_fn::closure
+-struct closure<'_0, '_1> {
++struct closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
+   &'_0 &'_1 [u8],
+ }
+ 
+ // Full name: test_crate::call_fn::{impl Fn<(usize,)> for closure<'_0, '_1>}::call
+ fn {impl Fn<(usize,)> for closure<'_0, '_1>}::call<'_0, '_1, '_2>(_1: &'_2 closure<'_0, '_1>, tupled_args_2: (usize,)) -> u8
++where
++    '_1 : '_0,
+ {
+     let _0: u8; // return
+     let _1: &'1 closure<'_0, '_1>; // arg #1
+@@ -161,6 +166,8 @@ fn call_fn<'_0>(a_1: &'_0 [u8], i_2: usize) -> u8
+ 
+ // Full name: test_crate::call_fn::{impl FnMut<(usize,)> for closure<'_0, '_1>}::call_mut
+ fn {impl FnMut<(usize,)> for closure<'_0, '_1>}::call_mut<'_0, '_1, '_2>(state_1: &'_2 mut closure<'_0, '_1>, args_2: (usize,)) -> u8
++where
++    '_1 : '_0,
+ {
+     let _0: u8; // return
+     let state_1: &'_2 mut closure<'_0, '_1>; // arg #1
+@@ -175,16 +182,23 @@ fn {impl FnMut<(usize,)> for closure<'_0, '_1>}::call_mut<'_0, '_1, '_2>(state_1
+ 
+ // Full name: test_crate::call_fn::closure::{impl Destruct for closure<'_0, '_1>}::drop_in_place
+ unsafe fn {impl Destruct for closure<'_0, '_1>}::drop_in_place<'_0, '_1>(_1: *mut closure<'_0, '_1>)
++where
++    '_1 : '_0,
+ = <missing>
+ 
+ // Full name: test_crate::call_fn::closure::{impl Destruct for closure<'_0, '_1>}
+-impl<'_0, '_1> Destruct for closure<'_0, '_1> {
++impl<'_0, '_1> Destruct for closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
+     fn drop_in_place = {impl Destruct for closure<'_0, '_1>}::drop_in_place<'_0, '_1>
+     non-dyn-compatible
+ }
+ 
+ // Full name: test_crate::call_fn::{impl FnOnce<(usize,)> for closure<'_0, '_1>}::call_once
+ fn {impl FnOnce<(usize,)> for closure<'_0, '_1>}::call_once<'_0, '_1>(_1: closure<'_0, '_1>, _2: (usize,)) -> u8
++where
++    '_1 : '_0,
+ {
+     let _0: u8; // return
+     let _1: closure<'_0, '_1>; // arg #1
+@@ -199,7 +213,10 @@ fn {impl FnOnce<(usize,)> for closure<'_0, '_1>}::call_once<'_0, '_1>(_1: closur
+ }
+ 
+ // Full name: test_crate::call_fn::{impl FnOnce<(usize,)> for closure<'_0, '_1>}
+-impl<'_0, '_1> FnOnce<(usize,)> for closure<'_0, '_1> {
++impl<'_0, '_1> FnOnce<(usize,)> for closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
+     parent_clause0 = {built_in impl MetaSized for closure<'_0, '_1>}
+     parent_clause1 = {built_in impl Sized for (usize,)}
+     parent_clause2 = {built_in impl Tuple for (usize,)}
+@@ -210,7 +227,10 @@ impl<'_0, '_1> FnOnce<(usize,)> for closure<'_0, '_1> {
+ }
+ 
+ // Full name: test_crate::call_fn::{impl FnMut<(usize,)> for closure<'_0, '_1>}
+-impl<'_0, '_1> FnMut<(usize,)> for closure<'_0, '_1> {
++impl<'_0, '_1> FnMut<(usize,)> for closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
+     parent_clause0 = {built_in impl MetaSized for closure<'_0, '_1>}
+     parent_clause1 = {impl FnOnce<(usize,)> for closure<'_0, '_1>}<'_0, '_1>
+     parent_clause2 = {built_in impl Sized for (usize,)}
+@@ -220,7 +240,10 @@ impl<'_0, '_1> FnMut<(usize,)> for closure<'_0, '_1> {
+ }
+ 
+ // Full name: test_crate::call_fn::{impl Fn<(usize,)> for closure<'_0, '_1>}
+-impl<'_0, '_1> Fn<(usize,)> for closure<'_0, '_1> {
++impl<'_0, '_1> Fn<(usize,)> for closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
+     parent_clause0 = {built_in impl MetaSized for closure<'_0, '_1>}
+     parent_clause1 = {impl FnMut<(usize,)> for closure<'_0, '_1>}<'_0, '_1>
+     parent_clause2 = {built_in impl Sized for (usize,)}
+diff --git a/tests/ui/simple/nested-closure-lifetime.out b/tests/ui/simple/nested-closure-lifetime.out
+index a94d608..984b831 100644
+--- a/tests/ui/simple/nested-closure-lifetime.out
++++ b/tests/ui/simple/nested-closure-lifetime.out
+@@ -132,6 +132,9 @@ fn {impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     let _0: test_crate::foo::closure::closure<'1, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: &'3 test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -171,6 +174,9 @@ fn {impl FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitCla
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     let _0: test_crate::foo::closure::closure<'0, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_3 mut test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -205,6 +211,9 @@ fn {impl FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitCl
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     let _0: test_crate::foo::closure::closure<'1, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -223,6 +232,9 @@ impl<'_0, '_1, '_2, T> FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitCla
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {built_in impl Sized for ()}
+@@ -238,6 +250,9 @@ impl<'_0, '_1, '_2, T> FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClau
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}<'_0, '_1, '_2, T>[@TraitClause0, @TraitClause1]
+@@ -252,6 +267,9 @@ impl<'_0, '_1, '_2, T> Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_1,
++    '_0 : '_1,
++    '_0 : '_2,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}<'_0, '_1, '_2, T>[@TraitClause0, @TraitClause1]
+@@ -266,6 +284,7 @@ fn {impl Fn<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @Tr
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     let _0: &'0 T; // return
+     let _1: &'2 test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -280,6 +299,7 @@ fn {impl FnMut<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0,
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     let _0: &'_1 T; // return
+     let state_1: &'_2 mut test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -314,6 +334,7 @@ fn {impl FnOnce<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0,
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     let _0: &'0 T; // return
+     let _1: test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -332,6 +353,7 @@ impl<'_0, '_1, T> FnOnce<()> for test_crate::foo::closure::closure<'_0, T>[@Trai
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {built_in impl Sized for ()}
+@@ -347,6 +369,7 @@ impl<'_0, '_1, T> FnMut<()> for test_crate::foo::closure::closure<'_0, T>[@Trait
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnOnce<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}<'_0, '_1, T>[@TraitClause0, @TraitClause1]
+@@ -361,6 +384,7 @@ impl<'_0, '_1, T> Fn<()> for test_crate::foo::closure::closure<'_0, T>[@TraitCla
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_0 : '_1,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnMut<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}<'_0, '_1, T>[@TraitClause0, @TraitClause1]
+diff --git a/tests/ui/simple/nested-closure.out b/tests/ui/simple/nested-closure.out
+index ea6b7b7..5ee6a27 100644
+--- a/tests/ui/simple/nested-closure.out
++++ b/tests/ui/simple/nested-closure.out
+@@ -162,6 +162,7 @@ fn {impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'2, '3, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: &'5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -191,6 +192,11 @@ fn {impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closure
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'2, '3, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: &'5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -296,6 +302,11 @@ fn {impl FnMut<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_clos
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '0, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_6 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -330,6 +341,11 @@ fn {impl FnOnce<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_clo
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'2, '3, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -348,6 +364,11 @@ impl<'a, '_1, '_2, '_3, '_4, '_5, T> FnOnce<()> for test_crate::{Foo<'a, T>[@Tra
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {built_in impl Sized for ()}
+@@ -363,6 +384,11 @@ impl<'a, '_1, '_2, '_3, '_4, '_5, T> FnMut<()> for test_crate::{Foo<'a, T>[@Trai
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnOnce<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}<'a, '_1, '_2, '_3, '_4, '_5, T>[@TraitClause0, @TraitClause1]
+@@ -377,6 +403,11 @@ impl<'a, '_1, '_2, '_3, '_4, '_5, T> Fn<()> for test_crate::{Foo<'a, T>[@TraitCl
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_2 : '_3,
++    '_3 : '_2,
++    '_5 : '_4,
++    '_1 : '_4,
++    '_1 : '_5,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnMut<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}<'a, '_1, '_2, '_3, '_4, '_5, T>[@TraitClause0, @TraitClause1]
+@@ -391,6 +422,7 @@ fn {impl FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nes
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '0, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_5 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -425,6 +457,7 @@ fn {impl FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_ne
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'2, '3, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+@@ -443,6 +476,7 @@ impl<'a, '_1, '_2, '_3, '_4, T> FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {built_in impl Sized for (&'_ u32,)}
+@@ -458,6 +492,7 @@ impl<'a, '_1, '_2, '_3, '_4, T> FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@T
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}<'a, '_1, '_2, '_3, '_4, T>[@TraitClause0, @TraitClause1]
+@@ -472,6 +507,7 @@ impl<'a, '_1, '_2, '_3, '_4, T> Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@Trai
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
++    '_1 : '_4,
+ {
+     parent_clause0 = {built_in impl MetaSized for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}
+     parent_clause1 = {impl FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}<'a, '_1, '_2, '_3, '_4, T>[@TraitClause0, @TraitClause1]

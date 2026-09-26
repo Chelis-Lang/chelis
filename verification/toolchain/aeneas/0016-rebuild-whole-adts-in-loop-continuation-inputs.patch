@@ -1,0 +1,88 @@
+# aeneas integration step 16 after cba11f3beb: commit 44b4093e4f33467a79491a0bab5489cc7caac0ec
+# first parent 03c2b2026f2cd0a482738184df4486709257408b
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Rebuild whole ADTs in loop continuation inputs
+#
+# A mutable loan projected inside a nominal ADT is consumed as the whole
+# ADT by the backward function receiving it (gtranslate_adt_fields keeps
+# every field). The avalue projection keeps the unprojected fields as
+# meta-values (AIgnored (Some sv)), but the evalue projection used by
+# region-abstraction continuations dropped them (EIgnored), so composing
+# continuations in loops (e.g. a Sink { native: &'a mut Native, errors }
+# used as loop state) failed with an internal error in
+# SymbolicToPureValues.gtranslate_adt_fields.
+#
+# Retain those fields' symbolic values as EValue meta-values when
+# expanding a loan projector over a nominal ADT which has mutable borrows
+# in the projected regions, and ignore them in einput_to_texpr only when
+# the enclosing ADT is filtered out. The backward functions only read the
+# projected fields, so the retained value is the current field value and
+# the given-back state is unchanged.
+
+diff --git a/src/interp/InterpProjectors.ml b/src/interp/InterpProjectors.ml
+index adbb169..951ada7 100644
+--- a/src/interp/InterpProjectors.ml
++++ b/src/interp/InterpProjectors.ml
+@@ -497,7 +497,7 @@ let apply_eproj_loans_on_symbolic_expansion (span : Meta.span)
+   let (value, ty) : evalue * ty =
+     match (see, proj_ty) with
+     | SeLiteral _, TLiteral _ -> (EIgnored, original_sv_ty)
+-    | SeAdt (variant_id, fields), TAdt { id = adt_id; generics } ->
++    | SeAdt (variant_id, see_fields), TAdt { id = adt_id; generics } ->
+         (* Project over the field values *)
+         let field_types =
+           ctx_adt_get_instantiated_field_types span ctx adt_id variant_id
+@@ -506,7 +506,28 @@ let apply_eproj_loans_on_symbolic_expansion (span : Meta.span)
+         let fields =
+           List.map2
+             (mk_eproj_loans_value_from_symbolic_value type_infos regions)
+-            fields field_types
++            see_fields field_types
++        in
++        (* A projected mutable loan inside a nominal ADT is consumed as the
++           whole ADT by the backward function which receives it (see
++           [gtranslate_adt_fields]): its other fields must be supplied, even
++           though that function only reads the projected ones. Retain their
++           symbolic values as meta-values, exactly as the corresponding
++           avalue projection does ([AIgnored (Some _)]). Tuples and boxes are
++           not rebuilt as a whole, so they keep ignoring those fields. *)
++        let fields =
++          match adt_id with
++          | TAdtId _
++            when ty_has_mut_borrow_for_region_in_set type_infos regions proj_ty
++            ->
++              List.map2
++                (fun (field : tevalue) (sv : symbolic_value) ->
++                  match field.value with
++                  | EIgnored ->
++                      mk_evalue [] field.ty (mk_tvalue_from_symbolic_value sv)
++                  | _ -> field)
++                fields see_fields
++          | _ -> fields
+         in
+         (EAdt { borrow_proj = false; variant_id; fields }, original_sv_ty)
+     | SeMutRef (bid, spc), TRef (r, ref_ty, RMut) ->
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index ff6cf12..9282876 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -1064,9 +1064,15 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+         let ctx, out =
+           gtranslate_adt_fields ~project_borrows:false (tevalue_to_string ctx)
+             (texpr_to_string ctx)
+-            (fun ~filter ctx v ->
+-              let ctx, can_fail, e = to_texpr ~filter rids ctx v in
+-              (ctx, Option.map (fun x -> (can_fail, x)) e))
++            (fun ~filter ctx (v : V.tevalue) ->
++              match v.value with
++              | V.EValue _ when filter ->
++                  (* A meta-value retained for an unprojected ADT field: only
++                     needed when the whole ADT is rebuilt. *)
++                  (ctx, None)
++              | _ ->
++                  let ctx, can_fail, e = to_texpr ~filter rids ctx v in
++                  (ctx, Option.map (fun x -> (can_fail, x)) e))
+             (compute_tevalue_proj_kind ctx.span ctx.type_ctx.type_infos rids
+                abs_level current_level)
+             (fun fields ->

@@ -1,0 +1,213 @@
+# charon integration step 25 after 546078ea5d: commit d0c1e0b0e83fd83d4b56945ea2fa8d4c20add4d3
+# first parent bb8351878c6160d6d1742d7f857482aed6e0259c
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: experimental compact span encoding (CHARON_COMPACT_SPANS=1)
+#
+# Spans take a quarter of large LLBC files: every span is written as
+# {"data":{"file_id":..,"beg":{"line":..,"col":..},"end":{..}},"generated_from_span":..}.
+# With CHARON_COMPACT_SPANS=1 the exporter writes [file, beg_line, beg_col,
+# end_line, end_col], followed by five more numbers when generated_from_span is
+# present (chelis-deep: 187.6 MB -> 150.0 MB). The default format is unchanged and
+# charon-ml cannot read the compact one, so this is a measurement prototype only.
+# Charon's own deserializer accepts both encodings (compact_spans_round_trip).
+#
+# Span implements the stateless serde_state traits by hand because the
+# serde_state derive does not accept serde(into/from).
+
+diff --git a/src/ast/meta.rs b/src/ast/meta.rs
+index acc2b6a..b99a2a9 100644
+--- a/src/ast/meta.rs
++++ b/src/ast/meta.rs
+@@ -55,12 +55,10 @@ pub struct SpanData {
+     Hash,
+     Serialize,
+     Deserialize,
+-    SerializeState,
+-    DeserializeState,
+     Drive,
+     DriveMut,
+ )]
+-#[serde_state(stateless)]
++#[serde(into = "SpanRepr", from = "SpanRepr")]
+ pub struct Span {
+     /// The source code span.
+     ///
+@@ -86,6 +84,117 @@ pub struct Span {
+     pub generated_from_span: Option<SpanData>,
+ }
+ 
++// Stateless, like `#[serde_state(stateless)]`, whose derive does not support `serde(into/from)`.
++impl<State: ?Sized> SerializeState<State> for Span {
++    fn serialize_state<S: serde::Serializer>(&self, _: &State, s: S) -> Result<S::Ok, S::Error> {
++        self.serialize(s)
++    }
++}
++impl<'de, State: ?Sized> DeserializeState<'de, State> for Span {
++    fn deserialize_state<D: serde::Deserializer<'de>>(_: &State, d: D) -> Result<Self, D::Error> {
++        Self::deserialize(d)
++    }
++}
++
++thread_local! {
++    static COMPACT_SPANS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++}
++
++/// Run `f` (a serialization) with the experimental compact span encoding: a span is the array
++/// `[file, beg_line, beg_col, end_line, end_col]`, followed by the same five numbers for
++/// `generated_from_span` when present. Only charon's own deserializer reads it; charon-ml does not.
++pub fn with_compact_spans<R>(f: impl FnOnce() -> R) -> R {
++    struct Reset(bool);
++    impl Drop for Reset {
++        fn drop(&mut self) {
++            COMPACT_SPANS.set(self.0);
++        }
++    }
++    let _reset = Reset(COMPACT_SPANS.replace(true));
++    f()
++}
++
++/// The serialized form of a [Span]; deserialization accepts both encodings.
++#[derive(Serialize, Deserialize)]
++#[serde(untagged)]
++enum SpanRepr {
++    Compact([usize; 5]),
++    CompactGenerated([usize; 10]),
++    Full {
++        data: SpanData,
++        generated_from_span: Option<SpanData>,
++    },
++}
++
++impl SpanData {
++    fn to_array(self) -> [usize; 5] {
++        [
++            self.file_id.index(),
++            self.beg.line,
++            self.beg.col,
++            self.end.line,
++            self.end.col,
++        ]
++    }
++
++    fn from_array([file, beg_line, beg_col, end_line, end_col]: [usize; 5]) -> Self {
++        SpanData {
++            file_id: FileId::new(file),
++            beg: Loc {
++                line: beg_line,
++                col: beg_col,
++            },
++            end: Loc {
++                line: end_line,
++                col: end_col,
++            },
++        }
++    }
++}
++
++impl From<Span> for SpanRepr {
++    fn from(span: Span) -> Self {
++        if !COMPACT_SPANS.get() {
++            return SpanRepr::Full {
++                data: span.data,
++                generated_from_span: span.generated_from_span,
++            };
++        }
++        let data = span.data.to_array();
++        match span.generated_from_span {
++            None => SpanRepr::Compact(data),
++            Some(generated) => {
++                let mut both = [0; 10];
++                both[..5].copy_from_slice(&data);
++                both[5..].copy_from_slice(&generated.to_array());
++                SpanRepr::CompactGenerated(both)
++            }
++        }
++    }
++}
++
++impl From<SpanRepr> for Span {
++    fn from(repr: SpanRepr) -> Self {
++        match repr {
++            SpanRepr::Compact(data) => Span {
++                data: SpanData::from_array(data),
++                generated_from_span: None,
++            },
++            SpanRepr::CompactGenerated(both) => Span {
++                data: SpanData::from_array(both[..5].try_into().unwrap()),
++                generated_from_span: Some(SpanData::from_array(both[5..].try_into().unwrap())),
++            },
++            SpanRepr::Full {
++                data,
++                generated_from_span,
++            } => Span {
++                data,
++                generated_from_span,
++            },
++        }
++    }
++}
++
+ /// `#[inline]` built-in attribute.
+ #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Drive, DriveMut)]
+ pub enum InlineAttr {
+@@ -270,3 +379,39 @@ pub struct File {
+     /// Some files don't have contents.
+     pub contents: Option<String>,
+ }
++
++#[test]
++fn compact_spans_round_trip() {
++    let data = |file, line| SpanData {
++        file_id: FileId::new(file),
++        beg: Loc { line, col: 4 },
++        end: Loc {
++            line: line + 1,
++            col: 0,
++        },
++    };
++    for span in [
++        Span {
++            data: data(3, 10),
++            generated_from_span: None,
++        },
++        Span {
++            data: data(3, 10),
++            generated_from_span: Some(data(7, 2)),
++        },
++    ] {
++        let full = serde_json::to_string(&span).unwrap();
++        let compact = with_compact_spans(|| serde_json::to_string(&span).unwrap());
++        assert!(full.starts_with("{\"data\":"), "{full}");
++        assert!(compact.starts_with("[3,10,4,11,0"), "{compact}");
++        for json in [full, compact] {
++            assert_eq!(serde_json::from_str::<Span>(&json).unwrap(), span, "{json}");
++        }
++    }
++    // The flag is scoped to the closure.
++    let span = Span {
++        data: data(1, 1),
++        generated_from_span: None,
++    };
++    assert!(serde_json::to_string(&span).unwrap().starts_with('{'));
++}
+diff --git a/src/export.rs b/src/export.rs
+index e8b5223..da1235c 100644
+--- a/src/export.rs
++++ b/src/export.rs
+@@ -102,7 +102,14 @@ impl CrateData {
+         // Write to the file. `serde_json` emits one small write per token: buffer them, or large
+         // crates spend their serialization time in write syscalls.
+         let mut writer = std::io::BufWriter::new(outfile);
+-        let res = serde_json::to_writer(&mut writer, self)
++        let write = |writer: &mut std::io::BufWriter<File>| serde_json::to_writer(writer, self);
++        // Experimental, not readable by charon-ml: `CHARON_COMPACT_SPANS=1` writes spans as arrays.
++        let res = if std::env::var_os("CHARON_COMPACT_SPANS").is_some_and(|v| v == "1") {
++            crate::ast::with_compact_spans(|| write(&mut writer))
++        } else {
++            write(&mut writer)
++        };
++        let res = res
+             .map_err(|err| format!("{err:?}"))
+             .and_then(|()| std::io::Write::flush(&mut writer).map_err(|err| format!("{err:?}")));
+         match res {

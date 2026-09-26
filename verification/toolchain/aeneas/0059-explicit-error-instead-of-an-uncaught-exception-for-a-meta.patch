@@ -1,0 +1,51 @@
+# aeneas integration step 59 after cba11f3beb: commit d8cc84ce5a61032456d936e516abe655a739b9d1
+# first parent 3ab919eea5cd314105932b3b59d882879eb59246
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Explicit error instead of an uncaught exception for a meta-value referring to an ended shared loan
+#
+# tvalue_to_texpr looked up the shared value of a shared (or reserved) borrow with
+# Option.get: a meta-value (e.g., a carrier field which a stage of a staged
+# backward function does not select) may refer to a shared loan which ended since
+# it was recorded, and the Invalid_argument aborted the whole run (chelis_deep
+# slice, annotations.rs try_map_payloads, early_stage_inputs).
+#
+# (cherry picked from commit 659bd74464314e33d602ccecec0942ba500dcc31)
+
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index b41e7f5..27b94aa 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -944,18 +944,21 @@ let rec tvalue_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (v : V.tvalue) :
+         | VMutLoan _ -> [%craise] ctx.span "Unreachable")
+     | VBorrow bc -> (
+         match bc with
+-        | VSharedBorrow (bid, _) ->
+-            (* Lookup the shared value in the context, and continue *)
++        | VSharedBorrow (bid, _) | VReservedMutBorrow (bid, _) ->
++            (* Lookup the shared value in the context, and continue. Note that
++               we use reserved borrows only in *meta-data*: a value *actually
++               used* in the translation can't come from an unpromoted reserved
++               borrow. A meta-value (e.g., the value of a field which a stage
++               of a staged backward function does not select) may refer to a
++               shared loan which ended since it was recorded: its value is lost
++               (explicit error, rather than an uncaught exception). *)
+             let sv =
+-              InterpBorrowsCore.ctx_lookup_shared_value ctx.span ectx bid
+-            in
+-            translate sv
+-        | VReservedMutBorrow (bid, _) ->
+-            (* Same as for shared borrows. However, note that we use reserved borrows
+-             * only in *meta-data*: a value *actually used* in the translation can't come
+-             * from an unpromoted reserved borrow *)
+-            let sv =
+-              InterpBorrowsCore.ctx_lookup_shared_value ctx.span ectx bid
++              [%unwrap_with_span] ctx.span
++                (InterpBorrowsCore.lookup_shared_value_opt ctx.span ectx.env
++                   bid)
++                ("The translation of a value refers to a shared borrow ("
++                ^ V.BorrowId.to_string bid
++                ^ ") whose loan is not in the context anymore")
+             in
+             translate sv
+         | VMutBorrow (_, v) ->

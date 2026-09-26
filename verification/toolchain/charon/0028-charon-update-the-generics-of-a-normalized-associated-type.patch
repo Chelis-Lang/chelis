@@ -1,0 +1,256 @@
+# charon integration step 28 after 546078ea5d: commit 91205de1a7077df662bf8d62cc86e87cec0be7b8
+# first parent 45354ddd6390a7860cf100493cefb10e3505c74f
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: update the generics of a normalized associated type only once
+
+diff --git a/src/transform/normalize/expand_associated_types.rs b/src/transform/normalize/expand_associated_types.rs
+index fa534c1..ec50829 100644
+--- a/src/transform/normalize/expand_associated_types.rs
++++ b/src/transform/normalize/expand_associated_types.rs
+@@ -1279,7 +1279,7 @@ impl VisitAstMut for UpdateItemBody<'_> {
+     }
+ 
+     // Normalize associated types.
+-    fn enter_ty_kind(&mut self, kind: &mut TyKind) {
++    fn visit_ty_kind(&mut self, kind: &mut TyKind) -> ControlFlow<Self::Break> {
+         if let TyKind::TraitType(tref, name) = kind {
+             let path = TraitRefPath::self_ref().with_assoc_type(*name);
+             if let Some(new_ty) = self.lookup_path_on_trait_ref(&path, tref) {
+@@ -1288,10 +1288,12 @@ impl VisitAstMut for UpdateItemBody<'_> {
+                     "fixing up substituted type {}",
+                     new_ty.with_ctx(&self.ctx.into_fmt())
+                 );
+-                // Fix the newly-substituted type.
+-                let _ = self.visit(kind);
++                // Fix the newly-substituted type, which may be a `TraitType` again. Return early:
++                // visiting its children again would update their generics a second time.
++                return self.visit(kind);
+             }
+         }
++        self.visit_inner(kind)
+     }
+ 
+     // Track span for more precise error messages.
+diff --git a/tests/ui/lift-assoc-types-normalized-adt-args.out b/tests/ui/lift-assoc-types-normalized-adt-args.out
+new file mode 100644
+index 0000000..13023d3
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-normalized-adt-args.out
+@@ -0,0 +1,178 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::convert::From
++#[lang_item("From")]
++pub trait From<Self, T>
++{
++    parent_clause0 : [@TraitClause0]: Sized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<T>
++    fn from = core::convert::From::from<Self, T>[Self]
++    non-dyn-compatible
++}
++
++#[lang_item("from_fn")]
++pub fn core::convert::From::from<Self, T>(_1: T) -> Self
++where
++    [@TraitClause0]: From<Self, T>,
++= <opaque>
++
++// Full name: core::convert::{impl From<T> for T}::from
++pub fn {impl From<T> for T}::from<T>(_1: T) -> T
++where
++    [@TraitClause0]: Sized<T>,
++= <opaque>
++
++// Full name: core::convert::{impl From<T> for T}
++impl<T> From<T> for T
++where
++    [@TraitClause0]: Sized<T>,
++{
++    parent_clause0 = @TraitClause0
++    parent_clause1 = @TraitClause0
++    fn from = {impl From<T> for T}::from<T>[@TraitClause0]
++    non-dyn-compatible
++}
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Prim
++pub trait Prim<Self, Self_Inner>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Inner>
++    vtable: test_crate::Prim::{vtable}<Self_Inner>
++}
++
++// Full name: test_crate::{impl Prim<u64> for u32}
++impl Prim<u64> for u32 {
++    parent_clause0 = {built_in impl MetaSized for u32}
++    parent_clause1 = {built_in impl Sized for u64}
++    vtable: {impl Prim<u64> for u32}::{vtable}
++}
++
++// Full name: test_crate::Wrap
++pub struct Wrap<T, Clause1_Inner>
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Prim<T, Clause1_Inner>,
++{
++  Clause1_Inner,
++}
++
++// Full name: test_crate::Iter
++pub trait Iter<Self, Self_Item>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Item>
++    fn get<'_0_1> = test_crate::Iter::get<'_0_1, Self, Self_Item>[Self]
++    fn convert<'_0_1, B, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: From<B, Self_Item>> = test_crate::Iter::convert<'_0_1, Self, B, Self_Item>[Self, @TraitClause0_1, @TraitClause1_1]
++    non-dyn-compatible
++}
++
++pub fn test_crate::Iter::get<'_0, Self, Clause0_Item>(_1: &'_0 Self) -> Clause0_Item
++where
++    [@TraitClause0]: Iter<Self, Clause0_Item>,
++= <method_without_default_body>
++
++pub fn test_crate::Iter::convert<'_0, Self, B, Clause0_Item>(self_1: &'_0 Self) -> B
++where
++    [@TraitClause0]: Iter<Self, Clause0_Item>,
++    [@TraitClause1]: Sized<B>,
++    [@TraitClause2]: From<B, Clause0_Item>,
++{
++    let _0: B; // return
++    let self_1: &'1 Self; // arg #1
++    let _2: Clause0_Item; // anonymous local
++    let _3: &'2 Self; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*self_1) with_metadata(copy self_1.metadata)
++    _2 = @TraitClause0::get<'4>(move _3)
++    storage_dead(_3)
++    _0 = @TraitClause2::from(move _2)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::Src
++pub struct Src {}
++
++// Full name: test_crate::{impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::get
++pub fn {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::get<'_0>(self_1: &'_0 Src) -> Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]
++{
++    let _0: Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]; // return
++    let self_1: &'1 Src; // arg #1
++
++    _0 = Wrap { 0: const 0 : u64 }
++    return
++}
++
++// Full name: test_crate::{impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::convert
++pub fn {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::convert<'_0, B>(self_1: &'_0 Src) -> B
++where
++    [@TraitClause0]: Sized<B>,
++    [@TraitClause1]: From<B, Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]>,
++{
++    let _0: B; // return
++    let self_1: &'1 Src; // arg #1
++    let _2: Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]; // anonymous local
++    let _3: &'2 Src; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*self_1)
++    _2 = {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::get<'4>(move _3)
++    storage_dead(_3)
++    _0 = @TraitClause1::from(move _2)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::{impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}
++impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src {
++    parent_clause0 = {built_in impl MetaSized for Src}
++    parent_clause1 = {built_in impl Sized for Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]}
++    fn get<'_0_1> = {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::get<'_0_1>
++    fn convert<'_0_1, B, [@TraitClause0_1]: Sized<B>, [@TraitClause1_1]: From<B, Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]>> = {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::convert<'_0_1, B>[@TraitClause0_1, @TraitClause1_1]
++    non-dyn-compatible
++}
++
++// Full name: test_crate::call
++pub fn call<'_0>(s_1: &'_0 Src) -> Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]
++{
++    let _0: Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]; // return
++    let s_1: &'1 Src; // arg #1
++    let _2: &'2 Src; // anonymous local
++
++    storage_live(_2)
++    _2 = &(*s_1)
++    _0 = {impl Iter<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]> for Src}::convert<'4, Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]>[{built_in impl Sized for Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]}, {impl From<T> for T}<Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]>[{built_in impl Sized for Wrap<u32, u64>[{built_in impl Sized for u32}, {impl Prim<u64> for u32}]}]](move _2)
++    storage_dead(_2)
++    return
++}
++
++
++
+diff --git a/tests/ui/lift-assoc-types-normalized-adt-args.rs b/tests/ui/lift-assoc-types-normalized-adt-args.rs
+new file mode 100644
+index 0000000..65b7f93
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-normalized-adt-args.rs
+@@ -0,0 +1,32 @@
++//@ charon-arg=--lift-associated-types=*
++// Normalizing `Self::Item` to `Wrap<u32>` substitutes an ADT whose lifted associated-type
++// parameter must be added exactly once. Its children used to be updated twice, giving
++// `Wrap<u32, u64, u64>` (the `Vec<NonZeroUsize>: FromIterator<Self::Item>` pattern of
++// `collect`).
++pub trait Prim {
++    type Inner;
++}
++impl Prim for u32 {
++    type Inner = u64;
++}
++pub struct Wrap<T: Prim>(pub T::Inner);
++
++pub trait Iter {
++    type Item;
++    fn get(&self) -> Self::Item;
++    fn convert<B: From<Self::Item>>(&self) -> B {
++        B::from(self.get())
++    }
++}
++
++pub struct Src;
++impl Iter for Src {
++    type Item = Wrap<u32>;
++    fn get(&self) -> Wrap<u32> {
++        Wrap(0)
++    }
++}
++
++pub fn call(s: &Src) -> Wrap<u32> {
++    s.convert()
++}

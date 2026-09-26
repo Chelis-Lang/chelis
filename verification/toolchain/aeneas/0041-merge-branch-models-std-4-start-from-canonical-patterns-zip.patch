@@ -1,0 +1,800 @@
+# aeneas integration step 41 after cba11f3beb: commit 1eafb5684d8f1ce6b84890c2bed38437abc35726
+# first parent 8dbbd8870e1f1c3358796312c04e7018acd5c75e, merged 91b8ff358efa8046d10be4e1118fb81239779edb
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-4' (start-from canonical patterns, Zip of Copy vec::IntoIter, IntoIterator for &BTreeMap)
+
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index f4f29b4..deb05d5 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -410,6 +410,15 @@ def IntoIteratorBTreeMap.into_iter {K V : Type} (map : BTreeMap K V) :
+     Result (IntoIter K V × (IntoIter K V → BTreeMap K V)) :=
+   .ok (⟨map.entries⟩, fun iterator => ⟨iterator.remaining⟩)
+ 
++/-- `impl IntoIterator for &'a BTreeMap<K, V, A>` (map.rs:1564-1571): `self.iter()`.
++The borrowed map is not changed: recovery returns it whatever the iterator state. -/
++@[rust_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>}::into_iter"
++  (keepParams := [true, true, false]) (keepTraitClauses := [false])]
++def IntoIteratorSharedBTreeMap.into_iter {K V : Type} (map : BTreeMap K V) :
++    Result (Iter K V × (Iter K V → BTreeMap K V)) := do
++  let iterator ← BTreeMap.iter map
++  .ok (iterator, fun _ => map)
++
+ /-- Stable insertion into an already sorted sequence: later equivalent keys go
+ AFTER earlier keys. This is intentionally not map insert, which retains a key. -/
+ def stableInsert {K V : Type} (ord : core.cmp.Ord K) (item : K × V) :
+@@ -462,6 +471,14 @@ def core.iter.traits.collect.IntoIteratorBTreeMap (K V : Type) :
+   into_iter := alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter
+ }
+ 
++@[reducible, rust_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>"
++  (keepParams := [true, true, false]) (keepTraitClauses := [false])]
++def core.iter.traits.collect.IntoIteratorSharedBTreeMap (K V : Type) :
++    core.iter.traits.collect.IntoIterator (BTreeMap K V) (K × V) (Iter K V) := {
++  iteratorInst := core.iter.traits.iterator.IteratorBTreeIter K V
++  into_iter := alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter
++}
++
+ @[reducible, rust_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>"]
+ def core.iter.traits.collect.FromIteratorBTreeMap {K : Type} (V : Type) (ord : core.cmp.Ord K) :
+     core.iter.traits.collect.FromIterator (BTreeMap K V) (K × V) := {
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 9bc8c2f..12b79e1 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1776,27 +1776,17 @@ let simplify_trait_calls (crate : crate) : crate =
+      Items Charon translated only as dependencies of replaced bodies are not
+      roots. *)
+   let start_from =
+-    List.map
+-      (fun pattern ->
+-        try NameMatcher.parse_pattern pattern
+-        with _ ->
+-          [%craise_opt_span] None
+-            ("Cannot parse Charon's --start-from pattern: " ^ pattern))
+-      crate.options.start_from
+-  in
+-  let under_start_from (name : name) =
+-    List.exists
+-      (fun pattern ->
+-        let n = List.length pattern in
+-        n <= List.length name
+-        && NameMatcher.match_name mctx ExtractBuiltin.default_match_config
+-             pattern
+-             (fst (Collections.List.split_at name n)))
+-      start_from
++    match StartFrom.of_options crate.options with
++    | Ok start_from -> start_from
++    | Error pattern ->
++        [%craise_opt_span] None
++          ("Cannot parse Charon's --start-from pattern: " ^ pattern)
+   in
+   let is_root (meta : item_meta) =
+     (not (nested_in_modeled_function meta.name))
+-    && if start_from = [] then meta.is_local else under_start_from meta.name
++    &&
++    if start_from = [] then meta.is_local
++    else List.exists (fun sf -> StartFrom.matches crate sf meta) start_from
+   in
+   AnyDeclIdSet.iter
+     (fun id ->
+diff --git a/src/dune b/src/dune
+index cb6bc38..de1273a 100644
+--- a/src/dune
++++ b/src/dune
+@@ -103,6 +103,7 @@
+   SCC
+   SeparateCompilation
+   Scalars
++  StartFrom
+   StringUtils
+   Substitute
+   SymbolicAst
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index a4c0bcf..fb91629 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -268,8 +268,10 @@ let lean_builtin_funs = [
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::ne" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.ne" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 138 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>}::extend" "_root_.Aeneas.Std.alloc.collections.btree.map.ExtendBTreeMap.extend" ~keep_params:(Some [true; true; false; true; true]) ~keep_trait_clauses:(Some [true; false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 442 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 451 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>}::from_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 415 *)
++  mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 407 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 397 *)
+@@ -2006,13 +2008,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::range::Step<usize>" "_root_.Aeneas.Std.core.iter.range.StepUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 752 *)
+   mk_trait_impl "core::iter::traits::accum::Product<usize, &'a usize>" "_root_.Aeneas.Std.core.iter.traits.accum.ProductUsizeSharedUsize";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 471 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 488 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 149 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::set::BTreeSet<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 100 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>" "_root_.Aeneas.Std.alloc.vec.ExtendVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 465 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 482 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 143 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet";
+@@ -2024,6 +2026,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T; @N], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedArray";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 294 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice";
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 474 *)
++  mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 164 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::vec::Vec<@T>, &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 782 *)
+@@ -2032,7 +2036,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBoxSlice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 104 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<[@T; @N], @T, core::array::iter::IntoIter<@T, @N>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 457 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 466 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 167 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 7fbf7da..e5e7c35 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -205,6 +205,15 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                   repeated next with the total (0, None) size_hint"))
+         impl.methods
+     in
++    (* Types that are Copy (hence have no drop glue) whatever their instances:
++       scalars, shared references, and tuples and arrays of them. *)
++    let rec copy_ty (ty : ty) =
++      match ty with
++      | TLiteral _ | TRef (_, _, RShared) -> true
++      | TAdt { id = TTuple; generics } -> List.for_all copy_ty generics.types
++      | TArray (ty, _) -> copy_ty ty
++      | _ -> false
++    in
+     let rec check_iterator span seen (tr : trait_ref) =
+       let tr = normalize span tr in
+       if generic_root tr then defer span (Iter tr) else
+@@ -268,16 +277,25 @@ let check ~(evidence : crate) (crate : crate) : crate =
+          takes that surplus item. Only when both sides are TrustedRandomAccess
+          does next itself stop at that length without touching either side
+          (modeled in IteratorCombinators.lean), so that repeated next has the
+-         native schedule. *)
++         native schedule. Otherwise the model's repeated next differs from the
++         native fold only by that surplus left next and one right next that
++         returns None: see vec_into_iter_copy for the sides where neither is
++         observable. *)
+       | Some name when name = iterator ^ "Zip" -> (
+           match List.filter (fun tr -> ref_name tr = Some iterator) args with
+           | [ a; b ] ->
+               check_iterator span seen a;
+               check_iterator span seen b;
+-              if not (random_access span a && random_access span b) then
++              if
++                not
++                  ((random_access span a && random_access span b)
++                  || (vec_into_iter_copy span a && indexed_next span b))
++              then
+                 reject span
+-                  "Zip over iterators that are not both TrustedRandomAccess: \
+-                   native collectors fold it without the surplus left next of \
++                  "Zip over iterators that are not both TrustedRandomAccess, \
++                   nor a vec::IntoIter of a Copy element zipped with an \
++                   iterator whose next is its indexed access: native \
++                   collectors fold it without the surplus left next of \
+                    repeated Zip::next"
+           | _ -> reject span "missing or ambiguous Zip iterator evidence")
+       (* A crate iterator that only defines next (check_default_consumers): every
+@@ -330,6 +348,56 @@ let check ~(evidence : crate) (crate : crate) : crate =
+             | [ a; b ] -> random_access span a && random_access span b
+             | _ -> false)
+         | _ -> false
++    (* vec::IntoIter<T, A> is TrustedRandomAccessNoCoerce, but not
++       TrustedRandomAccess, when T: NonDrop, that is T: Copy (alloc
++       vec/into_iter.rs, rustc 1.95, 470-486: `pub trait NonDrop {}`,
++       `impl<T: Copy> NonDrop for T {}`, `unsafe impl<T, A: Allocator>
++       TrustedRandomAccessNoCoerce for IntoIter<T, A> where T: NonDrop`; 363-375:
++       __iterator_get_unchecked reads element i without advancing). A zip of
++       it with another TrustedRandomAccessNoCoerce iterator b takes the
++       NoCoerce ZipImpl (core zip.rs 253-291), whose fold (the Vec
++       collectors' extend_trusted and in-place collection) runs over
++       min(a.size(), b.size()) through __iterator_get_unchecked. The model
++       has no random access for vec::IntoIter and collects by repeated
++       general next. That next's surplus a.next() moves out a Copy element:
++       no callback and no drop glue runs. Its b.next() at b's end returns
++       None without callbacks, and before that yields the element that the
++       indexed access would, with the same callbacks, when b is
++       indexed_next. A left side with callbacks (e.g. Map), or an element
++       type with drop glue, stays rejected. *)
++    and vec_into_iter_copy span (tr : trait_ref) =
++      let tr = normalize span tr in
++      (not (generic_root tr))
++      &&
++      let impl, _, _ = resolve span tr in
++      impl_name impl = Some (iterator ^ "VecIntoIter")
++      &&
++      match tr.trait_decl_ref.binder_value.generics.types with
++      | [ _; item ] -> copy_ty item
++      | _ -> false
++    (* TrustedRandomAccessNoCoerce iterators whose next yields their next
++       indexed access and runs the same callbacks (no Skip: its first next
++       calls nth, which maps the skipped items, while its indexed access
++       offsets the index). *)
++    and indexed_next span (tr : trait_ref) =
++      vec_into_iter_copy span tr
++      ||
++      let tr = normalize span tr in
++      (not (generic_root tr))
++      &&
++      let impl, args, _ = resolve span tr in
++      match impl_name impl with
++      | Some name
++        when List.mem name
++               (List.map (( ^ ) iterator)
++                  [ "SliceIter"; "Windows"; "Chunks"; "ChunksExact"; "Range" ]) ->
++          true
++      | Some name
++        when List.mem name
++               (List.map (( ^ ) iterator) [ "Map"; "Copied"; "Cloned"; "Enumerate" ])
++        ->
++          indexed_next span (one span iterator args)
++      | _ -> false
+     in
+     let check_into span tr = check_into span [] tr in
+     let discharge span (callee : fun_decl) (generics : generic_args) =
+diff --git a/src/llbc/StartFrom.ml b/src/llbc/StartFrom.ml
+new file mode 100644
+index 0000000..f847403
+--- /dev/null
++++ b/src/llbc/StartFrom.ml
+@@ -0,0 +1,414 @@
++(** The items Charon started the translation from.
++
++    Charon records its start-from options in the LLBC ([--start-from] and
++    [--start-from-file], [--start-from-if-exists], [--start-from-attribute],
++    [--start-from-pub]), but not the items they selected. We select them again
++    on the translated crate, with Charon's own pattern language: the syntax of
++    charon/src/name_matcher/parser.rs and the name matching of
++    [Pattern::matches] and [StartFrom::matches] (charon/src/name_matcher/mod.rs,
++    charon/src/options.rs). This is not the syntax of charon-ml's
++    [NameMatcher]: Charon's canonical patterns (e.g. the roots of
++    [CHARON_CALLGRAPH]) use impl elements [{impl a::T}] and
++    [{impl a::Tr<u8> for a::T}], disambiguated identifiers [_#1] and
++    [closure#12], and plain identifiers match every disambiguator.
++
++    Charon resolves a pattern without disambiguators as a rustc path first,
++    which follows re-exports; names do not. A pattern that designates an item
++    through a re-export selects nothing here. *)
++
++open Types
++open LlbcAst
++
++type pat_elem =
++  | Ident of string * pat_ty list * int option
++      (** A name, its generic arguments (for a trait, the implemented type
++          first) and its disambiguator: [None] matches every disambiguator. *)
++  | Impl of pattern
++      (** An inherent impl (the pattern of its type) or a trait impl (the
++          pattern of the trait, the implemented type as first argument). *)
++  | Glob  (** [_] or [*] *)
++
++and pat_ty =
++  | Pat of pattern
++  | Ref of ref_kind * pat_ty
++  | Var  (** [@]: a type parameter *)
++
++and pattern = pat_elem list
++
++type t = Pattern of pattern | Attribute of string | Pub
++
++(** The identifiers Charon gives to unnamed path elements ([SPECIAL_IDENTS]). *)
++let special_idents =
++  [
++    "{use}";
++    "{const}";
++    "{promoted_const}";
++    "{vtable}";
++    "{vtable_method}";
++    "{vtable_drop_shim}";
++    "{vtable_drop_preshim}";
++    "{vtable_method_preshim}";
++  ]
++
++(** A recoverable parse error: the next alternative is tried (nom's [Error]). *)
++exception Backtrack
++
++(** An unrecoverable parse error (nom's [Failure], after [cut]). *)
++exception Cut
++
++(** Parse a pattern like [Pattern::parse]; [None] if it is not one. *)
++let parse (s : string) : pattern option =
++  let n = String.length s in
++  let pos = ref 0 in
++  let tag (t : string) : unit =
++    let l = String.length t in
++    if !pos + l <= n && String.sub s !pos l = t then pos := !pos + l
++    else raise Backtrack
++  in
++  let is_space c = c = ' ' || c = '\t' || c = '\n' || c = '\r' in
++  let is_digit c = c >= '0' && c <= '9' in
++  (* Rust's [char::is_alphanumeric] or ['_']; every non-ASCII byte is part of
++     a UTF-8 character, which we accept like a letter. *)
++  let is_ident c =
++    (c >= 'a' && c <= 'z')
++    || (c >= 'A' && c <= 'Z')
++    || is_digit c || c = '_' || Char.code c >= 128
++  in
++  let take_while (f : char -> bool) : string =
++    let start = !pos in
++    while !pos < n && f s.[!pos] do
++      incr pos
++    done;
++    String.sub s start (!pos - start)
++  in
++  let take_while1 f =
++    let x = take_while f in
++    if x = "" then raise Backtrack else x
++  in
++  let space0 () = ignore (take_while is_space) in
++  let space1 () = ignore (take_while1 is_space) in
++  let opt p =
++    let start = !pos in
++    try Some (p ())
++    with Backtrack ->
++      pos := start;
++      None
++  in
++  let rec alt ps =
++    match ps with
++    | [] -> raise Backtrack
++    | p :: ps -> (
++        let start = !pos in
++        try p ()
++        with Backtrack ->
++          pos := start;
++          alt ps)
++  in
++  let cut p = try p () with Backtrack -> raise Cut in
++  (* [separated_list0] *)
++  let separated_list0 sep elem =
++    match opt elem with
++    | None -> []
++    | Some first ->
++        let rec rest acc =
++          match
++            opt (fun () ->
++                sep ();
++                elem ())
++          with
++          | Some e -> rest (e :: acc)
++          | None -> List.rev acc
++        in
++        rest [ first ]
++  in
++  (* An optional [#N] suffix *)
++  let disambiguator () : int option =
++    opt (fun () ->
++        tag "#";
++        match int_of_string_opt (take_while1 is_digit) with
++        | Some d -> d
++        | None -> raise Backtrack)
++  in
++  let rec pattern () : pattern =
++    separated_list0
++      (fun () ->
++        tag "::";
++        space0 ())
++      pat_elem
++  and pat_elem () : pat_elem = alt [ glob; special_ident; impl_elem; simple_elem ]
++  and glob () =
++    tag "*";
++    Glob
++  and special_ident () =
++    tag "{";
++    let ident =
++      take_while1 (fun c -> c = '_' || (is_ident c && Char.code c < 128))
++    in
++    tag "}";
++    let name = "{" ^ ident ^ "}" in
++    if not (List.mem name special_idents) then raise Backtrack;
++    let d = disambiguator () in
++    space0 ();
++    Ident (name, [], d)
++  and impl_elem () =
++    tag "{";
++    space0 ();
++    cut (fun () ->
++        ignore
++          (opt (fun () ->
++               tag "impl";
++               cut space1));
++        let pat = pattern () in
++        space0 ();
++        let for_ty =
++          opt (fun () ->
++              tag "for";
++              space1 ();
++              let ty = pat_ty () in
++              space0 ();
++              ty)
++        in
++        tag "}";
++        match for_ty with
++        | None -> Impl pat
++        | Some ty -> (
++            (* The implemented type is the first argument of the trait. *)
++            match List.rev pat with
++            | Ident (name, generics, d) :: rest ->
++                Impl (List.rev (Ident (name, ty :: generics, d) :: rest))
++            | _ -> raise Cut))
++  and simple_elem () =
++    let ident = take_while is_ident in
++    let d = disambiguator () in
++    space0 ();
++    if ident = "_" && d = None then Glob
++    else
++      let generics =
++        opt (fun () ->
++            tag "<";
++            space0 ();
++            let args =
++              separated_list0
++                (fun () ->
++                  tag ",";
++                  space0 ())
++                (fun () ->
++                  let ty = pat_ty () in
++                  space0 ();
++                  ty)
++            in
++            tag ">";
++            args)
++      in
++      Ident (ident, Option.value generics ~default:[], d)
++  and pat_ty () : pat_ty =
++    alt
++      [
++        (fun () ->
++          tag "&";
++          space0 ();
++          let kind =
++            match
++              opt (fun () ->
++                  tag "mut";
++                  space0 ())
++            with
++            | Some () -> RMut
++            | None -> RShared
++          in
++          Ref (kind, pat_ty ()));
++        (fun () ->
++          tag "@";
++          Var);
++        (fun () -> Pat (pattern ()));
++      ]
++  in
++  try
++    let p = pattern () in
++    if !pos = n then Some p else None
++  with Backtrack | Cut -> None
++
++(** Split a start-from option into its patterns, at the commas outside
++    brackets ([split_patterns] in charon/src/options.rs). *)
++let split_patterns (list : string) : string list =
++  let depth = ref 0 in
++  let start = ref 0 in
++  let parts = ref [] in
++  String.iteri
++    (fun i c ->
++      match c with
++      | '<' | '{' | '(' | '[' -> incr depth
++      | '>' | '}' | ')' | ']' -> depth := max 0 (!depth - 1)
++      | ',' when !depth = 0 ->
++          parts := String.sub list !start (i - !start) :: !parts;
++          start := i + 1
++      | _ -> ())
++    list;
++  parts := String.sub list !start (String.length list - !start) :: !parts;
++  List.filter (fun p -> p <> "") (List.rev_map String.trim !parts)
++
++(** The start-from selections of the options Charon recorded, or [Error] with
++    a pattern that does not parse. Without any, Charon starts from the local
++    crate: [[]]. *)
++let of_options (options : cli_options) : (t list, string) result =
++  let patterns =
++    List.concat_map split_patterns
++      (options.start_from @ options.start_from_if_exists)
++  in
++  let rec parse_all acc = function
++    | [] -> Ok (List.rev acc)
++    | p :: ps -> (
++        match parse p with
++        | Some pat -> parse_all (Pattern pat :: acc) ps
++        | None -> Error p)
++  in
++  Result.map
++    (fun patterns ->
++      patterns
++      @ (match options.start_from_attribute with
++        | Some attr -> [ Attribute attr ]
++        | None -> [])
++      @ if options.start_from_pub then [ Pub ] else [])
++    (parse_all [] patterns)
++
++let builtin_name (b : builtin_ty) : name =
++  let path =
++    match b with
++    | TBox -> [ "alloc"; "boxed"; "Box" ]
++    | TStr -> [ "Str" ]
++  in
++  List.map (fun s -> PeIdent (s, Disambiguator.zero)) path
++
++(** [Pattern::matches_with_generics]: a pattern matches a name when it matches
++    a prefix of it. The arguments are those of the last name element. *)
++let rec matches_name (crate : crate) (p : pattern) (name : name)
++    (args : generic_args option) : bool =
++  let name, args =
++    match List.rev name with
++    | PeInstantiated binder :: rest -> (List.rev rest, Some binder.binder_value)
++    | _ -> (name, args)
++  in
++  (* A pattern that starts with an impl matches it anywhere: from the
++     rightmost impl of the name. *)
++  let name =
++    match p with
++    | Impl _ :: _ ->
++        let rec from_last_impl found = function
++          | [] -> found
++          | (PeImpl _ :: _ as rest) -> from_last_impl rest (List.tl rest)
++          | _ :: rest -> from_last_impl found rest
++        in
++        from_last_impl name name
++    | _ -> name
++  in
++  let rec go (p : pattern) (name : name) =
++    match (p, name) with
++    | [], _ -> true
++    | _ :: _, [] -> false
++    | [ pe ], [ ne ] -> matches_elem crate pe ne args
++    | pe :: p, ne :: name -> matches_elem crate pe ne None && go p name
++  in
++  go p name
++
++and matches_elem (crate : crate) (pe : pat_elem) (ne : path_elem)
++    (args : generic_args option) : bool =
++  match (pe, ne) with
++  | Glob, _ -> true
++  | Ident (pid, generics, d), PeIdent (id, ed) ->
++      (pid = id || (pid = "crate" && id = crate.name))
++      && (match d with
++         | None -> true
++         | Some d -> d = Disambiguator.to_int ed)
++      && matches_generics crate generics args
++  | Impl p, PeImpl (ImplElemTy ty) -> matches_ty crate p ty.binder_value
++  | Impl p, PeImpl (ImplElemTrait impl_id) -> (
++      match TraitImplId.Map.find_opt impl_id crate.trait_impls with
++      | None -> false
++      | Some timpl -> (
++          match
++            TraitDeclId.Map.find_opt timpl.impl_trait.id crate.trait_decls
++          with
++          | None -> false
++          | Some tdecl ->
++              let tname = tdecl.item_meta.name in
++              (* An instantiated trait's name carries its arguments. *)
++              let args =
++                match List.rev tname with
++                | PeInstantiated _ :: _ -> None
++                | _ -> Some timpl.impl_trait.generics
++              in
++              matches_name crate p tname args))
++  | _ -> false
++
++and matches_generics (crate : crate) (pats : pat_ty list)
++    (args : generic_args option) : bool =
++  match args with
++  | None -> true
++  | Some _ when pats = [] -> true
++  | Some g ->
++      (* Patterns do not mention regions. Charon matched the patterns before
++         [--lift-associated-types] appended type parameters to the items that
++         need associated types (e.g. [Fn<Args>] became [Fn<Args, Output>]):
++         then the pattern's types spell out a prefix of the types. *)
++      let nconsts = List.length g.const_generics in
++      let ntype_pats = List.length pats - nconsts in
++      let ntypes = List.length g.types in
++      (ntype_pats = ntypes
++      || crate.options.lift_associated_types <> []
++         && 0 <= ntype_pats && ntype_pats < ntypes)
++      &&
++      let type_pats, const_pats = Collections.List.split_at pats ntype_pats in
++      let types, _ = Collections.List.split_at g.types ntype_pats in
++      List.for_all2 (matches_pat_ty crate) type_pats types
++      (* Charon only implements the glob pattern for constants. *)
++      && List.for_all (fun pat -> pat = Pat [ Glob ]) const_pats
++
++and matches_ty (crate : crate) (p : pattern) (ty : ty) : bool =
++  p = [ Glob ]
++  ||
++  let ident s = [ PeIdent (s, Disambiguator.zero) ] in
++  match ty with
++  | TAdt { id = TAdtId id; generics } -> (
++      match TypeDeclId.Map.find_opt id crate.type_decls with
++      | Some d -> matches_name crate p d.item_meta.name (Some generics)
++      | None -> false)
++  | TAdt { id = TBuiltin b; generics } ->
++      matches_name crate p (builtin_name b) (Some generics)
++  | TAdt { id = TTuple; generics } -> (
++      (* Tuples are [Tuple<A, B, ..>], with every argument spelled out. *)
++      match p with
++      | [ Ident ("Tuple", pats, None) ] ->
++          List.length pats = List.length generics.types
++          && List.for_all2 (matches_pat_ty crate) pats generics.types
++      | _ -> false)
++  | TArray (ty, len) ->
++      matches_name crate p (ident "Array")
++        (Some { TypesUtils.empty_generic_args with types = [ ty ]; const_generics = [ len ] })
++  | TSlice ty ->
++      matches_name crate p (ident "Slice")
++        (Some { TypesUtils.empty_generic_args with types = [ ty ] })
++  | TLiteral lit ->
++      matches_name crate p
++        (ident (Charon.Print.literal_type_to_string lit))
++        (Some TypesUtils.empty_generic_args)
++  | _ -> false
++
++and matches_pat_ty (crate : crate) (pt : pat_ty) (ty : ty) : bool =
++  match (pt, ty) with
++  | Pat p, _ -> matches_ty crate p ty
++  | Ref (kind, pt), TRef (_, ty, kind') -> kind = kind' && matches_pat_ty crate pt ty
++  | Var, TVar _ -> true
++  | _ -> false
++
++(** [StartFrom::matches]: whether the selection selects the item (or an item
++    it is named under). *)
++let matches (crate : crate) (selection : t) (meta : item_meta) : bool =
++  match selection with
++  | Pattern p -> matches_name crate p meta.name None
++  | Attribute attr ->
++      List.exists
++        (function
++          | Meta.AttrUnknown raw -> raw.path = attr
++          | _ -> false)
++        meta.attr_info.attributes
++  | Pub -> meta.attr_info.public
+diff --git a/tests/lean/StartFromCanonical.lean b/tests/lean/StartFromCanonical.lean
+new file mode 100644
+index 0000000..66cec64
+--- /dev/null
++++ b/tests/lean/StartFromCanonical.lean
+@@ -0,0 +1,55 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [start_from_canonical]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace start_from_canonical
++
++/-- [start_from_canonical::Counter]
++    Source: 'tests/src/start-from-canonical.rs', lines 10:0-12:1
++    Visibility: public -/
++structure Counter where
++  value : _root_.Aeneas.Std.U32
++
++/-- [start_from_canonical::{start_from_canonical::Counter}::bump]:
++    Source: 'tests/src/start-from-canonical.rs', lines 15:4-18:5
++    Visibility: public -/
++def Counter.bump
++  (self : _root_.start_from_canonical.Counter) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.start_from_canonical.Counter)
++  := do
++  let i ← self.value + 1#u32
++  _root_.Aeneas.Std.Result.ok (i, { value := i })
++
++/-- [start_from_canonical::offsets::closure#10]
++    Source: 'tests/src/start-from-canonical.rs', lines 33:14-33:29 -/
++@[reducible]
++def offsets.closure_10 := _root_.Unit
++
++/-- [start_from_canonical::_#1::{start_from_canonical::Counter}::reset]:
++    Source: 'tests/src/start-from-canonical.rs', lines 41:8-45:9
++    Visibility: public -/
++def __1.Counter.reset
++  (self : _root_.start_from_canonical.Counter) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.start_from_canonical.Counter)
++  := do
++  _root_.Aeneas.Std.Result.ok (self.value, { value := 0#u32 })
++
++/-- [start_from_canonical::plain]:
++    Source: 'tests/src/start-from-canonical.rs', lines 49:0-51:1
++    Visibility: public -/
++def plain
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  x + 1#u32
++
++end start_from_canonical
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 7930b5f..107d661 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -91,6 +91,7 @@ package «tests» {}
+ @[default_target] lean_lib Scalars
+ @[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
++@[default_target] lean_lib StartFromCanonical
+ @[default_target] lean_lib Static
+ @[default_target] lean_lib StaticRefs
+ @[default_target] lean_lib StepBy
+diff --git a/tests/src/start-from-canonical.rs b/tests/src/start-from-canonical.rs
+new file mode 100644
+index 0000000..071b9a6
+--- /dev/null
++++ b/tests/src/start-from-canonical.rs
+@@ -0,0 +1,51 @@
++//@ [!lean] skip
++//@ charon-args=--start-from=start_from_canonical::plain,start_from_canonical::{start_from_canonical::Counter}::bump --start-from=start_from_canonical::_#1::{start_from_canonical::Counter}::reset --start-from=start_from_canonical::offsets::closure#10
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Charon's canonical start-from patterns select the roots Aeneas keeps: impl
++//! elements, anonymous constants (`_#1`), multi-digit disambiguators
++//! (`closure#10`) and comma-joined lists. charon-ml's `NameMatcher` syntax has
++//! none of them ("Cannot parse Charon's --start-from pattern"). Every root is
++//! extracted.
++
++pub struct Counter {
++    pub value: u32,
++}
++
++impl Counter {
++    pub fn bump(&mut self) -> u32 {
++        self.value += 1;
++        self.value
++    }
++}
++
++/// Eleven closures: the last one is `closure#10`.
++pub fn offsets(x: u32) -> u32 {
++    let c0 = |v: u32| v;
++    let c1 = |v: u32| v + 1;
++    let c2 = |v: u32| v + 2;
++    let c3 = |v: u32| v + 3;
++    let c4 = |v: u32| v + 4;
++    let c5 = |v: u32| v + 5;
++    let c6 = |v: u32| v + 6;
++    let c7 = |v: u32| v + 7;
++    let c8 = |v: u32| v + 8;
++    let c9 = |v: u32| v + 9;
++    let c10 = |v: u32| v * 10;
++    c10(c9(c8(c7(c6(c5(c4(c3(c2(c1(c0(x)))))))))))
++}
++
++const _: () = ();
++
++const _: () = {
++    impl Counter {
++        pub fn reset(&mut self) -> u32 {
++            let old = self.value;
++            self.value = 0;
++            old
++        }
++    }
++};
++
++pub fn plain(x: u32) -> u32 {
++    x + 1
++}

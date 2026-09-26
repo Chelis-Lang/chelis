@@ -1,0 +1,125 @@
+# charon integration step 30 after 546078ea5d: commit 2eb221b25a42d74b46a0c3fbd202fb8609cb86cc
+# first parent 3160c39ada7c293084ed7ca97134b33c12028d2e
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: decode compact and interned spans
+
+diff --git a/charon-ml/src/generated/Generated_Meta.ml b/charon-ml/src/generated/Generated_Meta.ml
+index 62015a4..bad4f6a 100644
+--- a/charon-ml/src/generated/Generated_Meta.ml
++++ b/charon-ml/src/generated/Generated_Meta.ml
+@@ -96,7 +96,18 @@ and raw_attribute = {
+           different delimiters or the [path = lit] case. *)
+ }
+ 
+-(** Meta information about a piece of code (block, statement, etc.) *)
++(** Meta information about a piece of code (block, statement, etc.)
++
++    A span is serialized as the array
++    [[file, beg_line, beg_col, end_line, end_col]], followed by the same five
++    numbers for [generated_from_span] when present.
++
++    When values are deduplicated (see [crate::ast::HashConsSerializerState]),
++    each distinct span is interned: its first occurrence is prefixed with its id
++    ([[id, file, ..]], 6 or 11 numbers) and the later ones are that id alone.
++    Like hash-consing, this relies on serialization and deserialization visiting
++    values in the same order. Spans in stateless positions (e.g. the span of an
++    [ItemMeta]) are written without id. *)
+ and span = {
+   data : span_data;
+       (** The source code span.
+diff --git a/charon-ml/src/generated/Generated_OfJson.ml b/charon-ml/src/generated/Generated_OfJson.ml
+index c7ec39f..ac95f1d 100644
+--- a/charon-ml/src/generated/Generated_OfJson.ml
++++ b/charon-ml/src/generated/Generated_OfJson.ml
+@@ -34,6 +34,7 @@ type of_json_ctx = {
+   id_to_file_map : file FileTbl.t;
+   ty_hashcons_map : ty HashConsId.Map.t ref;
+   tref_hashcons_map : trait_ref HashConsId.Map.t ref;
++  span_table : (int, span) Hashtbl.t;  (** Interned spans, by id. *)
+ }
+ 
+ (** A fresh context for decoding one file. The file and hash-consing tables are
+@@ -43,6 +44,7 @@ let fresh_of_json_ctx () : of_json_ctx =
+     id_to_file_map = FileTbl.create 8;
+     ty_hashcons_map = ref HashConsId.Map.empty;
+     tref_hashcons_map = ref HashConsId.Map.empty;
++    span_table = Hashtbl.create 1024;
+   }
+ 
+ let hash_consed_val_of_json (map : 'a HashConsId.Map.t ref)
+@@ -67,6 +69,60 @@ let hash_consed_val_of_json (map : 'a HashConsId.Map.t ref)
+       end
+     | _ -> Error "")
+ 
++(** A span is the array [[file; beg_line; beg_col; end_line; end_col]], followed
++    by the same numbers for [generated_from_span] when present. In deduplicated
++    files, the first occurrence of each span is prefixed with its id (ids are
++    consecutive from 0) and the later occurrences are the id alone. *)
++let span_numbers_of_json (ctx : of_json_ctx) (js : json) : (span, string) result
++    =
++  let span_data file beg_line beg_col end_line end_col :
++      (span_data, string) result =
++    match FileTbl.find_opt ctx.id_to_file_map (FileId.of_int file) with
++    | Some file ->
++        Ok
++          {
++            file;
++            beg_loc = { line = beg_line; col = beg_col };
++            end_loc = { line = end_line; col = end_col };
++          }
++    | None -> Error ("unknown file id " ^ string_of_int file)
++  in
++  let span (numbers : int list) : (span, string) result =
++    match numbers with
++    | [ f; bl; bc; el; ec ] ->
++        let* data = span_data f bl bc el ec in
++        Ok { data; generated_from_span = None }
++    | [ f; bl; bc; el; ec; gf; gbl; gbc; gel; gec ] ->
++        let* data = span_data f bl bc el ec in
++        let* generated = span_data gf gbl gbc gel gec in
++        Ok { data; generated_from_span = Some generated }
++    | _ -> Error "a span has 5 or 10 numbers"
++  in
++  combine_error_msgs js __FUNCTION__
++    (match js with
++    | `Int id -> (
++        match Hashtbl.find_opt ctx.span_table id with
++        | Some span -> Ok span
++        | None ->
++            Error
++              "Span id not found; there is a serialization mismatch between \
++               Rust and OCaml")
++    | `List numbers -> (
++        let* numbers = of_json_list int_of_json ctx numbers in
++        match numbers with
++        | id :: numbers when List.length numbers = 5 || List.length numbers = 10
++          ->
++            if id <> Hashtbl.length ctx.span_table then
++              Error
++                "Unexpected span id; there is a serialization mismatch between \
++                 Rust and OCaml"
++            else
++              let* span = span numbers in
++              Hashtbl.add ctx.span_table id span;
++              Ok span
++        | _ -> span numbers)
++    | _ -> Error "")
++
+ let path_buf_of_json = string_of_json
+ 
+ let big_int_of_json _ (js : json) : (big_int, string) result =
+@@ -1147,12 +1203,7 @@ and scalar_value_of_json (ctx : of_json_ctx) (js : json) :
+ and span_of_json (ctx : of_json_ctx) (js : json) : (span, string) result =
+   combine_error_msgs js __FUNCTION__
+     (match js with
+-    | `Assoc [ ("data", data); ("generated_from_span", generated_from_span) ] ->
+-        let* data = span_data_of_json ctx data in
+-        let* generated_from_span =
+-          option_of_json span_data_of_json ctx generated_from_span
+-        in
+-        Ok ({ data; generated_from_span } : span)
++    | json -> span_numbers_of_json ctx json
+     | _ -> Error "")
+ 
+ and span_data_of_json (ctx : of_json_ctx) (js : json) :

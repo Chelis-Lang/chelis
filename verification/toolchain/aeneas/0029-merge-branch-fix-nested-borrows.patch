@@ -1,0 +1,65 @@
+# aeneas integration step 29 after cba11f3beb: commit 4767ece6768abd3dc5a5133e5ee01decbe9f8d99
+# first parent 44be018a375fcfe7ce9465112b4a6841574b0ef2, merged c033455a374492593cb394f8b676b47b0bc353c4
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows'
+
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index b401597..7a36b77 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -1913,6 +1913,26 @@ and end_proj_loans_symbolic (config : config) (span : Meta.span)
+       (* End the loan itself *)
+       let ctx = update_aproj_loans_to_ended span abs_id level proj ctx in
+       (ctx, cc)
++  | Some (NonSharedProj (abs_id', proj_ty', level'))
++    when abs_id' = abs_id && level' <> level ->
++      (* The intersecting borrow projector lies in the abstraction whose
++         sub-abstraction we are ending, at another level: the borrows of the
++         symbolic value flow from one level of the abstraction to another one
++         (this happens with nested borrows, when a value given back by an
++         ignored borrow of the abstraction is itself given back to an ignored
++         loan of the same abstraction). Ending the whole level of the borrow
++         projector would require ending the current level first (the
++         sub-abstractions of higher levels must end before the lower ones):
++         we end exactly this projector instead, as [end_abs_borrows] does.
++         The other values of that level are left untouched. *)
++      [%sanity_check] span (level' < level);
++      let bproj : symbolic_proj = { sv_id = proj.sv_id; proj_ty = proj_ty' } in
++      let nsv = mk_fresh_symbolic_value span ctx proj_ty' in
++      let ctx = end_aproj_borrows span regions bproj nsv ctx in
++      let ctx = give_back_symbolic_value config span regions bproj nsv ctx in
++      (* Retry ending the projector of loans *)
++      end_proj_loans_symbolic config span ~snapshots chain abs_id level regions
++        proj ctx
+   | Some (NonSharedProj (abs_id', _proj_ty, level')) ->
+       (* We found one projector of borrows in an abstraction: end the abstraction
+          at the corresponding level. *)
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 85b37e0..3d409f7 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1249,11 +1249,20 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+     let monadic = false in
+     mk_closed_checked_lets __FILE__ __LINE__ ctx monadic eqs next_e)
+   else
+-    (* Check that the region abstraction only consumes values but does not output any *)
++    (* An ancestor input abstraction ended while synthesizing the backward
++       function of a descendant region group. At level 0 it only consumes values
++       (the outputs of the ancestor's own backward function). At a higher level
++       (nested borrows) it gives back the values which the caller supplies to
++       the *ancestor's* backward function when ending the borrows it received
++       at that depth: those are not inputs of the descendant's backward
++       function. The descendant receives the parts of those values which it
++       owns through its own sub-abstractions (the projectors over these values
++       in its own abstraction, bound to its own staged inputs), so the values
++       themselves are not in scope here: we do not bind them. Any later use of
++       them would be reported as an unbound variable by the closedness checks. *)
+     let ctx, outputs = abs_to_given_back None abs abs_level ctx in
+-    [%cassert] ctx.span (outputs = []) "Unimplemented";
++    [%cassert] ctx.span (abs_level > 0 || outputs = []) "Unimplemented";
+ 
+-    (* No outputs: we can ignore it *)
+     translate_expr e ctx
+ 
+ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)

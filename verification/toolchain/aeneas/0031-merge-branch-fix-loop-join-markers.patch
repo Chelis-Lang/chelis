@@ -1,0 +1,1262 @@
+# aeneas integration step 31 after cba11f3beb: commit 1c15d39db1bcf0fea7371d882020c4336c03bb5b
+# first parent 7b3f9ba78791776ce5b984a68e0bc25114359f4d, merged f39fbd5d20423e7909d5d264c91c1d3665ef38a8
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/loop-join-markers'
+
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index 7a36b77..8ff2d47 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -2598,6 +2598,30 @@ let abs_mut_borrows_loans_in_fixed span (ctx : eval_ctx)
+     false
+   with Found -> true
+ 
++(** A value which contains no loans and no mutable borrows, including inside
++    its symbolic values: discarding it gives nothing back and only releases
++    shared loans. *)
++let value_has_only_shared_borrows (ctx : eval_ctx) (v : tvalue) : bool =
++  let exception Found in
++  let visitor =
++    object
++      inherit [_] iter_tvalue
++      method! visit_VLoan _ _ = raise Found
++
++      method! visit_VBorrow _ bc =
++        match bc with
++        | VSharedBorrow _ -> ()
++        | VMutBorrow _ | VReservedMutBorrow _ -> raise Found
++
++      method! visit_VSymbolic _ sv =
++        if ty_has_mut_borrows ctx.type_ctx.type_infos sv.sv_ty then raise Found
++    end
++  in
++  try
++    visitor#visit_tvalue () v;
++    true
++  with Found -> false
++
+ let eliminate_ended_shared_loans (span : Meta.span) (ctx : eval_ctx) : eval_ctx
+     =
+   (* Filter the avalues *)
+@@ -2607,6 +2631,15 @@ let eliminate_ended_shared_loans (span : Meta.span) (ctx : eval_ctx) : eval_ctx
+       | ALoan (AEndedSharedLoan (_, sv, child))
+         when (not (value_has_loans_or_borrows (Some span) ctx sv.value))
+              && is_aignored child.value -> false
++      (* The shared value of an ended shared loan cannot be accessed anymore:
++         the shared borrows it contains are dead (e.g., the borrow of an
++         element of a slice, whose reference was itself shared and is not
++         live anymore). Dropping them releases the loans they borrow from.
++         Only do so in abstractions which can end: fixed abstractions must
++         not change. *)
++      | ALoan (AEndedSharedLoan (_, sv, child))
++        when abs.can_end && is_aignored child.value
++             && value_has_only_shared_borrows ctx sv -> false
+       | ASymbolic (_, AEndedProjLoans { proj = _; consumed; borrows })
+         when List.for_all (fun (_, proj) -> proj = AEmpty) (consumed @ borrows)
+         -> false
+diff --git a/src/interp/InterpBorrows.mli b/src/interp/InterpBorrows.mli
+index cd9cd12..8174238 100644
+--- a/src/interp/InterpBorrows.mli
++++ b/src/interp/InterpBorrows.mli
+@@ -173,6 +173,11 @@ val loan_proj_is_endable :
+ *)
+ val eliminate_internal_shared_borrows : Meta.span -> eval_ctx -> abs -> abs
+ 
++(** A value which contains no loans and no mutable borrows, including inside
++    its symbolic values: discarding it gives nothing back and only releases
++    shared loans. *)
++val value_has_only_shared_borrows : eval_ctx -> tvalue -> bool
++
+ (** Attempts to eliminate useless ended shared loans.
+ 
+     TODO: will not be necessary once we destructure the avalues. *)
+diff --git a/src/interp/InterpLoops.ml b/src/interp/InterpLoops.ml
+index b2c670f..fb93240 100644
+--- a/src/interp/InterpLoops.ml
++++ b/src/interp/InterpLoops.ml
+@@ -354,6 +354,73 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+   let el = List.map eval_after_loop_iter ctx_resl in
+   (List.map (fun x -> !x) ctx_info_at_break, cf_loop el)
+ 
++(** The locals which are uninitialized ([⊥]) in a context *)
++let bottom_locals (ctx : eval_ctx) : Expressions.LocalId.id list =
++  let rec go (env : env) =
++    match env with
++    | EBinding (BVar var, { value = VBottom; _ }) :: env -> var.index :: go env
++    | EFrame :: _ | [] -> []
++    | _ :: env -> go env
++  in
++  go ctx.env
++
++(** A local which is uninitialized when entering a loop is initialized by an
++    iteration before being read, so its value at a [continue] is dead: the next
++    iteration never reads it, and the joins at the loop entry discard it (they
++    join it with [⊥]). When such a value holds shared borrows (and no loans or
++    mutable borrows, so that discarding it gives nothing back), discard it
++    before the joins instead, and end the borrows and abstractions which were
++    only kept alive by it, e.g. the shared borrow returned by an indexing
++    ([let r = &lim[0]; ... *r ...]) and the abstractions of that call.
++    Otherwise, the join has to reconcile the borrow graph of these
++    abstractions, which exists in the continue context only. *)
++let drop_dead_locals_at_continue (config : config) (span : Meta.span)
++    (dead : Expressions.LocalId.id list) (eval_loop_body : stl_cm_fun) :
++    stl_cm_fun =
++ fun ctx ->
++  let resl, cf = eval_loop_body ctx in
++  let resl =
++    List.map
++      (fun (ctx, res) ->
++        match res with
++        | Continue 0 ->
++            (* Move the dead values to anonymous values *)
++            let moved = ref false in
++            let ctx =
++              List.fold_left
++                (fun ctx id ->
++                  let v = ctx_lookup_var_value span ctx id in
++                  if
++                    value_has_borrows (Some span) ctx v.value
++                    && InterpBorrows.value_has_only_shared_borrows ctx v
++                  then (
++                    [%ltrace
++                      "dropping dead local "
++                      ^ Expressions.LocalId.to_string id
++                      ^ ": "
++                      ^ tvalue_to_string ctx v];
++                    moved := true;
++                    let p = mk_place_from_var_id ctx span id in
++                    let ctx =
++                      InterpPaths.write_place span Write p
++                        (ValuesUtils.mk_bottom span v.ty) ctx
++                    in
++                    ctx_push_dummy_var ctx (ctx.fresh_dummy_var_id ()) v)
++                  else ctx)
++                ctx dead
++            in
++            if not !moved then ((ctx, res), fun e -> e)
++            else
++              (* End what only these values kept alive *)
++              let ctx, cc =
++                InterpBorrows.simplify_dummy_values_useless_abs config span ctx
++              in
++              ((ctx, res), cc)
++        | _ -> ((ctx, res), fun e -> e))
++      resl
++  in
++  (List.map fst resl, fun el -> cf (List.map2 (fun (_, cc) e -> cc e) resl el))
++
+ (** Evaluate a loop in symbolic mode.
+ 
+     A loop can be left through its own [break], but also through a [break] or a
+@@ -365,6 +432,10 @@ let eval_loop_symbolic (config : config) (span : span)
+  fun ctx ->
+   (* Debug *)
+   [%ltrace "Context:\n" ^ eval_ctx_to_string ~span:(Some span) ctx ^ "\n"];
++  (* Discard the values of the locals which are dead at the continues *)
++  let eval_loop_body =
++    drop_dead_locals_at_continue config span (bottom_locals ctx) eval_loop_body
++  in
+ 
+   (* Generate a fresh loop id *)
+   let loop_id = ctx.fresh_loop_id () in
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 6d557e9..1775165 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -913,9 +913,14 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       (* Create the abstraction expression *)
+       let cont : abs_cont option =
+         if S.with_abs_conts then
++          (* Only the mutable borrows of the projected region give values
++             back: a region which only appears under shared borrows (e.g.,
++             the ['a] of a closure capturing [&'a T] and [&'b mut U]) has an
++             empty continuation, like the loan projections of the loop
++             abstractions it is later merged with. *)
+           if
+-            TypesUtils.ty_has_mut_borrows ctx0.type_ctx.type_infos
+-              ty_with_regions
++            TypesUtils.ty_has_mut_borrow_for_region_in_set
++              ctx0.type_ctx.type_infos regions ty_with_regions
+           then
+             (* We used to generate a continuation of the following shape:
+                {[
+@@ -2587,7 +2592,10 @@ let match_ctxs (span : Meta.span) ~(check_equiv : bool)
+       raise_distinct "match_abstractions: kind";
+     if check_can_end && can_end0 <> can_end1 then
+       raise_distinct "match_abstractions: can_end";
+-    let _ = match_aids parents0 parents1 in
++    (* When checking equivalence, the parents must be the same. When matching a
++       source (fixed-point) context with a target context, the parents are
++       checked once all the abstractions have been matched (see below). *)
++    if check_equiv then ignore (match_aids parents0 parents1);
+     let _ = match_rids regions0 regions1 in
+ 
+     if not (AbsLevelSet.equal ended_subabs0 ended_subabs1) then
+@@ -2910,6 +2918,34 @@ let match_ctxs (span : Meta.span) ~(check_equiv : bool)
+   in
+ 
+   match_envs env0 env1;
++  (* Every parent of an abstraction of the target context must correspond to a
++     parent of the matching abstraction of the source context. The source
++     abstraction may have more parents: they are ended before it, which only
++     restricts the order in which the target borrows are ended (e.g., the loop
++     abstractions of a fixed point where the region abstractions of a call in
++     the loop body were joined with the abstractions of the loop entry). *)
++  if not check_equiv then begin
++    let abs0 = env_get_abs ctx0.env in
++    let abs1 = env_get_abs ctx1.env in
++    let aid_map = AbsId.InjSubst.to_map !aid_map in
++    AbsId.InjSubst.Map.iter
++      (fun aid0 aid1 ->
++        match (AbsId.Map.find_opt aid0 abs0, AbsId.Map.find_opt aid1 abs1) with
++        | Some abs0, Some abs1 ->
++            let parents0 =
++              AbsId.Set.filter_map
++                (fun p -> AbsId.InjSubst.Map.find_opt p aid_map)
++                abs0.parents
++            in
++            if not (AbsId.Set.subset abs1.parents parents0) then
++              raise
++                (Distinct
++                   ("match_abstractions: the parents of "
++                  ^ AbsId.to_string aid1 ^ " are not parents of "
++                  ^ AbsId.to_string aid0))
++        | _ -> ())
++      aid_map
++  end;
+   let maps =
+     {
+       aid_map = !aid_map;
+diff --git a/src/interp/InterpReduceCollapse.ml b/src/interp/InterpReduceCollapse.ml
+index da3176f..bee4414 100644
+--- a/src/interp/InterpReduceCollapse.ml
++++ b/src/interp/InterpReduceCollapse.ml
+@@ -176,14 +176,36 @@ let eliminate_shared_borrow_markers (span : Meta.span)
+   let non_marked_loans, non_marked_loan_projs =
+     get_non_marked_shared_loans span ctx
+   in
++  (* A shared reborrow of a part of a symbolic value can be introduced as soon
++     as unmarked loan projectors cover this part: e.g., the region abstraction
++     of an indexing call in a loop body, which reborrows the component
++     [&'b u32] of the elements [(&'a u32, &'b u32)] of a shared slice whose
++     loan projector covers both components. *)
++  let loan_projs_cover (nproj : norm_symb_proj) : bool =
++    NormSymbProj.Set.mem nproj non_marked_loan_projs
++    ||
++    let coverage =
++      NormSymbProj.Set.fold
++        (fun (loan : norm_symb_proj) coverage ->
++          if loan.sv_id <> nproj.sv_id then coverage
++          else
++            match coverage with
++            | None -> Some loan.norm_proj_ty
++            | Some previous ->
++                Some (norm_proj_tys_union span ctx previous loan.norm_proj_ty))
++        non_marked_loan_projs None
++    in
++    match coverage with
++    | None -> false
++    | Some coverage ->
++        norm_proj_ty_contains span ctx coverage nproj.norm_proj_ty
++  in
+   let shared_proj_is_available regions asb =
+     List.for_all
+       (function
+         | AsbBorrow (bid, _) -> BorrowId.Set.mem bid non_marked_loans
+         | AsbProjReborrows proj ->
+-            NormSymbProj.Set.mem
+-              (normalize_symbolic_proj regions proj)
+-              non_marked_loan_projs)
++            loan_projs_cover (normalize_symbolic_proj regions proj))
+       asb
+   in
+   (* A shared input can consist of an already common input plus a self-fed
+diff --git a/tests/lean/LoopJoinBorrows.lean b/tests/lean/LoopJoinBorrows.lean
+new file mode 100644
+index 0000000..75c49e8
+--- /dev/null
++++ b/tests/lean/LoopJoinBorrows.lean
+@@ -0,0 +1 @@
++import LoopJoinBorrows.Checks
+diff --git a/tests/lean/LoopJoinBorrows/Checks.lean b/tests/lean/LoopJoinBorrows/Checks.lean
+new file mode 100644
+index 0000000..091d476
+--- /dev/null
++++ b/tests/lean/LoopJoinBorrows/Checks.lean
+@@ -0,0 +1,53 @@
++import LoopJoinBorrows.LoopJoinBorrows
++
++/-! Evaluate the model of `tests/src/loop-join-borrows.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace loop_join_borrows.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def us (xs : List Nat) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def arr2 (x y : Nat) : Array U32 2#usize := ⟨[u x, u y], by simp⟩
++
++/-- A slice of pairs; the references of the Rust elements are erased. -/
++def pairs {α : Type} (xs : List (Nat × α))
++    (h : xs.length ≤ Usize.max := by simp; try scalar_tac) : Slice (U32 × α) :=
++  ⟨xs.map (fun (x, y) => (u x, y)), by simpa using h⟩
++
++def res (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++def res3 (r : Result (U32 × U32 × U32)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++#guard res (slice_of_refs (us [3, 9]) (u 7)) == some 3
++#guard res (slice_of_refs (us [0]) (u 0)) == some 0
++#guard res (slice_of_refs (us [10]) (u 5)) == some 0
++#guard res (array_of_refs (arr2 3 1) (u 7)) == some 5
++#guard res (array_of_refs (arr2 0 6) (u 6)) == some 0
++
++#guard res (last_second (pairs [(1, u 5), (2, u 7)]) 2#usize (u 9)) == some 7
++#guard res (last_second (pairs [(1, u 5), (2, u 7)]) 1#usize (u 9)) == some 5
++#guard res (last_second (pairs [(1, u 5)]) 0#usize (u 9)) == some 9
++#guard res (store_second_state (u 4) (u 8) 0#usize) == some 1
++#guard res (store_second_state (u 4) (u 8) 1#usize) == some 4
++#guard res (store_second_state (u 4) (u 8) 2#usize) == some 8
++#guard res (last_some (pairs [(1, some (u 3)), (2, none)])) == some 3
++#guard res (last_some (pairs [(1, none), (1, some (u 6))])) == some 6
++#guard res (last_some (pairs ([] : List (Nat × Option U32)))) == some 0
++#guard res (push_seconds_sum (u 4) (u 8)) == some 12
++#guard res (push_seconds_sum (u 0) (u 0)) == some 0
++
++#guard res3 (bump_many_state (u 0) (u 0) (u 3) (u 5)) == some (3, 3, 15)
++#guard res3 (bump_many_state (u 2) (u 7) (u 0) (u 5)) == some (0, 2, 7)
++#guard res3 (bump_many_state (u 1) (u 1) (u 4) (u 2)) == some (4, 5, 9)
++
++end loop_join_borrows.checks
+diff --git a/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+new file mode 100644
+index 0000000..185b5ff
+--- /dev/null
++++ b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+@@ -0,0 +1,717 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_join_borrows]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_join_borrows
++
++/-- [loop_join_borrows::bump_many::closure]
++    Source: 'tests/src/loop-join-borrows.rs', lines 133:16-137:5 -/
++def bump_many.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<loop_join_borrows::bump_many::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<loop_join_borrows::bump_many::closure<'0, '1>, (&'2 mut @T0), @T1>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11
++  (T0 : Type) (T1 : Type) where
++  call_once : _root_.loop_join_borrows.bump_many.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.loop_join_borrows.bump_many.closure
++    × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<loop_join_borrows::bump_many::closure<'0, '1>, (&'2 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<loop_join_borrows::bump_many::closure<'0, '1>, (&'2 mut @T0), @T1>"
++  (parentClauses := ["FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11Inst"])]
++structure
++  core.ops.function.FnMutclosureTupleMut2T0T1_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  (T0 : Type) (T1 : Type) where
++  FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11Inst :
++    _root_.loop_join_borrows.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11
++    T0 T1
++  call_mut : _root_.loop_join_borrows.bump_many.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.loop_join_borrows.bump_many.closure
++    × (_root_.loop_join_borrows.bump_many.closure →
++    _root_.loop_join_borrows.bump_many.closure) × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T0 × T1)
++
++/-- [loop_join_borrows::slice_of_refs]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 18:4-23:5
++    Visibility: public -/
++@[rust_loop_body]
++def slice_of_refs_loop.body
++  (lim : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  if i < n
++  then
++    let i1 ← Slice.index_usize lim 0#usize
++    let c1 ← if i > i1
++               then c + 1#u32
++               else _root_.Aeneas.Std.Result.ok c
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (c1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done c)
++
++/-- [loop_join_borrows::slice_of_refs]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 18:4-23:5
++    Visibility: public -/
++@[rust_loop]
++def slice_of_refs_loop
++  (lim : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (c1, i1) => _root_.loop_join_borrows.slice_of_refs_loop.body lim n c1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (c, i)
++
++/-- [loop_join_borrows::slice_of_refs]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 15:0-25:1
++    Visibility: public -/
++@[reducible]
++def slice_of_refs
++  (lim : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_join_borrows.slice_of_refs_loop lim n 0#u32 0#u32
++
++/-- [loop_join_borrows::array_of_refs]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 30:4-35:5
++    Visibility: public -/
++@[rust_loop_body]
++def array_of_refs_loop.body
++  (lim : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize)
++  (n : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  if i < n
++  then
++    let i1 ← Array.index_usize lim 1#usize
++    let c1 ← if i > i1
++               then c + 1#u32
++               else _root_.Aeneas.Std.Result.ok c
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (c1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done c)
++
++/-- [loop_join_borrows::array_of_refs]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 30:4-35:5
++    Visibility: public -/
++@[rust_loop]
++def array_of_refs_loop
++  (lim : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize)
++  (n : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (c1, i1) => _root_.loop_join_borrows.array_of_refs_loop.body lim n c1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (c, i)
++
++/-- [loop_join_borrows::array_of_refs]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 27:0-37:1
++    Visibility: public -/
++@[reducible]
++def array_of_refs
++  (lim : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_join_borrows.array_of_refs_loop lim n 0#u32 0#u32
++
++/-- [loop_join_borrows::last_second]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 44:4-47:5
++    Visibility: public -/
++@[rust_loop_body]
++def last_second_loop.body
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  if i < n
++  then
++    let (_, out1) ← Slice.index_usize a i
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (out1, i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++
++/-- [loop_join_borrows::last_second]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 44:4-47:5
++    Visibility: public -/
++@[rust_loop]
++def last_second_loop
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (out1, i1) => _root_.loop_join_borrows.last_second_loop.body a n out1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.U32))
++    (out, i)
++
++/-- [loop_join_borrows::last_second]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 41:0-49:1
++    Visibility: public -/
++@[reducible]
++def last_second
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (dflt : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_join_borrows.last_second_loop a n dflt 0#usize
++
++/-- [loop_join_borrows::store_second]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 54:4-57:5
++    Visibility: public -/
++@[rust_loop_body]
++def store_second_loop.body
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  if i < n
++  then
++    let (_, out1) ← Slice.index_usize a i
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (out1, i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++
++/-- [loop_join_borrows::store_second]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 54:4-57:5
++    Visibility: public -/
++@[rust_loop]
++def store_second_loop
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (out1, i1) => _root_.loop_join_borrows.store_second_loop.body a n out1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.U32))
++    (out, i)
++
++/-- [loop_join_borrows::store_second]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 52:0-58:1
++    Visibility: public -/
++@[reducible]
++def store_second
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) (n : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_join_borrows.store_second_loop a n out 0#usize
++
++/-- [loop_join_borrows::store_second_state]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 60:0-66:1
++    Visibility: public -/
++def store_second_state
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let s ←
++    lift (Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [ (1#u32, x), (1#u32, y) ]))
++  _root_.loop_join_borrows.store_second s n 1#u32
++
++/-- [loop_join_borrows::last_some]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 71:4-75:5
++    Visibility: public -/
++@[rust_loop_body]
++def last_some_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  (_root_.Option _root_.Aeneas.Std.U32)))
++  (out : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.Aeneas.Std.U32))) × (_root_.Option
++    _root_.Aeneas.Std.U32)) (_root_.Option _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | some p =>
++    let (_, v) := p
++    let b := _root_.Aeneas.Std.core.option.Option.is_some v
++    let out1 ←
++      if b
++      then _root_.Aeneas.Std.Result.ok v
++      else _root_.Aeneas.Std.Result.ok out
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [loop_join_borrows::last_some]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 71:4-75:5
++    Visibility: public -/
++@[rust_loop]
++def last_some_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  (_root_.Option _root_.Aeneas.Std.U32)))
++  (out : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, out1) => _root_.loop_join_borrows.last_some_loop.body iter1
++       out1 : ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32
++      × (_root_.Option _root_.Aeneas.Std.U32))) × (_root_.Option
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × (_root_.Option _root_.Aeneas.Std.U32))) ×
++      (_root_.Option _root_.Aeneas.Std.U32)) (_root_.Option
++      _root_.Aeneas.Std.U32)))
++    (iter, out)
++
++/-- [loop_join_borrows::last_some]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 69:0-80:1
++    Visibility: public -/
++def last_some
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 × (_root_.Option
++  _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let out ← _root_.loop_join_borrows.last_some_loop iter none
++  match out with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some x => _root_.Aeneas.Std.Result.ok x
++
++/-- [loop_join_borrows::push_seconds]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 84:4-86:5
++    Visibility: public -/
++@[rust_loop_body]
++def push_seconds_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  (_root_.Option _root_.Aeneas.Std.U32)))
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.Aeneas.Std.U32))) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Option _root_.Aeneas.Std.U32))) (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Option _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | some p =>
++    let (_, v) := p
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out v
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [loop_join_borrows::push_seconds]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 84:4-86:5
++    Visibility: public -/
++@[rust_loop]
++def push_seconds_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  (_root_.Option _root_.Aeneas.Std.U32)))
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Option
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.loop_join_borrows.push_seconds_loop.body iter1
++       out1 : ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32
++      × (_root_.Option _root_.Aeneas.Std.U32))) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32)))
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.Aeneas.Std.U32))) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32)))
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [loop_join_borrows::push_seconds]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 83:0-87:1
++    Visibility: public -/
++def push_seconds
++  (a : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.U32 × (_root_.Option
++  _root_.Aeneas.Std.U32)))
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Option
++    _root_.Aeneas.Std.U32))
++  := do
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  _root_.loop_join_borrows.push_seconds_loop iter out
++
++/-- [loop_join_borrows::push_seconds_sum]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 97:4-102:5
++    Visibility: public -/
++@[rust_loop_body]
++def push_seconds_sum_loop.body
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len out
++  if i < i1
++  then
++    let o ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice (_root_.Option
++        _root_.Aeneas.Std.U32)) out i
++    let s1 ←
++      match o with
++      | none => _root_.Aeneas.Std.Result.ok s
++      | some r => s + r
++    let i2 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++
++/-- [loop_join_borrows::push_seconds_sum]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 97:4-102:5
++    Visibility: public -/
++@[rust_loop]
++def push_seconds_sum_loop
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32))
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => _root_.loop_join_borrows.push_seconds_sum_loop.body out s1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.U32))
++    (s, i)
++
++/-- [loop_join_borrows::push_seconds_sum]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 90:0-104:1
++    Visibility: public -/
++def push_seconds_sum
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let s ←
++    lift (Array.to_slice
++      (_root_.Aeneas.Std.Array.make 3#usize [
++        (1#u32, some x), (1#u32, none), (1#u32, some y)
++        ]))
++  let out ←
++    _root_.loop_join_borrows.push_seconds s
++      (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Option
++      _root_.Aeneas.Std.U32))
++  _root_.loop_join_borrows.push_seconds_sum_loop out 0#u32 0#usize
++
++/-- [loop_join_borrows::Counter]
++    Source: 'tests/src/loop-join-borrows.rs', lines 106:0-109:1
++    Visibility: public -/
++structure Counter where
++  count : _root_.Aeneas.Std.U32
++  total : _root_.Aeneas.Std.U32
++
++/-- [loop_join_borrows::{loop_join_borrows::Counter}::bump]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 112:4-115:5
++    Visibility: public -/
++def Counter.bump
++  (self : _root_.loop_join_borrows.Counter) (by1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_join_borrows.Counter
++  := do
++  let i ← self.count + 1#u32
++  let i1 ← self.total + by1
++  _root_.Aeneas.Std.Result.ok { count := i, total := i1 }
++
++/-- [loop_join_borrows::apply]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 122:4-125:5
++    Visibility: public -/
++@[rust_loop_body]
++def apply_loop.body
++  {T : Type} {F : Type}
++  (coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  F T _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) (x : T) (f : F)
++  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (T × F ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++    T))
++  := do
++  if i < n
++  then
++    let (last1, f1, x1) ←
++      coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
++        f x
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (x1, f1,
++      last1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (last, x))
++
++/-- [loop_join_borrows::apply]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 122:4-125:5
++    Visibility: public -/
++@[rust_loop]
++def apply_loop
++  {T : Type} {F : Type}
++  (coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  F T _root_.Aeneas.Std.U32) (x : T) (n : _root_.Aeneas.Std.U32) (f : F)
++  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T)
++  := do
++  loop
++    (fun (x1, f1, last1, i1) => _root_.loop_join_borrows.apply_loop.body
++       coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst
++       n x1 f1 last1 i1 : (T × F × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (T × F × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × T)))
++    (x, f, last, i)
++
++/-- [loop_join_borrows::apply]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 119:0-127:1
++    Visibility: public -/
++@[reducible]
++def apply
++  {T : Type} {F : Type}
++  (coreopsfunctionFnMutFTupleMut0TU32_specialized_943e173885df97b2ecc8767154e6953dInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  F T _root_.Aeneas.Std.U32) (x : T) (n : _root_.Aeneas.Std.U32) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T)
++  := do
++  _root_.loop_join_borrows.apply_loop
++    coreopsfunctionFnMutFTupleMut0TU32_specialized_943e173885df97b2ecc8767154e6953dInst
++    x n f 0#u32 0#u32
++
++/-- [loop_join_borrows::apply::<0, T0, loop_join_borrows::bump_many::closure<1, 2>>]: loop body 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 122:4-125:5
++    Visibility: public -/
++@[rust_loop_body]
++def apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274_loop.body
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleMutT0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  T0 _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32)
++  (back : _root_.loop_join_borrows.bump_many.closure → _root_.Aeneas.Std.U32)
++  (x : T0) (f : _root_.loop_join_borrows.bump_many.closure)
++  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.loop_join_borrows.bump_many.closure → _root_.Aeneas.Std.U32) ×
++    T0 × _root_.loop_join_borrows.bump_many.closure × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32) (T0 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i1, _) := f
++  if i < n
++  then
++    let (last1, f1, call_mut_back, x1) ←
++      coreopsfunctionFnMutclosureTupleMutT0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst.call_mut
++        f x
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun c => let (_, i3) := call_mut_back c
++                back (i1, i3), x1, f1, last1, i2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (x, last,
++      back f))
++
++/-- [loop_join_borrows::apply::<0, T0, loop_join_borrows::bump_many::closure<1, 2>>]: loop 0:
++    Source: 'tests/src/loop-join-borrows.rs', lines 122:4-125:5
++    Visibility: public -/
++@[rust_loop]
++def apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274_loop
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleMutT0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  T0 _root_.Aeneas.Std.U32)
++  (back : _root_.loop_join_borrows.bump_many.closure → _root_.Aeneas.Std.U32)
++  (x : T0) (n : _root_.Aeneas.Std.U32)
++  (f : _root_.loop_join_borrows.bump_many.closure)
++  (last : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (T0 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (back1, x1, f1, last1, i1) =>
++       _root_.loop_join_borrows.apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274_loop.body
++       coreopsfunctionFnMutclosureTupleMutT0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst
++       n back1 x1 f1 last1 i1 : ((_root_.loop_join_borrows.bump_many.closure
++      → _root_.Aeneas.Std.U32) × T0 ×
++      _root_.loop_join_borrows.bump_many.closure × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.loop_join_borrows.bump_many.closure → _root_.Aeneas.Std.U32)
++      × T0 × _root_.loop_join_borrows.bump_many.closure ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (T0 ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++    (back, x, f, last, i)
++
++/-- [loop_join_borrows::apply::<0, T0, loop_join_borrows::bump_many::closure<1, 2>>]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 119:0-127:1
++    Visibility: public -/
++def apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274
++  {T0 : Type}
++  (coreopsfunctionFnMutclosureTupleMut0T0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  T0 _root_.Aeneas.Std.U32) (x : T0) (n : _root_.Aeneas.Std.U32)
++  (f : _root_.loop_join_borrows.bump_many.closure) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T0 ×
++    _root_.loop_join_borrows.bump_many.closure)
++  := do
++  let (i, _) := f
++  let (x1, last, back) ←
++    _root_.loop_join_borrows.apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274_loop
++      coreopsfunctionFnMutclosureTupleMut0T0U32_specialized_b1e1260b53a33bc34ce40f8b499b24ebInst
++      (fun c => let (_, i1) := c
++                i1) x n f 0#u32 0#u32
++  _root_.Aeneas.Std.Result.ok (last, x1, (i, back))
++
++/-- [loop_join_borrows::bump_many::{core::ops::function::FnMut::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for loop_join_borrows::Counter}::call_mut]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 133:16-137:5 -/
++def
++  bump_many.closure.Insts.CoreOpsFunctionFnMutTupleMutCounterU32_specialized_b1e1260b53a33bc34ce40f8b499b24eb.call_mut
++  (c : _root_.loop_join_borrows.bump_many.closure)
++  (tupled_args : _root_.loop_join_borrows.Counter) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_borrows.bump_many.closure ×
++    (_root_.loop_join_borrows.bump_many.closure →
++    _root_.loop_join_borrows.bump_many.closure) ×
++    _root_.loop_join_borrows.Counter)
++  := do
++  let (i, i1) := c
++  let tupled_args1 ← _root_.loop_join_borrows.Counter.bump tupled_args i
++  let i2 ← i1 + 1#u32
++  let back :=
++    (fun c1 => let (_, i3) := c1
++               (i, i3) : _root_.loop_join_borrows.bump_many.closure →
++      _root_.loop_join_borrows.bump_many.closure)
++  _root_.Aeneas.Std.Result.ok (i2, (i, i2), back, tupled_args1)
++
++/-- [loop_join_borrows::bump_many::{core::ops::function::FnOnce::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for loop_join_borrows::Counter}::call_once]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 133:16-137:5 -/
++def
++  bump_many.closure.Insts.CoreOpsFunctionFnOnceTupleMutCounterU32_specialized_8ae96fe87946b54ec5298ceba4ef5b11.call_once
++  (c : _root_.loop_join_borrows.bump_many.closure)
++  (c1 : _root_.loop_join_borrows.Counter) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_borrows.bump_many.closure ×
++    _root_.loop_join_borrows.Counter)
++  := do
++  let (i, _) := c
++  let (i1, c2, call_mut_back, c3) ←
++    _root_.loop_join_borrows.bump_many.closure.Insts.CoreOpsFunctionFnMutTupleMutCounterU32_specialized_b1e1260b53a33bc34ce40f8b499b24eb.call_mut
++      c c1
++  let c4 := call_mut_back c2
++  let (_, i2) := c4
++  _root_.Aeneas.Std.Result.ok (i1, (i, i2), c3)
++
++/-- Trait implementation: [loop_join_borrows::bump_many::{core::ops::function::FnOnce::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for loop_join_borrows::Counter}]
++    Source: 'tests/src/loop-join-borrows.rs', lines 133:16-137:5 -/
++@[reducible]
++def
++  bump_many.closure.Insts.CoreOpsFunctionFnOnceTupleMutCounterU32_specialized_8ae96fe87946b54ec5298ceba4ef5b11
++  :
++  _root_.loop_join_borrows.core.ops.function.FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11
++  _root_.loop_join_borrows.Counter _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.loop_join_borrows.bump_many.closure.Insts.CoreOpsFunctionFnOnceTupleMutCounterU32_specialized_8ae96fe87946b54ec5298ceba4ef5b11.call_once
++}
++
++/-- Trait implementation: [loop_join_borrows::bump_many::{core::ops::function::FnMut::<loop_join_borrows::bump_many::closure<0, 1>, (&2 mut (T0)), T1><0, 1, '_, u32> for loop_join_borrows::Counter}]
++    Source: 'tests/src/loop-join-borrows.rs', lines 133:16-137:5 -/
++@[reducible]
++def
++  bump_many.closure.Insts.CoreOpsFunctionFnMutTupleMutCounterU32_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  :
++  _root_.loop_join_borrows.core.ops.function.FnMutclosureTupleMut2T0T1_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++  _root_.loop_join_borrows.Counter _root_.Aeneas.Std.U32 := {
++  FnOnceclosureTupleMut2T0T1_specialized_8ae96fe87946b54ec5298ceba4ef5b11Inst
++    :=
++    _root_.loop_join_borrows.bump_many.closure.Insts.CoreOpsFunctionFnOnceTupleMutCounterU32_specialized_8ae96fe87946b54ec5298ceba4ef5b11
++  call_mut :=
++    _root_.loop_join_borrows.bump_many.closure.Insts.CoreOpsFunctionFnMutTupleMutCounterU32_specialized_b1e1260b53a33bc34ce40f8b499b24eb.call_mut
++}
++
++/-- [loop_join_borrows::bump_many]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 131:0-138:1
++    Visibility: public -/
++def bump_many
++  (c : _root_.loop_join_borrows.Counter) (n : _root_.Aeneas.Std.U32)
++  (by1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_borrows.Counter)
++  := do
++  let (i, c1, _) ←
++    _root_.loop_join_borrows.apply0T0closure_specialized_bbbb0fc747b13e459db10d486d1d4274
++      _root_.loop_join_borrows.bump_many.closure.Insts.CoreOpsFunctionFnMutTupleMutCounterU32_specialized_b1e1260b53a33bc34ce40f8b499b24eb
++      c n (by1, 0#u32)
++  _root_.Aeneas.Std.Result.ok (i, c1)
++
++/-- [loop_join_borrows::bump_many_state]:
++    Source: 'tests/src/loop-join-borrows.rs', lines 141:0-145:1
++    Visibility: public -/
++def bump_many_state
++  (count : _root_.Aeneas.Std.U32) (total : _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (by1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, c) ← _root_.loop_join_borrows.bump_many { count, total } n by1
++  _root_.Aeneas.Std.Result.ok (r, c.count, c.total)
++
++end loop_join_borrows
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ea9e87e..e9bc8ed 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -54,6 +54,7 @@ package «tests» {}
+ @[default_target] lean_lib Joins
+ @[default_target] lean_lib JoinDuplicate
+ @[default_target] lean_lib ListBorrows
++@[default_target] lean_lib LoopJoinBorrows
+ @[default_target] lean_lib LoopSharedLoanInJoin
+ @[default_target] lean_lib Loops
+ @[default_target] lean_lib LoopsRec
+diff --git a/tests/src/loop-join-borrows.rs b/tests/src/loop-join-borrows.rs
+new file mode 100644
+index 0000000..e40379b
+--- /dev/null
++++ b/tests/src/loop-join-borrows.rs
+@@ -0,0 +1,181 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopJoinBorrows
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops whose joins involve borrows created inside the body: a shared
++//! borrow into a slice (or array) of references, read through a temporary
++//! which is dead at the `continue`; a reference copied out of a component of
++//! an element of a slice of tuples (so that the element is only partially
++//! reborrowed); and a closure capturing both a shared and a mutable
++//! reference, called at every iteration.
++//! `LoopJoinBorrows/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++/// Counts the iterations `i < n` where `i > *lim[0]`.
++pub fn slice_of_refs(lim: &[&u32], n: u32) -> u32 {
++    let mut c = 0;
++    let mut i = 0;
++    while i < n {
++        if i > *lim[0] {
++            c += 1;
++        }
++        i += 1;
++    }
++    c
++}
++
++pub fn array_of_refs(lim: &[&u32; 2], n: u32) -> u32 {
++    let mut c = 0;
++    let mut i = 0;
++    while i < n {
++        if i > *lim[1] {
++            c += 1;
++        }
++        i += 1;
++    }
++    c
++}
++
++/// Reads `*a[k].1` for the last `k < n` (or `*dflt` when `n == 0`): the
++/// reference is copied out of a component of an element of the slice.
++pub fn last_second<'a>(a: &[(&'a u32, &'a u32)], n: usize, dflt: &'a u32) -> u32 {
++    let mut out = dflt;
++    let mut i = 0;
++    while i < n {
++        out = a[i].1;
++        i += 1;
++    }
++    *out
++}
++
++/// Same as [last_second], writing through a mutable reference.
++pub fn store_second<'a>(a: &[(&'a u32, &'a u32)], n: usize, out: &mut &'a u32) {
++    let mut i = 0;
++    while i < n {
++        *out = a[i].1;
++        i += 1;
++    }
++}
++
++pub fn store_second_state(x: u32, y: u32, n: usize) -> u32 {
++    let (a, b, c) = (1u32, x, y);
++    let v = [(&a, &b), (&a, &c)];
++    let mut out = &a;
++    store_second(&v, n, &mut out);
++    *out
++}
++
++/// The last `Some` second component of the elements (0 if there is none).
++pub fn last_some<'a>(a: &[(&'a u32, Option<&'a u32>)]) -> u32 {
++    let mut out: Option<&'a u32> = None;
++    for (_, v) in a.iter() {
++        if v.is_some() {
++            out = *v;
++        }
++    }
++    match out {
++        Some(x) => *x,
++        None => 0,
++    }
++}
++
++/// Copies the second components into `out`.
++pub fn push_seconds<'a>(a: &[(&'a u32, Option<&'a u32>)], out: &mut Vec<Option<&'a u32>>) {
++    for (_, v) in a.iter() {
++        out.push(*v);
++    }
++}
++
++/// Sums the `Some` components collected by [push_seconds].
++pub fn push_seconds_sum(x: u32, y: u32) -> u32 {
++    let (a, b, c) = (1u32, x, y);
++    let v = [(&a, Some(&b)), (&a, None), (&a, Some(&c))];
++    let mut out = Vec::new();
++    push_seconds(&v, &mut out);
++    let mut s = 0;
++    let mut i = 0;
++    while i < out.len() {
++        if let Some(r) = out[i] {
++            s += *r;
++        }
++        i += 1;
++    }
++    s
++}
++
++pub struct Counter {
++    pub count: u32,
++    pub total: u32,
++}
++
++impl Counter {
++    pub fn bump(&mut self, by: u32) {
++        self.count += 1;
++        self.total += by;
++    }
++}
++
++/// Calls `f` `n` times, returning its last result.
++pub fn apply<T, F: FnMut(&mut T) -> u32>(x: &mut T, n: u32, mut f: F) -> u32 {
++    let mut last = 0;
++    let mut i = 0;
++    while i < n {
++        last = f(x);
++        i += 1;
++    }
++    last
++}
++
++/// The closure captures `by` by shared reference and `calls` by mutable
++/// reference.
++pub fn bump_many(c: &mut Counter, n: u32, by: u32) -> u32 {
++    let mut calls = 0u32;
++    apply(c, n, |c: &mut Counter| {
++        c.bump(by);
++        calls += 1;
++        calls
++    })
++}
++
++/// Returns `(bump_many result, count, total)`.
++pub fn bump_many_state(count: u32, total: u32, n: u32, by: u32) -> (u32, u32, u32) {
++    let mut c = Counter { count, total };
++    let r = bump_many(&mut c, n, by);
++    (r, c.count, c.total)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn refs() {
++        assert_eq!(slice_of_refs(&[&3, &9], 7), 3);
++        assert_eq!(slice_of_refs(&[&0], 0), 0);
++        assert_eq!(slice_of_refs(&[&10], 5), 0);
++        assert_eq!(array_of_refs(&[&3, &1], 7), 5);
++        assert_eq!(array_of_refs(&[&0, &6], 6), 0);
++    }
++
++    #[test]
++    fn tuple_components() {
++        assert_eq!(last_second(&[(&1, &5), (&2, &7)], 2, &9), 7);
++        assert_eq!(last_second(&[(&1, &5), (&2, &7)], 1, &9), 5);
++        assert_eq!(last_second(&[(&1, &5)], 0, &9), 9);
++        assert_eq!(store_second_state(4, 8, 0), 1);
++        assert_eq!(store_second_state(4, 8, 1), 4);
++        assert_eq!(store_second_state(4, 8, 2), 8);
++        assert_eq!(last_some(&[(&1, Some(&3)), (&2, None)]), 3);
++        assert_eq!(last_some(&[(&1, None), (&1, Some(&6))]), 6);
++        assert_eq!(last_some(&[]), 0);
++        assert_eq!(push_seconds_sum(4, 8), 12);
++        assert_eq!(push_seconds_sum(0, 0), 0);
++    }
++
++    #[test]
++    fn closures() {
++        assert_eq!(bump_many_state(0, 0, 3, 5), (3, 3, 15));
++        assert_eq!(bump_many_state(2, 7, 0, 5), (0, 2, 7));
++        assert_eq!(bump_many_state(1, 1, 4, 2), (4, 5, 9));
++    }
++}

@@ -1,0 +1,123 @@
+# charon integration step 6 after 546078ea5d: commit 84516ed72106422f4afaf2523071c424cb19f7dd
+# first parent 9bb3a3d6c062037f75e1ad9cc9d4d04662a76be3
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon-hidden-traits
+
+diff --git a/src/name_matcher/mod.rs b/src/name_matcher/mod.rs
+index 7da9afb..9b80034 100644
+--- a/src/name_matcher/mod.rs
++++ b/src/name_matcher/mod.rs
+@@ -43,12 +43,6 @@ impl Pattern {
+         use std::str::FromStr;
+         Self::from_str(i)
+     }
+-    /// Construct a pattern that matches all the impls for that trait.
+-    pub fn impl_for(trait_pat: Self) -> Self {
+-        Pattern {
+-            elems: vec![PatElem::Impl(Box::new(trait_pat))],
+-        }
+-    }
+ 
+     fn len(&self) -> usize {
+         self.elems.len()
+diff --git a/src/options.rs b/src/options.rs
+index 7a84ee7..ab3233d 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -635,20 +635,9 @@ impl TranslateOptions {
+                 opacities.push((pat.to_string(), Invisible));
+             }
+ 
+-            for trait_name in &hide_traits {
+-                opacities.push((trait_name.to_string(), Invisible));
+-            }
+-
+-            // Hide trait impls and defs for the excluded traits.
+-            let hide_traits = hide_traits
+-                .iter()
+-                .cloned()
+-                .flat_map(|pat| [pat.clone(), NamePattern::impl_for(pat)])
+-                .map(|pat| (pat, Invisible));
+             opacities
+                 .into_iter()
+                 .filter_map(|(s, opacity)| parse_pattern(&s).ok().map(|pat| (pat, opacity)))
+-                .chain(hide_traits)
+                 .collect()
+         };
+ 
+@@ -692,6 +681,25 @@ impl TranslateOptions {
+     /// `#[charon::opaque]` annotations, only cli parameters.
+     #[tracing::instrument(skip(self, krate), ret)]
+     pub fn opacity_for_name(&self, krate: &TranslatedCrate, name: &Name) -> ItemOpacity {
++        // Hax removes these traits from bounds and their arguments unconditionally. Their
++        // declarations and implementations must therefore stay hidden even when a more precise
++        // `--include` matches the enclosing type (including synthetic impls on that type).
++        // Impl names can only be resolved after translation; the invisible-impl cleanup pass
++        // calls this again once their implemented trait is available.
++        let implemented_trait_name = name.name.iter().rev().find_map(|elem| {
++            let PathElem::Impl(ImplElem::Trait(id)) = elem else {
++                return None;
++            };
++            let timpl = krate.trait_impls.get(*id)?;
++            krate.item_name(timpl.impl_trait.id)
++        });
++        if self.hide_traits.iter().any(|pat| {
++            pat.matches(krate, name)
++                || implemented_trait_name.is_some_and(|name| pat.matches(krate, name))
++        }) {
++            return ItemOpacity::Invisible;
++        }
++
+         // Find the most precise pattern that matches this name. There is always one since
+         // the list contains the `_` pattern. If there are conflicting settings for this item, we
+         // err on the side of being more opaque.
+diff --git a/tests/crate_data.rs b/tests/crate_data.rs
+index e6cf5e3..3cd1e8b 100644
+--- a/tests/crate_data.rs
++++ b/tests/crate_data.rs
+@@ -63,6 +63,44 @@ fn type_decl() -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
++#[test]
++fn hidden_trait_impl_on_transparent_type() -> anyhow::Result<()> {
++    let crate_data = translate_with_options(
++        r#"
++        pub fn consume<I, F>(_map: std::iter::Map<I, F>) {}
++        "#,
++        &[
++            "--preset=aeneas",
++            "--include=core::iter::adapters::map::Map",
++        ],
++    )?;
++
++    // Resolving the drop of Map creates a synthetic Destruct impl under Map's name.
++    // Including the type must not resurrect an implementation of a hidden trait.
++    for timpl in crate_data.trait_impls.iter() {
++        assert!(
++            crate_data.trait_decls.get(timpl.impl_trait.id).is_some(),
++            "implementation of an omitted trait: {}",
++            repr_name(&crate_data, &timpl.item_meta.name),
++        );
++    }
++    assert!(crate_data.trait_decls.iter().all(|tdecl| {
++        repr_name(&crate_data, &tdecl.item_meta.name) != "core::marker::Destruct"
++    }));
++
++    // Including a type still makes its structure available to the consumer.
++    let map = crate_data
++        .type_decls
++        .iter()
++        .find(|ty| repr_name(&crate_data, &ty.item_meta.name) == "core::iter::adapters::map::Map")
++        .unwrap();
++    assert!(
++        matches!(map.kind, TypeDeclKind::Struct(_)),
++        "Map must remain a transparent structure",
++    );
++    Ok(())
++}
++
+ #[test]
+ fn file_name() -> anyhow::Result<()> {
+     let crate_data = translate(

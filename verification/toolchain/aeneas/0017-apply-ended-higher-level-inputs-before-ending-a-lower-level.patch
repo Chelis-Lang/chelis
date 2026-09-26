@@ -1,0 +1,43 @@
+# aeneas integration step 17 after cba11f3beb: commit f5849e2eb1bbede5a4941f7de74988b78fe992ee
+# first parent 44b4093e4f33467a79491a0bab5489cc7caac0ec
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Apply ended higher-level inputs before ending a lower level
+#
+# When all loans of a nested sub-abstraction level of a function-call
+# abstraction end from outside (their borrows gave the values back), the
+# interpreter does not end that level as a sub-abstraction, so its
+# consumed values remained pending inputs of the backward function when
+# level 0 ended (internal error at the pending-level sanity check, e.g.
+# on an early return out of a loop over a struct holding &mut state).
+#
+# Before translating the end of a level, supply every pending higher level
+# whose consumed values are available, exactly as ending that level would.
+
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 6341306..6f37315 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1260,6 +1260,22 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+   [%ltrace
+     "abs (level: " ^ string_of_int abs_level ^ "):\n" ^ abs_to_string ctx abs];
++  (* The loans of a higher level may all have ended from outside (their
++     borrows were ended and gave their values back) without that level being
++     ended as a sub-abstraction: the interpreter only ends sub-abstractions
++     which still hold live borrows or loans. Their consumed values are then
++     still pending inputs of the backward function when a lower level ends.
++     Supply them first, exactly as ending that level would. *)
++  match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
++  | Some { pending_inputs = (level, _) :: _; output_values = None; _ }
++    when level > abs_level && abs_to_consumed ctx ectx abs level <> [] ->
++      translate_end_abstraction_fun_call ectx abs level
++        (S.EndAbs (ectx, abs, abs_level, e))
++        ctx
++  | _ -> translate_end_abstraction_fun_call_level ectx abs abs_level e ctx
++
++and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
++    (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+   let inputs = abs_to_consumed ctx ectx abs abs_level in
+   (* Nested projections can regroup abstraction values, so original argument
+      positions are no longer source-place indices for these output patterns. *)

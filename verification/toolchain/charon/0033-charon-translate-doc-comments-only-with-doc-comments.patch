@@ -1,0 +1,160 @@
+# charon integration step 33 after 546078ea5d: commit fa444321bd2ffcb265ff32b4eb2bf2fb67e676bb
+# first parent d48a61a9921d7201a3dd5a28694be465183f0ea5
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: translate doc comments only with --doc-comments
+#
+# DocComment attributes carry no semantics and took 6% of chelis-deep's llbc (11 MB) and 12% of
+# chelis-pred's. Aeneas does not read them (the doc comments of its generated code are its own). They
+# are now translated only with the new --doc-comments option; generate-ml passes it, since the OCaml
+# doc comments are generated from the Rust ones.
+
+diff --git a/src/bin/charon-driver/translate/translate_meta.rs b/src/bin/charon-driver/translate/translate_meta.rs
+index a4962f7..794ec11 100644
+--- a/src/bin/charon-driver/translate/translate_meta.rs
++++ b/src/bin/charon-driver/translate/translate_meta.rs
+@@ -642,8 +642,9 @@ impl<'tcx> TranslateCtx<'tcx> {
+         Ok(Some(parsed))
+     }
+ 
+-    /// Translates a rust attribute. Returns `None` if the attribute is a doc comment (rustc
+-    /// encodes them as attributes). For now we use `String`s for `Attributes`.
++    /// Translates a rust attribute. Returns `None` for attributes we don't keep, among which doc
++    /// comments (rustc encodes them as attributes) unless `--doc-comments` is set. For now we use
++    /// `String`s for `Attributes`.
+     pub(crate) fn translate_attribute(
+         &mut self,
+         def_id: &hax::DefId,
+@@ -652,9 +653,10 @@ impl<'tcx> TranslateCtx<'tcx> {
+         use rustc_hir as hir;
+         use rustc_hir::attrs as hir_attrs;
+         match attr {
+-            hir::Attribute::Parsed(hir_attrs::AttributeKind::DocComment { comment, .. }) => {
+-                Some(Attribute::DocComment(comment.to_string()))
+-            }
++            hir::Attribute::Parsed(hir_attrs::AttributeKind::DocComment { comment, .. }) => self
++                .options
++                .doc_comments
++                .then(|| Attribute::DocComment(comment.to_string())),
+             hir::Attribute::Parsed(_) => None,
+             hir::Attribute::Unparsed(attr) => {
+                 let raw_attr = RawAttribute {
+diff --git a/src/bin/generate-ml/main.rs b/src/bin/generate-ml/main.rs
+index 2af5790..bd79867 100644
+--- a/src/bin/generate-ml/main.rs
++++ b/src/bin/generate-ml/main.rs
+@@ -145,6 +145,8 @@ fn main() -> Result<()> {
+         cmd.arg("--start-from=charon_lib::ast::ullbc_ast::BodyContents");
+         cmd.arg("--exclude=charon_lib::common::hash_by_addr::HashByAddr");
+         cmd.arg("--unbind-item-vars");
++        // The OCaml doc comments are generated from the Rust ones.
++        cmd.arg("--doc-comments");
+         cmd.arg("--dest-file");
+         cmd.arg(&charon_llbc);
+         cmd.arg("--");
+diff --git a/src/options.rs b/src/options.rs
+index 186131a..6cc1493 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -158,6 +158,11 @@ pub struct CliOpts {
+     #[clap(long)]
+     #[serde(default)]
+     pub translate_all_methods: bool,
++    /// Translate doc comments (`/// ...`) into `DocComment` attributes. They are omitted by
++    /// default: they carry no semantics and take a noticeable part of the llbc of large crates.
++    #[clap(long)]
++    #[serde(default)]
++    pub doc_comments: bool,
+ 
+     /// Transform the associate types of traits to be type parameters instead. This takes a list
+     /// of name patterns of the traits to transform, using the same syntax as `--include`.
+@@ -492,6 +497,8 @@ pub struct TranslateOptions {
+     /// Usually we skip the provided methods that aren't used. When this flag is on, we translate
+     /// them all.
+     pub translate_all_methods: bool,
++    /// Translate doc comments into `DocComment` attributes.
++    pub doc_comments: bool,
+     /// If `Some(_)`, run the partial mutability monomorphization pass. The contained enum
+     /// indicates whether to partially monomorphize types.
+     pub monomorphize_mut: Option<MonomorphizeMut>,
+@@ -671,6 +678,7 @@ impl TranslateOptions {
+             lift_associated_types,
+             unbind_item_vars: options.unbind_item_vars,
+             translate_all_methods: options.translate_all_methods,
++            doc_comments: options.doc_comments,
+             no_typecheck: options.no_typecheck,
+             no_normalize: options.no_normalize,
+             desugar_drops: options.desugar_drops,
+diff --git a/tests/crate_data.rs b/tests/crate_data.rs
+index 3cd1e8b..6b9ae16 100644
+--- a/tests/crate_data.rs
++++ b/tests/crate_data.rs
+@@ -325,7 +325,6 @@ fn attributes() -> anyhow::Result<()> {
+         static BAR: () = ();
+ 
+         #[inline(never)]
+-        /// This is a doc comment.
+         fn main() {
+             // Attribute on a closure.
+             let _f = #[inline(always)] || 42;
+@@ -358,15 +357,6 @@ fn attributes() -> anyhow::Result<()> {
+         crate_data.fun_decls[1].item_meta.attr_info.inline,
+         Some(InlineAttr::Never)
+     );
+-    assert_eq!(
+-        crate_data.fun_decls[1]
+-            .item_meta
+-            .attr_info
+-            .attributes
+-            .last()
+-            .unwrap(),
+-        &Attribute::DocComment(" This is a doc comment.".to_owned())
+-    );
+     // Check that the `inline` attribute on closures gets picked up.
+     let any_inline_always = crate_data
+         .fun_decls
+@@ -376,6 +366,30 @@ fn attributes() -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
++#[test]
++fn doc_comments() -> anyhow::Result<()> {
++    let code = r#"
++        /// This is a doc comment.
++        fn main() {}
++        "#;
++    let doc_comments = |crate_data: &TranslatedCrate| {
++        crate_data
++            .fun_decls
++            .iter()
++            .flat_map(|decl| &decl.item_meta.attr_info.attributes)
++            .filter(|attr| attr.is_doc_comment())
++            .cloned()
++            .collect_vec()
++    };
++    // Doc comments carry no semantics: they are only translated on request.
++    assert_eq!(doc_comments(&translate(code)?), vec![]);
++    assert_eq!(
++        doc_comments(&translate_with_options(code, &["--doc-comments"])?),
++        vec![Attribute::DocComment(" This is a doc comment.".to_owned())]
++    );
++    Ok(())
++}
++
+ #[test]
+ fn visibility() -> anyhow::Result<()> {
+     let crate_data = translate(
+diff --git a/tests/help-output.txt b/tests/help-output.txt
+index 081d81d..65e1264 100644
+--- a/tests/help-output.txt
++++ b/tests/help-output.txt
+@@ -92,6 +92,9 @@ Options:
+       --translate-all-methods
+           Usually we skip the provided methods that aren't used. When this flag is on, we translate them all
+ 
++      --doc-comments
++          Translate doc comments (`/// ...`) into `DocComment` attributes. They are omitted by default: they carry no semantics and take a noticeable part of the llbc of large crates
++
+       --lift-associated-types <LIFT_ASSOCIATED_TYPES>
+           Transform the associate types of traits to be type parameters instead. This takes a list of name patterns of the traits to transform, using the same syntax as `--include`
+ 

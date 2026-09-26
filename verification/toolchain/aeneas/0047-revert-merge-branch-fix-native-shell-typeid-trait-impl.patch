@@ -1,0 +1,1098 @@
+# aeneas integration step 47 after cba11f3beb: commit de9fe5ee5d27c7394e8d2a1907e576bdf85b1a0d
+# first parent a971f79377de13bb019be091de2eb55db132a523
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Revert "Merge branch fix/native-shell (TypeId, trait-impl state contracts, fail-closed modeled instances, explicit-state catch_native_unwind)"
+#
+# This reverts commit ffa170e5de50aeec3f5838edfb77f5515d341541, reversing
+# changes made to 22d3b239944ea1f6c5e16400702a2cd9c3976034.
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 8af6a8b..38d3c6f 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -6,7 +6,6 @@ import Aeneas.Std.BTreeSet
+ import Aeneas.Std.BigUint
+ import Aeneas.Std.ChelisNative
+ import Aeneas.Std.Core
+-import Aeneas.Std.Core.Any
+ import Aeneas.Std.Core.Borrow
+ import Aeneas.Std.Float
+ import Aeneas.Std.FloatFmt
+diff --git a/backends/lean/Aeneas/Std/ChelisNative.lean b/backends/lean/Aeneas/Std/ChelisNative.lean
+index 34a0b15..6f9a888 100644
+--- a/backends/lean/Aeneas/Std/ChelisNative.lean
++++ b/backends/lean/Aeneas/Std/ChelisNative.lean
+@@ -222,22 +222,20 @@ def observe_raise {P : Type} (_anyInst : core.any.Any P) (s : LoweringRuntime) (
+     Result (P × LoweringRuntime) :=
+   .ok (payload, { s with hook := s.hook ++ [(s.u, s.o)] })
+ 
+-/-- `catch_native_unwind`: `o := true; let r := f self state; o := false; r`.
+-    The conversions `marker` and `message` apply only to an unexpected native
+-    unwind, which is outside the modeled domain: the failure of `f` propagates.
+-    The grown stack segment is not observable. `F : FnOnce(&mut Self, &mut S)` is
+-    Charon's `FnOnce<(&mut LoweringRuntime, &mut S)>` specialization: the call
+-    returns the closure's value, the runtime and the state it was lent. -/
++/-- `catch_native_unwind`: `o := true; let r := f self; o := false; r`. The
++    conversions `marker` and `message` apply only to an unexpected native unwind,
++    which is outside the modeled domain: the failure of `f` propagates. The grown
++    stack segment is not observable. -/
+ @[rust_fun
+   "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind"]
+-def catch_native_unwind {S T D F Marker Message : Type} (_cloneInst : core.clone.Clone D)
+-    (fInst : core.ops.function.FnOnceMutArgMutArg F LoweringRuntime S (core.result.Result T D))
++def catch_native_unwind {T D F Marker Message : Type} (_cloneInst : core.clone.Clone D)
++    (fInst : core.ops.function.FnOnceMutArg F LoweringRuntime (core.result.Result T D))
+     (_markerInst : core.ops.function.FnOnce Marker Unit D)
+     (_messageInst : core.ops.function.FnOnce Message (Option String) D)
+-    (s : LoweringRuntime) (state : S) (f : F) (_marker : Marker) (_message : Message) :
+-    Result (core.result.Result T D × LoweringRuntime × S) := do
+-  let (result, s, state) ← fInst.call_once f ({ s with o := true }, state)
+-  .ok (result, { s with o := false }, state)
++    (s : LoweringRuntime) (f : F) (_marker : Marker) (_message : Message) :
++    Result (core.result.Result T D × LoweringRuntime) := do
++  let (result, s) ← fInst.call_once f { s with o := true }
++  .ok (result, { s with o := false })
+ 
+ /-- `fresh_host_inference_var`: the next element of this thread's draws from the
+     process-global supply. -/
+diff --git a/backends/lean/Aeneas/Std/Core/Any.lean b/backends/lean/Aeneas/Std/Core/Any.lean
+deleted file mode 100644
+index 74e9b58..0000000
+--- a/backends/lean/Aeneas/Std/Core/Any.lean
++++ /dev/null
+@@ -1,15 +0,0 @@
+-import Aeneas.Std.Core.Core
+-import Aeneas.Std.Scalar.Core
+-
+-namespace Aeneas.Std
+-
+-/-- `core::any::TypeId` (core/src/any.rs): at runtime the 128-bit hash of a type
+-    (its array of pointers carries provenance only for const evaluation and Miri).
+-    `Any::type_id` mentions it, so every crate with `Any` evidence retains the type.
+-    No operation on it is modeled: a call to `Any::type_id` or to a comparison
+-    fails closed as an unknown external. -/
+-@[rust_type "core::any::TypeId" (body := .opaque)]
+-structure core.any.TypeId where
+-  hash : U128
+-
+-end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Core/Ops.lean b/backends/lean/Aeneas/Std/Core/Ops.lean
+index 5f0a15f..ee726db 100644
+--- a/backends/lean/Aeneas/Std/Core/Ops.lean
++++ b/backends/lean/Aeneas/Std/Core/Ops.lean
+@@ -70,15 +70,6 @@ structure core.ops.function.FnOnceMutArgPair (Self : Type u) (T : Type v) (U : T
+     (Output : Type x) where
+   call_once : Self → (T × U) → Result (Output × T)
+ 
+-/-- The specialization `FnOnce<(&'a mut T, &'b mut U)>` that Charon's
+-    `--monomorphize-mut` creates for a closure taking two mutable borrows (e.g.
+-    the runtime and the explicit state of a catch). Both borrowed arguments are
+-    returned after the call; the consumed closure state is not. -/
+-@[rust_trait "core::ops::function::FnOnce<@Self, (&'a mut @T, &'b mut @U), @Output>"]
+-structure core.ops.function.FnOnceMutArgMutArg (Self : Type u) (T : Type v) (U : Type w)
+-    (Output : Type x) where
+-  call_once : Self → (T × U) → Result (Output × T × U)
+-
+ @[rust_trait "core::ops::function::FnMut" (parentClauses := ["FnOnceInst"])]
+ structure core.ops.function.FnMut (Self : Type u) (Args : Type v) (Output : Type w) where
+   FnOnceInst : core.ops.function.FnOnce Self Args Output
+diff --git a/src/Main.ml b/src/Main.ml
+index a082cf2..961915a 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -633,11 +633,9 @@ let () =
+         let fun_decls =
+           LlbcAst.FunDeclId.Map.filter
+             (fun _ (d : LlbcAst.fun_decl) ->
++              let names_map = ExtractBuiltin.builtin_funs_map () in
+               (not d.item_meta.is_local)
+-              && not
+-                   (ExtractBuiltin.mem_fun
+-                      (Charon.NameMatcher.ctx_from_crate m)
+-                      d.item_meta.name)
++              && (not (matches_name m d.item_meta.name names_map))
+               (* We also ignore the trait method declarations *)
+               &&
+               match d.src with
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 5e4a653..12b79e1 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1676,10 +1676,7 @@ let simplify_trait_calls (crate : crate) : crate =
+     | Some id ->
+         let global = GlobalDeclId.Map.find id crate.global_decls in
+         has_model ExtractBuiltin.builtin_globals_map global.item_meta.name
+-    | None ->
+-        Config.if_backend
+-          (fun () -> ExtractBuiltin.mem_fun mctx f.item_meta.name)
+-          false
++    | None -> has_model ExtractBuiltin.builtin_funs_map f.item_meta.name
+   in
+   let fun_decls =
+     FunDeclId.Map.map
+@@ -2756,7 +2753,10 @@ let resolve_default_only_dispatch (crate : crate) : crate =
+           ("Default-only dispatch requires a Rust provided method: "
+          ^ method_name);
+         [%cassert] method_decl.item_meta.span
+-          (ExtractBuiltin.mem_fun mctx method_decl.item_meta.name)
++          (Option.is_some
++             (ExtractBuiltin.NameMatcherMap.find_opt mctx
++                method_decl.item_meta.name
++                (ExtractBuiltin.builtin_funs_map ())))
+           ("Default-only method lacks a standalone model: " ^ method_name);
+         TraitImplId.Map.iter
+           (fun _ (impl : trait_impl) ->
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 0f81a1e..f78f691 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -1180,10 +1180,12 @@ let export_functions_group (fmt : Format.formatter) (config : gen_config)
+      Note that if one definition in the group is builtin, then all the
+      definitions must be builtin *)
+   let builtin =
+-    let mctx = NameMatcher.ctx_from_crate ctx.trans_ctx.crate in
++    let open ExtractBuiltin in
++    let funs_map = builtin_funs_map () in
+     List.map
+       (fun (trans : pure_fun_translation) ->
+-        ExtractBuiltin.mem_fun mctx trans.f.item_meta.name)
++        match_name_find_opt ctx.trans_ctx trans.f.item_meta.name funs_map
++        <> None)
+       pure_ls
+   in
+ 
+diff --git a/src/extract/ExtractBuiltin.ml b/src/extract/ExtractBuiltin.ml
+index f861df0..968ba98 100644
+--- a/src/extract/ExtractBuiltin.ml
++++ b/src/extract/ExtractBuiltin.ml
+@@ -976,20 +976,6 @@ let mk_builtin_funs_map () =
+ 
+ let builtin_funs_map = mk_memoized mk_builtin_funs_map
+ 
+-(** A partial-monomorphization instance of a function (last name element
+-    [PeInstantiated]) substitutes a mutability shape into the generic function:
+-    its dictionaries are specialized records and the borrows inside its
+-    arguments add backward continuations. The logical matcher ignores
+-    [PeInstantiated] and would select the generic model with the wrong
+-    arguments. So an instance is modeled only after PrePasses folds an
+-    ABI-compatible instance to its generic function; otherwise it stays an
+-    unknown external. *)
+-let find_fun_info ctx name =
+-  if backend () = Lean && is_trait_specialization name then None
+-  else NameMatcherMap.find_opt ctx name (builtin_funs_map ())
+-
+-let mem_fun ctx name = Option.is_some (find_fun_info ctx name)
+-
+ type effect_info = { can_fail : bool }
+ 
+ let mk_builtin_fun_effects () : (pattern * effect_info) list =
+@@ -1005,8 +991,3 @@ let mk_builtin_fun_effects_map () =
+   name_matcher_map_of_list (if_backend mk_builtin_fun_effects [])
+ 
+ let builtin_fun_effects_map = mk_memoized mk_builtin_fun_effects_map
+-
+-(** The effects of a modeled function; an instance as in [find_fun_info]. *)
+-let find_fun_effect_info ctx name =
+-  if backend () = Lean && is_trait_specialization name then None
+-  else NameMatcherMap.find_opt ctx name (builtin_fun_effects_map ())
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 1b3eb65..fb91629 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -44,8 +44,6 @@ let lean_builtin_types = [
+   mk_type "chelis_types::native::NativeServices" "_root_.Aeneas.Std.chelis_types.native.NativeServices";
+   (* file: "Aeneas/Std/Core/Ptr.lean", line: 78 *)
+   mk_type "core::alloc::layout::Layout" "_root_.Aeneas.Std.core.alloc.layout.Layout" ~kind:(KStruct [("size", Some "size"); ("align", Some "align")]);
+-  (* file: "Aeneas/Std/Core/Any.lean", line: 11 *)
+-  mk_type "core::any::TypeId" "_root_.Aeneas.Std.core.any.TypeId";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 115 *)
+   mk_type "core::array::TryFromSliceError" "_root_.Aeneas.Std.core.array.TryFromSliceError";
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 8 *)
+@@ -120,7 +118,7 @@ let lean_builtin_types = [
+   mk_type "core::num::niche_types::NonZeroUsizeInner" "_root_.Aeneas.Std.core.num.niche_types.NonZeroUsizeInner";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 14 *)
+   mk_type "core::num::nonzero::NonZero" "_root_.Aeneas.Std.core.num.nonzero.NonZero" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 118 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 109 *)
+   mk_type "core::ops::control_flow::ControlFlow" "_root_.Aeneas.Std.core.ops.control_flow.ControlFlow" ~kind:(KEnum [("Continue", Some "Continue"); ("Break", Some "Break")]);
+   (* file: "Aeneas/Std/Range.lean", line: 14 *)
+   mk_type "core::ops::range::Range" "_root_.Aeneas.Std.core.ops.range.Range" ~kind:(KStruct [("start", Some "start"); ("end", Some "«end»")]);
+@@ -488,33 +486,33 @@ let lean_builtin_funs = [
+   mk_fun "chelis_ir::lowering_runtime::resume_native_unwind" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.resume_native_unwind";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 177 *)
+   mk_fun "chelis_ir::lowering_runtime::scoped" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.scoped";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 231 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 229 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 311 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 309 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 302 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 300 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration_start" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration_start";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 294 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 292 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_phase" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_phase";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 285 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 283 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_start" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_start";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 244 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 242 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::fresh_host_inference_var" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_host_inference_var";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 269 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 267 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::fresh_preflight_frame" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_preflight_frame";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 219 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 250 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 248 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::record_summary_probe_build" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.record_summary_probe_build";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 319 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 317 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::report_internal" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.report_internal";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 262 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 260 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::reset_summary_probe_builds" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.reset_summary_probe_builds";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 212 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::set_output_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_output_suppressed";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 205 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::set_unrepresentable_panic_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_unrepresentable_panic_suppressed";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 256 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 254 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::summary_probe_builds" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.summary_probe_builds";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 199 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::unrepresentable_panic_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.unrepresentable_panic_suppressed";
+@@ -1679,27 +1677,25 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::deref::Deref" "_root_.Aeneas.Std.core.ops.deref.Deref" ~methods:[("deref", "deref")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 23 *)
+   mk_trait_decl "core::ops::deref::DerefMut" "_root_.Aeneas.Std.core.ops.deref.DerefMut" ~parent_clauses:["derefInst"] ~methods:[("deref_mut", "deref_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 87 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 78 *)
+   mk_trait_decl "core::ops::function::Fn" "_root_.Aeneas.Std.core.ops.function.Fn" ~parent_clauses:["FnMutInst"] ~methods:[("call", "call")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 82 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 73 *)
+   mk_trait_decl "core::ops::function::FnMut" "_root_.Aeneas.Std.core.ops.function.FnMut" ~parent_clauses:["FnOnceInst"] ~methods:[("call_mut", "call_mut")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 51 *)
+   mk_trait_decl "core::ops::function::FnOnce" "_root_.Aeneas.Std.core.ops.function.FnOnce" ~methods:[("call_once", "call_once")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 60 *)
+   mk_trait_decl "core::ops::function::FnOnce<@Self, (&'a mut @T), @Output>" "_root_.Aeneas.Std.core.ops.function.FnOnceMutArg" ~methods:[("call_once", "call_once")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 77 *)
+-  mk_trait_decl "core::ops::function::FnOnce<@Self, (&'a mut @T, &'b mut @U), @Output>" "_root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg" ~methods:[("call_once", "call_once")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 68 *)
+   mk_trait_decl "core::ops::function::FnOnce<@Self, (&'a mut @T, @U), @Output>" "_root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair" ~methods:[("call_once", "call_once")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 10 *)
+   mk_trait_decl "core::ops::index::Index" "_root_.Aeneas.Std.core.ops.index.Index" ~methods:[("index", "index")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 14 *)
+   mk_trait_decl "core::ops::index::IndexMut" "_root_.Aeneas.Std.core.ops.index.IndexMut" ~parent_clauses:["indexInst"] ~methods:[("index_mut", "index_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 114 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 105 *)
+   mk_trait_decl "core::ops::try_trait::FromResidual" "_root_.Aeneas.Std.core.ops.try_trait.FromResidual" ~methods:[("from_residual", "from_residual")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 129 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 120 *)
+   mk_trait_decl "core::ops::try_trait::Residual" "_root_.Aeneas.Std.core.ops.try_trait.Residual" ~parent_clauses:["TryInst"];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 123 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 114 *)
+   mk_trait_decl "core::ops::try_trait::Try" "_root_.Aeneas.Std.core.ops.try_trait.Try" ~parent_clauses:["FromResidualInst"] ~methods:[("from_output", "from_output"); ("branch", "branch")];
+   (* file: "Aeneas/Std/Slice.lean", line: 298 *)
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index aa208d2..4c2bbbd 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -72,7 +72,8 @@ let check ~(evidence : crate) (crate : crate) : crate =
+     let fun_name (decl : fun_decl) =
+       Option.map
+         (fun (info : Pure.builtin_fun_info) -> info.extract_name)
+-        (ExtractBuiltin.find_fun_info mctx decl.item_meta.name)
++        (ExtractBuiltin.NameMatcherMap.find_opt mctx decl.item_meta.name
++           (ExtractBuiltin.builtin_funs_map ()))
+     in
+     let reject span reason =
+       [%craise] span
+diff --git a/src/llbc/FunsAnalysis.ml b/src/llbc/FunsAnalysis.ml
+index 708748e..31fd359 100644
+--- a/src/llbc/FunsAnalysis.ml
++++ b/src/llbc/FunsAnalysis.ml
+@@ -70,7 +70,9 @@ let analyze_module (m : crate) (funs_map : fun_decl FunDeclId.Map.t) :
+        suitably in the backend libraries, rather than special-casing for them all the
+        way. *)
+     let get_builtin_info (f : fun_decl) : ExtractBuiltin.effect_info option =
+-      ExtractBuiltin.find_fun_effect_info name_matcher_ctx f.item_meta.name
++      let open ExtractBuiltin in
++      NameMatcherMap.find_opt name_matcher_ctx f.item_meta.name
++        (builtin_fun_effects_map ())
+     in
+ 
+     (* JP: Why not use a reduce visitor here with a tuple of the values to be
+diff --git a/src/llbc/LlbcAstUtils.ml b/src/llbc/LlbcAstUtils.ml
+index 2603a9d..9140d59 100644
+--- a/src/llbc/LlbcAstUtils.ml
++++ b/src/llbc/LlbcAstUtils.ml
+@@ -70,7 +70,7 @@ let crate_get_opaque_non_builtin_decls (k : crate) (filter_builtin : bool)
+     && ((not filter_builtin)
+        || (not
+              (NameMatcherMap.mem ctx d.item_meta.name (builtin_globals_map ())))
+-          && not (mem_fun ctx d.item_meta.name)
++          && not (NameMatcherMap.mem ctx d.item_meta.name (builtin_funs_map ()))
+        )
+   in
+   let is_opaque_type (d : type_decl) : bool =
+diff --git a/src/llbc/ModelStateInputs.ml b/src/llbc/ModelStateInputs.ml
+index 0fcaa9c..85773c1 100644
+--- a/src/llbc/ModelStateInputs.ml
++++ b/src/llbc/ModelStateInputs.ml
+@@ -50,17 +50,6 @@ let rec has_hidden_state (crate : crate) seen ty =
+     | TArray (ty, _) | TSlice ty -> has_hidden_state crate (ty :: seen) ty
+     | _ -> false
+ 
+-(** The model of a trait impl's trait, as call sites resolve it. A remaining
+-    specialization (last name element [PeInstantiated]) is modeled only by the
+-    schema model its instantiation matches (e.g. [FnOnceMutArg] for
+-    [FnOnce<(&mut T,)>]), never by the generic record's contract. *)
+-let trait_model_name (crate : crate) (trait_decl : trait_decl) =
+-  Option.map
+-    (fun (info : Pure.builtin_trait_decl_info) -> info.extract_name)
+-    (ExtractBuiltin.find_trait_decl_info
+-       (NameMatcher.ctx_from_crate crate)
+-       trait_decl.item_meta.name)
+-
+ (** Only symbolic bodies can supply the additional authoritative state outputs.
+     Once a method needs hidden generic state, preserve all its owned state
+     inputs, including a concrete receiver modified alongside its callback. *)
+@@ -73,10 +62,17 @@ let for_decl (crate : crate) (decl : fun_decl) =
+         match (decl.src, decl.body) with
+         | TraitImplItem (_, tr, method_name, _), StructuredBody _ ->
+             let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
++            let name =
++              String.concat "."
++                ("_root_.Aeneas.Std"
++                :: List.filter_map
++                     (function
++                       | PeIdent (name, _) -> Some name
++                       | _ -> None)
++                     trait_decl.item_meta.name)
++            in
+             let indices =
+-              Option.value ~default:[]
+-                (Option.bind (trait_model_name crate trait_decl) (fun name ->
+-                     for_method name method_name))
++              Option.value ~default:[] (for_method name method_name)
+             in
+             let owned =
+               List.filter
+@@ -156,10 +152,16 @@ let canonical_body_state_inputs (crate : crate) (decl : fun_decl) =
+       match (decl.src, decl.body) with
+       | TraitImplItem (_, tr, method_name, _), StructuredBody _ -> (
+           let trait_decl = TraitDeclId.Map.find tr.id crate.trait_decls in
+-          match
+-            Option.bind (trait_model_name crate trait_decl) (fun name ->
+-                for_method name method_name)
+-          with
++          let name =
++            String.concat "."
++              ("_root_.Aeneas.Std"
++              :: List.filter_map
++                   (function
++                     | PeIdent (name, _) -> Some name
++                     | _ -> None)
++                   trait_decl.item_meta.name)
++          in
++          match for_method name method_name with
+           | Some indices
+             when indices <> [] && indices = states
+                  && (!Config.simplify_merged_fwd_backs
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index d2de25b..5b66a1e 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -321,9 +321,8 @@ let for_call (ctx : Contexts.decls_ctx) (fid : A.fn_ptr_kind) =
+         (* A local body is a canonical boundary only if its real signature
+            returns every owned state and has no native mutable backward ABI. *)
+         match
+-          ExtractBuiltin.find_fun_info
+-            (NameMatcher.ctx_from_crate ctx.crate)
+-            decl.item_meta.name
++          TranslateCore.match_name_find_opt ctx decl.item_meta.name
++            (ExtractBuiltin.builtin_funs_map ())
+         with
+         | None ->
+             Option.map
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index 7f5f603..9f39559 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -108,9 +108,8 @@ let translate_fun_decl (ctx : bs_ctx) (body : S.expr option) : fun_decl =
+   let backend_attributes = { reducible = false } in
+   (* Check if the function is builtin *)
+   let builtin_info =
+-    ExtractBuiltin.find_fun_info
+-      (NameMatcher.ctx_from_crate ctx.decls_ctx.crate)
+-      def.item_meta.name
++    let funs_map = ExtractBuiltin.builtin_funs_map () in
++    match_name_find_opt ctx.decls_ctx def.item_meta.name funs_map
+   in
+   let def : fun_decl =
+     {
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index a14fae1..39c2c45 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1305,10 +1305,9 @@ and translate_function_call_aux (call : S.call) (e : S.expr) (ctx : bs_ctx) :
+                    boundary: instantiating its signature cannot invent state
+                    that its body did not return. *)
+                 if
+-                  not
+-                    (ExtractBuiltin.mem_fun
+-                       (NameMatcher.ctx_from_crate ctx.decls_ctx.crate)
+-                       decl.item_meta.name)
++                  match_name_find_opt ctx.decls_ctx decl.item_meta.name
++                    (ExtractBuiltin.builtin_funs_map ())
++                  = None
+                 then
+                   let signature = (FunDeclId.Map.find id ctx.fun_sigs).sg in
+                   let subst =
+diff --git a/tests/lean/AnyTypeId.lean b/tests/lean/AnyTypeId.lean
+deleted file mode 100644
+index 195cff8..0000000
+--- a/tests/lean/AnyTypeId.lean
++++ /dev/null
+@@ -1 +0,0 @@
+-import AnyTypeId.Checks
+diff --git a/tests/lean/AnyTypeId/AnyTypeId.lean b/tests/lean/AnyTypeId/AnyTypeId.lean
+deleted file mode 100644
+index a5d90a4..0000000
+--- a/tests/lean/AnyTypeId/AnyTypeId.lean
++++ /dev/null
+@@ -1,40 +0,0 @@
+--- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
+--- [any_type_id]
+-import Aeneas
+-open Aeneas Aeneas.Std Result ControlFlow Error
+-set_option linter.dupNamespace false
+-set_option linter.hashCommand false
+-set_option linter.unusedVariables false
+-
+-/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
+-set_option maxHeartbeats 1000000
+-
+-namespace any_type_id
+-
+-/-- [any_type_id::pass_any]:
+-    Source: 'tests/src/any-type-id.rs', lines 13:0-15:1
+-    Visibility: public -/
+-def pass_any
+-  {P : Type} (coreanyAnyInst : _root_.Aeneas.Std.core.any.Any P) (payload : P)
+-  :
+-  _root_.Aeneas.Std.Result P
+-  := do
+-  _root_.Aeneas.Std.Result.ok payload
+-
+-/-- [any_type_id::tagged]:
+-    Source: 'tests/src/any-type-id.rs', lines 17:0-20:1
+-    Visibility: public -/
+-def tagged
+-  (code : _root_.Aeneas.Std.U32) (fatal : _root_.Bool) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Bool)
+-  := do
+-  let code1 ←
+-    _root_.any_type_id.pass_any (_root_.Aeneas.Std.core.any.AnyBlanket
+-      _root_.Aeneas.Std.U32) code
+-  let i ← lift (core.num.U32.wrapping_add code1 1#u32)
+-  let b ←
+-    _root_.any_type_id.pass_any (_root_.Aeneas.Std.core.any.AnyBlanket
+-      _root_.Bool) fatal
+-  _root_.Aeneas.Std.Result.ok (i, b)
+-
+-end any_type_id
+diff --git a/tests/lean/AnyTypeId/Checks.lean b/tests/lean/AnyTypeId/Checks.lean
+deleted file mode 100644
+index 46dc322..0000000
+--- a/tests/lean/AnyTypeId/Checks.lean
++++ /dev/null
+@@ -1,19 +0,0 @@
+-import AnyTypeId.AnyTypeId
+-
+-/-! Evaluate the model of `tests/src/any-type-id.rs` on the inputs of its
+-    `native` test module and compare with the native results. -/
+-
+-namespace any_type_id.checks
+-open Aeneas Aeneas.Std Result
+-
+-def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
+-
+-def res (r : Result (U32 × Bool)) : Option (Nat × Bool) :=
+-  match r with
+-  | ok (code, fatal) => some (code.val, fatal)
+-  | _ => none
+-
+-#guard res (tagged (u 4) true) == some (5, true)
+-#guard res (tagged (u 4294967295) false) == some (0, false)
+-
+-end any_type_id.checks
+diff --git a/tests/lean/CapturedFnOnceMut.lean b/tests/lean/CapturedFnOnceMut.lean
+deleted file mode 100644
+index 506db10..0000000
+--- a/tests/lean/CapturedFnOnceMut.lean
++++ /dev/null
+@@ -1 +0,0 @@
+-import CapturedFnOnceMut.Checks
+diff --git a/tests/lean/CapturedFnOnceMut/CapturedFnOnceMut.lean b/tests/lean/CapturedFnOnceMut/CapturedFnOnceMut.lean
+deleted file mode 100644
+index b4783b5..0000000
+--- a/tests/lean/CapturedFnOnceMut/CapturedFnOnceMut.lean
++++ /dev/null
+@@ -1,123 +0,0 @@
+--- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
+--- [captured_fn_once_mut]
+-import Aeneas
+-open Aeneas Aeneas.Std Result ControlFlow Error
+-set_option linter.dupNamespace false
+-set_option linter.hashCommand false
+-set_option linter.unusedVariables false
+-
+-/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
+-set_option maxHeartbeats 1000000
+-
+-namespace captured_fn_once_mut
+-
+-/-- [captured_fn_once_mut::apply]:
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 13:0-15:1
+-    Visibility: public -/
+-def apply
+-  {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T1 _root_.Aeneas.Std.U32
+-  R) (x : _root_.Aeneas.Std.U32) (f : T1) :
+-  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32)
+-  := do
+-  coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst.call_once
+-    f x
+-
+-/-- [captured_fn_once_mut::catching::closure]
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 18:13-18:26 -/
+-@[reducible]
+-def catching.closure {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1TupleMutU32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T1 _root_.Aeneas.Std.U32
+-  R) :=
+-  T1
+-
+-/-- [captured_fn_once_mut::catching::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, R> for captured_fn_once_mut::catching::closure<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 18:13-18:26 -/
+-def
+-  catching.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
+-  {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T1 _root_.Aeneas.Std.U32
+-  R)
+-  (c : _root_.captured_fn_once_mut.catching.closure
+-  coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst)
+-  (tupled_args : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32)
+-  := do
+-  coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst.call_once
+-    c tupled_args
+-
+-/-- Trait implementation: [captured_fn_once_mut::catching::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, R> for captured_fn_once_mut::catching::closure<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 18:13-18:26 -/
+-@[reducible]
+-def
+-  catching.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+-  {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T1 _root_.Aeneas.Std.U32
+-  R) : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
+-  (_root_.captured_fn_once_mut.catching.closure
+-  coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst)
+-  _root_.Aeneas.Std.U32 R := {
+-  call_once :=
+-    _root_.captured_fn_once_mut.catching.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
+-    coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-}
+-
+-/-- [captured_fn_once_mut::catching]:
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 17:0-19:1
+-    Visibility: public -/
+-def catching
+-  {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T1 _root_.Aeneas.Std.U32
+-  R) (x : _root_.Aeneas.Std.U32) (f : T1) :
+-  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32)
+-  := do
+-  _root_.captured_fn_once_mut.apply
+-    (_root_.captured_fn_once_mut.catching.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+-    coreopsfunctionFnOnceT1TupleMut0U32R_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst)
+-    x f
+-
+-/-- [captured_fn_once_mut::bump::closure]
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 23:16-26:5 -/
+-@[reducible]
+-def bump.closure := _root_.Unit
+-
+-/-- [captured_fn_once_mut::bump::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for captured_fn_once_mut::bump::closure}::call_once]:
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 23:16-26:5 -/
+-def
+-  bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
+-  (c : _root_.captured_fn_once_mut.bump.closure)
+-  (tupled_args : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+-  := do
+-  let y ← lift (core.num.U32.wrapping_add tupled_args 1#u32)
+-  _root_.Aeneas.Std.Result.ok (y, y)
+-
+-/-- Trait implementation: [captured_fn_once_mut::bump::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for captured_fn_once_mut::bump::closure}]
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 23:16-26:5 -/
+-@[reducible]
+-def
+-  bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
+-  _root_.captured_fn_once_mut.bump.closure _root_.Aeneas.Std.U32
+-  _root_.Aeneas.Std.U32 := {
+-  call_once :=
+-    _root_.captured_fn_once_mut.bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
+-}
+-
+-/-- [captured_fn_once_mut::bump]:
+-    Source: 'tests/src/captured-fn-once-mut.rs', lines 22:0-27:1
+-    Visibility: public -/
+-def bump
+-  (x : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+-  := do
+-  _root_.captured_fn_once_mut.catching
+-    _root_.captured_fn_once_mut.bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
+-    x ()
+-
+-end captured_fn_once_mut
+diff --git a/tests/lean/CapturedFnOnceMut/Checks.lean b/tests/lean/CapturedFnOnceMut/Checks.lean
+deleted file mode 100644
+index 6843843..0000000
+--- a/tests/lean/CapturedFnOnceMut/Checks.lean
++++ /dev/null
+@@ -1,20 +0,0 @@
+-import CapturedFnOnceMut.CapturedFnOnceMut
+-
+-/-! Evaluate the model of `tests/src/captured-fn-once-mut.rs` on the inputs of
+-    its `native` test module and compare with the native results. -/
+-
+-namespace captured_fn_once_mut.checks
+-open Aeneas Aeneas.Std Result
+-
+-def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
+-
+-/-- The result and the final value of the borrowed argument. -/
+-def res (r : Result (U32 × U32)) : Option (Nat × Nat) :=
+-  match r with
+-  | ok (v, x) => some (v.val, x.val)
+-  | _ => none
+-
+-#guard res (bump (u 4)) == some (5, 5)
+-#guard res (bump (u 4294967295)) == some (0, 0)
+-
+-end captured_fn_once_mut.checks
+diff --git a/tests/lean/FnOnceMutArgMutArg.lean b/tests/lean/FnOnceMutArgMutArg.lean
+deleted file mode 100644
+index ef58405..0000000
+--- a/tests/lean/FnOnceMutArgMutArg.lean
++++ /dev/null
+@@ -1 +0,0 @@
+-import FnOnceMutArgMutArg.Checks
+diff --git a/tests/lean/FnOnceMutArgMutArg/Checks.lean b/tests/lean/FnOnceMutArgMutArg/Checks.lean
+deleted file mode 100644
+index b8dd201..0000000
+--- a/tests/lean/FnOnceMutArgMutArg/Checks.lean
++++ /dev/null
+@@ -1,22 +0,0 @@
+-import FnOnceMutArgMutArg.FnOnceMutArgMutArg
+-
+-/-! Evaluate the model of `tests/src/fn-once-mut-arg-mut-arg.rs` on the inputs
+-    of its `native` test module and compare with the native results. -/
+-
+-namespace fn_once_mut_arg_mut_arg.checks
+-open Aeneas Aeneas.Std Result
+-
+-def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
+-def w (n : Nat) : U64 := ⟨BitVec.ofNat _ n⟩
+-
+-/-- The result and the final values of both borrowed arguments. -/
+-def res {α β : Type} (f : α → β) (r : Result (α × U32 × U64)) : Option (β × Nat × Nat) :=
+-  match r with
+-  | ok (v, x, y) => some (f v, x.val, y.val)
+-  | _ => none
+-
+-#guard res id (step (u 4) (w 3) (u 5)) == some (false, 9, 6)
+-#guard res id (step (u 4294967295) (w 6) (u 2)) == some (true, 1, 12)
+-#guard res (·.val) (forwarded (u 7) (w 18446744073709551615)) == some (7, 7, 0)
+-
+-end fn_once_mut_arg_mut_arg.checks
+diff --git a/tests/lean/FnOnceMutArgMutArg/FnOnceMutArgMutArg.lean b/tests/lean/FnOnceMutArgMutArg/FnOnceMutArgMutArg.lean
+deleted file mode 100644
+index 463980f..0000000
+--- a/tests/lean/FnOnceMutArgMutArg/FnOnceMutArgMutArg.lean
++++ /dev/null
+@@ -1,146 +0,0 @@
+--- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
+--- [fn_once_mut_arg_mut_arg]
+-import Aeneas
+-open Aeneas Aeneas.Std Result ControlFlow Error
+-set_option linter.dupNamespace false
+-set_option linter.hashCommand false
+-set_option linter.unusedVariables false
+-
+-/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
+-set_option maxHeartbeats 1000000
+-
+-namespace fn_once_mut_arg_mut_arg
+-
+-/-- [fn_once_mut_arg_mut_arg::apply_both]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 13:0-15:1
+-    Visibility: public -/
+-def apply_both
+-  {R : Type} {T1 : Type}
+-  (coreopsfunctionFnOnceT1PairMut0U32Mut1U64R_specialized_8d158b4d6c3de772f5459eb4ab3f927cInst
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg T1
+-  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U64 R) (x : _root_.Aeneas.Std.U32)
+-  (y : _root_.Aeneas.Std.U64) (f : T1) :
+-  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  coreopsfunctionFnOnceT1PairMut0U32Mut1U64R_specialized_8d158b4d6c3de772f5459eb4ab3f927cInst.call_once
+-    f (x, y)
+-
+-/-- [fn_once_mut_arg_mut_arg::step::closure]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 19:21-23:5 -/
+-@[reducible]
+-def step.closure := _root_.Aeneas.Std.U32
+-
+-/-- [fn_once_mut_arg_mut_arg::step::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, bool> for fn_once_mut_arg_mut_arg::step::closure}::call_once]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 19:21-23:5 -/
+-def
+-  step.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64Bool_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-  (c : _root_.fn_once_mut_arg_mut_arg.step.closure)
+-  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
+-  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  let (x, y) := tupled_args
+-  let x1 ← lift (core.num.U32.wrapping_add x c)
+-  let y1 ← lift (core.num.U64.wrapping_mul y 2#u64)
+-  _root_.Aeneas.Std.Result.ok (y1 > 10#u64, x1, y1)
+-
+-/-- Trait implementation: [fn_once_mut_arg_mut_arg::step::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, bool> for fn_once_mut_arg_mut_arg::step::closure}]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 19:21-23:5 -/
+-@[reducible]
+-def
+-  step.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64Bool_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg
+-  _root_.fn_once_mut_arg_mut_arg.step.closure _root_.Aeneas.Std.U32
+-  _root_.Aeneas.Std.U64 _root_.Bool := {
+-  call_once :=
+-    _root_.fn_once_mut_arg_mut_arg.step.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64Bool_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-}
+-
+-/-- [fn_once_mut_arg_mut_arg::step]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 18:0-24:1
+-    Visibility: public -/
+-def step
+-  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U64)
+-  (by1 : _root_.Aeneas.Std.U32) :
+-  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  _root_.fn_once_mut_arg_mut_arg.apply_both
+-    _root_.fn_once_mut_arg_mut_arg.step.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64Bool_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-    x y by1
+-
+-/-- [fn_once_mut_arg_mut_arg::forwarded::closure::closure]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 29:25-32:9 -/
+-@[reducible]
+-def forwarded.closure.closure := _root_.Unit
+-
+-/-- [fn_once_mut_arg_mut_arg::forwarded::closure::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, u32> for fn_once_mut_arg_mut_arg::forwarded::closure::closure}::call_once]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 29:25-32:9 -/
+-def
+-  forwarded.closure.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-  (c : _root_.fn_once_mut_arg_mut_arg.forwarded.closure.closure)
+-  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  let (x, y) := tupled_args
+-  let y1 ← lift (core.num.U64.wrapping_add y 1#u64)
+-  _root_.Aeneas.Std.Result.ok (x, x, y1)
+-
+-/-- Trait implementation: [fn_once_mut_arg_mut_arg::forwarded::closure::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, u32> for fn_once_mut_arg_mut_arg::forwarded::closure::closure}]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 29:25-32:9 -/
+-@[reducible]
+-def
+-  forwarded.closure.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg
+-  _root_.fn_once_mut_arg_mut_arg.forwarded.closure.closure
+-  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 := {
+-  call_once :=
+-    _root_.fn_once_mut_arg_mut_arg.forwarded.closure.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-}
+-
+-/-- [fn_once_mut_arg_mut_arg::forwarded::closure]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 28:21-33:5 -/
+-@[reducible]
+-def forwarded.closure := _root_.Unit
+-
+-/-- [fn_once_mut_arg_mut_arg::forwarded::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, u32> for fn_once_mut_arg_mut_arg::forwarded::closure}::call_once]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 28:21-33:5 -/
+-def
+-  forwarded.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-  (c : _root_.fn_once_mut_arg_mut_arg.forwarded.closure)
+-  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  let (x, y) := tupled_args
+-  _root_.fn_once_mut_arg_mut_arg.apply_both
+-    _root_.fn_once_mut_arg_mut_arg.forwarded.closure.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-    x y ()
+-
+-/-- Trait implementation: [fn_once_mut_arg_mut_arg::forwarded::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, u32, u64, u32> for fn_once_mut_arg_mut_arg::forwarded::closure}]
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 28:21-33:5 -/
+-@[reducible]
+-def
+-  forwarded.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg
+-  _root_.fn_once_mut_arg_mut_arg.forwarded.closure _root_.Aeneas.Std.U32
+-  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 := {
+-  call_once :=
+-    _root_.fn_once_mut_arg_mut_arg.forwarded.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+-}
+-
+-/-- [fn_once_mut_arg_mut_arg::forwarded]:
+-    Source: 'tests/src/fn-once-mut-arg-mut-arg.rs', lines 27:0-34:1
+-    Visibility: public -/
+-def forwarded
+-  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U64) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+-    _root_.Aeneas.Std.U64)
+-  := do
+-  _root_.fn_once_mut_arg_mut_arg.apply_both
+-    _root_.fn_once_mut_arg_mut_arg.forwarded.closure.Insts.CoreOpsFunctionFnOncePairMutU32MutU64U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+-    x y ()
+-
+-end fn_once_mut_arg_mut_arg
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ec0a8b6..e504d0a 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -8,7 +8,6 @@ package «tests» {}
+ @[default_target] lean_lib Adt
+ @[default_target] lean_lib AdtBorrows
+ @[default_target] lean_lib AdtMutBorrowLoops
+-@[default_target] lean_lib AnyTypeId
+ @[default_target] lean_lib ArrayOfBorrowsLoop
+ @[default_target] lean_lib Arrays
+ @[default_target] lean_lib ArraysDefs
+@@ -20,7 +19,6 @@ package «tests» {}
+ @[default_target] lean_lib Bitwise
+ @[default_target] lean_lib BlanketImpl
+ @[default_target] lean_lib Builtin
+-@[default_target] lean_lib CapturedFnOnceMut
+ @[default_target] lean_lib CharSwitch
+ @[default_target] lean_lib Issue804ClosureReturnRef
+ @[default_target] lean_lib Closures
+@@ -48,7 +46,6 @@ package «tests» {}
+ @[default_target] lean_lib DropBug
+ @[default_target] lean_lib Dyn
+ @[default_target] lean_lib DynamicSize
+-@[default_target] lean_lib FnOnceMutArgMutArg
+ @[default_target] lean_lib FromTo
+ @[default_target] lean_lib Hashmap
+ @[default_target] lean_lib Into
+diff --git a/tests/src/any-type-id.rs b/tests/src/any-type-id.rs
+deleted file mode 100644
+index 2d7459d..0000000
+--- a/tests/src/any-type-id.rs
++++ /dev/null
+@@ -1,31 +0,0 @@
+-//@ [!lean] skip
+-//@ [lean] subdir=AnyTypeId
+-//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
+-//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+-//! `Any` evidence retains `core::any::TypeId` through the signature of
+-//! `Any::type_id`, although nothing calls it: the type must have a model,
+-//! not become an axiom (an unknown external).
+-//! `AnyTypeId/Checks.lean` evaluates the model on the inputs of the `native`
+-//! test module below and compares with the native results.
+-use std::any::Any;
+-
+-/// A payload threaded through an `Any` bound, as raise sites do.
+-pub fn pass_any<P: Any>(payload: P) -> P {
+-    payload
+-}
+-
+-pub fn tagged(code: u32, fatal: bool) -> (u32, bool) {
+-    let code = pass_any(code);
+-    (code.wrapping_add(1), pass_any(fatal))
+-}
+-
+-#[cfg(test)]
+-mod native {
+-    use super::*;
+-
+-    #[test]
+-    fn tagged_passes_payloads() {
+-        assert_eq!(tagged(4, true), (5, true));
+-        assert_eq!(tagged(u32::MAX, false), (0, false));
+-    }
+-}
+diff --git a/tests/src/captured-fn-once-mut.rs b/tests/src/captured-fn-once-mut.rs
+deleted file mode 100644
+index 542bfa0..0000000
+--- a/tests/src/captured-fn-once-mut.rs
++++ /dev/null
+@@ -1,42 +0,0 @@
+-//@ [!lean] skip
+-//@ [lean] subdir=CapturedFnOnceMut
+-//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
+-//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+-//! A closure calling a captured generic `impl FnOnce(&mut T)`, as
+-//! `LoweringRuntime::catch_lowering` wraps its callback. The closure implements
+-//! the `FnOnce<(&mut T,)>` specialization (model `FnOnceMutArg`): the borrowed
+-//! argument is returned, the consumed closure is not, although its capture is
+-//! generic.
+-//! `CapturedFnOnceMut/Checks.lean` evaluates the model on the inputs of the
+-//! `native` test module below and compares with the native results.
+-
+-pub fn apply<R>(x: &mut u32, f: impl FnOnce(&mut u32) -> R) -> R {
+-    f(x)
+-}
+-
+-pub fn catching<R>(x: &mut u32, f: impl FnOnce(&mut u32) -> R) -> R {
+-    apply(x, move |y| f(y))
+-}
+-
+-/// `catching` with a closure that captures nothing.
+-pub fn bump(x: &mut u32) -> u32 {
+-    catching(x, |y| {
+-        *y = y.wrapping_add(1);
+-        *y
+-    })
+-}
+-
+-#[cfg(test)]
+-mod native {
+-    use super::*;
+-
+-    #[test]
+-    fn bump_increments() {
+-        let mut x = 4;
+-        assert_eq!(bump(&mut x), 5);
+-        assert_eq!(x, 5);
+-        let mut x = u32::MAX;
+-        assert_eq!(bump(&mut x), 0);
+-        assert_eq!(x, 0);
+-    }
+-}
+diff --git a/tests/src/fn-once-mut-arg-mut-arg.rs b/tests/src/fn-once-mut-arg-mut-arg.rs
+deleted file mode 100644
+index d3af805..0000000
+--- a/tests/src/fn-once-mut-arg-mut-arg.rs
++++ /dev/null
+@@ -1,56 +0,0 @@
+-//@ [!lean] skip
+-//@ [lean] subdir=FnOnceMutArgMutArg
+-//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
+-//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+-//! A closure taking two mutable borrows, as the callback of
+-//! `LoweringRuntime::catch_native_unwind` takes the runtime and the explicit
+-//! state. Charon's `--monomorphize-mut` specializes `FnOnce<(&mut T, &mut U)>`,
+-//! whose model `FnOnceMutArgMutArg` returns both borrowed arguments (and not
+-//! the consumed closure).
+-//! `FnOnceMutArgMutArg/Checks.lean` evaluates the model on the inputs of the
+-//! `native` test module below and compares with the native results.
+-
+-pub fn apply_both<R>(x: &mut u32, y: &mut u64, f: impl FnOnce(&mut u32, &mut u64) -> R) -> R {
+-    f(x, y)
+-}
+-
+-/// A closure that writes both borrows, with a captured value.
+-pub fn step(x: &mut u32, y: &mut u64, by: u32) -> bool {
+-    apply_both(x, y, move |x, y| {
+-        *x = x.wrapping_add(by);
+-        *y = y.wrapping_mul(2);
+-        *y > 10
+-    })
+-}
+-
+-/// The borrows passed on through a closure that takes them.
+-pub fn forwarded(x: &mut u32, y: &mut u64) -> u32 {
+-    apply_both(x, y, |x, y| {
+-        apply_both(x, y, |x, y| {
+-            *y = y.wrapping_add(1);
+-            *x
+-        })
+-    })
+-}
+-
+-#[cfg(test)]
+-mod native {
+-    use super::*;
+-
+-    #[test]
+-    fn step_writes_both() {
+-        let (mut x, mut y) = (4, 3);
+-        assert!(!step(&mut x, &mut y, 5));
+-        assert_eq!((x, y), (9, 6));
+-        let (mut x, mut y) = (u32::MAX, 6);
+-        assert!(step(&mut x, &mut y, 2));
+-        assert_eq!((x, y), (1, 12));
+-    }
+-
+-    #[test]
+-    fn forwarded_returns_both() {
+-        let (mut x, mut y) = (7, u64::MAX);
+-        assert_eq!(forwarded(&mut x, &mut y), 7);
+-        assert_eq!((x, y), (7, 0));
+-    }
+-}
+diff --git a/tests/src/modeled-instance-fail-closed.rs b/tests/src/modeled-instance-fail-closed.rs
+deleted file mode 100644
+index 1f55587..0000000
+--- a/tests/src/modeled-instance-fail-closed.rs
++++ /dev/null
+@@ -1,25 +0,0 @@
+-//@ [lean] known-failure
+-//@ [lean] no-check-output
+-//@ [!lean] skip
+-//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
+-//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+-//! `core::mem::swap` has a generic model. Swapping two mutable references
+-//! makes Charon's `--monomorphize-mut` translate a partial-monomorphization
+-//! instance `core::mem::swap::<&mut _>`, whose borrowed arguments carry nested
+-//! backward continuations that the generic model's signature lacks. The name
+-//! matcher ignores the instance shape, so the generic model used to be called
+-//! with the wrong arguments; the instance now remains an unknown external.
+-//! (No output check: the failure is reported after generation, next to the
+-//! run's timing.)
+-
+-pub fn swap_targets<'a>(a: &mut &'a mut u32, b: &mut &'a mut u32) {
+-    std::mem::swap(a, b);
+-}
+-
+-pub fn swapped_writes(x: &mut u32, y: &mut u32) {
+-    let mut a = x;
+-    let mut b = y;
+-    swap_targets(&mut a, &mut b);
+-    *a = 1;
+-    *b = 2;
+-}
+diff --git a/tests/src/mutually-recursive-traits.lean.out b/tests/src/mutually-recursive-traits.lean.out
+index c026ac8..d7d6c54 100644
+--- a/tests/src/mutually-recursive-traits.lean.out
++++ b/tests/src/mutually-recursive-traits.lean.out
+@@ -3,5 +3,5 @@
+ Trait declaration: mutually_recursive_traits::Trait1
+ Source: Source: 'tests/src/mutually-recursive-traits.rs', lines 5:0-7:1
+ Source: 'tests/src/mutually-recursive-traits.rs', lines 5:0-7:1
+-Compiler source: symbolic/SymbolicToPure.ml, line 214
++Compiler source: symbolic/SymbolicToPure.ml, line 209
+ 

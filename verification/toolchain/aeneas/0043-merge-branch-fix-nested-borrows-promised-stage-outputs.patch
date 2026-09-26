@@ -1,0 +1,835 @@
+# aeneas integration step 43 after cba11f3beb: commit 12d2d9924df00759a77f5c5423497894cf6a2d6b
+# first parent 1cff58e19898271ba3a98757f5d7e6d86059d17f, merged 299c68cc0aeda5c163b1b58015ed490ff1a4636a
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch fix/nested-borrows (promised stage outputs, dropped values, callee carriers)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 5362733..b71c111 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -209,6 +209,8 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       var_id_to_default = Pure.FVarId.Map.empty;
+       abs_id_to_info = AbsId.Map.empty;
+       fun_call_stages = AbsId.Map.empty;
++      promised_fvars = Pure.FVarId.Set.empty;
++      deferred_lets = [];
+       ignored_abs_ids = AbsId.Set.empty;
+       meta_symb_places = SymbolicToPureCore.MetaSymbPlaceSet.empty;
+     }
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 719be51..5493ad2 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -162,6 +162,11 @@ type fun_call_stage = {
+       (** The stages (before the last one) and levels whose outputs in
+           [early_outputs] have been bound to the values given back by the
+           sub-abstractions of these levels. *)
++  deferred_outputs : (int * abs_level * tpat list) list;
++      (** The stages (the last one included) and levels whose sub-abstraction
++          ended before the stage was applied: the values it gave back (the
++          patterns) are promised (see [bs_ctx.promised_fvars]) and bound to the
++          outputs of the stage once it is applied. *)
+ }
+ [@@deriving show]
+ 
+@@ -385,6 +390,15 @@ type bs_ctx = {
+       (** Remaining applications and already evaluated outputs of a
+           function-call backward component. [abs_id_to_info] holds its current
+           continuation. *)
++  promised_fvars : FVarId.Set.t;
++      (** Staged backward functions of function calls: the variables of values
++          given back by a sub-abstraction which ended before the stage which
++          computes them was applied, and of the deferred let-bindings (see
++          [deferred_lets]). They are bound once their stage is applied. *)
++  deferred_lets : (tpat * texpr) list;
++      (** Pure let-bindings whose bound expression uses a promised variable
++          (see [promised_fvars]), in order: they are emitted as soon as it is
++          bound. *)
+   ignored_abs_ids : V.AbsId.Set.t;
+       (** For sanity purposes, we keep track of the region abstractions for
+           which we did not introduce any variable in the translation: when we
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 408153d..4e14a6c 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -132,6 +132,72 @@ let decompose_let_match (ctx : bs_ctx) (pat : tpat) (bound : texpr) :
+   in
+   (!ctx, (pat, bound))
+ 
++(** Staged backward functions of function calls (see [Pure.back_sg_info.early]):
++    the interpreter may end a sub-abstraction of a call before the values
++    received by the stages which give back its values are available. It ends
++    the loans of the deeper levels first (see [InterpBorrows.end_all_sub_abs]),
++    while the outputs of a stage may depend on inputs of lower levels (e.g., the
++    first stage of a group nested under three borrows receives values of level
++    1 and gives back values of level 2); ending the lower levels first is not an
++    option: two consecutive calls then form a cycle at the granularity of
++    levels, which is only broken at the granularity of stages (see
++    [.work/diag/nb/DESIGN-4LEVELS.md], section 5).
++
++    The variables of the values given back are then *promised*
++    ([bs_ctx.promised_fvars]): they are bound once the stage is applied, which
++    may itself wait for promised values of other calls. The pure let-bindings
++    of the translation of function-call abstractions go through this helper: a
++    let-binding whose bound expression uses a promised variable is deferred
++    ([bs_ctx.deferred_lets]) until that variable is bound, the other ones are
++    emitted in order, followed by the deferred let-bindings which they make
++    ready. Delaying pure let-bindings preserves the semantics. A promised
++    variable used by anything else stays unbound, which the check that the
++    function bodies are closed rejects. Without promised variables, this is
++    [mk_closed_checked_lets]. *)
++let emit_pure_lets (ctx : bs_ctx) (bindings : (tpat * texpr) list)
++    (next : bs_ctx -> texpr) : texpr =
++  if FVarId.Set.is_empty ctx.promised_fvars && ctx.deferred_lets = [] then
++    mk_closed_checked_lets __FILE__ __LINE__ ctx false bindings (next ctx)
++  else
++    let promised =
++      List.fold_left
++        (fun promised (pat, _) ->
++          FVarId.Set.union promised (tpat_get_fvars pat))
++        ctx.promised_fvars bindings
++    in
++    let rec flush promised queue emitted =
++      let promised = ref promised in
++      let progress = ref false in
++      let emitted = ref emitted in
++      let queue =
++        List.filter
++          (fun ((pat, bound) : tpat * texpr) ->
++            if FVarId.Set.disjoint (texpr_get_fvars bound) !promised then (
++              promised := FVarId.Set.diff !promised (tpat_get_fvars pat);
++              emitted := (pat, bound) :: !emitted;
++              progress := true;
++              false)
++            else true)
++          queue
++      in
++      if !progress then flush !promised queue !emitted
++      else (!promised, queue, List.rev !emitted)
++    in
++    let promised_fvars, deferred_lets, emitted =
++      flush promised (ctx.deferred_lets @ bindings) []
++    in
++    let ctx = { ctx with promised_fvars; deferred_lets } in
++    mk_closed_checked_lets __FILE__ __LINE__ ctx false emitted (next ctx)
++
++(** Promise the variables of the values given back by a sub-abstraction of a
++    function call before the stage which computes them was applied (see
++    [emit_pure_lets]). *)
++let promise_fvars (ctx : bs_ctx) (pats : tpat list) : bs_ctx =
++  {
++    ctx with
++    promised_fvars = FVarId.Set.union ctx.promised_fvars (tpats_get_fvars pats);
++  }
++
+ (** Find carriers by identity, descending only through actual constructors.
+     Equal erased field types are never used to choose a source value. *)
+ let owned_carrier_paths (ctx : bs_ctx) (value : texpr) =
+@@ -633,6 +699,7 @@ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+     supplied_inputs = [];
+     early_outputs = [];
+     bound_early_outputs = [];
++    deferred_outputs = [];
+   }
+ 
+ and translate_function_call (call : S.call) (e : S.expr) (ctx : bs_ctx) : texpr
+@@ -1545,6 +1612,42 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+           List.combine input_values (List.map mk_texpr_from_fvar bound_values))
+         stages
+     in
++    (* A value given back by an ancestor input abstraction at a level > 0 is
++       an input of the ancestor's backward function, which is not in scope
++       here (see the last case below). This abstraction receives its own
++       version of it through a borrow projector over it, which ended with a
++       value given back to this backward function (bound above): use it as
++       the carrier of the ancestor's value, e.g., for the positions of the
++       ancestor's value which a stage does not select (see
++       [select_back_side]). *)
++    let ctx =
++      let carriers = ref [] in
++      let visitor =
++        object
++          inherit [_] V.iter_abs as super
++
++          method! visit_AEndedProjBorrows env proj =
++            carriers :=
++              (proj.mvalues.consumed, proj.mvalues.given_back.sv_id)
++              :: !carriers;
++            super#visit_AEndedProjBorrows env proj
++        end
++      in
++      visitor#visit_abs () abs;
++      List.fold_left
++        (fun ctx (original, given_back) ->
++          match
++            ( V.SymbolicValueId.Map.find_opt original ctx.sv_to_var,
++              V.SymbolicValueId.Map.find_opt given_back ctx.sv_to_var )
++          with
++          | None, Some var ->
++              {
++                ctx with
++                sv_to_var = V.SymbolicValueId.Map.add original var ctx.sv_to_var;
++              }
++          | _ -> ctx)
++        ctx (List.rev !carriers)
++    in
+     (* Translate the next expression *)
+     let next_e = translate_expr e ctx in
+     (* Generate the assignemnts *)
+@@ -1588,10 +1691,10 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+          receive them *)
+       let ctx, bindings = bind_early_stage_outputs ~all:false abs abs_level ctx in
+       let stage = V.AbsId.Map.find abs.abs_id ctx.fun_call_stages in
+-      mk_closed_checked_lets __FILE__ __LINE__ ctx false bindings
+-        (translate_apply_early_stage ectx abs stage
+-           (S.EndAbs (ectx, abs, abs_level, e))
+-           ctx)
++      emit_pure_lets ctx bindings (fun ctx ->
++          translate_apply_early_stage ectx abs stage
++            (S.EndAbs (ectx, abs, abs_level, e))
++            ctx)
+   (* The loans of a higher level may all have ended from outside (their
+      borrows were ended and gave their values back) without that level being
+      ended as a sub-abstraction: the interpreter only ends sub-abstractions
+@@ -1715,6 +1818,35 @@ and translate_apply_early_stage (ectx : C.eval_ctx) (abs : V.abs)
+         mk_tpat_from_fvar None late;
+       ]
+   in
++  (* The values given back by the sub-abstractions which ended before this
++     stage was applied are promised: bind them to its outputs *)
++  let fulfilled, deferred_outputs =
++    List.partition
++      (fun (index', _, _) -> index' = index)
++      stage.deferred_outputs
++  in
++  let ctx, fulfilled =
++    List.fold_left_map
++      (fun ctx (_, level, pats) ->
++        let vars =
++          match List.assoc_opt level early_outputs with
++          | Some vars -> vars
++          | None -> []
++        in
++        [%cassert] span
++          (List.map (fun (p : tpat) -> p.ty) pats
++          = List.map (fun (v : fvar) -> v.ty) vars)
++          ("Nested borrows: the values given back at level "
++         ^ string_of_int level
++         ^ " disagree with the outputs of the stage "
++          ^ string_of_int (index + 1)
++          ^ " of a staged backward function");
++        List.fold_left_map
++          (fun ctx (pat, var) ->
++            decompose_let_match ctx pat (mk_texpr_from_fvar var))
++          ctx (List.combine pats vars))
++      ctx fulfilled
++  in
+   let ctx =
+     {
+       ctx with
+@@ -1724,18 +1856,32 @@ and translate_apply_early_stage (ectx : C.eval_ctx) (abs : V.abs)
+           ctx.abs_id_to_info;
+       fun_call_stages =
+         V.AbsId.Map.add abs.abs_id
+-          { stage with early_outputs = stage.early_outputs @ [ early_outputs ] }
++          {
++            stage with
++            early_outputs = stage.early_outputs @ [ early_outputs ];
++            deferred_outputs;
++          }
+           ctx.fun_call_stages;
+     }
+   in
+-  [%add_loc] mk_closed_checked_let ctx can_fail pat call (translate_expr e ctx)
++  let fulfilled = List.concat fulfilled in
++  if can_fail then (
++    [%cassert] span
++      (FVarId.Set.disjoint (texpr_get_fvars call) ctx.promised_fvars)
++      ("Nested borrows: the stage "
++      ^ string_of_int (index + 1)
++      ^ " of a staged backward function which can fail receives values given \
++         back before the values received by their own stage are available");
++    [%add_loc] mk_closed_checked_let ctx can_fail pat call
++      (emit_pure_lets ctx fulfilled (translate_expr e)))
++  else emit_pure_lets ctx ((pat, call) :: fulfilled) (translate_expr e)
+ 
+ (** Staged backward functions (see [Pure.back_sg_info.early]): bind the values
+     given back at [abs_level] on the positions of the stages before the last
+     one which have been applied, if they are not bound yet (the next stages may
+     receive them, see [translate_end_abstraction_fun_call]). With [all], the
+-    stages which have not been applied must not give back values at this
+-    level. *)
++    values given back by the stages which have not been applied are promised:
++    they are bound when the stage is applied (see [emit_pure_lets]). *)
+ and bind_early_stage_outputs ~(all : bool) (abs : V.abs)
+     (abs_level : abs_level) (ctx : bs_ctx) : bs_ctx * (tpat * texpr) list =
+   match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+@@ -1747,6 +1893,7 @@ and bind_early_stage_outputs ~(all : bool) (abs : V.abs)
+          _;
+        } as stage) ->
+       let indices = List.init (List.length early) Fun.id in
++      let deferred = ref [] in
+       let ctx, bindings =
+         List.fold_left_map
+           (fun ctx0 index ->
+@@ -1758,14 +1905,10 @@ and bind_early_stage_outputs ~(all : bool) (abs : V.abs)
+               in
+               match List.nth_opt early_outputs index with
+               | None ->
+-                  if all then
+-                    [%cassert] ctx.span (pats = [])
+-                      ("Nested borrows: the values given back at level "
+-                      ^ string_of_int abs_level ^ " by the stage "
+-                      ^ string_of_int (index + 1)
+-                      ^ " of a staged backward function are needed before the \
+-                         values it receives are available");
+-                  (ctx0, [])
++                  if all && pats <> [] then (
++                    deferred := (index, abs_level, pats) :: !deferred;
++                    (promise_fvars ctx pats, []))
++                  else (ctx0, [])
+               | Some values ->
+                   let vars =
+                     match List.assoc_opt abs_level values with
+@@ -1797,7 +1940,11 @@ and bind_early_stage_outputs ~(all : bool) (abs : V.abs)
+         {
+           stage with
+           bound_early_outputs =
+-            List.sort_uniq compare (bound @ bound_early_outputs);
++            List.sort_uniq compare
++              (bound
++              @ List.map (fun (index, level, _) -> (index, level)) !deferred
++              @ bound_early_outputs);
++          deferred_outputs = stage.deferred_outputs @ List.rev !deferred;
+         }
+       in
+       ( {
+@@ -1821,24 +1968,57 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+   (* Staged backward functions (see [Pure.back_sg_info.early]): the values
+      given back at this level on the positions of a stage before the last one
+      are its outputs, which were computed when it was applied (see
+-     [translate_apply_early_stage]). They must all have been applied. *)
++     [translate_apply_early_stage]), or are promised until it is applied. *)
+   let ctx, early_bindings = bind_early_stage_outputs ~all:true abs abs_level ctx in
++  (* The values given back at this level by the last stage may already be
++     promised (this level ended before the earlier stages were applied, and
++     is ended again to supply its inputs, see
++     [translate_end_abstraction_fun_call]) *)
++  let late_promised =
++    match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
++    | Some stage ->
++        List.mem
++          (back_last_stage stage.signature, abs_level)
++          stage.bound_early_outputs
++    | None -> false
++  in
+   (* Nested projections can regroup abstraction values, so original argument
+      positions are no longer source-place indices for these output patterns. *)
+-  let ctx, outputs = abs_to_given_back ?sides None abs abs_level ctx in
++  let ctx, outputs =
++    if late_promised then (ctx, [])
++    else abs_to_given_back ?sides None abs abs_level ctx
++  in
+   match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+   | Some stage when not (fun_call_last_stage_ready stage) ->
+       (* Staged backward function whose earlier stages are not all applied:
+          the inputs of the last stage at this level stay pending (they are
+          supplied when a lower level ends, see
+-         [translate_end_abstraction_fun_call]) *)
+-      [%cassert] ctx.span (outputs = [])
+-        ("Nested borrows: the values given back at level "
+-        ^ string_of_int abs_level
+-        ^ " by the last stage of a staged backward function are needed before \
+-           the values received by its earlier stages are available");
+-      mk_closed_checked_lets __FILE__ __LINE__ ctx false early_bindings
+-        (translate_expr e ctx)
++         [translate_end_abstraction_fun_call]), and the values it gives back
++         at this level are promised (see [emit_pure_lets]) until it is
++         applied. *)
++      let ctx =
++        if outputs = [] then ctx
++        else
++          let last = back_last_stage stage.signature in
++          let stage =
++            {
++              stage with
++              bound_early_outputs =
++                List.sort_uniq compare
++                  ((last, abs_level) :: stage.bound_early_outputs);
++              deferred_outputs =
++                stage.deferred_outputs @ [ (last, abs_level, outputs) ];
++            }
++          in
++          promise_fvars
++            {
++              ctx with
++              fun_call_stages =
++                V.AbsId.Map.add abs.abs_id stage ctx.fun_call_stages;
++            }
++            outputs
++      in
++      emit_pure_lets ctx early_bindings (translate_expr e)
+   | _ ->
+   match V.AbsId.Map.find_opt abs.abs_id ctx.abs_id_to_info with
+   | None ->
+@@ -2034,11 +2214,9 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+             (fun ctx (output, value) -> decompose_let_match ctx output value)
+             ctx bindings
+         in
+-        mk_closed_checked_lets __FILE__ __LINE__ ctx false
+-          (update_bindings @ bindings)
+-          (translate_expr e ctx)
++        emit_pure_lets ctx (update_bindings @ bindings) (translate_expr e)
+       in
+-      let next =
++      let next ctx =
+         match stage.output_values with
+         | Some values ->
+             [%sanity_check] ctx.span (args = [] && pending_inputs = []);
+@@ -2063,8 +2241,7 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+                       ctx.abs_id_to_info;
+                 }
+               in
+-              [%add_loc] mk_closed_checked_let ctx false output call
+-                (translate_expr e ctx)
++              emit_pure_lets ctx [ (output, call) ] (translate_expr e)
+         | None ->
+             (* The last application evaluates the backward component exactly once.
+              Keep its lower-level outputs in scope until their abstractions end. *)
+@@ -2089,12 +2266,57 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+                  && stage.signature.inputs <> []
+             in
+             let ctx, (output, call) = decompose_let_match ctx output call in
+-            [%add_loc] mk_closed_checked_let ctx can_fail output call
+-              (bind_outputs ctx values)
++            (* The values given back by the levels which ended before the
++               earlier stages were applied are promised: bind them to the
++               outputs (see [emit_pure_lets]) *)
++            let last = back_last_stage stage.signature in
++            let fulfilled =
++              List.filter
++                (fun (index, _, _) -> index = last)
++                stage.deferred_outputs
++            in
++            let ctx, fulfilled =
++              List.fold_left_map
++                (fun ctx (_, level, pats) ->
++                  let vars =
++                    match List.assoc_opt level values with
++                    | Some vars -> vars
++                    | None -> []
++                  in
++                  [%cassert] ctx.span
++                    (List.map (fun (p : tpat) -> p.ty) pats
++                    = List.map (fun (v : fvar) -> v.ty) vars)
++                    ("Function-call givebacks disagree with the decomposed \
++                      signature at level " ^ string_of_int level);
++                  List.fold_left_map
++                    (fun ctx (pat, var) ->
++                      decompose_let_match ctx pat (mk_texpr_from_fvar var))
++                    ctx (List.combine pats vars))
++                ctx fulfilled
++            in
++            let values =
++              List.filter
++                (fun (level, _) ->
++                  not
++                    (List.exists
++                       (fun (index, level', _) -> index = last && level' = level)
++                       stage.deferred_outputs))
++                values
++            in
++            let fulfilled = List.concat fulfilled in
++            if can_fail then (
++              [%cassert] ctx.span
++                (FVarId.Set.disjoint (texpr_get_fvars call) ctx.promised_fvars)
++                "Nested borrows: the last stage of a staged backward function \
++                 which can fail receives values given back before the values \
++                 received by their own stage are available";
++              [%add_loc] mk_closed_checked_let ctx can_fail output call
++                (emit_pure_lets ctx fulfilled (fun ctx -> bind_outputs ctx values)))
++            else
++              emit_pure_lets ctx ((output, call) :: fulfilled) (fun ctx ->
++                  bind_outputs ctx values)
+       in
+-      mk_closed_checked_lets __FILE__ __LINE__ ctx false
+-        (early_bindings @ nested_bindings)
+-        next
++      emit_pure_lets ctx (early_bindings @ nested_bindings) next
+ 
+ and translate_end_abs_identity (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index e8872cb..978f8c5 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -1376,7 +1376,12 @@ and aproj_to_consumed_aux (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+       views are placeholders, and so are all the positions on the side of an
+       ignored borrow inside the ADT which the view does not follow;
+     - a symbolic value is kept or replaced as a whole: its projectors do not
+-      distinguish the paths of its values of the same level. *)
++      distinguish the paths of its values of the same level;
++    - with a staged selection, a value given back to the caller which it
++      dropped unchanged (an ended loan projector without children at a lower
++      level) supplies its unchanged value to the selected loans of the deeper
++      levels of the same polarity, and ignores the values given back to the
++      selected borrows of the other levels. *)
+ let select_back_side (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+     (side : back_side) (abs_level : abs_level) (av : V.tavalue) : V.tavalue =
+   let span = ctx.span in
+@@ -1540,6 +1545,51 @@ let select_back_side (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+                             (List.map (fun _ -> av.ty) keys);
+                       };
+                 }))
++    | ASymbolic (pm, V.AEndedProjLoans { proj; consumed = []; borrows = [] })
++      when (match side with
++           | SelectPaths _ -> true
++           | BothSides -> false)
++           && level < abs_level
++           && List.exists
++                (fun path ->
++                  SymbolicToPureTypes.back_path_level path = abs_level - level
++                  && (not off) && in_view view path
++                  && select (List.rev_append rev_path path))
++                (paths av.ty) ->
++        (* A value given back to the caller, whose loans all ended at once
++           without any value consumed or projected (the caller dropped it
++           unchanged). A stage of a staged backward function may still
++           exchange values on the positions of its deeper levels:
++           - the loans of the levels of the same polarity consume its unchanged
++             value: they become ended loan projectors over the original value
++             at the selected level (see [aproj_to_consumed_aux]);
++           - the borrows of the levels of the other polarity receive values
++             which the caller drops: they become ended borrow projectors which
++             give back the original value itself, which marks an ignored output
++             (see [aproj_to_given_back_aux]).
++           The intermediate levels hold no projection. *)
++        let meta : V.mconsumed_symb =
++          { sv_id = proj; proj_ty = av.ty; proj_regions = abs_regions }
++        in
++        let rec unchanged (n : int) : V.aproj =
++          if n = 0 then
++            if (abs_level - level) mod 2 = 0 then
++              V.AEndedProjLoans { proj; consumed = []; borrows = [] }
++            else
++              V.AEndedProjBorrows
++                {
++                  mvalues =
++                    {
++                      consumed = proj;
++                      given_back = { sv_id = proj; sv_ty = av.ty };
++                    };
++                  loans = [];
++                }
++          else
++            V.AEndedProjLoans
++              { proj; consumed = [ (meta, unchanged (n - 1)) ]; borrows = [] }
++        in
++        { av with value = ASymbolic (pm, unchanged (abs_level - level)) }
+     | ASymbolic (_, aproj) ->
+         let level_paths =
+           List.filter
+@@ -1938,6 +1988,14 @@ and aproj_to_given_back_aux (abs_regions : T.RegionId.Set.t)
+     fold_aproj_at_level abs_level current_level
+       (fun (ctx, pats) aproj _ty ->
+         match aproj with
++        | AEndedProjBorrows { mvalues = mv; loans = [] }
++          when mv.consumed = mv.given_back.sv_id
++               && has_mut_region mv.given_back.sv_ty ->
++            (* A value which the caller dropped unchanged receives nothing:
++               the output is ignored (see [select_back_side]; an ended borrow
++               projector otherwise always gives back a fresh value) *)
++            let ty = ctx_translate_fwd_ty ctx mv.given_back.sv_ty in
++            (ctx, ({ pat = PIgnored; ty } : tpat) :: pats)
+         | AEndedProjBorrows { mvalues = mv; loans = _ }
+           when has_mut_region mv.given_back.sv_ty ->
+             let ctx, var = fresh_var_for_symbolic_value mv.given_back ctx in
+diff --git a/tests/lean/NestedBorrowsFourLevels/Checks.lean b/tests/lean/NestedBorrowsFourLevels/Checks.lean
+index 0088a1b..7e8b852 100644
+--- a/tests/lean/NestedBorrowsFourLevels/Checks.lean
++++ b/tests/lean/NestedBorrowsFourLevels/Checks.lean
+@@ -13,6 +13,12 @@ def val {α β} (f : α → β) : Result α → Option β
+   | _ => none
+ 
+ def once (v : Nat) := val (·.val) (incr4_once (u v))
++def twice (v : Nat) := val (·.val) (incr4_twice (u v))
++def bumpOnce (n : Nat) :=
++  val (fun (p : U32 × U32) => (p.1.val, p.2.val)) (bump_once (u n))
++def bumpTwice (n : Nat) :=
++  val (fun (p : U32 × U32 × U32) => (p.1.val, p.2.1.val, p.2.2.val))
++    (bump_twice (u n))
+ def swap (v w : Nat) :=
+   val (fun (p : U32 × U32) => (p.1.val, p.2.val)) (incr4_swap (u v) (u w))
+ 
+@@ -21,6 +27,19 @@ def swap (v w : Nat) :=
+ #guard once 4294967295 == some 0
+ #guard once 7 == some 8
+ 
++#guard twice 0 == some 2
++#guard twice 40 == some 42
++#guard twice 4294967295 == some 1
++#guard twice 4294967294 == some 0
++
++#guard bumpOnce 0 == some (1, 1)
++#guard bumpOnce 41 == some (42, 42)
++#guard bumpOnce 4294967295 == some (0, 0)
++
++#guard bumpTwice 0 == some (1, 2, 2)
++#guard bumpTwice 40 == some (41, 42, 42)
++#guard bumpTwice 4294967295 == some (0, 1, 1)
++
+ #guard swap 0 0 == some (0, 1)
+ #guard swap 5 41 == some (5, 42)
+ #guard swap 3 4294967295 == some (3, 0)
+diff --git a/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+index 800cc95..4129562 100644
+--- a/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
++++ b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+@@ -54,8 +54,34 @@ def incr4_once
+   let (i6, back3) := back2 i5
+   _root_.Aeneas.Std.Result.ok (back3 i6)
+ 
++/-- [nested_borrows_four_levels::incr4_twice]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 27:0-37:1
++    Visibility: public -/
++def incr4_twice
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (r3, incr4_back, incr4_back1, incr4_back2) ←
++    _root_.nested_borrows_four_levels.incr4 v
++  let (i, incr4_back3, incr4_back4, incr4_back5) ←
++    _root_.nested_borrows_four_levels.incr4 r3
++  let i1 := incr4_back3 i
++  let i2 := incr4_back i1
++  let (i3, back) := incr4_back1 i2
++  let (i4, back1) := incr4_back4 i3
++  let i5 := back1 i4
++  let i6 := back i5
++  let (i7, back2) := incr4_back2 i6
++  let (i8, back3) := incr4_back5 i7
++  let (i9, back4) := back3 i8
++  let (i10, back5) := back2 i9
++  let (i11, back6) := back5 i10
++  let (i12, back7) := back4 i11
++  let i13 := back7 i12
++  _root_.Aeneas.Std.Result.ok (back6 i13)
++
+ /-- [nested_borrows_four_levels::incr4_swap]:
+-    Source: 'tests/src/nested-borrows-four-levels.rs', lines 24:0-35:1
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 40:0-51:1
+     Visibility: public -/
+ def incr4_swap
+   (v : _root_.Aeneas.Std.U32) (w : _root_.Aeneas.Std.U32) :
+@@ -72,4 +98,102 @@ def incr4_swap
+   let w1 := back3 i6
+   _root_.Aeneas.Std.Result.ok (v, w1)
+ 
++/-- [nested_borrows_four_levels::C]
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 55:0-57:1
++    Visibility: public -/
++structure C where
++  r : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_four_levels::W]
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 59:0-61:1
++    Visibility: public -/
++structure W where
++  c : _root_.nested_borrows_four_levels.C
++
++/-- [nested_borrows_four_levels::O]
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 63:0-65:1
++    Visibility: public -/
++structure O where
++  w : _root_.nested_borrows_four_levels.W
++
++/-- [nested_borrows_four_levels::bump]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 69:0-72:1
++    Visibility: public -/
++def bump
++  (o : _root_.nested_borrows_four_levels.O) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_four_levels.O × (_root_.nested_borrows_four_levels.O
++    → _root_.nested_borrows_four_levels.O) ×
++    (_root_.nested_borrows_four_levels.O →
++    (_root_.nested_borrows_four_levels.O ×
++    (_root_.nested_borrows_four_levels.O →
++    _root_.nested_borrows_four_levels.O))) ×
++    (_root_.nested_borrows_four_levels.O →
++    (_root_.nested_borrows_four_levels.O ×
++    (_root_.nested_borrows_four_levels.O →
++    (_root_.nested_borrows_four_levels.O ×
++    (_root_.nested_borrows_four_levels.O →
++    (_root_.nested_borrows_four_levels.O ×
++    (_root_.nested_borrows_four_levels.O →
++    _root_.nested_borrows_four_levels.O))))))))
++  := do
++  let i ← lift (core.num.U32.wrapping_add o.w.c.r 1#u32)
++  let back :=
++    (fun o1 => (o1, fun o2 => o2) : _root_.nested_borrows_four_levels.O →
++      (_root_.nested_borrows_four_levels.O ×
++      (_root_.nested_borrows_four_levels.O →
++      _root_.nested_borrows_four_levels.O)))
++  let back1 :=
++    (fun o1 => (o1, fun o2 => (o2, fun o3 => (o3, fun o4 => o4))) :
++      _root_.nested_borrows_four_levels.O →
++      (_root_.nested_borrows_four_levels.O ×
++      (_root_.nested_borrows_four_levels.O →
++      (_root_.nested_borrows_four_levels.O ×
++      (_root_.nested_borrows_four_levels.O →
++      (_root_.nested_borrows_four_levels.O ×
++      (_root_.nested_borrows_four_levels.O →
++      _root_.nested_borrows_four_levels.O)))))))
++  _root_.Aeneas.Std.Result.ok (i, { w := { c := { r := i } } }, fun o1 => o1,
++    back, back1)
++
++/-- [nested_borrows_four_levels::bump_once]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 76:0-83:1
++    Visibility: public -/
++def bump_once
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, bump_back, _, bump_back1) ←
++    _root_.nested_borrows_four_levels.bump { w := { c := { r := n } } }
++  let o1 := bump_back o
++  let (_, back) := bump_back1 o1
++  let (_, back1) := back o
++  let (_, back2) := back1 o1
++  let o2 := back2 o
++  _root_.Aeneas.Std.Result.ok (a, o2.w.c.r)
++
++/-- [nested_borrows_four_levels::bump_twice]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 88:0-96:1
++    Visibility: public -/
++def bump_twice
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (a, o, bump_back, _, bump_back1) ←
++    _root_.nested_borrows_four_levels.bump { w := { c := { r := n } } }
++  let (b, o1, bump_back2, _, bump_back3) ←
++    _root_.nested_borrows_four_levels.bump o
++  let o2 := bump_back2 o1
++  let o3 := bump_back o2
++  let (o4, back) := bump_back1 o3
++  let (_, back1) := bump_back3 o4
++  let (o5, back2) := back1 o1
++  let (_, back3) := back o5
++  let (o6, back4) := back3 o3
++  let (_, back5) := back2 o6
++  let o7 := back5 o1
++  let o8 := back4 o7
++  _root_.Aeneas.Std.Result.ok (a, b, o8.w.c.r)
++
+ end nested_borrows_four_levels
+diff --git a/tests/src/nested-borrows-four-levels.rs b/tests/src/nested-borrows-four-levels.rs
+index 6068fbd..a997227 100644
+--- a/tests/src/nested-borrows-four-levels.rs
++++ b/tests/src/nested-borrows-four-levels.rs
+@@ -20,6 +20,22 @@ pub fn incr4_once(v: u32) -> u32 {
+     v
+ }
+ 
++/// Two consecutive calls on the same chain: the second call receives the
++/// values given back by the first one. The interpreter ends the level 2 of the
++/// second call before the values received by the stages which compute its
++/// values are available (see `emit_pure_lets` in SymbolicToPureExpressions).
++pub fn incr4_twice(v: u32) -> u32 {
++    let mut v = v;
++    {
++        let mut r1 = &mut v;
++        let mut r2 = &mut r1;
++        let mut r3 = &mut r2;
++        incr4(&mut r3);
++        incr4(&mut r3);
++    }
++    v
++}
++
+ /// The same chain, whose innermost borrow is replaced before the call.
+ pub fn incr4_swap(v: u32, w: u32) -> (u32, u32) {
+     let mut v = v;
+@@ -34,6 +50,51 @@ pub fn incr4_swap(v: u32, w: u32) -> (u32, u32) {
+     (v, w)
+ }
+ 
++/// The same nesting through structures: the region of `C::r` is nested under
++/// the borrow of `O`, `O::w` and `W::c`.
++pub struct C<'a> {
++    pub r: &'a mut u32,
++}
++
++pub struct W<'a, 'b> {
++    pub c: &'a mut C<'b>,
++}
++
++pub struct O<'a, 'b, 'c> {
++    pub w: &'a mut W<'b, 'c>,
++}
++
++/// The backward function of the innermost region receives the structures
++/// given back to the ancestor regions through its own projections of them.
++pub fn bump(o: &mut O<'_, '_, '_>) -> u32 {
++    *o.w.c.r = (*o.w.c.r).wrapping_add(1);
++    *o.w.c.r
++}
++
++/// The caller drops the structure given back to `o` without using it: the
++/// later stages of `bump` receive its unchanged value at the deeper levels.
++pub fn bump_once(n: u32) -> (u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let a = bump(&mut o);
++    (a, n)
++}
++
++/// Two consecutive calls on the same structure: the second call receives the
++/// structure given back by the first one; the caller drops the structure given
++/// back by the second one.
++pub fn bump_twice(n: u32) -> (u32, u32, u32) {
++    let mut n = n;
++    let mut c = C { r: &mut n };
++    let mut w = W { c: &mut c };
++    let mut o = O { w: &mut w };
++    let a = bump(&mut o);
++    let b = bump(&mut o);
++    (a, b, n)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -46,6 +107,28 @@ mod native {
+         assert_eq!(incr4_once(7), 8);
+     }
+ 
++    #[test]
++    fn incr4_twice_native() {
++        assert_eq!(incr4_twice(0), 2);
++        assert_eq!(incr4_twice(40), 42);
++        assert_eq!(incr4_twice(u32::MAX), 1);
++        assert_eq!(incr4_twice(u32::MAX - 1), 0);
++    }
++
++    #[test]
++    fn bump_once_native() {
++        assert_eq!(bump_once(0), (1, 1));
++        assert_eq!(bump_once(41), (42, 42));
++        assert_eq!(bump_once(u32::MAX), (0, 0));
++    }
++
++    #[test]
++    fn bump_twice_native() {
++        assert_eq!(bump_twice(0), (1, 2, 2));
++        assert_eq!(bump_twice(40), (41, 42, 42));
++        assert_eq!(bump_twice(u32::MAX), (0, 1, 1));
++    }
++
+     #[test]
+     fn incr4_swap_native() {
+         assert_eq!(incr4_swap(0, 0), (0, 1));

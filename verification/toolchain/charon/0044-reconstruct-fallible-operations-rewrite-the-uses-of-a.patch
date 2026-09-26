@@ -1,0 +1,500 @@
+# charon integration step 44 after 546078ea5d: commit 1fbb31c2138208421a1ddbff61cf6c413cbe2467
+# first parent edaf3da24157560e40e7694412db17f6911e5735
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# reconstruct_fallible_operations: rewrite the uses of a checked operation's result in every block
+#
+# The rewrite of 'r := x checked.+ y; assert(!r.1)' into 'r := x panic.+ y' changes
+# the type of r to the integer type, but replaced the uses of r.0 only in the same
+# block. A use after a call terminator (e.g. 'v[i] = a + b', whose place
+# IndexMut::index_mut(&mut v, i) is computed after the sum) kept 'move r.0' with
+# r: usize, an ill-typed LLBC (Aeneas: expand_symbolic_value_no_branching on a
+# TLiteral). The use counts are now taken over the whole body, the rewrite is
+# skipped unless the tuple is only used through r.0 (and the asserted r.1), and
+# the r.0 uses of every rewritten tuple are replaced body-wide.
+
+diff --git a/src/transform/resugar/reconstruct_fallible_operations.rs b/src/transform/resugar/reconstruct_fallible_operations.rs
+index f4ef2f9..550bd3a 100644
+--- a/src/transform/resugar/reconstruct_fallible_operations.rs
++++ b/src/transform/resugar/reconstruct_fallible_operations.rs
+@@ -4,7 +4,7 @@
+ //! compiling for release). In our case, we take this into account in the semantics of our
+ //! array/slice manipulation and arithmetic functions, on the verification side.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ 
+ use derive_generic_visitor::*;
+ 
+@@ -97,6 +97,39 @@ fn uses_local<T: BodyVisitable>(x: &T, local: LocalId) -> bool {
+     x.drive_body(&mut UsesLocalVisitor(local)).is_break()
+ }
+ 
++/// Occurrences of a local in the places of a whole body: as a place node (the local itself,
++/// including as the base of a projection or as an assigned place), and as the base of the
++/// tuple fields `r.0` (the integer result of a checked operation) and `r.1` (its overflow flag).
++#[derive(Default, Clone, Copy)]
++struct TupleUses {
++    whole: usize,
++    integer: usize,
++    overflow: usize,
++}
++
++/// The [TupleUses] of every local of a body, over all its blocks (statements and terminators).
++/// A checked operation's result tuple can be used after a call terminator, e.g. in
++/// `v[i] = a + b`, whose place `*IndexMut::index_mut(&mut v, i)` is computed after the sum.
++fn compute_tuple_uses(body: &ExprBody) -> HashMap<LocalId, TupleUses> {
++    let mut uses: HashMap<LocalId, TupleUses> = HashMap::new();
++    body.body.dyn_visit_in_body(|p: &Place| {
++        if let Some(local) = p.as_local() {
++            uses.entry(local).or_default().whole += 1;
++        }
++        if let Some((sub, ProjectionElem::Field(FieldProjKind::Tuple(..), fid))) = p.as_projection()
++            && let Some(local) = sub.as_local()
++        {
++            let entry = uses.entry(local).or_default();
++            match fid.index() {
++                0 => entry.integer += 1,
++                1 => entry.overflow += 1,
++                _ => (),
++            }
++        }
++    });
++    uses
++}
++
+ fn make_binop_overflow_panic<T: BodyVisitable>(
+     x: &mut [T],
+     matches: impl Fn(&BinOp, &Operand, &Operand) -> bool,
+@@ -148,6 +181,8 @@ fn equiv_op(op_l: &Operand, op_r: &Operand) -> bool {
+ fn remove_dynamic_checks(
+     _ctx: &mut TransformCtx,
+     uses: &LocalUses,
++    tuple_uses: &HashMap<LocalId, TupleUses>,
++    rewritten_tuples: &mut HashSet<LocalId>,
+     block_id: BlockId,
+     locals: &mut Locals,
+     statements: &mut [Statement],
+@@ -483,27 +518,17 @@ fn remove_dynamic_checks(
+             },
+             rest @ ..,
+         ] if let Some(tuple_local_id) = tuple.as_local() => {
+-            // Check if the result boolean is used in any other way than just getting the integer
+-            // result.
+-            let mut uses_of_tuple = 0;
+-            let mut uses_of_integer = 0;
++            // Check if the tuple is used in any other way than just getting the integer result
++            // (and, with an assert, the overflow flag), anywhere in the body: its uses can live
++            // in later blocks.
++            let tuple_use = tuple_uses.get(&tuple_local_id).copied().unwrap_or_default();
++            let mut whole = tuple_use.whole;
+             if *tuple == locals.return_place() {
+-                uses_of_tuple += 1; // The return place counts as a use.
+-            }
+-            for stmt in rest.iter_mut() {
+-                stmt.dyn_visit_in_body(|p: &Place| {
+-                    if p == tuple {
+-                        uses_of_tuple += 1;
+-                    }
+-                    if let Some((sub, ProjectionElem::Field(FieldProjKind::Tuple(..), fid))) =
+-                        p.as_projection()
+-                        && fid.index() == 0
+-                        && sub == tuple
+-                    {
+-                        uses_of_integer += 1;
+-                    }
+-                });
++                whole += 1; // The return place counts as a use.
+             }
++            // The occurrences of the tuple other than its definition here and the bases of
++            // `r.0` and `r.1`.
++            let other_uses = whole.checked_sub(1 + tuple_use.integer + tuple_use.overflow);
+             // Check if the operation is followed by an assert.
+             let followed_by_assert = if let [
+                 Statement {
+@@ -530,7 +555,8 @@ fn remove_dynamic_checks(
+             } else {
+                 false
+             };
+-            if uses_of_tuple != uses_of_integer && !followed_by_assert {
++            let only_projected = other_uses == Some(0);
++            if !(only_projected && tuple_use.overflow == usize::from(followed_by_assert)) {
+                 // The tuple is used either directly or for the overflow check; we change nothing.
+                 return;
+             }
+@@ -549,21 +575,10 @@ fn remove_dynamic_checks(
+             // Fixup the local type.
+             let result_local = &mut locals.locals[tuple_local_id];
+             result_local.ty = result_local.ty.as_tuple().unwrap()[0].clone();
+-            // Fixup the place type.
+-            let new_result_place = locals.place_for_var(tuple_local_id);
+-            // Replace uses of `r.0` with `r`.
+-            for stmt in rest.iter_mut() {
+-                stmt.dyn_visit_in_body_mut(|p: &mut Place| {
+-                    if let Some((sub, ProjectionElem::Field(FieldProjKind::Tuple(..), fid))) =
+-                        p.as_projection()
+-                        && sub == tuple
+-                    {
+-                        assert_eq!(fid.index(), 0);
+-                        *p = new_result_place.clone()
+-                    }
+-                });
+-            }
+-            *tuple = new_result_place;
++            // Fixup the place type. The uses of `r.0`, in this block and in later ones, are
++            // replaced with `r` once all the blocks are transformed.
++            *tuple = locals.place_for_var(tuple_local_id);
++            rewritten_tuples.insert(tuple_local_id);
+             return;
+         }
+ 
+@@ -598,9 +613,38 @@ impl FusedUllbcPass for Transform {
+ 
+     fn transform_body(&self, ctx: &mut TransformCtx, b: &mut ExprBody) {
+         let local_uses: LocalUses = compute_uses(b);
++        let tuple_uses = compute_tuple_uses(b);
++        let mut rewritten_tuples = HashSet::new();
+         b.transform_sequences_fwd(|id, locals, seq| {
+-            remove_dynamic_checks(ctx, &local_uses, id, locals, seq);
++            remove_dynamic_checks(
++                ctx,
++                &local_uses,
++                &tuple_uses,
++                &mut rewritten_tuples,
++                id,
++                locals,
++                seq,
++            );
+             Vec::new()
+         });
++        if rewritten_tuples.is_empty() {
++            return;
++        }
++        // Replace the uses of `r.0` with `r` for every checked operation `r` that was replaced
++        // with its integer operation (whose local now has the integer type).
++        let results: HashMap<LocalId, Place> = rewritten_tuples
++            .iter()
++            .map(|local| (*local, b.locals.place_for_var(*local)))
++            .collect();
++        b.body.dyn_visit_in_body_mut(|p: &mut Place| {
++            if let Some((sub, ProjectionElem::Field(FieldProjKind::Tuple(..), fid))) =
++                p.as_projection()
++                && let Some(local) = sub.as_local()
++                && let Some(result) = results.get(&local)
++            {
++                assert_eq!(fid.index(), 0);
++                *p = result.clone()
++            }
++        });
+     }
+ }
+diff --git a/tests/ui/checked-op-cross-block.out b/tests/ui/checked-op-cross-block.out
+new file mode 100644
+index 0000000..0f81b9a
+--- /dev/null
++++ b/tests/ui/checked-op-cross-block.out
+@@ -0,0 +1,257 @@
++# Final LLBC before serialization:
++
++// Full name: core::ops::index::Index
++#[lang_item("index")]
++pub trait Index<Self, Idx, Self_Output>
++{
++    fn index<'_0_1> = core::ops::index::Index::index<'_0_1, Self, Idx, Self_Output>[Self]
++    vtable: core::ops::index::Index::{vtable}<Idx, Self_Output>
++}
++
++pub fn core::ops::index::Index::index<'_0, Self, Idx, Clause0_Output>(_1: &'_0 Self, _2: Idx) -> &'_0 Clause0_Output
++where
++    [@TraitClause0]: Index<Self, Idx, Clause0_Output>,
++= <opaque>
++
++// Full name: core::ops::index::IndexMut
++#[lang_item("index_mut")]
++pub trait IndexMut<Self, Idx, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: Index<Self, Idx, Self_Clause0_Output>
++    fn index_mut<'_0_1> = core::ops::index::IndexMut::index_mut<'_0_1, Self, Idx, Self_Clause0_Output>[Self]
++    vtable: core::ops::index::IndexMut::{vtable}<Idx, Self_Clause0_Output>
++}
++
++pub fn core::ops::index::IndexMut::index_mut<'_0, Self, Idx, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Idx) -> &'_0 mut Clause0_Clause0_Output
++where
++    [@TraitClause0]: IndexMut<Self, Idx, Clause0_Clause0_Output>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::slot
++fn slot<'_0>(v_1: &'_0 mut [u32; 4 : usize], i_2: usize) -> &'_0 mut u32
++{
++    let _0: &'1 mut u32; // return
++    let v_1: &'3 mut [u32; 4 : usize]; // arg #1
++    let i_2: usize; // arg #2
++    let _3: &'4 mut u32; // anonymous local
++    let _4: &'5 mut u32; // anonymous local
++    let _5: usize; // anonymous local
++    let _6: &'_ mut [u32; 4 : usize]; // anonymous local
++    let _7: &'_ mut u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = copy i_2
++    storage_live(_6)
++    _6 = &mut (*v_1)
++    storage_live(_7)
++    _7 = @ArrayIndexMut<'_, u32, 4 : usize>(move _6, copy _5)
++    _4 = &mut (*_7)
++    _3 = &mut (*_4)
++    _0 = &mut (*_3)
++    storage_dead(_5)
++    storage_dead(_4)
++    storage_dead(_3)
++    return
++}
++
++// Full name: test_crate::write_sum
++pub fn write_sum<'_0>(v_1: &'_0 mut [u32; 4 : usize], i_2: usize, a_3: u32, b_4: u32)
++{
++    let _0: (); // return
++    let v_1: &'1 mut [u32; 4 : usize]; // arg #1
++    let i_2: usize; // arg #2
++    let a_3: u32; // arg #3
++    let b_4: u32; // arg #4
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: u32; // anonymous local
++    let _8: &'3 mut u32; // anonymous local
++    let _9: &'4 mut [u32; 4 : usize]; // anonymous local
++    let _10: usize; // anonymous local
++
++    storage_live(_7)
++    _0 = ()
++    storage_live(_5)
++    _5 = copy a_3
++    storage_live(_6)
++    _6 = copy b_4
++    _7 = copy _5 panic.+ copy _6
++    storage_live(_8)
++    storage_live(_9)
++    _9 = &two-phase-mut (*v_1)
++    storage_live(_10)
++    _10 = copy i_2
++    _8 = slot<'6>(move _9, move _10)
++    storage_dead(_10)
++    storage_dead(_9)
++    (*_8) = move _7
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(_8)
++    _0 = ()
++    return
++}
++
++// Full name: test_crate::Cells
++pub struct Cells {
++  [u32; 4 : usize],
++}
++
++// Full name: test_crate::{impl Index<usize, u32> for Cells}::index
++pub fn {impl Index<usize, u32> for Cells}::index<'_0>(self_1: &'_0 Cells, i_2: usize) -> &'_0 u32
++{
++    let _0: &'1 u32; // return
++    let self_1: &'3 Cells; // arg #1
++    let i_2: usize; // arg #2
++    let _3: &'4 u32; // anonymous local
++    let _4: usize; // anonymous local
++    let _5: &'_ [u32; 4 : usize]; // anonymous local
++    let _6: &'_ u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_4)
++    _4 = copy i_2
++    storage_live(_5)
++    _5 = &((*self_1)).0
++    storage_live(_6)
++    _6 = @ArrayIndexShared<'_, u32, 4 : usize>(move _5, copy _4)
++    _3 = &(*_6)
++    _0 = &(*_3)
++    storage_dead(_4)
++    storage_dead(_3)
++    return
++}
++
++// Full name: test_crate::{impl Index<usize, u32> for Cells}
++impl Index<usize, u32> for Cells {
++    fn index<'_0_1> = {impl Index<usize, u32> for Cells}::index<'_0_1>
++    vtable: {impl Index<usize, u32> for Cells}::{vtable}
++}
++
++// Full name: test_crate::{impl IndexMut<usize, u32> for Cells}::index_mut
++pub fn {impl IndexMut<usize, u32> for Cells}::index_mut<'_0>(self_1: &'_0 mut Cells, i_2: usize) -> &'_0 mut u32
++{
++    let _0: &'1 mut u32; // return
++    let self_1: &'3 mut Cells; // arg #1
++    let i_2: usize; // arg #2
++    let _3: &'4 mut u32; // anonymous local
++    let _4: &'5 mut u32; // anonymous local
++    let _5: usize; // anonymous local
++    let _6: &'_ mut [u32; 4 : usize]; // anonymous local
++    let _7: &'_ mut u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = copy i_2
++    storage_live(_6)
++    _6 = &mut ((*self_1)).0
++    storage_live(_7)
++    _7 = @ArrayIndexMut<'_, u32, 4 : usize>(move _6, copy _5)
++    _4 = &mut (*_7)
++    _3 = &mut (*_4)
++    _0 = &mut (*_3)
++    storage_dead(_5)
++    storage_dead(_4)
++    storage_dead(_3)
++    return
++}
++
++// Full name: test_crate::{impl IndexMut<usize, u32> for Cells}
++impl IndexMut<usize, u32> for Cells {
++    parent_clause0 = {impl Index<usize, u32> for Cells}
++    fn index_mut<'_0_1> = {impl IndexMut<usize, u32> for Cells}::index_mut<'_0_1>
++    vtable: {impl IndexMut<usize, u32> for Cells}::{vtable}
++}
++
++// Full name: test_crate::add_into
++pub fn add_into<'_0>(c_1: &'_0 mut Cells, i_2: usize, a_3: u32, b_4: u32)
++{
++    let _0: (); // return
++    let c_1: &'1 mut Cells; // arg #1
++    let i_2: usize; // arg #2
++    let a_3: u32; // arg #3
++    let b_4: u32; // arg #4
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: u32; // anonymous local
++    let _8: u32; // anonymous local
++    let _9: u32; // anonymous local
++    let _10: u32; // anonymous local
++    let _11: &'3 mut u32; // anonymous local
++    let _12: &'4 mut Cells; // anonymous local
++    let _13: usize; // anonymous local
++
++    storage_live(_8)
++    storage_live(_10)
++    _0 = ()
++    storage_live(_5)
++    storage_live(_6)
++    _6 = copy a_3
++    storage_live(_7)
++    _7 = copy b_4
++    _8 = copy _6 panic.* copy _7
++    _5 = move _8
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_live(_9)
++    _9 = copy a_3
++    _10 = copy _5 panic.+ copy _9
++    storage_live(_11)
++    storage_live(_12)
++    _12 = &mut (*c_1)
++    storage_live(_13)
++    _13 = copy i_2
++    _11 = {impl IndexMut<usize, u32> for Cells}::index_mut<'6>(move _12, move _13)
++    storage_dead(_13)
++    storage_dead(_12)
++    (*_11) = move _10
++    storage_dead(_9)
++    storage_dead(_5)
++    storage_dead(_11)
++    _0 = ()
++    return
++}
++
++// Full name: test_crate::same_block
++pub fn same_block(a_1: u32, b_2: u32) -> u32
++{
++    let _0: u32; // return
++    let a_1: u32; // arg #1
++    let b_2: u32; // arg #2
++    let s_3: u32; // local
++    let _4: u32; // anonymous local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++
++    storage_live(_6)
++    storage_live(s_3)
++    storage_live(_4)
++    _4 = copy a_1
++    storage_live(_5)
++    _5 = copy b_2
++    _6 = copy _4 panic.- copy _5
++    s_3 = move _6
++    storage_dead(_5)
++    storage_dead(_4)
++    _0 = copy s_3
++    storage_dead(s_3)
++    return
++}
++
++
++
+diff --git a/tests/ui/checked-op-cross-block.rs b/tests/ui/checked-op-cross-block.rs
+new file mode 100644
+index 0000000..38d31d6
+--- /dev/null
++++ b/tests/ui/checked-op-cross-block.rs
+@@ -0,0 +1,41 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas
++//! The result of a checked operation used in a later block. An assignment evaluates its value
++//! before its place, so in `*slot(v, i) = a + b` and `c[i] = a + b` (an overloaded `IndexMut`)
++//! the sum `r := a checked.+ b; assert(!r.1)` is computed before the call that computes the
++//! place, and its use `r.0` lives in the block after that call. Rewriting the sum into
++//! `r := a panic.+ b` changes the type of `r` to `u32`, so that use must become `r` too.
++use std::ops::{Index, IndexMut};
++
++fn slot(v: &mut [u32; 4], i: usize) -> &mut u32 {
++    &mut v[i]
++}
++
++pub fn write_sum(v: &mut [u32; 4], i: usize, a: u32, b: u32) {
++    *slot(v, i) = a + b;
++}
++
++pub struct Cells([u32; 4]);
++
++impl Index<usize> for Cells {
++    type Output = u32;
++    fn index(&self, i: usize) -> &u32 {
++        &self.0[i]
++    }
++}
++
++impl IndexMut<usize> for Cells {
++    fn index_mut(&mut self, i: usize) -> &mut u32 {
++        &mut self.0[i]
++    }
++}
++
++pub fn add_into(c: &mut Cells, i: usize, a: u32, b: u32) {
++    c[i] = a * b + a;
++}
++
++/// The same block: `r.0` is used right after the assert.
++pub fn same_block(a: u32, b: u32) -> u32 {
++    let s = a - b;
++    s
++}

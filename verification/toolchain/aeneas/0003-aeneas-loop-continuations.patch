@@ -1,0 +1,2803 @@
+# aeneas integration step 3 after cba11f3beb: commit aed1f6c6442d7f3db4f2d559392938eb01563529
+# first parent 77908021a3a1b8a58e4cc65e6608367d5ef6f658
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# aeneas-loop-continuations
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 41a38cd..e0b23c5 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -45,12 +45,20 @@ let erase_body_regions (crate : crate) (f : fun_decl) : fun_decl =
+ 
+   let erase_visitor =
+     object
+-      inherit [_] map_statement
++      inherit [_] map_statement as super
+ 
+       method! visit_fn_operand _ x =
+         (* Do not erase the use of body regions inside function operands *)
+         x
+ 
++      method! visit_constant_expr env cv =
++        match cv.kind with
++        | CFnDef _ ->
++            (* Function-item types bind call lifetimes, not local storage.
++               Erasing these regions would sever their declared binders. *)
++            cv
++        | _ -> super#visit_constant_expr env cv
++
+       method! visit_RBody _ _ = RErased
+       method! visit_RVar _ _ = RErased
+       method! visit_RStatic _ = RErased
+@@ -368,285 +376,222 @@ let update_array_default (crate : crate) : crate =
+       in
+       visitor#visit_crate None crate
+ 
+-exception FoundStatement of statement
+-
+-(** Check that loops:
+-    - do not contain early returns
+-    - do not continue/break to outer loops
++type loop_continuation = {
++  after_loop : statement list;
++  outer_loops : loop_continuation list;
++  returns_to_function : bool;
++}
+ 
+-    We also attempt to update the loops so that they have the proper shape (for
+-    instance, if a loop has returns but no breaks, we replace the returns with
+-    breaks, and move the returns after the loop).
++(** Normalize function-returning loop exits before symbolic joins.
+ 
+-    We do the following transformations:
+-
+-    # Transformation 1:
+-    {[
+-      loop {
+-        if e {
+-          return;
+-        } else {
+-          continue;
+-        }
+-      }
+-
+-        ~~>
+-
+-      loop {
+-        if e {
+-          break;
+-        } else {
+-          continue;
+-        }
+-      };
+-      return;
+-    ]}
+-
+-    # Transformation 2:
+-    {[
+-      loop {
+-        if e0 {
+-          st0;
+-          return;
+-        } else if e1 {
+-          st1;
+-          break;
+-        } else {
+-          continue;
+-        }
+-      }
+-      st2;
+-      return;
+-
+-        ~~>
+-
+-      loop {
+-        if e0 {
+-          st0;
+-          break;
+-        } else if e1 {
+-          st1;
+-          st2;
+-          break;
+-        } else {
+-          continue;
+-        }
+-      }
+-      return;
+-    ]}
+-
+-    # Transformation 3:
+-    {[
+-      loop {
+-        if e0 {
+-          st0;
+-          return;
+-        } else if e1 {
+-          st1;
+-          break;
+-        } else {
+-          continue;
+-        }
+-      }
+-      st2;
+-      panic;
+-
+-        ~~>
++    Copy the normal continuation only onto the breaks that execute it, then
++    replace completed returns with a local break followed by a return outside
++    the loop. This keeps return values and scoped locals on their original
++    paths, including when one serial loop is nested in another's continuation.
+ 
+-      loop {
+-        if e0 {
+-          st0;
+-          break;
+-        } else if e1 {
+-          st1;
+-          st2;
+-          panic;
+-        } else {
+-          continue;
+-        }
+-      }
+-      return;
+-    ]} *)
++    A continuation which resumes an outer iteration, and a nonlocal continue,
++    remain unsupported. Do not merge them with function-returning paths. *)
+ let update_loops (crate : crate) (f : fun_decl) : fun_decl =
+   let f0 = f in
+   let span = f.item_meta.span in
++  let enclosing loops i =
++    [%cassert] span
++      (i >= 0 && i < List.length loops)
++      "A loop exit refers to a missing enclosing loop";
++    List.nth loops i
++  in
++  let has_break ?(nonlocal = false) (body : block) =
++    let visitor =
++      object (self)
++        inherit [_] iter_statement
++        method! visit_Loop depth body = self#visit_block (depth + 1) body
++
++        method! visit_Break depth i =
++          if i = depth && ((not nonlocal) || depth > 0) then raise Found
++      end
++    in
++    try
++      visitor#visit_block 0 body;
++      false
++    with Found -> true
++  in
++  let has_function_exit loops (body : block) =
++    let visitor =
++      object (self)
++        inherit [_] iter_statement
++        method! visit_Loop depth body = self#visit_block (depth + 1) body
++        method! visit_Return _ = raise Found
++
++        method! visit_Break depth i =
++          if i > depth && (enclosing loops (i - depth - 1)).returns_to_function
++          then raise Found
++      end
++    in
++    try
++      visitor#visit_block 0 body;
++      false
++    with Found -> true
++  in
++  let needs_continuation =
++    let visitor =
++      object
++        inherit [_] iter_statement
+ 
+-  let visitor =
+-    object (self)
+-      inherit [_] map_statement as super
+-
+-      (* [after]: the list of statements coming *after* this one in this block.
+-
+-         We return:
+-         - the list of statements resulting from updating the current statement
+-         - the list of statements to put after and that are yet to be updated
+-           (the reason is that we might have moved some of those statements
+-           inside the current statement).
+-      *)
+-      method update_statement (depth : int) (st : statement)
+-          (after : statement list) : statement list * statement list =
++        method! visit_Loop loops body =
++          if has_function_exit loops body || has_break ~nonlocal:true body then
++            raise Found
++      end
++    in
++    fun loops st ->
++      try
++        visitor#visit_statement loops st;
++        false
++      with Found -> true
++  in
++  (* A copied continuation must finish the function, not resume an enclosing
++     iteration. Following breaks decreases the source loop-stack depth. *)
++  let rec completes_function loops (statements : statement list) =
++    match statements with
++    | [] -> false
++    | st :: after -> (
+         match st.kind with
+-        | Loop loop -> (
+-            (* Recursively update the loop.
+-
+-               Note that doing this will raise an exception if we find a loop with
+-               an early return. *)
+-            try ([ { st with kind = self#visit_Loop (depth + 1) loop } ], after)
+-            with FoundStatement return_st ->
+-              (* An exception was raised: it means we found a return in the loop: attempt
+-                 to replace it with a break.
+-
+-                 There are 2 cases:
+-                 - either the loop does not contain any break, in which case we
+-                   can simply replace the return with a break, and move the return
+-                   after the loop (this is transformation 1 above)
+-                 - or there is already a break in the loop: we can apply transformation 2
+-                   (resp., 3) if the statements after the loop end with a return (resp., a panic)
+-              *)
+-              let block_has_no_breaks (b : block) : bool =
+-                let visitor =
+-                  object
+-                    inherit [_] iter_statement
+-                    method! visit_Break _ _ = raise Found
+-                  end
+-                in
+-                try
+-                  visitor#visit_block () b;
+-                  true
+-                with Found -> false
+-              in
+-              if block_has_no_breaks loop then (* Transformation 1 *)
+-                let block_replace (b : block) : block =
+-                  let visitor =
+-                    object
+-                      inherit [_] map_statement
+-                      method! visit_Loop i loop = super#visit_Loop (i + 1) loop
+-
+-                      method! visit_Return i =
+-                        [%sanity_check] span (i = 0);
+-                        (* Replace the return with a break *)
+-                        Break i
+-                    end
+-                  in
+-                  visitor#visit_block 0 b
+-                in
+-                let loop = block_replace loop in
+-                let loop : statement = { st with kind = Loop loop } in
+-                let loop = super#visit_statement depth loop in
+-                let return : statement =
+-                  {
+-                    span = st.span;
+-                    statement_id =
+-                      StatementId.zero (* we'll refresh this later *);
+-                    kind = Return;
+-                    comments_before = [];
+-                  }
+-                in
+-                ([ loop; return ], after)
+-              else
+-                (* Transformations 2 and 3 *)
+-                (* Check if the statements after the loop end with a return or a panic.
+-                   We output the statements with which to replace breaks.
+-                *)
+-                let rec decompose_after (after : statement list) :
+-                    statement list =
+-                  match after with
+-                  | [] ->
+-                      [%craise] span
+-                        "Early returns inside of loops are not supported yet"
+-                  | st :: after -> (
+-                      match st.kind with
+-                      | Return -> [ { st with kind = Break 0 } ]
+-                      | Abort _ -> [ st ]
+-                      | _ -> st :: decompose_after after)
+-                in
+-                let after = decompose_after after in
+-                let replace (st : statement) : statement list =
+-                  match st.kind with
+-                  | Return ->
+-                      (* Replace the return with a break *)
+-                      [ { st with kind = Break 0 } ]
+-                  | Break i ->
+-                      (* Move the statements [after] before the break *)
+-                      [%cassert] span (i = 0)
+-                        "Breaks to outer loops are not supported yet";
+-                      after
+-                  | _ -> [ st ]
+-                in
+-
+-                let block_visitor =
+-                  object (self)
+-                    inherit [_] map_statement_base as super
+-
+-                    method! visit_Loop depth loop =
+-                      super#visit_Loop (depth + 1) loop
+-
+-                    method! visit_block depth b =
+-                      (* Only replace if the depth is 0 (it means we haven't dived
+-                         into an inner loop) *)
+-                      if depth = 0 then
+-                        let update st =
+-                          replace (self#visit_statement depth st)
+-                        in
+-                        {
+-                          b with
+-                          statements =
+-                            List.flatten (List.map update b.statements);
+-                        }
+-                      else b
+-                  end
+-                in
+-
+-                let loop = block_visitor#visit_block 0 loop in
+-                let loop : statement = { st with kind = Loop loop } in
+-                let loop = super#visit_statement depth loop in
+-                ([ loop; return_st ], []))
+-        | _ -> ([ self#visit_statement depth st ], after)
+-
+-      method! visit_block depth (block : block) : block =
+-        let rec update (stl : statement list) : statement list =
+-          match stl with
+-          | [] -> []
+-          | st :: stl ->
+-              let stl0, stl1 = self#update_statement depth st stl in
+-              stl0 @ update stl1
+-        in
+-        { block with statements = update block.statements }
+-
+-      method! visit_Break depth i =
+-        [%cassert] span (i = 0) "Breaks to outer loops are not supported yet";
+-        super#visit_Break depth i
+-
+-      method! visit_Continue depth i =
+-        [%cassert] span (i = 0) "Continue to outer loops are not supported yet";
+-        super#visit_Continue depth i
+-
+-      method! visit_statement depth st =
++        | Return | Abort _ -> true
++        | Continue _ -> false
++        | Break i ->
++            let target = enclosing loops i in
++            target.returns_to_function
++            && completes_function target.outer_loops target.after_loop
++        | Switch switch -> (
++            let completes body =
++              completes_function loops (body.statements @ after)
++            in
++            match switch with
++            | If (_, left, right) -> completes left && completes right
++            | SwitchInt (_, _, branches, otherwise) ->
++                List.for_all (fun (_, body) -> completes body) branches
++                && completes otherwise
++            | Match (_, branches, otherwise) ->
++                List.for_all (fun (_, body) -> completes body) branches
++                && Option.fold ~none:true ~some:completes otherwise)
++        | _ -> completes_function loops after)
++  in
++  let mk_statement span kind : statement =
++    { span; statement_id = StatementId.zero; kind; comments_before = [] }
++  in
++  (* Continuations are copied only onto edges which would have executed them.
++     Every exit of a returning loop has therefore completed its return value.
++     In particular, dead locals on a return edge are never joined with locals
++     needed by a normal continuation. *)
++  let rec normalize loops return_kind (statements : statement list) =
++    match statements with
++    | [] -> []
++    | st :: after -> (
+         match st.kind with
+-        | Return ->
+-            [%cassert] span (depth <= 1)
+-              "Returns inside of nested loops are not supported yet";
+-            (* If we are inside a loop we need to get rid of the return.
+-
+-               Note that raising an exception containing the full return
+-               statement allows us to use its span when moving it after the loop. *)
+-            if depth = 1 then raise (FoundStatement st) else st
+-        | _ -> super#visit_statement depth st
+-
+-      method! visit_Return _ =
+-        (* The Return case should have been caught by the [visit_statement] method *)
+-        [%internal_error] span
+-    end
++        | Return -> [ { st with kind = return_kind } ]
++        | Abort _ -> [ st ]
++        | Continue i ->
++            [%cassert] st.span (i = 0)
++              "Continue to outer loops are not supported yet";
++            [ st ]
++        | Break i ->
++            let target = enclosing loops i in
++            if target.returns_to_function then
++              normalize target.outer_loops return_kind target.after_loop
++            else (
++              [%cassert] st.span (i = 0)
++                "Breaks to non-returning outer loops are not supported yet";
++              [ st ])
++        | Switch switch ->
++            (* Only returning loops need an enclosing branch's continuation.
++               Keep other joins to avoid exponential duplication of independent
++               conditionals preceding a returning loop. *)
++            let distribute = needs_continuation loops st in
++            let branch (body : block) =
++              {
++                body with
++                statements =
++                  normalize loops return_kind
++                    (if distribute then body.statements @ after
++                     else body.statements);
++              }
++            in
++            let switch =
++              match switch with
++              | If (op, left, right) -> If (op, branch left, branch right)
++              | SwitchInt (op, ty, branches, otherwise) ->
++                  SwitchInt
++                    ( op,
++                      ty,
++                      List.map (fun (p, b) -> (p, branch b)) branches,
++                      branch otherwise )
++              | Match (place, branches, otherwise) ->
++                  Match
++                    ( place,
++                      List.map (fun (p, b) -> (p, branch b)) branches,
++                      Option.map branch otherwise )
++            in
++            { st with kind = Switch switch }
++            :: (if distribute then [] else normalize loops return_kind after)
++        | Loop body ->
++            let returns_to_function =
++              has_function_exit loops body
++              || has_break ~nonlocal:true body
++                 && completes_function loops after
++            in
++            let current =
++              { after_loop = after; outer_loops = loops; returns_to_function }
++            in
++            if returns_to_function then (
++              [%cassert] st.span
++                ((not (has_break body)) || completes_function loops after)
++                "Early returns from a loop whose continuation resumes an outer \
++                 iteration are not supported yet";
++              let body =
++                {
++                  body with
++                  statements =
++                    normalize (current :: loops) (Break 0) body.statements;
++                }
++              in
++              [ { st with kind = Loop body }; mk_statement st.span return_kind ])
++            else
++              let body =
++                {
++                  body with
++                  statements =
++                    normalize (current :: loops) return_kind body.statements;
++                }
++              in
++              { st with kind = Loop body } :: normalize loops return_kind after
++        | _ -> st :: normalize loops return_kind after)
++  in
++  let needs_normalization (body : block) =
++    let visitor =
++      object (self)
++        inherit [_] iter_statement
++        method! visit_Loop depth body = self#visit_block (depth + 1) body
++        method! visit_Return depth = if depth > 0 then raise Found
++        method! visit_Break _ i = if i > 0 then raise Found
++        method! visit_Continue _ i = if i > 0 then raise Found
++      end
++    in
++    try
++      visitor#visit_block 0 body;
++      false
++    with Found -> true
+   in
+-
+-  (* Map  *)
+   let body =
+     match f.body with
+-    | StructuredBody body ->
+-        StructuredBody { body with body = visitor#visit_block 0 body.body }
++    | StructuredBody body when needs_normalization body.body ->
++        let block = body.body in
++        StructuredBody
++          {
++            body with
++            body =
++              { block with statements = normalize [] Return block.statements };
++          }
+     | other -> other
+   in
+-
+   let f : fun_decl = { f with body } in
+   [%ldebug
+     let env = Print.crate_to_fmt_env crate in
+@@ -682,10 +627,28 @@ let remove_useless_joins (crate : crate) (f : fun_decl) : fun_decl =
+         | Nop | StorageLive _ | StorageDead _ | PlaceMention _ | Drop _ ->
+             (can_inline, st :: ls)
+         | Abort _ | Return | Break _ | Continue _ -> (true, [ st ])
+-        | Switch switch ->
++        | Switch (Match (_, branches, Some otherwise))
++          when otherwise.statements = []
++               && List.for_all (fun (_, b) -> b.statements = []) branches ->
++            (* Drop elaboration can leave effect-free matches after moving an
++               enum's payload. Remove them before inlining continuations: a
++               preceding join need not retain the moved enum's discriminant.
++               A zero-branch match without a default is not fallthrough. *)
++            (can_inline, ls)
++        | Switch switch -> (
+             [%ldebug "Switch: can_inline: " ^ Print.bool_to_string can_inline];
+-            (* Attempt to inline inside the body *)
+-            let to_inline, ls = if can_inline then (ls, []) else ([], ls) in
++            (* Keep an adjacent same-place cleanup under the known
++               discriminant, without duplicating the unrelated continuation. *)
++            let to_inline, ls =
++              if can_inline then (ls, [])
++              else
++                match (switch, ls) with
++                | ( Match (p, _, _),
++                    ({ kind = Switch (Match (next, _, _)); _ } as cleanup)
++                    :: rest )
++                  when p = next -> ([ cleanup ], rest)
++                | _ -> ([], ls)
++            in
+             let update b = snd (update_block to_inline b) in
+             let switch =
+               match switch with
+@@ -703,11 +666,35 @@ let remove_useless_joins (crate : crate) (f : fun_decl) : fun_decl =
+                   let otherwise = Option.map update otherwise in
+                   Match (scrut, branches, otherwise)
+             in
+-            let ls = { st with kind = Switch switch } :: ls in
+-            [%ldebug
+-              "after updating the switch:\n"
+-              ^ Print.list_to_string ~sep:"\n" (statement_to_string crate) ls];
+-            (false, ls)
++            (* Cleanup defaults can already contain an exit. After inlining,
++               identical exits no longer need to inspect the discriminant. *)
++            match switch with
++            | Match
++                ( _,
++                  branches,
++                  Some
++                    {
++                      statements =
++                        [
++                          ({ kind = Abort _ | Return | Break _ | Continue _; _ }
++                           as exit);
++                        ];
++                      _;
++                    } )
++              when List.for_all
++                     (fun (_, b) ->
++                       match b.statements with
++                       | [ st ] -> st.kind = exit.kind
++                       | _ -> false)
++                     branches -> (true, [ exit ])
++            | _ ->
++                let ls = { st with kind = Switch switch } :: ls in
++                [%ldebug
++                  "after updating the switch:\n"
++                  ^ Print.list_to_string ~sep:"\n"
++                      (statement_to_string crate)
++                      ls];
++                (false, ls))
+         | Loop loop ->
+             (* Update the inside of the loop *)
+             (false, { st with kind = Loop (snd (update_block [] loop)) } :: ls)
+@@ -872,160 +859,6 @@ let filter_type_aliases (crate : crate) : crate =
+         crate.declarations;
+   }
+ 
+-(** Whenever we write a string literal in Rust, rustc actually introduces a
+-    constant of type [&str]. Generally speaking, because [str] is unsized, it
+-    doesn't make sense to manipulate values of type [str] directly. But in the
+-    context of Aeneas, it is reasonable to decompose those literals into: a
+-    string stored in a local variable, then a borrow of this variable.
+-
+-    Remark: the new statements all have the id 0: this pass requires to refresh
+-    the ids later. *)
+-let decompose_str_borrows (_ : crate) (f : fun_decl) : fun_decl =
+-  (* Map  *)
+-  let body =
+-    match f.body with
+-    | StructuredBody body ->
+-        let new_locals = ref [] in
+-        let _, gen =
+-          LocalId.mk_stateful_generator_starting_at_id
+-            (LocalId.of_int (List.length body.locals.locals))
+-        in
+-        let fresh_local ty =
+-          let local =
+-            {
+-              index = gen ();
+-              local_ty = ty;
+-              name = None;
+-              span = f.item_meta.span;
+-            }
+-          in
+-          new_locals := local :: !new_locals;
+-          local.index
+-        in
+-
+-        (* Function to decompose a constant literal *)
+-        let decompose_rvalue (span : Meta.span) (lv : place) (rv : rvalue) :
+-            statement list =
+-          let new_statements = ref [] in
+-
+-          (* Visit the rvalue *)
+-          let visitor =
+-            object
+-              inherit [_] map_statement as super
+-
+-              (* We have to visit all the constant operands.
+-                 As we might need to replace them with borrows, while borrows
+-                 are rvalues (i.e., not operands) we have to introduce two
+-                 intermediate statements: the string initialization, then
+-                 the borrow, that we can finally move.
+-              *)
+-              method! visit_Constant env (cv : constant_expr) =
+-                match (cv.kind, cv.ty) with
+-                | ( CLiteral (VStr str),
+-                    TRef
+-                      (_, (TAdt { id = TBuiltin TStr; _ } as str_ty), ref_kind)
+-                  ) ->
+-                    (* We need to introduce intermediate assignments *)
+-                    (* First the string initialization *)
+-                    let local_id =
+-                      let local_id = fresh_local str_ty in
+-                      let new_cv : constant_expr =
+-                        { kind = CLiteral (VStr str); ty = str_ty }
+-                      in
+-                      let st =
+-                        {
+-                          span;
+-                          statement_id = StatementId.zero;
+-                          kind =
+-                            Assign
+-                              ( { kind = PlaceLocal local_id; ty = str_ty },
+-                                Use (Constant new_cv) );
+-                          comments_before = [];
+-                        }
+-                      in
+-                      new_statements := st :: !new_statements;
+-                      local_id
+-                    in
+-                    let str_len =
+-                      Constant
+-                        {
+-                          kind =
+-                            CLiteral
+-                              (VScalar
+-                                 (UnsignedScalar
+-                                    (Usize, Z.of_int (String.length str))));
+-                          ty = TLiteral (TUInt Usize);
+-                        }
+-                    in
+-                    (* Then the borrow *)
+-                    let local_id =
+-                      let nlocal_id = fresh_local cv.ty in
+-                      let bkind =
+-                        match ref_kind with
+-                        | RMut -> BMut
+-                        | RShared -> BShared
+-                      in
+-                      let rv =
+-                        RvRef
+-                          ( { kind = PlaceLocal local_id; ty = str_ty },
+-                            bkind,
+-                            str_len )
+-                      in
+-                      let lv = { kind = PlaceLocal nlocal_id; ty = cv.ty } in
+-                      let st =
+-                        {
+-                          span;
+-                          statement_id = StatementId.zero;
+-                          kind = Assign (lv, rv);
+-                          comments_before = [];
+-                        }
+-                      in
+-                      new_statements := st :: !new_statements;
+-                      nlocal_id
+-                    in
+-                    (* Finally we can move the value *)
+-                    Move { kind = PlaceLocal local_id; ty = cv.ty }
+-                | _ -> super#visit_Constant env cv
+-            end
+-          in
+-
+-          let rv = visitor#visit_rvalue () rv in
+-
+-          (* Construct the sequence *)
+-          let assign =
+-            {
+-              span;
+-              statement_id = StatementId.zero;
+-              kind = Assign (lv, rv);
+-              comments_before = [];
+-            }
+-          in
+-          (* Note that the new statements are in reverse order *)
+-          let statements = assign :: !new_statements in
+-          List.rev statements
+-        in
+-
+-        (* Visit all the statements and decompose the literals *)
+-        let decompose_in_statement (st : statement) : statement list =
+-          match st.kind with
+-          | Assign (lv, rv) -> decompose_rvalue st.span lv rv
+-          | _ -> [ st ]
+-        in
+-        let body_body = map_statement decompose_in_statement body.body in
+-        StructuredBody
+-          {
+-            body with
+-            body = body_body;
+-            locals =
+-              {
+-                body.locals with
+-                locals = body.locals.locals @ List.rev !new_locals;
+-              };
+-          }
+-    | other -> other
+-  in
+-  { f with body }
+-
+ (** Refresh the statement ids to make sure they are unique *)
+ let refresh_statement_ids (_ : crate) (f : fun_decl) : fun_decl =
+   (* Map  *)
+@@ -1549,7 +1382,21 @@ let remove_vtables (crate : crate) : crate =
+       crate.trait_decls
+   in
+ 
+-  { crate with declarations; type_decls; global_decls; fun_decls; trait_decls }
++  let trait_impls =
++    TraitImplId.Map.map
++      (fun (d : trait_impl) -> { d with vtable = None })
++      crate.trait_impls
++  in
++
++  {
++    crate with
++    declarations;
++    type_decls;
++    global_decls;
++    fun_decls;
++    trait_decls;
++    trait_impls;
++  }
+ 
+ let name_is_valid (n : string) : bool =
+   let is_valid_char c =
+@@ -1603,6 +1450,7 @@ let rename_type_vars (crate : crate) : crate =
+       an assignment)
+     - the blanket [TryInto::try_into] implementation (we replace it with a call
+       to the [try_from] method of the required [TryFrom] clause)
++    - unary reference identities, verified from their complete Rust bodies
+ 
+     TODO: remove once we have partial monomorphization *)
+ let simplify_trait_calls (crate : crate) : crate =
+@@ -1628,12 +1476,86 @@ let simplify_trait_calls (crate : crate) : crate =
+   in
+   let is_blanket_into_iter = match_pattern into_iter_pat in
+   let is_blanket_try_into = match_pattern try_into_pat in
++  let reference_identities =
++    FunDeclId.Map.fold
++      (fun id (f : fun_decl) ids ->
++        match (f.signature.inputs, f.signature.output, f.body) with
++        | ( [ TRef _ ],
++            TRef _,
++            StructuredBody
++              {
++                locals = { arg_count = 1; _ };
++                body =
++                  {
++                    statements =
++                      [
++                        {
++                          kind =
++                            Assign
++                              ( { kind = PlaceLocal dest; ty },
++                                Use (Move input | Copy input) );
++                          _;
++                        };
++                        { kind = Return; _ };
++                      ];
++                    _;
++                  };
++                _;
++              } )
++          when dest = LocalId.zero
++               && input.kind = PlaceLocal (LocalId.of_int 1)
++               && ty = input.ty -> FunDeclId.Set.add id ids
++        | _ -> ids)
++      crate.fun_decls FunDeclId.Set.empty
++  in
++  let identity_defaults =
++    FunDeclId.Set.filter
++      (fun id ->
++        let f = FunDeclId.Map.find id crate.fun_decls in
++        let provided =
++          match f.src with
++          | TraitDeclItem (tr, name, true) -> Some (tr.id, name)
++          | TraitImplItem (_, tr, name, true) -> (
++              let decl = TraitDeclId.Map.find tr.id crate.trait_decls in
++              let method_decl =
++                List.find
++                  (fun (method_decl : trait_method binder) ->
++                    method_decl.binder_value.name = name)
++                  decl.methods
++              in
++              let source =
++                FunDeclId.Map.find method_decl.binder_value.item.id
++                  crate.fun_decls
++              in
++              match source.src with
++              | TraitDeclItem (_, _, true) -> Some (tr.id, name)
++              | _ -> None)
++          | _ -> None
++        in
++        match provided with
++        | None -> false
++        | Some (id, name) -> (
++            let decl = TraitDeclId.Map.find id crate.trait_decls in
++            match
++              ExtractBuiltin.find_trait_decl_info mctx decl.item_meta.name
++            with
++            | Some info -> not (List.mem_assoc name info.methods)
++            | None -> false))
++      reference_identities
++  in
+ 
+   let try_replace_call (super_visit : unit -> statement_kind) (span : Meta.span)
+       (call : call) : statement_kind =
+     match call.func with
+     | FnOpRegular { kind = FunId (FRegular fid); generics } -> (
+         match FunDeclId.Map.find_opt fid crate.fun_decls with
++        | Some _ when FunDeclId.Set.mem fid reference_identities -> (
++            (* The entire body only returns its single reference argument.
++               Inline the real move instead of inventing a nested-call state
++               boundary. Dynamic dispatch and non-identity overrides remain. *)
++            match call.args with
++            | [ arg ] -> Assign (call.dest, Use arg)
++            | _ -> [%internal_error] span)
+         | Some d
+           when List.length generics.trait_refs > 0 && List.length call.args > 0
+           ->
+@@ -1725,90 +1647,148 @@ let simplify_trait_calls (crate : crate) : crate =
+   in
+   let crate = visitor#visit_crate None crate in
+ 
+-  (* Re-compute the set of used trait impls and fun declarations: by simplifying
+-     the calls we may have filtered some annoying ones
+-
+-     Remark: the way we explore the crate is slightly approximative below.
+-     We should improve it.
+-  *)
+-  let used_impls = ref TraitImplId.Set.empty in
+-  let impls_to_explore = ref [] in
+-  let used_funs = ref FunDeclId.Set.empty in
+-
+-  (* First explore the transparent functions *)
++  (* Imported implementations replace Rust bodies, including their private
++     representation dependencies. Compute reachability after that cutover,
++     rather than retaining dependencies from bodies which are never exported. *)
++  let mctx = NameMatcher.ctx_from_crate crate in
++  let has_model models name =
++    Config.if_backend
++      (fun () -> ExtractBuiltin.NameMatcherMap.mem mctx name (models ()))
++      false
++  in
++  let is_modeled_function (f : fun_decl) =
++    match f.is_global_initializer with
++    | Some id ->
++        let global = GlobalDeclId.Map.find id crate.global_decls in
++        has_model ExtractBuiltin.builtin_globals_map global.item_meta.name
++    | None -> has_model ExtractBuiltin.builtin_funs_map f.item_meta.name
++  in
++  let fun_decls =
++    FunDeclId.Map.map
++      (fun (f : fun_decl) ->
++        if LlbcAstUtils.body_is_known f.body && is_modeled_function f then
++          { f with body = OpaqueBody }
++        else f)
++      crate.fun_decls
++  in
++  let crate = { crate with fun_decls } in
++  let declared =
++    List.fold_left
++      (fun declared group ->
++        List.fold_left
++          (fun declared id -> AnyDeclIdSet.add id declared)
++          declared
++          (declaration_group_to_list group))
++      AnyDeclIdSet.empty crate.declarations
++  in
++  let used = ref AnyDeclIdSet.empty in
++  let pending = ref [] in
++  let require id =
++    let is_identity =
++      match id with
++      | IdFun id -> FunDeclId.Set.mem id identity_defaults
++      | _ -> false
++    in
++    if
++      (not is_identity)
++      && AnyDeclIdSet.mem id declared
++      && not (AnyDeclIdSet.mem id !used)
++    then (
++      used := AnyDeclIdSet.add id !used;
++      pending := id :: !pending)
++  in
++  let visited_types = TyCache.create 16 in
+   let visitor =
+     object
+-      inherit [_] iter_statement
+-
+-      method! visit_trait_impl_id _ id =
+-        if not (TraitImplId.Set.mem id !used_impls) then (
+-          used_impls := TraitImplId.Set.add id !used_impls;
+-          impls_to_explore := id :: !impls_to_explore)
+-
+-      method! visit_fun_decl_id _ id =
+-        used_funs := FunDeclId.Set.add id !used_funs
++      inherit [_] iter_crate as super
++
++      method! visit_ty env ty =
++        if not (TyCache.mem visited_types ty) then (
++          TyCache.add visited_types ty ();
++          super#visit_ty env ty)
++
++      method! visit_item_meta _ _ = ()
++      method! visit_type_decl_id _ id = require (IdType id)
++      method! visit_fun_decl_id _ id = require (IdFun id)
++      method! visit_global_decl_id _ id = require (IdGlobal id)
++      method! visit_trait_decl_id _ id = require (IdTraitDecl id)
++      method! visit_trait_impl_id _ id = require (IdTraitImpl id)
+     end
+   in
+-  FunDeclId.Map.iter
+-    (fun _ (f : fun_decl) ->
+-      if f.item_meta.is_local then visitor#visit_fun_decl_id () f.def_id;
+-      match f.body with
+-      | StructuredBody body -> visitor#visit_block () body.body
++  AnyDeclIdSet.iter
++    (fun id ->
++      match LlbcAstUtils.crate_get_item_meta crate id with
++      | Some meta when meta.is_local -> require id
+       | _ -> ())
+-    crate.fun_decls;
+-
+-  GlobalDeclId.Map.iter
+-    (fun _ (d : global_decl) -> visitor#visit_fun_decl_id () d.init)
+-    crate.global_decls;
+-
+-  TraitDeclId.Map.iter
+-    (fun _ (d : trait_decl) ->
+-      List.iter
+-        (fun (d : trait_method binder) ->
+-          visitor#visit_fun_decl_id () d.binder_value.item.id)
+-        d.methods)
+-    crate.trait_decls;
+-
+-  (* Add the local trait impls *)
+-  TraitImplId.Map.iter
+-    (fun _ (d : trait_impl) ->
+-      if d.item_meta.is_local then visitor#visit_trait_impl_id () d.def_id)
+-    crate.trait_impls;
+-
+-  (* Explore the impls *)
+-  while !impls_to_explore <> [] do
+-    let id = List.hd !impls_to_explore in
+-    impls_to_explore := List.tl !impls_to_explore;
+-    match TraitImplId.Map.find_opt id crate.trait_impls with
+-    | None -> ()
+-    | Some impl ->
+-        List.iter (visitor#visit_trait_ref ()) impl.implied_trait_refs;
+-        List.iter
+-          (fun ((_, x) : _ * fun_decl_ref binder) ->
+-            visitor#visit_fun_decl_id () x.binder_value.id)
+-          impl.methods
++    declared;
++  (* Preserve explicitly supplied external-only crates when no local root is
++     available to distinguish their roots from dependencies. *)
++  if AnyDeclIdSet.is_empty !used then AnyDeclIdSet.iter require declared;
++  while !pending <> [] do
++    let id = List.hd !pending in
++    pending := List.tl !pending;
++    match id with
++    | IdFun id ->
++        let f = FunDeclId.Map.find id crate.fun_decls in
++        if is_modeled_function f then (
++          visitor#visit_generic_params () f.generics;
++          visitor#visit_fun_sig () f.signature)
++        else visitor#visit_fun_decl () f
++    | IdType id ->
++        let d = TypeDeclId.Map.find id crate.type_decls in
++        if has_model ExtractBuiltin.builtin_types_map d.item_meta.name then
++          visitor#visit_generic_params () d.generics
++        else visitor#visit_type_decl () d
++    | IdGlobal id ->
++        let d = GlobalDeclId.Map.find id crate.global_decls in
++        require (IdFun d.init);
++        if has_model ExtractBuiltin.builtin_globals_map d.item_meta.name then (
++          visitor#visit_generic_params () d.generics;
++          visitor#visit_ty () d.ty)
++        else visitor#visit_global_decl () d
++    | IdTraitDecl id ->
++        visitor#visit_trait_decl () (TraitDeclId.Map.find id crate.trait_decls)
++    | IdTraitImpl id ->
++        let impl = TraitImplId.Map.find id crate.trait_impls in
++        let decl = TraitDeclId.Map.find impl.impl_trait.id crate.trait_decls in
++        let modeled =
++          Config.if_backend
++            (fun () ->
++              Option.is_some
++                (ExtractBuiltin.find_trait_impl_info mctx decl.item_meta.name
++                   impl.impl_trait.generics))
++            false
++        in
++        if modeled then (
++          visitor#visit_generic_params () impl.generics;
++          visitor#visit_trait_decl_ref () impl.impl_trait;
++          List.iter (visitor#visit_trait_ref ()) impl.implied_trait_refs)
++        else visitor#visit_trait_impl () impl
+   done;
++  let filter =
++    object
++      inherit [_] filter_decl_id
+ 
+-  (* Filter the declaration groups we want to extract *)
+-  let keep_group (gr : declaration_group) : bool =
+-    match gr with
+-    | TraitImplGroup (NonRecGroup id) ->
+-        if TraitImplId.Set.mem id !used_impls then true else false
+-    | TraitImplGroup (RecGroup ids) ->
+-        if List.exists (fun id -> TraitImplId.Set.mem id !used_impls) ids then
+-          true
+-        else false
+-    | FunGroup (NonRecGroup id) ->
+-        if FunDeclId.Set.mem id !used_funs then true else false
+-    | FunGroup (RecGroup ids) ->
+-        if List.exists (fun id -> FunDeclId.Set.mem id !used_funs) ids then true
+-        else false
+-    | _ -> true
+-  in
+-  let declarations = List.filter keep_group crate.declarations in
++      method! visit_type_decl_id _ id =
++        if AnyDeclIdSet.mem (IdType id) !used then Some id else None
+ 
+-  (* *)
+-  { crate with declarations }
++      method! visit_fun_decl_id _ id =
++        if AnyDeclIdSet.mem (IdFun id) !used then Some id else None
++
++      method! visit_global_decl_id _ id =
++        if AnyDeclIdSet.mem (IdGlobal id) !used then Some id else None
++
++      method! visit_trait_decl_id _ id =
++        if AnyDeclIdSet.mem (IdTraitDecl id) !used then Some id else None
++
++      method! visit_trait_impl_id _ id =
++        if AnyDeclIdSet.mem (IdTraitImpl id) !used then Some id else None
++    end
++  in
++  {
++    crate with
++    declarations = filter#visit_declaration_groups () crate.declarations;
++  }
+ 
+ (** Add missing outlives constraints for closure trait implementations.
+ 
+@@ -1871,8 +1851,1388 @@ let fix_closure_lifetimes (crate : crate) (f : fun_decl) : fun_decl =
+           f
+       | _, _ -> f)
+ 
++(** Resolve inherited implementations through real models, whether Charon
++    supplied their body or not. Dictionary fields retain dispatch; fieldless
++    provided methods use their standalone model. Overrides are never eligible.
++*)
++let resolve_modeled_defaults (crate : crate) : crate =
++  if Config.backend () <> Config.Lean then crate
++  else
++    let mctx = NameMatcher.ctx_from_crate crate in
++    let matches pat name =
++      NameMatcher.match_name mctx
++        {
++          map_vars_to_vars = true;
++          match_with_trait_decl_refs =
++            Config.match_patterns_with_trait_decl_refs;
++        }
++        pat name
++    in
++    let modeled_traits =
++      TraitDeclId.Map.filter_map
++        (fun _ (decl : trait_decl) ->
++          ExtractBuiltin.find_trait_decl_info mctx decl.item_meta.name)
++        crate.trait_decls
++    in
++    let defaults =
++      FunDeclId.Map.filter_map
++        (fun _ (f : fun_decl) ->
++          match f.src with
++          | TraitImplItem (impl_ref, trait_ref, name, true) ->
++              let decl = TraitDeclId.Map.find trait_ref.id crate.trait_decls in
++              let through_dictionary =
++                match TraitDeclId.Map.find_opt trait_ref.id modeled_traits with
++                | Some info -> (
++                    match List.assoc_opt name info.methods with
++                    | Some method_info -> method_info.has_default
++                    | None -> false)
++                | None -> false
++              in
++              let standalone_eligible =
++                match TraitDeclId.Map.find_opt trait_ref.id modeled_traits with
++                | Some info -> not (List.mem_assoc name info.methods)
++                | None -> false
++              in
++              let method_decl =
++                List.find
++                  (fun (m : trait_method binder) -> m.binder_value.name = name)
++                  decl.methods
++              in
++              let default_decl =
++                FunDeclId.Map.find method_decl.binder_value.item.id
++                  crate.fun_decls
++              in
++              let inherited =
++                match default_decl.src with
++                | TraitDeclItem (tr, method_name, true) ->
++                    tr.id = decl.def_id && method_name = name
++                | _ -> false
++              in
++              let modeled =
++                through_dictionary
++                || standalone_eligible
++                   && List.exists
++                        (fun (pattern, _) ->
++                          matches pattern default_decl.item_meta.name)
++                        (ExtractBuiltin.builtin_funs ())
++              in
++              if (not inherited) || not modeled then None
++              else
++                let impl = TraitImplId.Map.find impl_ref.id crate.trait_impls in
++                let method_ref = List.assoc name impl.methods in
++                Some
++                  ( f,
++                    impl_ref,
++                    trait_ref,
++                    name,
++                    method_ref,
++                    decl,
++                    through_dictionary )
++          | _ -> None)
++        crate.fun_decls
++    in
++    let new_dictionary_uses = ref FunDeclId.Map.empty in
++    (* The parent recorded in a method's source is metadata, but the same
++         implementation can also occur in its body: recursive derived methods
++         pass their own dictionary through imported box/formatting models. *)
++    FunDeclId.Map.iter
++      (fun fid (decl : fun_decl) ->
++        match (decl.src, decl.body) with
++        | TraitImplItem (parent, _, _, _), StructuredBody body -> (
++            let exception UsesParentDictionary in
++            let visitor =
++              object
++                inherit [_] iter_statement
++
++                method! visit_trait_impl_id () id =
++                  if id = parent.id then raise UsesParentDictionary
++              end
++            in
++            try visitor#visit_block () body.body
++            with UsesParentDictionary ->
++              new_dictionary_uses :=
++                FunDeclId.Map.update fid
++                  (fun uses ->
++                    Some
++                      (TraitImplId.Set.add parent.id
++                         (Option.value uses ~default:TraitImplId.Set.empty)))
++                  !new_dictionary_uses)
++        | _ -> ())
++      crate.fun_decls;
++    if
++      FunDeclId.Map.is_empty defaults
++      && FunDeclId.Map.is_empty !new_dictionary_uses
++    then crate
++    else
++      let new_method_uses = ref FunDeclId.Map.empty in
++      let visitor =
++        object
++          inherit [_] map_crate as super
++
++          method! visit_fun_decl _ (f : fun_decl) =
++            super#visit_fun_decl (Some f.def_id) f
++
++          method! visit_fn_ptr env ptr =
++            let ptr = super#visit_fn_ptr env ptr in
++            match ptr.kind with
++            | FunId (FRegular fid) when FunDeclId.Map.mem fid defaults ->
++                let ( f,
++                      impl_ref,
++                      trait_decl_ref,
++                      name,
++                      method_ref,
++                      decl,
++                      through_dictionary ) =
++                  FunDeclId.Map.find fid defaults
++                in
++                let span = f.item_meta.span in
++                Option.iter
++                  (fun owner ->
++                    new_dictionary_uses :=
++                      FunDeclId.Map.update owner
++                        (fun uses ->
++                          Some
++                            (TraitImplId.Set.add impl_ref.id
++                               (Option.value uses ~default:TraitImplId.Set.empty)))
++                        !new_dictionary_uses)
++                  env;
++                let subst =
++                  [%add_loc] Substitute.make_subst_from_generics (Some span)
++                    f.generics ptr.generics
++                    (UnknownTrait "inherited method has no free Self dictionary")
++                in
++                let trait_ref =
++                  Substitute.trait_ref_substitute subst
++                    {
++                      kind = TraitImpl impl_ref;
++                      trait_decl_ref =
++                        { binder_regions = []; binder_value = trait_decl_ref };
++                    }
++                in
++                (* Recover the method binder from its actual argument template,
++                   not by dropping an impl-parameter prefix. Associated-type
++                   lifting can interleave impl and method parameters. *)
++                let select get_id ids template actual =
++                  [%cassert] span
++                    (List.length template = List.length actual)
++                    "Inherited method argument arity mismatch";
++                  let pairs = List.combine template actual in
++                  List.map
++                    (fun id ->
++                      let values =
++                        List.filter_map
++                          (fun (template, actual) ->
++                            if get_id template = Some id then Some actual
++                            else None)
++                          pairs
++                      in
++                      match values with
++                      | value :: rest when List.for_all (( = ) value) rest ->
++                          value
++                      | _ ->
++                          [%craise] span
++                            "Cannot recover an inherited method binder")
++                    ids
++                in
++                let params = method_ref.binder_params in
++                let template = method_ref.binder_value.generics in
++                let actual = ptr.generics in
++                let generics =
++                  {
++                    regions =
++                      select
++                        (function
++                          | RVar (Bound (0, id)) -> Some id
++                          | _ -> None)
++                        (List.map
++                           (fun (p : region_param) -> p.index)
++                           params.regions)
++                        template.regions actual.regions;
++                    types =
++                      select
++                        (function
++                          | TVar (Bound (0, id)) -> Some id
++                          | _ -> None)
++                        (List.map
++                           (fun (p : type_param) -> p.index)
++                           params.types)
++                        template.types actual.types;
++                    const_generics =
++                      select
++                        (fun (c : constant_expr) ->
++                          match c.kind with
++                          | CVar (Bound (0, id)) -> Some id
++                          | _ -> None)
++                        (List.map
++                           (fun (p : const_generic_param) -> p.index)
++                           params.const_generics)
++                        template.const_generics actual.const_generics;
++                    trait_refs =
++                      select
++                        (fun (tr : trait_ref) ->
++                          match tr.kind with
++                          | Clause (Bound (0, id)) -> Some id
++                          | _ -> None)
++                        (List.map
++                           (fun (p : trait_param) -> p.clause_id)
++                           params.trait_clauses)
++                        template.trait_refs actual.trait_refs;
++                  }
++                in
++                let method_decl =
++                  List.find
++                    (fun (m : trait_method binder) ->
++                      m.binder_value.name = name)
++                    decl.methods
++                in
++                Option.iter
++                  (fun owner ->
++                    new_method_uses :=
++                      FunDeclId.Map.update owner
++                        (fun uses ->
++                          Some
++                            (FunDeclId.Set.add method_decl.binder_value.item.id
++                               (Option.value uses ~default:FunDeclId.Set.empty)))
++                        !new_method_uses)
++                  env;
++                if through_dictionary then
++                  {
++                    kind =
++                      TraitMethod
++                        (trait_ref, name, method_decl.binder_value.item.id);
++                    generics;
++                  }
++                else
++                  let fn_ref =
++                    [%unwrap_with_span] span
++                      (Substitute.lookup_and_subst_trait_decl_method decl name
++                         trait_ref generics)
++                      "Missing modeled inherited method"
++                  in
++                  {
++                    kind = FunId (FRegular fn_ref.id);
++                    generics = fn_ref.generics;
++                  }
++            | _ -> ptr
++        end
++      in
++      let crate =
++        if FunDeclId.Map.is_empty defaults then crate
++        else visitor#visit_crate None crate
++      in
++      let trait_impls =
++        if FunDeclId.Map.is_empty defaults then crate.trait_impls
++        else
++          TraitImplId.Map.map
++            (fun (impl : trait_impl) ->
++              let methods =
++                List.filter
++                  (fun (_, (m : fun_decl_ref binder)) ->
++                    not (FunDeclId.Map.mem m.binder_value.id defaults))
++                  impl.methods
++              in
++              { impl with methods })
++            crate.trait_impls
++      in
++      let declarations =
++        if FunDeclId.Map.is_empty defaults then crate.declarations
++        else
++          let filter =
++            object
++              inherit [_] filter_decl_id
++
++              method! visit_fun_decl_id () id =
++                if FunDeclId.Map.mem id defaults then None else Some id
++            end
++          in
++          filter#visit_declaration_groups () crate.declarations
++      in
++      let crate = { crate with trait_impls; declarations } in
++      (* Both inherited calls rewritten above and native recursive methods can
++         depend on dictionaries. Reorder whole existing recursive groups; never
++         assume the implementation was textually earlier than its callers. *)
++      let group_ids = function
++        | TypeGroup g ->
++            List.map (fun id -> IdType id) (g_declaration_group_to_list g)
++        | FunGroup g ->
++            List.map (fun id -> IdFun id) (g_declaration_group_to_list g)
++        | GlobalGroup g ->
++            List.map (fun id -> IdGlobal id) (g_declaration_group_to_list g)
++        | TraitDeclGroup g ->
++            List.map (fun id -> IdTraitDecl id) (g_declaration_group_to_list g)
++        | TraitImplGroup g ->
++            List.map (fun id -> IdTraitImpl id) (g_declaration_group_to_list g)
++        | MixedGroup g -> g_declaration_group_to_list g
++      in
++      (* Charon can retain an implementation in its maps but omit its
++         declaration when every use was a concrete method call. Introducing a
++         dictionary makes that implementation, and its dictionary dependencies,
++         real declarations again. Restore them before computing order. *)
++      let present =
++        List.fold_left
++          (fun present group ->
++            List.fold_left
++              (fun present id -> AnyDeclIdMap.add id () present)
++              present (group_ids group))
++          AnyDeclIdMap.empty declarations
++      in
++      let dependency_graph = ref AnyDeclIdMap.empty in
++      let add_dependency owner dependency =
++        match owner with
++        | IdTraitDecl id when TraitDeclId.Map.mem id modeled_traits ->
++            (* Imported dictionaries do not depend on Rust method bodies. *)
++            ()
++        | _ when owner = dependency -> ()
++        | _ ->
++            dependency_graph :=
++              AnyDeclIdMap.update owner
++                (fun deps ->
++                  Some
++                    (AnyDeclIdSet.add dependency
++                       (Option.value deps ~default:AnyDeclIdSet.empty)))
++                !dependency_graph
++      in
++      let uses = Deps.compute_graph_of_uses crate in
++      AnyDeclIdMap.iter
++        (fun dependency users ->
++          Deps.ItemInfoSet.iter
++            (fun (user : Deps.item_info) ->
++              match (user.id, dependency) with
++              | IdTraitDecl _, IdFun _ -> ()
++              | IdFun fid, IdTraitImpl iid
++                when (match (FunDeclId.Map.find fid crate.fun_decls).src with
++                     | TraitImplItem (parent, _, _, _) -> parent.id = iid
++                     | _ -> false)
++                     && not
++                          (TraitImplId.Set.mem iid
++                             (Option.value
++                                (FunDeclId.Map.find_opt fid !new_dictionary_uses)
++                                ~default:TraitImplId.Set.empty)) ->
++                  (* A concrete method's parent is metadata unless its body
++                     actually uses the parent's dictionary. *)
++                  ()
++              | IdFun fid, IdGlobal gid
++                when (FunDeclId.Map.find fid crate.fun_decls)
++                       .is_global_initializer = Some gid -> ()
++              | _ -> add_dependency user.id dependency)
++            users)
++        uses.graph;
++      (* Trait declarations require method signatures, not method bodies. *)
++      let signature_visitor =
++        object
++          inherit [_] iter_crate
++          method! visit_type_decl_id owner id = add_dependency owner (IdType id)
++          method! visit_fun_decl_id owner id = add_dependency owner (IdFun id)
++
++          method! visit_global_decl_id owner id =
++            add_dependency owner (IdGlobal id)
++
++          method! visit_trait_decl_id owner id =
++            add_dependency owner (IdTraitDecl id)
++
++          method! visit_trait_impl_id owner id =
++            add_dependency owner (IdTraitImpl id)
++        end
++      in
++      TraitDeclId.Map.iter
++        (fun id (decl : trait_decl) ->
++          List.iter
++            (fun (m : trait_method binder) ->
++              let f =
++                FunDeclId.Map.find m.binder_value.item.id crate.fun_decls
++              in
++              signature_visitor#visit_generic_params (IdTraitDecl id) f.generics;
++              signature_visitor#visit_fun_sig (IdTraitDecl id) f.signature)
++            decl.methods)
++        crate.trait_decls;
++      let required = ref AnyDeclIdSet.empty in
++      let pending = ref [] in
++      let require id =
++        (* Existing groups already have Charon's dependency closure. Restore
++           only newly needed definitions retained in the maps, not metadata
++           references to definitions removed by earlier passes. *)
++        if
++          (not (AnyDeclIdMap.mem id present))
++          && (not (AnyDeclIdSet.mem id !required))
++          &&
++          match id with
++          | IdType id -> TypeDeclId.Map.mem id crate.type_decls
++          | IdFun id -> FunDeclId.Map.mem id crate.fun_decls
++          | IdGlobal id -> GlobalDeclId.Map.mem id crate.global_decls
++          | IdTraitDecl id -> TraitDeclId.Map.mem id crate.trait_decls
++          | IdTraitImpl id -> TraitImplId.Map.mem id crate.trait_impls
++        then (
++          required := AnyDeclIdSet.add id !required;
++          pending := id :: !pending)
++      in
++      FunDeclId.Map.iter
++        (fun owner ids ->
++          if AnyDeclIdMap.mem (IdFun owner) present then
++            TraitImplId.Set.iter (fun id -> require (IdTraitImpl id)) ids)
++        !new_dictionary_uses;
++      FunDeclId.Map.iter
++        (fun owner ids ->
++          if AnyDeclIdMap.mem (IdFun owner) present then
++            FunDeclId.Set.iter (fun id -> require (IdFun id)) ids)
++        !new_method_uses;
++      while !pending <> [] do
++        let id = List.hd !pending in
++        pending := List.tl !pending;
++        AnyDeclIdSet.iter require
++          (Option.value
++             (AnyDeclIdMap.find_opt id !dependency_graph)
++             ~default:AnyDeclIdSet.empty)
++      done;
++      let additional =
++        AnyDeclIdSet.elements !required
++        |> List.map (function
++             | IdType id -> TypeGroup (NonRecGroup id)
++             | IdFun id -> FunGroup (NonRecGroup id)
++             | IdGlobal id -> GlobalGroup (NonRecGroup id)
++             | IdTraitDecl id -> TraitDeclGroup (NonRecGroup id)
++             | IdTraitImpl id -> TraitImplGroup (NonRecGroup id))
++      in
++      let declarations = declarations @ additional in
++      let crate = { crate with declarations } in
++      let groups = Array.of_list declarations in
++      let owners =
++        Array.fold_left
++          (fun (index, owners) group ->
++            ( index + 1,
++              List.fold_left
++                (fun owners id -> AnyDeclIdMap.add id index owners)
++                owners (group_ids group) ))
++          (0, AnyDeclIdMap.empty) groups
++        |> snd
++      in
++      let module DepScc = SCC.Make (Collections.OrderedInt) in
++      let module IntSet = DepScc.S in
++      let dependencies = Array.make (Array.length groups) IntSet.empty in
++      AnyDeclIdMap.iter
++        (fun owner deps ->
++          match AnyDeclIdMap.find_opt owner owners with
++          | None -> ()
++          | Some owner ->
++              AnyDeclIdSet.iter
++                (fun dependency ->
++                  match AnyDeclIdMap.find_opt dependency owners with
++                  | Some dependency when owner <> dependency ->
++                      dependencies.(owner) <-
++                        IntSet.add dependency dependencies.(owner)
++                  | _ -> ())
++                deps)
++        !dependency_graph;
++      (* Condense genuine cycles instead of rejecting every back-edge. Preserve
++         existing recursive groups and let the backend handle each kind of SCC;
++         in particular, mixed dictionary/function recursion must not be silently
++         linearized as if it were a sequence of non-recursive declarations. *)
++      let sccs =
++        DepScc.compute
++          (Array.to_list (Array.mapi (fun i deps -> (i, deps)) dependencies))
++      in
++      let merge_groups indices =
++        match indices with
++        | [ index ] -> groups.(index)
++        | _ -> (
++            let ids =
++              List.concat_map (fun index -> group_ids groups.(index)) indices
++            in
++            let types, funs, globals, traits, impls =
++              List.fold_left
++                (fun (ts, fs, gs, tds, tis) -> function
++                  | IdType id -> (id :: ts, fs, gs, tds, tis)
++                  | IdFun id -> (ts, id :: fs, gs, tds, tis)
++                  | IdGlobal id -> (ts, fs, id :: gs, tds, tis)
++                  | IdTraitDecl id -> (ts, fs, gs, id :: tds, tis)
++                  | IdTraitImpl id -> (ts, fs, gs, tds, id :: tis))
++                ([], [], [], [], []) ids
++            in
++            match (types, funs, globals, traits, impls) with
++            | ids, [], [], [], [] -> TypeGroup (RecGroup (List.rev ids))
++            | [], ids, [], [], [] -> FunGroup (RecGroup (List.rev ids))
++            | [], [], ids, [], [] -> GlobalGroup (RecGroup (List.rev ids))
++            | [], [], [], ids, [] -> TraitDeclGroup (RecGroup (List.rev ids))
++            | [], [], [], [], ids -> TraitImplGroup (RecGroup (List.rev ids))
++            | _ -> MixedGroup (RecGroup ids))
++      in
++      let declarations =
++        List.map
++          (fun (_, indices) -> merge_groups indices)
++          (SCC.SccId.Map.bindings sccs.sccs)
++      in
++      { crate with declarations }
++
++(** Fold only ABI-compatible modeled specializations. Whole-state contracts can
++    reconstruct captured mutable state, but a generic borrowed-output record
++    cannot express additional backward continuations. In that case retain the
++    specialized trait, method signatures, and dictionary references together.
++    Normalize modeled implementation references too: their specialized records
++    contain only Charon's demanded methods, not the model's native overrides and
++    marker evidence. Instantiating the original implementation preserves both.
++    Structured methods may also reuse the original body when its actual owned
++    state outputs form the complete canonical ABI, without native mutable
++    backward results. This preserves delayed restoration across conversions
++    instead of translating an artificial independent-lifetime body. *)
++let normalize_modeled_trait_specializations (crate : crate) : crate =
++  if Config.backend () <> Config.Lean then crate
++  else
++    let mctx = NameMatcher.ctx_from_crate crate in
++    let modeled name = ExtractBuiltin.find_trait_decl_info mctx name in
++    let specialization (name : name) =
++      match List.rev name with
++      | PeInstantiated shape :: rest -> Some (List.rev rest, shape)
++      | _ -> None
++    in
++    let traits =
++      TraitDeclId.Map.filter_map
++        (fun _ (decl : trait_decl) ->
++          match specialization decl.item_meta.name with
++          | Some (name, shape) -> (
++              match modeled name with
++              | Some info
++                when ModelStateABI.trait_specialization_is_compatible info shape
++                ->
++                  let original =
++                    List.find
++                      (fun (d : trait_decl) -> d.item_meta.name = name)
++                      (TraitDeclId.Map.values crate.trait_decls)
++                  in
++                  Some (original.def_id, shape)
++              | _ -> None)
++          | _ -> None)
++        crate.trait_decls
++    in
++    (* A canonical subtrait cannot contain a specialized parent dictionary.
++       Remove such candidates to a fixed point, including transitive parents. *)
++    let rec retain_specialized_parents traits =
++      let compatible =
++        TraitDeclId.Map.filter
++          (fun id _ ->
++            let decl = TraitDeclId.Map.find id crate.trait_decls in
++            let compatible = ref true in
++            let visitor =
++              object
++                inherit [_] iter_crate
++
++                method! visit_trait_decl_id _ parent_id =
++                  let parent =
++                    TraitDeclId.Map.find parent_id crate.trait_decls
++                  in
++                  if
++                    ExtractBuiltin.is_trait_specialization parent.item_meta.name
++                    && not (TraitDeclId.Map.mem parent_id traits)
++                  then compatible := false
++              end
++            in
++            List.iter (visitor#visit_trait_param ()) decl.implied_clauses;
++            !compatible)
++          traits
++      in
++      if TraitDeclId.Map.cardinal compatible = TraitDeclId.Map.cardinal traits
++      then compatible
++      else retain_specialized_parents compatible
++    in
++    let traits = retain_specialized_parents traits in
++    let compatible_trait id =
++      let decl = TraitDeclId.Map.find id crate.trait_decls in
++      match specialization decl.item_meta.name with
++      | Some _ -> TraitDeclId.Map.mem id traits
++      | None -> Option.is_some (modeled decl.item_meta.name)
++    in
++    let methods =
++      FunDeclId.Map.filter_map
++        (fun _ (decl : fun_decl) ->
++          match (decl.src, specialization decl.item_meta.name) with
++          | ( ( TraitDeclItem (trait_ref, _, _)
++              | TraitImplItem (_, trait_ref, _, _) ),
++              Some (name, shape) )
++            when compatible_trait trait_ref.id -> (
++              match
++                List.find_opt
++                  (fun (f : fun_decl) -> f.item_meta.name = name)
++                  (FunDeclId.Map.values crate.fun_decls)
++              with
++              | Some original ->
++                  let compatible =
++                    match (decl.body, decl.src) with
++                    | ( OpaqueBody,
++                        (TraitDeclItem _ | TraitImplItem (_, _, _, true)) ) ->
++                        true
++                    | StructuredBody _, _ ->
++                        Option.is_some
++                          (ModelStateInputs.canonical_body_state_inputs crate
++                             original)
++                    | _ -> false
++                  in
++                  if compatible then Some (original.def_id, shape) else None
++              | None -> None)
++          | _ -> None)
++        crate.fun_decls
++    in
++    let original_impls = TraitImplId.Map.values crate.trait_impls in
++    let impls =
++      TraitImplId.Map.filter_map
++        (fun _ (impl : trait_impl) ->
++          match specialization impl.item_meta.name with
++          | Some (name, shape)
++            when compatible_trait impl.impl_trait.id
++                 && List.for_all
++                      (fun (_, (method_ref : fun_decl_ref binder)) ->
++                        let id = method_ref.binder_value.id in
++                        let decl = FunDeclId.Map.find id crate.fun_decls in
++                        match
++                          (decl.body, specialization decl.item_meta.name)
++                        with
++                        | StructuredBody _, Some _ ->
++                            FunDeclId.Map.mem id methods
++                        | _ -> true)
++                      impl.methods -> (
++              match
++                List.find_opt
++                  (fun (original : trait_impl) ->
++                    original.item_meta.name = name)
++                  original_impls
++              with
++              | None -> None
++              | Some original -> Some (original.def_id, shape))
++          | _ -> None)
++        crate.trait_impls
++    in
++    if
++      TraitDeclId.Map.is_empty traits
++      && FunDeclId.Map.is_empty methods
++      && TraitImplId.Map.is_empty impls
++    then crate
++    else
++      let instantiate args shape =
++        Substitute.apply_args_to_binder args Substitute.generic_args_substitute
++          shape
++      in
++      let visitor =
++        object (self)
++          inherit [_] map_crate as super
++
++          method! visit_item_meta env meta =
++            let meta = super#visit_item_meta env meta in
++            (* Names are opaque to the generated visitor, but specialization
++               binders remain live substitutions after dictionary folding. *)
++            let name =
++              List.map
++                (function
++                  | PeInstantiated shape ->
++                      PeInstantiated
++                        (self#visit_binder self#visit_generic_args env shape)
++                  | elem -> elem)
++                meta.name
++            in
++            { meta with name }
++
++          method! visit_trait_decl_ref env tr =
++            match TraitDeclId.Map.find_opt tr.id traits with
++            | None -> super#visit_trait_decl_ref env tr
++            | Some (id, shape) ->
++                self#visit_trait_decl_ref env
++                  { id; generics = instantiate tr.generics shape }
++
++          method! visit_trait_impl_ref env impl =
++            match TraitImplId.Map.find_opt impl.id impls with
++            | None -> super#visit_trait_impl_ref env impl
++            | Some (id, shape) ->
++                self#visit_trait_impl_ref env
++                  { id; generics = instantiate impl.generics shape }
++
++          method! visit_fun_decl_ref env f =
++            match FunDeclId.Map.find_opt f.id methods with
++            | None -> super#visit_fun_decl_ref env f
++            | Some (id, shape) ->
++                self#visit_fun_decl_ref env
++                  { id; generics = instantiate f.generics shape }
++
++          method! visit_fn_ptr env ptr =
++            match ptr.kind with
++            | FunId (FRegular fid) when FunDeclId.Map.mem fid methods ->
++                let id, shape = FunDeclId.Map.find fid methods in
++                super#visit_fn_ptr env
++                  {
++                    kind = FunId (FRegular id);
++                    generics = instantiate ptr.generics shape;
++                  }
++            | TraitMethod (tr, name, fid) ->
++                let fid =
++                  match FunDeclId.Map.find_opt fid methods with
++                  | Some (id, _) -> id
++                  | None -> fid
++                in
++                super#visit_fn_ptr env
++                  { ptr with kind = TraitMethod (tr, name, fid) }
++            | _ -> super#visit_fn_ptr env ptr
++        end
++      in
++      let seen_traits = ref TraitDeclId.Set.empty in
++      let seen_impls = ref TraitImplId.Set.empty in
++      let seen_methods = ref FunDeclId.Set.empty in
++      let groups =
++        object
++          inherit [_] filter_decl_id
++
++          method! visit_trait_decl_id _ id =
++            let id =
++              match TraitDeclId.Map.find_opt id traits with
++              | Some (id, _) -> id
++              | None -> id
++            in
++            if TraitDeclId.Set.mem id !seen_traits then None
++            else (
++              seen_traits := TraitDeclId.Set.add id !seen_traits;
++              Some id)
++
++          method! visit_trait_impl_id _ id =
++            let id =
++              match TraitImplId.Map.find_opt id impls with
++              | Some (id, _) -> id
++              | None -> id
++            in
++            if TraitImplId.Set.mem id !seen_impls then None
++            else (
++              seen_impls := TraitImplId.Set.add id !seen_impls;
++              Some id)
++
++          method! visit_fun_decl_id _ id =
++            let id =
++              match FunDeclId.Map.find_opt id methods with
++              | Some (id, _) -> id
++              | None -> id
++            in
++            if FunDeclId.Set.mem id !seen_methods then None
++            else (
++              seen_methods := FunDeclId.Set.add id !seen_methods;
++              Some id)
++        end
++      in
++      let crate =
++        {
++          crate with
++          trait_decls =
++            TraitDeclId.Map.filter
++              (fun id _ -> not (TraitDeclId.Map.mem id traits))
++              crate.trait_decls;
++          trait_impls =
++            TraitImplId.Map.filter
++              (fun id _ -> not (TraitImplId.Map.mem id impls))
++              crate.trait_impls;
++          fun_decls =
++            FunDeclId.Map.filter
++              (fun id _ -> not (FunDeclId.Map.mem id methods))
++              crate.fun_decls;
++          declarations = groups#visit_declaration_groups () crate.declarations;
++        }
++      in
++      visitor#visit_crate () crate
++
++(** Some provided methods cannot occur in the model record because their bounds
++    depend on that record (Iterator.collect / FromIterator). The model must
++    explicitly restrict them to inherited-default dictionaries. Check Rust
++    provenance for every canonical implementation before lowering any generic
++    projection; an absent method or an opaque body is not evidence.
++
++    Charon's [reuses_default] is also true for implementations of required
++    methods, so it proves inheritance only together with the declaration's
++    [has_default]. Concrete calls keep their normal implementation dispatch. *)
++let resolve_default_only_dispatch (crate : crate) : crate =
++  if Config.backend () <> Config.Lean then crate
++  else
++    let mctx = NameMatcher.ctx_from_crate crate in
++    let checked = ref [] in
++    let check (decl : trait_decl) method_name =
++      if not (List.mem (decl.def_id, method_name) !checked) then (
++        let method_decl =
++          match
++            List.find_opt
++              (fun (method_decl : trait_method binder) ->
++                method_decl.binder_value.name = method_name)
++              decl.methods
++          with
++          | Some method_decl ->
++              FunDeclId.Map.find method_decl.binder_value.item.id
++                crate.fun_decls
++          | None ->
++              [%craise] decl.item_meta.span
++                ("Default-only method lacks a Rust declaration: " ^ method_name)
++        in
++        [%cassert] method_decl.item_meta.span
++          (match method_decl.src with
++          | TraitDeclItem (tr, name, true) ->
++              tr.id = decl.def_id && name = method_name
++          | _ -> false)
++          ("Default-only dispatch requires a Rust provided method: "
++         ^ method_name);
++        [%cassert] method_decl.item_meta.span
++          (Option.is_some
++             (ExtractBuiltin.NameMatcherMap.find_opt mctx
++                method_decl.item_meta.name
++                (ExtractBuiltin.builtin_funs_map ())))
++          ("Default-only method lacks a standalone model: " ^ method_name);
++        TraitImplId.Map.iter
++          (fun _ (impl : trait_impl) ->
++            if impl.impl_trait.id = decl.def_id then
++              let name () =
++                Print.name_to_string
++                  (Print.crate_to_fmt_env crate)
++                  impl.item_meta.name
++              in
++              match List.assoc_opt method_name impl.methods with
++              | None ->
++                  [%craise] impl.item_meta.span
++                    ("Default-only dispatch for " ^ method_name
++                   ^ " lacks inherited-default evidence in " ^ name ())
++              | Some method_ref -> (
++                  let implementation =
++                    FunDeclId.Map.find method_ref.binder_value.id
++                      crate.fun_decls
++                  in
++                  match implementation.src with
++                  | TraitImplItem (owner, tr, name, true)
++                    when owner.id = impl.def_id && tr.id = decl.def_id
++                         && name = method_name -> ()
++                  | _ ->
++                      [%craise] implementation.item_meta.span
++                        ("Default-only dispatch for " ^ method_name
++                       ^ " conflicts with a native override or unproven method \
++                          in " ^ name ())))
++          crate.trait_impls;
++        checked := (decl.def_id, method_name) :: !checked)
++    in
++    let visitor =
++      object
++        inherit [_] map_crate as super
++
++        method! visit_fn_ptr env ptr =
++          let ptr = super#visit_fn_ptr env ptr in
++          match ptr.kind with
++          | TraitMethod ({ kind = TraitImpl _; _ }, _, _) -> ptr
++          | TraitMethod (tr, method_name, _) -> (
++              let decl =
++                TraitDeclId.Map.find tr.trait_decl_ref.binder_value.id
++                  crate.trait_decls
++              in
++              match
++                ExtractBuiltin.find_trait_decl_info mctx decl.item_meta.name
++              with
++              | Some info when List.mem method_name info.default_only_methods ->
++                  [%cassert] decl.item_meta.span
++                    (not (List.mem_assoc method_name info.methods))
++                    "A default-only method must not also be a dictionary field";
++                  check decl method_name;
++                  let method_ref =
++                    [%unwrap_with_span] decl.item_meta.span
++                      (Substitute.lookup_and_subst_trait_decl_method decl
++                         method_name tr ptr.generics)
++                      "Missing checked standalone default"
++                  in
++                  {
++                    kind = FunId (FRegular method_ref.id);
++                    generics = method_ref.generics;
++                  }
++              | _ -> ptr)
++          | _ -> ptr
++      end
++    in
++    visitor#visit_crate () crate
++
++(** Optimized upstream MIR may use [Copy] at a non-Copy value's last use
++    (including an unconstrained generic parameter). Recover the ownership
++    transfer before symbolic execution. A place must be locally owned, used only
++    once by the statement, and dead on every successor, including indirect uses
++    through live borrowers. Never turn a read through a reference or a global
++    into a move. *)
++let recover_last_use_moves (_crate : crate) (f : fun_decl) : fun_decl =
++  let rec owned_local (p : place) =
++    match p.kind with
++    | PlaceLocal id -> Some id
++    | PlaceProjection (p, Field _) -> owned_local p
++    | PlaceProjection _ | PlaceGlobal _ -> None
++  in
++  (* Direct variable liveness does not cover references already handed to
++     another local. Keep conservative provenance edges through reference-bearing
++     assignments and call results, including wrappers and generic values. *)
++  let rec may_store_borrow = function
++    | TRef _ | TVar _ | TTraitType _ | TDynTrait _ | TError _ -> true
++    | TAdt { generics; _ } ->
++        generics.regions <> [] || List.exists may_store_borrow generics.types
++    | TArray (ty, _) | TSlice ty -> may_store_borrow ty
++    | TLiteral _ | TNever | TRawPtr _ | TFnDef _ | TFnPtr _ | TPtrMetadata _ ->
++        false
++  in
++  let rec may_write_borrows = function
++    | TRef (_, ty, RMut) -> may_store_borrow ty
++    | TAdt { generics; _ } ->
++        generics.regions <> [] || List.exists may_write_borrows generics.types
++    | TArray (ty, _) | TSlice ty -> may_write_borrows ty
++    | TVar _ | TTraitType _ | TDynTrait _ | TError _ -> true
++    | TRef (_, _, RShared)
++    | TLiteral _ | TNever | TRawPtr _ | TFnDef _ | TFnPtr _ | TPtrMetadata _ ->
++        false
++  in
++  let rec base_local (p : place) =
++    match p.kind with
++    | PlaceLocal id -> Some id
++    | PlaceProjection (p, _) -> base_local p
++    | PlaceGlobal _ -> None
++  in
++  let rec indirect_place (p : place) =
++    match p.kind with
++    | PlaceProjection (_, Deref) -> true
++    | PlaceProjection (p, _) -> indirect_place p
++    | PlaceLocal _ | PlaceGlobal _ -> false
++  in
++  let borrowers = ref LocalId.Map.empty in
++  let origins = ref LocalId.Map.empty in
++  let stores = ref [] in
++  let changed = ref false in
++  let add_edge source dest =
++    let next =
++      Option.value
++        (LocalId.Map.find_opt source !borrowers)
++        ~default:LocalId.Set.empty
++    in
++    if not (LocalId.Set.mem dest next) then (
++      changed := true;
++      borrowers := LocalId.Map.add source (LocalId.Set.add dest next) !borrowers;
++      origins :=
++        LocalId.Map.update dest
++          (fun ids ->
++            Some
++              (LocalId.Set.add source
++                 (Option.value ids ~default:LocalId.Set.empty)))
++          !origins)
++  in
++  let collect_sources (dest : place) visit =
++    match base_local dest with
++    | Some dest_id when may_store_borrow dest.ty ->
++        let reads =
++          object
++            inherit [_] iter_statement
++
++            method! visit_local_id _ source_id =
++              add_edge source_id dest_id;
++              if indirect_place dest then
++                stores := (source_id, dest_id) :: !stores
++          end
++        in
++        visit reads
++    | _ -> ()
++  in
++  let aliases =
++    object
++      inherit [_] iter_statement as super
++
++      method! visit_statement env st =
++        (match st.kind with
++        | Assign (dest, value) ->
++            collect_sources dest (fun reads -> reads#visit_rvalue () value)
++        | Call call ->
++            let args =
++              List.filter_map
++                (function
++                  | (Copy p | Move p) when may_store_borrow p.ty ->
++                      Option.map (fun id -> (id, p.ty)) (base_local p)
++                  | _ -> None)
++                call.args
++            in
++            List.iter
++              (fun (target, ty) ->
++                if may_write_borrows ty then
++                  List.iter
++                    (fun (source, _) ->
++                      if source <> target then
++                        stores := (source, target) :: !stores)
++                    args)
++              args;
++            collect_sources call.dest (fun reads ->
++                reads#visit_fn_operand () call.func;
++                List.iter (reads#visit_operand ()) call.args)
++        | _ -> ());
++        super#visit_statement env st
++    end
++  in
++  (match f.body with
++  | StructuredBody body -> aliases#visit_block () body.body
++  | _ -> ());
++  (* A callee can retain an input borrow in a mutable receiver even when its
++     return type is unit. Propagate those writes back to the receiver's lenders,
++     not just its temporary reference. Iterate for nested stores and loops. *)
++  let storage =
++    match f.body with
++    | StructuredBody body ->
++        List.fold_left
++          (fun ids (local : local) ->
++            if may_store_borrow local.local_ty then
++              LocalId.Set.add local.index ids
++            else ids)
++          LocalId.Set.empty body.locals.locals
++    | _ -> LocalId.Set.empty
++  in
++  let rec propagate_stores () =
++    changed := false;
++    List.iter
++      (fun (source, target) ->
++        let seen = ref LocalId.Set.empty in
++        let rec visit target =
++          if source <> target && not (LocalId.Set.mem target !seen) then (
++            seen := LocalId.Set.add target !seen;
++            if LocalId.Set.mem target storage then add_edge source target;
++            Option.iter (LocalId.Set.iter visit)
++              (LocalId.Map.find_opt target !origins))
++        in
++        visit target)
++      !stores;
++    if !changed then propagate_stores ()
++  in
++  propagate_stores ();
++  let is_live_through_aliases live id =
++    let seen = ref LocalId.Set.empty in
++    let rec visit id =
++      if LocalId.Set.mem id live then true
++      else if LocalId.Set.mem id !seen then false
++      else (
++        seen := LocalId.Set.add id !seen;
++        match LocalId.Map.find_opt id !borrowers with
++        | None -> false
++        | Some ids -> LocalId.Set.exists visit ids)
++    in
++    visit id
++  in
++  let rec block rewrite loops live_after (b : block) =
++    let live, statements =
++      List.fold_right
++        (fun st (live, statements) ->
++          let live, st = statement rewrite loops live st in
++          (live, st :: statements))
++        b.statements (live_after, [])
++    in
++    (live, if rewrite then { b with statements } else b)
++  and statement rewrite loops live_after (st : statement) =
++    match st.kind with
++    | Return -> (LocalId.Set.singleton LocalId.zero, st)
++    | Abort _ -> (LocalId.Set.empty, st)
++    | Break depth -> (fst (List.nth loops depth), st)
++    | Continue depth -> (snd (List.nth loops depth), st)
++    | Loop body ->
++        let rec fix head =
++          let next, _ = block false ((live_after, head) :: loops) head body in
++          if LocalId.Set.equal head next then head else fix next
++        in
++        let head = fix LocalId.Set.empty in
++        let _, body = block rewrite ((live_after, head) :: loops) head body in
++        (head, if rewrite then { st with kind = Loop body } else st)
++    | Switch switch ->
++        let live = ref LocalId.Set.empty in
++        let branch b =
++          let before, b = block rewrite loops live_after b in
++          live := LocalId.Set.union before !live;
++          b
++        in
++        let switch =
++          match switch with
++          | If (op, yes, no) -> If (op, branch yes, branch no)
++          | SwitchInt (op, ty, branches, otherwise) ->
++              SwitchInt
++                ( op,
++                  ty,
++                  List.map (fun (pats, b) -> (pats, branch b)) branches,
++                  branch otherwise )
++          | Match (p, branches, otherwise) ->
++              Match
++                ( p,
++                  List.map (fun (pats, b) -> (pats, branch b)) branches,
++                  Option.map branch otherwise )
++        in
++        (* Branches have already been analyzed. Treat only the scrutinee as
++           this statement's read, while keeping it intact for the interpreter. *)
++        let reads =
++          object
++            inherit [_] iter_statement
++            method! visit_block _ _ = ()
++            method! visit_local_id _ id = live := LocalId.Set.add id !live
++          end
++        in
++        reads#visit_switch () switch;
++        (!live, if rewrite then { st with kind = Switch switch } else st)
++    | _ ->
++        let counts = ref LocalId.Map.empty in
++        let reads =
++          object
++            inherit [_] iter_statement
++
++            method! visit_local_id _ id =
++              counts :=
++                LocalId.Map.update id
++                  (fun n -> Some (1 + Option.value n ~default:0))
++                  !counts
++          end
++        in
++        let write_place (p : place) =
++          match p.kind with
++          | PlaceLocal id -> LocalId.Set.remove id live_after
++          | _ ->
++              reads#visit_place () p;
++              live_after
++        in
++        let live_after =
++          match st.kind with
++          | Assign (p, rv) ->
++              reads#visit_rvalue () rv;
++              write_place p
++          | Call call ->
++              reads#visit_fn_operand () call.func;
++              List.iter (reads#visit_operand ()) call.args;
++              write_place call.dest
++          | StorageLive id | StorageDead id -> LocalId.Set.remove id live_after
++          | _ ->
++              reads#visit_statement () st;
++              live_after
++        in
++        let st =
++          if not rewrite then st
++          else
++            let visitor =
++              object
++                inherit [_] map_statement as super
++
++                method! visit_operand env op =
++                  match op with
++                  | Copy p -> (
++                      match owned_local p with
++                      | Some id
++                        when LocalId.Map.find_opt id !counts = Some 1
++                             && not (is_live_through_aliases live_after id) ->
++                          Move p
++                      | _ -> super#visit_operand env op)
++                  | _ -> super#visit_operand env op
++              end
++            in
++            visitor#visit_statement () st
++        in
++        let before =
++          LocalId.Map.fold
++            (fun id _ live -> LocalId.Set.add id live)
++            !counts live_after
++        in
++        (before, st)
++  in
++  match f.body with
++  | StructuredBody body ->
++      let _, b = block true [] LocalId.Set.empty body.body in
++      { f with body = StructuredBody { body with body = b } }
++  | _ -> f
++
++(** A CopyForDeref temporary is a place proxy, not a fresh mutable reborrow.
++    Inline an adjacent, single-consumer proxy into its reference expression.
++    This preserves shared reborrows through shared access to mutable references.
++*)
++let inline_deref_copies (_crate : crate) (f : fun_decl) : fun_decl =
++  match f.body with
++  | StructuredBody body ->
++      let counts = ref LocalId.Map.empty in
++      let count id =
++        Option.value (LocalId.Map.find_opt id !counts) ~default:0
++      in
++      let occurrences =
++        object
++          inherit [_] iter_statement as super
++
++          method! visit_place delta p =
++            match p.kind with
++            | PlaceLocal id ->
++                counts := LocalId.Map.add id (count id + delta) !counts
++            | _ -> super#visit_place delta p
++        end
++      in
++      occurrences#visit_block 1 body.body;
++      let rec through_deref id (p : place) =
++        match p.kind with
++        | PlaceProjection ({ kind = PlaceLocal root; _ }, Deref) -> root = id
++        | PlaceProjection (p, _) -> through_deref id p
++        | _ -> false
++      in
++      let rvalue_count id rv =
++        let n = ref 0 in
++        let visitor =
++          object
++            inherit [_] iter_statement as super
++
++            method! visit_place env p =
++              match p.kind with
++              | PlaceLocal root when root = id -> incr n
++              | _ -> super#visit_place env p
++          end
++        in
++        visitor#visit_rvalue () rv;
++        !n
++      in
++      let visitor =
++        object
++          inherit [_] map_statement as super
++
++          method! visit_block env b =
++            let b = super#visit_block env b in
++            let statements =
++              List.fold_right
++                (fun st rest ->
++                  match (st.kind, rest) with
++                  | ( Assign
++                        ( { kind = PlaceLocal id; _ },
++                          Use (Copy ({ ty = TRef (_, _, RMut); _ } as p)) ),
++                      ({ kind = Assign (dest, (RvRef (target, _, _) as rv)); _ }
++                       as next)
++                      :: tail )
++                    when through_deref id target
++                         && count id = 1 + rvalue_count id rv ->
++                      let replace =
++                        object
++                          inherit [_] map_statement as super
++
++                          method! visit_place env q =
++                            match q.kind with
++                            | PlaceLocal root when root = id -> p
++                            | _ -> super#visit_place env q
++                        end
++                      in
++                      let next' =
++                        {
++                          next with
++                          kind = Assign (dest, replace#visit_rvalue () rv);
++                          comments_before =
++                            st.comments_before @ next.comments_before;
++                        }
++                      in
++                      occurrences#visit_statement (-1) st;
++                      occurrences#visit_statement (-1) next;
++                      occurrences#visit_statement 1 next';
++                      next' :: tail
++                  | _ -> st :: rest)
++                b.statements []
++            in
++            { b with statements }
++        end
++      in
++      let b = visitor#visit_block () body.body in
++      { f with body = StructuredBody { body with body = b } }
++  | _ -> f
++
++(** Restore the reborrows hidden by optimized MIR's mutable-reference [Copy]
++    operands. Last-use ownership transfers have already been recovered; a
++    remaining [copy p : &mut T] means [&mut *p], never a duplicated borrow or a
++    move out of [p]. In particular, the ordinary mutable-borrow access checks
++    still reject paths crossing a shared reference.
++
++    When an operand needs a temporary, materialize the other place operands of
++    that statement in evaluation order too: hoisting only the reborrow could
++    invalidate an earlier read or move. Nested blocks are handled separately by
++    [map_statement], so no borrow is hoisted out of its branch or loop. *)
++let reborrow_mutable_copies (_crate : crate) (f : fun_decl) : fun_decl =
++  let is_mutable_copy = function
++    | Copy { ty = TRef (_, _, RMut); _ } -> true
++    | _ -> false
++  in
++  let reborrow (p : place) ty =
++    let pointee = { kind = PlaceProjection (p, Deref); ty } in
++    (* Keep the source reference's metadata, including for unsized pointees.
++       This is a metadata read, not a copy of the mutable reference itself. *)
++    let metadata =
++      Copy { kind = PlaceProjection (p, PtrMetadata); ty = TPtrMetadata ty }
++    in
++    RvRef (pointee, BMut, metadata)
++  in
++  match f.body with
++  | StructuredBody body ->
++      let new_locals = ref [] in
++      let _, gen =
++        LocalId.mk_stateful_generator_starting_at_id
++          (LocalId.of_int (List.length body.locals.locals))
++      in
++      let normalize (st : statement) =
++        match st.kind with
++        | Assign (dest, Use (Copy ({ ty = TRef (_, ty, RMut); _ } as p))) ->
++            [ { st with kind = Assign (dest, reborrow p ty) } ]
++        | _ ->
++            let needs_reborrow = ref false in
++            let scan =
++              object
++                inherit [_] iter_statement
++                method! visit_block _ _ = ()
++                method! visit_place _ _ = ()
++
++                method! visit_operand _ op =
++                  if is_mutable_copy op then needs_reborrow := true
++              end
++            in
++            scan#visit_statement () st;
++            if not !needs_reborrow then [ st ]
++            else
++              let before = ref [] in
++              let visitor =
++                object
++                  inherit [_] map_statement
++                  method! visit_block _ b = b
++                  method! visit_place _ p = p
++
++                  method! visit_operand _ op =
++                    match op with
++                    | Constant _ -> op
++                    | Copy p | Move p ->
++                        let local =
++                          {
++                            index = gen ();
++                            local_ty = p.ty;
++                            name = None;
++                            span = st.span;
++                          }
++                        in
++                        new_locals := local :: !new_locals;
++                        let dest =
++                          { kind = PlaceLocal local.index; ty = p.ty }
++                        in
++                        let rv =
++                          match op with
++                          | Copy { ty = TRef (_, ty, RMut); _ } -> reborrow p ty
++                          | _ -> Use op
++                        in
++                        before :=
++                          {
++                            span = st.span;
++                            statement_id = StatementId.zero;
++                            kind = Assign (dest, rv);
++                            comments_before = [];
++                          }
++                          :: !before;
++                        Move dest
++                end
++              in
++              let st = visitor#visit_statement () st in
++              List.rev_append !before [ st ]
++      in
++      let b = map_statement normalize body.body in
++      {
++        f with
++        body =
++          StructuredBody
++            {
++              body with
++              body = b;
++              locals =
++                {
++                  body.locals with
++                  locals = body.locals.locals @ List.rev !new_locals;
++                };
++            };
++      }
++  | _ -> f
++
+ let apply_passes (crate : crate) : crate =
+   (* Passes that apply to the whole crate *)
++  let crate = normalize_modeled_trait_specializations crate in
++  let crate = resolve_default_only_dispatch crate in
+   let crate = update_array_default crate in
+   (* Passes that apply to individual function bodies *)
+   let function_passes =
+@@ -1882,9 +3242,11 @@ let apply_passes (crate : crate) : crate =
+       ("remove_unreachable", remove_unreachable);
+       ("update_loop", update_loops);
+       ("remove_useless_joins", remove_useless_joins);
++      ("recover_last_use_moves", recover_last_use_moves);
++      ("inline_deref_copies", inline_deref_copies);
++      ("reborrow_mutable_copies", reborrow_mutable_copies);
+       ( "remove_shallow_borrows_storage_live_dead",
+         remove_shallow_borrows_storage_live_dead );
+-      ("decompose_str_borrows", decompose_str_borrows);
+       ("simplify_panics", simplify_panics);
+       ("decompose_global_accesses", decompose_global_accesses);
+       ("refresh_statement_ids", refresh_statement_ids);
+@@ -1936,6 +3298,7 @@ let apply_passes (crate : crate) : crate =
+   let crate = replace_static crate in
+   let crate = remove_vtables crate in
+   let crate = rename_type_vars crate in
++  let crate = resolve_modeled_defaults crate in
+   let crate = simplify_trait_calls crate in
+   [%ltrace "After pre-passes:\n" ^ Print.crate_to_string crate ^ "\n"];
+   crate
+diff --git a/src/llbc/LlbcAstUtils.ml b/src/llbc/LlbcAstUtils.ml
+index 8aeea62..9140d59 100644
+--- a/src/llbc/LlbcAstUtils.ml
++++ b/src/llbc/LlbcAstUtils.ml
+@@ -3,6 +3,21 @@ open LlbcAst
+ include Charon.LlbcAstUtils
+ open Collections
+ 
++(** Lean lowers function/implementation recursion through recursive method
++    functions. Other mixed declaration kinds remain unsupported. *)
++let mixed_declaration_group_is_supported (group : mixed_declaration_group) :
++    bool =
++  Config.backend () = Config.Lean
++  &&
++  match group with
++  | RecGroup ids ->
++      List.for_all
++        (function
++          | IdFun _ | IdTraitImpl _ -> true
++          | _ -> false)
++        ids
++  | NonRecGroup _ -> false
++
+ module FunIdOrderedType : OrderedType with type t = fun_id = struct
+   type t = fun_id
+ 
+@@ -128,39 +143,6 @@ let trait_impl_with_crate_to_pattern_string (span : Meta.span option)
+   name_with_generics_crate_to_pattern_string span crate
+     trait_decl.item_meta.name trait_decl.generics trait_impl.impl_trait.generics
+ 
+-(** Return true if the statement contains an instruction which breaks the
+-    control flow, at the exception of panics (that is: a break, a continue or a
+-    return) *)
+-let statement_has_break_continue_return (st : statement) : bool =
+-  let visitor =
+-    object
+-      inherit [_] iter_statement
+-      method! visit_Break _ _ = raise Utils.Found
+-      method! visit_Continue _ _ = raise Utils.Found
+-      method! visit_Return _ = raise Utils.Found
+-    end
+-  in
+-  try
+-    visitor#visit_statement () st;
+-    false
+-  with Utils.Found -> true
+-
+-(** Return true if the block contains a statement which breaks the control flow,
+-    at the exception of panics (that is: a break, a continue or a return) *)
+-let block_has_break_continue_return (st : block) : bool =
+-  let visitor =
+-    object
+-      inherit [_] iter_statement
+-      method! visit_Break _ _ = raise Utils.Found
+-      method! visit_Continue _ _ = raise Utils.Found
+-      method! visit_Return _ = raise Utils.Found
+-    end
+-  in
+-  try
+-    visitor#visit_block () st;
+-    false
+-  with Utils.Found -> true
+-
+ (** Compute the size of a function body - we count the number of statements and
+     blocks *)
+ let compute_body_size (b : body) : int =
+diff --git a/src/pure/PureMicroPassesLoops.ml b/src/pure/PureMicroPassesLoops.ml
+index b3f8e91..1dde3e0 100644
+--- a/src/pure/PureMicroPassesLoops.ml
++++ b/src/pure/PureMicroPassesLoops.ml
+@@ -7,6 +7,11 @@ open PureMicroPassesBase
+ let update_rec_continue_breaks (ctx : ctx) (def : fun_decl) (loop_func : texpr)
+     (constant_inputs : texpr list) (e : texpr) : texpr =
+   let span = def.item_meta.span in
++  let update_empty_ty ty =
++    match try_unwrap_loop_result ty with
++    | None -> ty
++    | Some (_, break) -> mk_result_ty break
++  in
+ 
+   let rec update (e : texpr) : texpr =
+     [%ldebug "e:\n" ^ texpr_to_string ctx e];
+@@ -71,8 +76,8 @@ let update_rec_continue_breaks (ctx : ctx) (def : fun_decl) (loop_func : texpr)
+               in
+               let ty =
+                 match branches with
+-                | [] -> [%internal_error] span
+-                | { branch = b; _ } :: _ -> b.ty
++                | [] -> update_empty_ty e.ty
++                | { branch; _ } :: _ -> branch.ty
+               in
+               (Match branches, ty)
+         in
+@@ -83,13 +88,7 @@ let update_rec_continue_breaks (ctx : ctx) (def : fun_decl) (loop_func : texpr)
+         let updates = List.map (fun (fid, e) -> (fid, update e)) updates in
+         { e with e = StructUpdate { struct_id; init; updates } }
+     | Meta (m, e) -> mk_emeta m (update e)
+-    | EError _ ->
+-        let ty =
+-          match try_unwrap_loop_result e.ty with
+-          | None -> e.ty
+-          | Some (_, break) -> mk_result_ty break
+-        in
+-        { e with ty }
++    | EError _ -> { e with ty = update_empty_ty e.ty }
+   in
+   update e
+ 
+@@ -99,6 +98,11 @@ let update_rec_continue_breaks (ctx : ctx) (def : fun_decl) (loop_func : texpr)
+ let update_non_rec_continue_breaks (ctx : ctx) (def : fun_decl) (input_ty : ty)
+     (output_ty : ty) (e : texpr) : texpr =
+   let span = def.item_meta.span in
++  let update_empty_ty ty =
++    match try_unwrap_loop_result ty with
++    | None -> ty
++    | Some _ -> mk_result_ty (mk_loop_result_ty input_ty output_ty)
++  in
+ 
+   let rec update (e : texpr) : texpr =
+     [%ldebug "e:\n" ^ texpr_to_string ctx e];
+@@ -150,8 +154,8 @@ let update_non_rec_continue_breaks (ctx : ctx) (def : fun_decl) (input_ty : ty)
+               in
+               let ty =
+                 match branches with
+-                | [] -> [%internal_error] span
+-                | { branch = b; _ } :: _ -> b.ty
++                | [] -> update_empty_ty e.ty
++                | { branch; _ } :: _ -> branch.ty
+               in
+               (Match branches, ty)
+         in
+@@ -162,13 +166,7 @@ let update_non_rec_continue_breaks (ctx : ctx) (def : fun_decl) (input_ty : ty)
+         let updates = List.map (fun (fid, e) -> (fid, update e)) updates in
+         { e with e = StructUpdate { struct_id; init; updates } }
+     | Meta (m, e) -> mk_emeta m (update e)
+-    | EError _ ->
+-        let ty =
+-          match try_unwrap_loop_result e.ty with
+-          | None -> e.ty
+-          | Some (_, break) -> mk_result_ty break
+-        in
+-        { e with ty }
++    | EError _ -> { e with ty = update_empty_ty e.ty }
+   in
+   update e
+ 
+@@ -435,6 +433,7 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+       (fresh_output_values : texpr list) (fresh_output_conts : texpr list)
+       (continue_ty : ty) (break_ty : ty) (body : loop_body) : loop_body =
+     let _, body = open_loop_body ctx span body in
++    let result_ty = mk_loop_result_ty continue_ty break_ty in
+ 
+     (* Introduce an intermediate let-binding for a loop.
+ 
+@@ -554,7 +553,7 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+                 in
+                 Match branches
+           in
+-          [%add_loc] mk_switch span scrut switch
++          mk_switch ~empty_ty:result_ty scrut switch
+       | Meta (m, e) -> mk_emeta m (update e)
+     in
+ 
+@@ -605,8 +604,8 @@ let simplify_loop_output_conts (ctx : ctx) (def : fun_decl) =
+                     { pat; branch })
+                   branches
+               in
+-              let ty = (List.hd branches).branch.ty in
+-              (Match branches, ty)
++              let switch = Match branches in
++              (switch, get_switch_body_ty ~empty_ty:e.ty switch)
+         in
+         { e = Switch (scrut, switch); ty }
+     | Let (monadic, pat, bound, next) -> (
+@@ -1094,6 +1093,7 @@ let filter_loop_useless_inputs_outputs_update_continue_break (span : Meta.span)
+     (ctx : ctx) ~(opened_vars : bool) (keep_outputs : bool list)
+     (keep_inputs : bool list) (continue_ty : ty) (break_ty : ty)
+     (body : loop_body) : loop_body =
++  let result_ty = mk_loop_result_ty continue_ty break_ty in
+   let opt_open_binder pat next =
+     if opened_vars then (pat, next)
+     else
+@@ -1170,7 +1170,7 @@ let filter_loop_useless_inputs_outputs_update_continue_break (span : Meta.span)
+               in
+               Match branches
+         in
+-        [%add_loc] mk_switch span scrut switch
++        mk_switch ~empty_ty:result_ty scrut switch
+     | Meta (m, e) -> mk_emeta m (update e)
+   in
+ 
+@@ -1730,7 +1730,7 @@ let filter_loop_useless_inputs_outputs (ctx : ctx)
+                      { pat; branch })
+                    bl)
+         in
+-        [%add_loc] mk_switch span scrut switch
++        mk_switch ~empty_ty:e.ty scrut switch
+   in
+   let body =
+     Option.map
+@@ -1794,9 +1794,15 @@ let reorder_loop_outputs (ctx : ctx) (def : fun_decl) =
+   let update_and_close_loop_body (explore : texpr -> texpr)
+       (output_indices : int list) (num_output_backs : int) (loop : loop) : texpr
+       =
++    let output_tys =
++      List.map (fun i -> Collections.List.nth loop.output_tys i) output_indices
++    in
+     let continue_ty =
+       mk_simpl_tuple_ty (List.map (fun (e : texpr) -> e.ty) loop.inputs)
+     in
++    let result_ty =
++      mk_loop_result_ty continue_ty (mk_simpl_tuple_ty output_tys)
++    in
+     let rec update (e : texpr) : texpr =
+       match e.e with
+       | FVar _ | BVar _ | CVar _ | Const _ | Lambda _ | StructUpdate _ | Loop _
+@@ -1850,7 +1856,7 @@ let reorder_loop_outputs (ctx : ctx) (def : fun_decl) =
+                 in
+                 Match branches
+           in
+-          [%add_loc] mk_switch span scrut switch
++          mk_switch ~empty_ty:result_ty scrut switch
+       | Meta (m, e) -> mk_emeta m (update e)
+     in
+ 
+@@ -1866,9 +1872,6 @@ let reorder_loop_outputs (ctx : ctx) (def : fun_decl) =
+     (* Rebuild the loop *)
+     let num_outputs = List.length loop.output_tys in
+     let num_output_values = num_outputs - num_output_backs in
+-    let output_tys =
+-      List.map (fun i -> Collections.List.nth loop.output_tys i) output_indices
+-    in
+     let loop =
+       {
+         loop with
+@@ -2244,7 +2247,7 @@ let reorder_loop_outputs (ctx : ctx) (def : fun_decl) =
+                      { pat; branch })
+                    bl)
+         in
+-        [%add_loc] mk_switch span scrut switch
++        mk_switch ~empty_ty:e.ty scrut switch
+   in
+   let body =
+     Option.map
+@@ -2590,6 +2593,7 @@ let loops_to_recursive_update_loop_body (ctx : ctx) (def : fun_decl)
+     (break_outputs : fvar list) (continue_ty : ty) (break_ty : ty)
+     (body : loop_body) : loop_body =
+   let span = def.item_meta.span in
++  let result_ty = mk_loop_result_ty continue_ty break_ty in
+   let rec update (e : texpr) : texpr =
+     match e.e with
+     | FVar _ | BVar _ | CVar _ | Const _ | Lambda _ | StructUpdate _ | Loop _ ->
+@@ -2618,7 +2622,7 @@ let loops_to_recursive_update_loop_body (ctx : ctx) (def : fun_decl)
+               in
+               Match branches
+         in
+-        [%add_loc] mk_switch span scrut switch
++        mk_switch ~empty_ty:result_ty scrut switch
+     | Meta (m, e) -> mk_emeta m (update e)
+   and update_app_or_qualif (e : texpr) : texpr =
+     (* This might be a break or a continue *)
+@@ -3035,6 +3039,22 @@ let decompose_loops_aux (ctx : ctx) (def : fun_decl) (body : fun_body) :
+     let ({ output_tys; loop_body; _ } : loop) = loop in
+     let output_ty = mk_simpl_tuple_ty output_tys in
+ 
++    (* The wrapper forwards each state argument to the fixed-point operator.
++       Simplification may have replaced an input with a tuple, unit, or an
++       ignored pattern. Bind ignored fields so the original state can still
++       be reconstructed without inventing values. *)
++    let loop_body =
++      if to_rec then loop_body
++      else
++        {
++          loop_body with
++          inputs =
++            List.map
++              (tpat_replace_ignored_vars_with_free_vars ctx.fresh_fvar_id)
++              loop_body.inputs;
++        }
++    in
++
+     (* Compute the list of *constant* inputs: those are variables used
+        by the loop but not bound by the loop itself (because they are
+        not modified through the loop iterations).
+@@ -3103,10 +3123,7 @@ let decompose_loops_aux (ctx : ctx) (def : fun_decl) (body : fun_body) :
+         let loop_body' = close_loop_body span loop.loop_body in
+         let inputs =
+           List.map
+-            (fun (pat : tpat) ->
+-              match pat.pat with
+-              | POpen (fvar, _) -> { e = FVar fvar.id; ty = pat.ty }
+-              | _ -> [%internal_error] span)
++            (fun pat -> Option.get (tpat_to_texpr span pat))
+             loop_body.inputs
+         in
+         let loop = { loop with loop_body = loop_body'; inputs } in

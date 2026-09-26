@@ -19,6 +19,22 @@
         "aarch64-linux"
         "x86_64-linux"
       ];
+      # Each verification/toolchain/<name>/SERIES lists that series' patches in
+      # application order (generated and checked by verification/toolchain/series.py).
+      series =
+        name:
+        let
+          directory = ./verification/toolchain + "/${name}";
+          lines = nixpkgs.lib.splitString "\n" (builtins.readFile (directory + "/SERIES"));
+        in
+        map (file: directory + "/${file}") (
+          builtins.filter (line: line != "" && !nixpkgs.lib.hasPrefix "#" line) lines
+        );
+      # Every patch applies exactly to the pinned upstream source: no fuzz.
+      patchFlags = [
+        "-p1"
+        "-F0"
+      ];
       perSystem = forAllSystems (
         system:
         let
@@ -31,34 +47,20 @@
           patchedAeneasSource = pkgs.applyPatches {
             name = "aeneas-source";
             src = aeneas;
-            patches = [ ./verification/aeneas-stdlib-models.patch ];
+            patches = series "aeneas";
+            inherit patchFlags;
           };
           tools = rec {
             charon = upstream.charon.overrideAttrs (old: {
-              patches = (old.patches or [ ]) ++ [
-                ./verification/charon-box-init.patch
-                ./verification/charon-closure-clauses.patch
-                ./verification/charon-nonlocal-continuations.patch
-                ./verification/charon-local-trait-bounds.patch
-                ./verification/charon-closure-regions.patch
-                ./verification/charon-hidden-traits.patch
-              ];
+              patches = (old.patches or [ ]) ++ series "charon";
+              inherit patchFlags;
             });
             charon-ml = upstream.charon-ml.overrideAttrs (old: {
-              patches = (old.patches or [ ]) ++ [
-                ./verification/charon-ml-binders.patch
-              ];
+              patches = (old.patches or [ ]) ++ series "charon-ml";
+              inherit patchFlags;
             });
-            aeneas = (upstream.aeneas.override { inherit charon charon-ml; }).overrideAttrs (old: {
+            aeneas = (upstream.aeneas.override { inherit charon charon-ml; }).overrideAttrs (_: {
               src = "${patchedAeneasSource}/src";
-              patches = (old.patches or [ ]) ++ [
-                ./verification/aeneas-strict-warnings.patch
-                ./verification/aeneas-loop-continuations.patch
-                ./verification/aeneas-trait-models.patch
-                ./verification/aeneas-shared-borrows.patch
-                ./verification/aeneas-floating-scalars.patch
-                ./verification/aeneas-collection-contract.patch
-              ];
             });
             rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
             model-rustc = pkgs.writeShellScriptBin "model-rustc" ''

@@ -1,0 +1,2468 @@
+# aeneas integration step 39 after cba11f3beb: commit b56074c3524968fa531d20fa169fc8f1dfb7ee8a
+# first parent 6e3590f91b18bcd92a27c7c1b2b6e3c90d67ab4c, merged b87a9d775055b4490cdae8256ba725c78cd5a6f8
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (staged backward functions with any number of stages, positions selected by path)
+
+diff --git a/src/pure/PrintPure.ml b/src/pure/PrintPure.ml
+index e3e0c38..2b94e71 100644
+--- a/src/pure/PrintPure.ml
++++ b/src/pure/PrintPure.ml
+@@ -751,7 +751,7 @@ let adt_pat_to_string ?(span : Meta.span option) (env : fmt_env)
+   snd (adt_pat_to_string_aux span env variant_id fields ty)
+ 
+ let back_sg_info_to_string (env : fmt_env) (info : back_sg_info) : string =
+-  let { inputs; outputs; effect_info; filter; early } = info in
++  let { inputs; outputs; effect_info; filter; early; stage_map = _ } = info in
+   let ty_to_string (n, ty) =
+     (match n with
+     | None -> ""
+@@ -771,13 +771,14 @@ let back_sg_info_to_string (env : fmt_env) (info : back_sg_info) : string =
+   ^ show_fun_effect_info effect_info
+   ^ "; filter = "
+   ^ Print.bool_to_string filter
+-  ^ (match early with
+-    | None -> ""
+-    | Some { early_inputs; early_outputs } ->
+-        "; early_inputs = "
+-        ^ Print.list_to_string tys_to_string early_inputs
+-        ^ "; early_outputs = "
+-        ^ Print.list_to_string tys_to_string early_outputs)
++  ^ String.concat ""
++      (List.map
++         (fun { early_inputs; early_outputs } ->
++           "; early_inputs = "
++           ^ Print.list_to_string tys_to_string early_inputs
++           ^ "; early_outputs = "
++           ^ Print.list_to_string tys_to_string early_outputs)
++         early)
+   ^ " }"
+ 
+ let decomposed_fun_type_to_string (env : fmt_env) (sg : decomposed_fun_type) :
+diff --git a/src/pure/Pure.ml b/src/pure/Pure.ml
+index bbaee87..fe4f290 100644
+--- a/src/pure/Pure.ml
++++ b/src/pure/Pure.ml
+@@ -1633,18 +1633,25 @@ type back_sg_info = {
+           - [[result (T * T)]] *)
+   effect_info : fun_effect_info;
+   filter : bool;  (** Should we filter this backward function? *)
+-  early : back_early_sg option;
+-      (** Nested borrows (a region group nested under two other regions): a
+-          first stage of the backward function which receives [early.inputs]
+-          and gives back [early.outputs] before receiving [inputs]. The
+-          backward function then has type
+-          [early_inputs -> (early_outputs * (inputs -> outputs))]. *)
++  early : back_early_sg list;
++      (** Nested borrows (a region group nested under other regions): the
++          stages of the backward function before the last one. Stage [j]
++          receives [early_inputs] and gives back [early_outputs] before the next
++          stage receives its inputs; the last stage receives [inputs] and gives
++          back [outputs]. With stages [s1; s2] the backward function has type
++          [s1.early_inputs -> (s1.early_outputs * (s2.early_inputs ->
++           (s2.early_outputs * (inputs -> outputs))))]. See
++          [SymbolicToPureTypes.back_sig_stage_map] for the stages. *)
++  stage_map : ((bool * bool list) * int) list;
++      (** Staged backward functions: the stage of every position of the region
++          group in the signature, identified by whether it comes from an input
++          ([true]) or from the output, and by its path through the ignored
++          mutable borrows (outermost first; [true]: the value given back to the
++          borrow, [false]: the borrowed value). Empty if [early = []]. *)
+ }
+ 
+-(** See [back_sg_info.early]. The inputs are the values given back at the odd
+-    levels on the "borrowed value" side of the outermost ignored mutable borrow
+-    of the input arguments, the outputs the values consumed at the even levels
+-    > 0 on the "given back" side. *)
++(** A stage of a staged backward function, before the last one (see
++    [back_sg_info.early]). *)
+ and back_early_sg = {
+   early_inputs : (abs_level * (string option * ty) list) list;
+   early_outputs : (abs_level * (string option * ty) list) list;
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 86e4139..5b66a1e 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -737,7 +737,7 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+           && back.inputs = [] && back.outputs = []
+         then None
+         else (
+-          let staged = Option.is_some back.early in
++          let staged = back.early <> [] in
+           let nested =
+             back_sig_is_nested (Some span) ctx get_group gid sg.inputs sg.output
+           in
+@@ -753,17 +753,18 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                     (mk_simpl_tuple_ty (List.map snd tys)) ))
+               levels
+           in
++          let last = List.length back.early in
+           let parameters = fresh_params back.inputs in
+-          (* Staged backward functions (see [Pure.back_early_sg]): the
+-             parameters of the first stage *)
++          (* Staged backward functions (see [Pure.back_sg_info.early]): the
++             parameters of the stages before the last one *)
+           let early_parameters =
+-            match back.early with
+-            | None -> []
+-            | Some early -> fresh_params early.early_inputs
++            List.map
++              (fun (early : back_early_sg) -> fresh_params early.early_inputs)
++              back.early
+           in
+           (* The values received by the backward function, identified by their
+-             level and their source (an input, or the output) *)
+-          let received ~early levels params =
++             stage, their level and their source (an input, or the output) *)
++          let received stage levels params =
+             List.concat
+               (List.map2
+                  (fun (level, tys) (_, var) ->
+@@ -779,15 +780,11 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                      List.filter_map
+                        (fun (i, ty, from_input) ->
+                          Option.map
+-                           (fun _ -> (level, i))
+-                           (if early then
+-                              translate_back_early_ty ~nested (Some span) ctx
+-                                get_group gid level ~to_input:true ~from_input
+-                                ty
+-                            else
+-                              translate_back_input_ty ~staged ~nested
+-                                (Some span) ctx get_group gid level ~from_input
+-                                ty))
++                           (fun _ -> (stage, level, i))
++                           (translate_back_input_ty
++                              ?stage:(SymbolicToPureCore.back_sg_stage back stage) ~nested
++                              (Some span) ctx get_group gid level ~from_input
++                              ty))
+                        sources
+                    in
+                    [%sanity_check] span (List.length sources = List.length es);
+@@ -795,15 +792,16 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                  levels params)
+           in
+           let supplied =
+-            (match back.early with
+-            | None -> []
+-            | Some early ->
+-                received ~early:true early.early_inputs early_parameters)
+-            @ received ~early:false back.inputs parameters
++            List.concat
++              (List.mapi
++                 (fun stage ((early : back_early_sg), params) ->
++                   received stage early.early_inputs params)
++                 (List.combine back.early early_parameters))
++            @ received last back.inputs parameters
+           in
+           let supplied_from source =
+             List.find_map
+-              (fun ((_, i), e) -> if i = source then Some e else None)
++              (fun ((_, _, i), e) -> if i = source then Some e else None)
+               supplied
+           in
+           let state i ty =
+@@ -830,14 +828,11 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                           "Model ABI did not return a required mutable input \
+                            state"))
+           in
+-          let level_outputs ~early (level, _) =
++          let level_outputs stage (level, _) =
+             let output_ty ~from_input ty =
+-              if early then
+-                translate_back_early_ty ~nested (Some span) ctx get_group gid
+-                  level ~to_input:false ~from_input ty
+-              else
+-                translate_back_output_ty ~staged ~nested (Some span) ctx
+-                  get_group gid level ~from_input ty
++              translate_back_output_ty
++                ?stage:(SymbolicToPureCore.back_sg_stage back stage)
++                ~nested (Some span) ctx get_group gid level ~from_input ty
+             in
+             let from_inputs =
+               List.filter_map
+@@ -856,7 +851,8 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+             (* Nested borrows: a constructor moves its inputs into its output.
+                The value given back at a level > 0 of the output is the output
+                of the model in which the inputs which moved into it are
+-               replaced with the values received at this level for them. *)
++               replaced with the values received at this level for them (in
++               this stage or before). *)
+             let from_output =
+               match output_ty ~from_input:false sg.output with
+               | None -> []
+@@ -867,9 +863,9 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                     ^ " for the output only for constructors");
+                   let updates =
+                     List.filter_map
+-                      (fun ((l, source), e) ->
++                      (fun ((s, l, source), e) ->
+                         match source with
+-                        | Some i when l = level -> Some (i, e)
++                        | Some i when l = level && s <= stage -> Some (i, e)
+                         | _ -> None)
+                       supplied
+                   in
+@@ -883,29 +879,31 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+             in
+             mk_simpl_tuple_texpr span (from_inputs @ from_output)
+           in
+-          let mk_stage ~early params outputs =
++          let last_stage =
+             mk_closed_lambdas span
+-              (List.map (fun (_, var) -> mk_tpat_from_fvar None var) params)
++              (List.map (fun (_, var) -> mk_tpat_from_fvar None var) parameters)
+               (mk_simpl_tuple_texpr span
+-                 (List.map (level_outputs ~early) outputs))
++                 (List.map (level_outputs last) back.outputs))
+           in
+-          let late = mk_stage ~early:false parameters back.outputs in
+-          match back.early with
+-          | None -> Some late
+-          | Some early ->
+-              let early_output =
+-                mk_simpl_tuple_texpr span
+-                  (List.map (level_outputs ~early:true) early.early_outputs)
+-              in
+-              Some
+-                (mk_closed_lambdas span
++          Some
++            (List.fold_right
++               (fun (stage, ((early : back_early_sg), params)) next ->
++                 let early_output =
++                   mk_simpl_tuple_texpr span
++                     (List.map (level_outputs stage) early.early_outputs)
++                 in
++                 mk_closed_lambdas span
+                    [
+                      mk_simpl_tuple_pat
+                        (List.map
+                           (fun (_, var) -> mk_tpat_from_fvar None var)
+-                          early_parameters);
++                          params);
+                    ]
+-                   (mk_simpl_tuple_texpr span [ early_output; late ]))))
++                   (mk_simpl_tuple_texpr span [ early_output; next ]))
++               (List.mapi
++                  (fun stage x -> (stage, x))
++                  (List.combine back.early early_parameters))
++               last_stage)))
+       (T.RegionGroupId.Map.bindings dsg.back_sg)
+   in
+   let output =
+@@ -1167,7 +1165,7 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                        (fun (i, ty) ->
+                          Option.bind
+                            (translate_back_input_ty
+-                              ~staged:(Option.is_some back.early) ~nested
++                              ?stage:(SymbolicToPureCore.back_sg_last_stage back) ~nested
+                               (Some span) ctx get_group gid level
+                               ~from_input:true ty)
+                            (project i ty level))
+@@ -1193,18 +1191,20 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                 in
+                 let back_fun, late_input =
+                   match back.early with
+-                  | None -> (back_fun, late_input)
+-                  | Some early ->
+-                      (* Staged backward function (see [Pure.back_early_sg]):
+-                         the canonical state is the one a caller observes if
+-                         it ends the regions right after the call without
+-                         updating the values it gets back. The first stage
+-                         receives the state of the inputs, and the second
+-                         stage receives, at level [l], the values given back
+-                         by the first stage at level [l + 1]. *)
++                  | [] -> (back_fun, late_input)
++                  | [ early ] ->
++                      (* Staged backward function (see
++                         [Pure.back_sg_info.early]): the canonical state is the
++                         one a caller observes if it ends the regions right
++                         after the call without updating the values it gets
++                         back. The first stage receives the state of the
++                         inputs, and the second stage receives, at level [l],
++                         the values given back by the first stage at level
++                         [l + 1]. *)
+                       [%cassert] span (not back.effect_info.can_fail)
+                         "Dictionary state recovery does not support failing \
+                          staged backward functions";
++                      let first_stage = SymbolicToPureCore.back_sg_stage back 0 in
+                       let early_inputs =
+                         List.map
+                           (fun (level, _) ->
+@@ -1218,9 +1218,9 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                                          "Dictionary state recovery: \
+                                           unsupported staged input state";
+                                        state)
+-                                     (translate_back_early_ty ~nested
+-                                        (Some span) ctx
+-                                        get_group gid level ~to_input:true
++                                     (translate_back_input_ty
++                                        ?stage:first_stage ~nested (Some span)
++                                        ctx get_group gid level
+                                         ~from_input:true ty))
+                                  indexed_inputs))
+                           early.early_inputs
+@@ -1267,10 +1267,9 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                               (fun (i, ty) ->
+                                 Option.map
+                                   (fun _ -> i)
+-                                  (translate_back_early_ty ~nested (Some span)
+-                                     ctx
+-                                     get_group gid (level + 1) ~to_input:false
+-                                     ~from_input:true ty))
++                                  (translate_back_output_ty ?stage:first_stage
++                                     ~nested (Some span) ctx get_group gid
++                                     (level + 1) ~from_input:true ty))
+                               indexed_inputs
+                           in
+                           [%sanity_check] span
+@@ -1286,6 +1285,10 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                                      staged backward function shape")
+                       in
+                       (mk_texpr_from_fvar late, staged_input)
++                  | _ ->
++                      [%craise] span
++                        "Dictionary state recovery does not support staged \
++                         backward functions with more than two stages"
+                 in
+                 let backward_inputs =
+                   List.map (fun (level, _) -> late_input level) back.inputs
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index c7a413f..719be51 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -8,12 +8,35 @@ module V = Values
+ module C = Contexts
+ module S = SymbolicAst
+ 
+-(** Nested borrows: the side of the outermost ignored mutable borrow of a value
+-    that we select when translating the values of a sub-abstraction level
+-    (see [Pure.back_early_sg]): the borrowed value, the value given back to it,
+-    or both. When the value doesn't start with an ignored mutable borrow, all
+-    its positions are on the borrowed side. *)
+-type back_side = BothSides | BorrowedSide | GivenBackSide
++(** Nested borrows: the positions of a value that we select when translating
++    the values of a sub-abstraction level for a stage of a staged backward
++    function (see [Pure.back_sg_info.early]): all of them, or those whose path
++    through the ignored mutable borrows (outermost first; [true]: the value
++    given back to the borrow, [false]: the borrowed value) satisfies the
++    predicate. *)
++type back_side = BothSides | SelectPaths of (bool list -> bool)
++
++(** A stage of a staged backward function: the stage map of its signature (see
++    [Pure.back_sg_info.stage_map]) and the index of the stage. *)
++type back_stage = { positions : ((bool * bool list) * int) list; index : int }
++
++(** The positions of an input ([from_input]) or of the output which belong to
++    a stage (see [back_stage]). *)
++let back_stage_side (stage : back_stage) ~(from_input : bool) : back_side =
++  SelectPaths
++    (fun path ->
++      List.assoc_opt (from_input, path) stage.positions = Some stage.index)
++
++(** The stage [index] of a backward function, if it is staged. *)
++let back_sg_stage (signature : back_sg_info) (index : int) : back_stage option
++    =
++  match signature.early with
++  | [] -> None
++  | _ -> Some { positions = signature.stage_map; index }
++
++(** The last stage of a backward function, if it is staged. *)
++let back_sg_last_stage (signature : back_sg_info) : back_stage option =
++  back_sg_stage signature (List.length signature.early)
+ 
+ let match_name_find_opt = TranslateCore.match_name_find_opt
+ 
+@@ -130,11 +153,15 @@ type fun_call_stage = {
+   supplied_inputs : abs_level list;
+       (** Levels whose inputs were already supplied to the backward function
+           (possibly before the sub-abstraction of this level ended). *)
+-  early_outputs : (abs_level * fvar list) list option;
+-      (** Staged backward functions (see [Pure.back_early_sg]): the outputs
+-          of the first stage, once it has been applied ([None] before). The
+-          backward function is then the continuation returned by the first
+-          stage, which receives [signature.inputs]. *)
++  early_outputs : (abs_level * fvar list) list list;
++      (** Staged backward functions (see [Pure.back_sg_info.early]): the
++          outputs of the stages which have been applied, in order. The backward
++          function is then the continuation returned by the last applied stage,
++          which receives the inputs of the next stage. *)
++  bound_early_outputs : (int * abs_level) list;
++      (** The stages (before the last one) and levels whose outputs in
++          [early_outputs] have been bound to the values given back by the
++          sub-abstractions of these levels. *)
+ }
+ [@@deriving show]
+ 
+@@ -225,10 +252,10 @@ type bs_ctx = {
+           the expressions which are specific to the backward functions.
+ 
+           Also, we split the inputs into different subabstraction levels. *)
+-  early_backward_inputs : fvar list AbsLevelMap.t RegionGroupId.Map.t;
+-      (** Staged backward functions (see [Pure.back_early_sg]): the inputs of
+-          the first stage, split by level (the inputs of the second stage are
+-          in [backward_inputs]). *)
++  early_backward_inputs : fvar list AbsLevelMap.t list RegionGroupId.Map.t;
++      (** Staged backward functions (see [Pure.back_sg_info.early]): the
++          inputs of the stages before the last one, split by level (the inputs
++          of the last stage are in [backward_inputs]). *)
+   deferred_backward_outputs : (C.eval_ctx * V.abs) AbsLevelMap.t;
+       (** Nested borrows (three levels or more): the outputs of the backward
+           function at a level > 0 are the values consumed by the sub-abstraction
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index d248e8b..408153d 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -282,14 +282,14 @@ let join_owned_state_recovery (outer : bs_ctx) (ctx : bs_ctx)
+       (root, recovered))
+     outer.owned_state_roots
+ 
+-(** Staged backward functions (see [Pure.back_early_sg]): the side of the
+-    outermost ignored mutable borrow which we select, at [level], for every
+-    value of a region abstraction (see
+-    [SymbolicToPureTypes.back_staged_side]). The values of a function-call
+-    abstraction are the projections of the inputs followed by the projection
+-    of the output. *)
+-let staged_abs_sides (span : Meta.span) ~(early : bool) (abs : V.abs)
+-    (level : abs_level) : back_side option list =
++(** Staged backward functions (see [Pure.back_sg_info.early]): the positions of
++    every value of a region abstraction which belong to the stage [index] of
++    the backward function whose signature is [signature] (see
++    [SymbolicToPureCore.back_stage_side]). The values of a function-call
++    abstraction are the projections of the inputs followed by the projection of
++    the output. *)
++let staged_abs_sides (span : Meta.span) (signature : back_sg_info)
++    (index : int) (abs : V.abs) : back_side option list =
+   let num_values = List.length abs.avalues in
+   let from_input index =
+     match abs.kind with
+@@ -302,20 +302,32 @@ let staged_abs_sides (span : Meta.span) ~(early : bool) (abs : V.abs)
+             region abstractions of kind "
+           ^ V.show_abs_kind abs.kind)
+   in
++  let stage = { positions = signature.stage_map; index } in
+   List.mapi
+     (fun index _ ->
+-      back_staged_side ~early ~from_input:(from_input index) level)
++      Some (back_stage_side stage ~from_input:(from_input index)))
+     abs.avalues
+ 
+-(** The sides selected for the second stage of the backward function of a
++(** The index of the last stage of a staged backward function. *)
++let back_last_stage (signature : back_sg_info) : int =
++  List.length signature.early
++
++(** The sides selected for the last stage of the backward function of a
+     function call (see [staged_abs_sides]), if it is staged. *)
+-let fun_call_late_sides (ctx : bs_ctx) (abs : V.abs) (level : abs_level) :
++let fun_call_late_sides (ctx : bs_ctx) (abs : V.abs) :
+     back_side option list option =
+   match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+-  | Some { signature = { early = Some _; _ }; _ } ->
+-      Some (staged_abs_sides ctx.span ~early:false abs level)
++  | Some { signature = { early = _ :: _; _ } as signature; _ } ->
++      Some
++        (staged_abs_sides ctx.span signature (back_last_stage signature) abs)
+   | _ -> None
+ 
++(** Staged backward functions: whether all the stages before the last one of
++    the backward function of a function call have been applied (always true if
++    it is not staged). *)
++let fun_call_last_stage_ready (stage : fun_call_stage) : bool =
++  List.length stage.early_outputs = List.length stage.signature.early
++
+ (** The body of a staged backward function is translated once: its tails
+     return the pair of the outputs of both stages, or panic. We mark them to
+     project them afterwards (see [map_staged_tails]). *)
+@@ -406,16 +418,18 @@ let rec remove_unused_staged_lets (e : texpr) : texpr =
+       | _ -> { e with e = Switch (scrut, Match branches) })
+   | _ -> e
+ 
+-(** Build a staged backward function (see [Pure.back_early_sg]) from the body
+-    [e] translated once, whose tails are marked with [mk_staged_tail]:
+-    [fun early_inputs => (early_outputs, fun inputs => outputs)]. The first
+-    stage is a copy of the body whose tails only return the early outputs,
+-    without the let-bindings it doesn't need: it must not use the inputs of the
+-    second stage. *)
++(** Build a staged backward function (see [Pure.back_sg_info.early]) from the
++    body [e] translated once, whose tails are marked with [mk_staged_tail]:
++    [fun early_inputs_1 => (early_outputs_1, fun early_inputs_2 => (...,
++     fun inputs => outputs))]. Every stage before the last one is a copy of the
++    body whose tails only return the outputs of this stage, without the
++    let-bindings it doesn't need: it must not use the inputs of the later
++    stages. *)
+ let mk_staged_backward_function (ctx : bs_ctx) (gid : T.RegionGroupId.id)
+-    (can_fail : bool) (early_inputs : (abs_level * fvar list) list)
++    (can_fail : bool) (early_inputs : (abs_level * fvar list) list list)
+     (inputs : (abs_level * fvar list) list) (e : texpr) : texpr =
+   let span = ctx.span in
++  let num_stages = List.length early_inputs + 1 in
+   let mk_level_pats (levels : (abs_level * fvar list) list) : tpat list =
+     List.map
+       (fun (_, vars) ->
+@@ -430,75 +444,86 @@ let mk_staged_backward_function (ctx : bs_ctx) (gid : T.RegionGroupId.id)
+       "Nested borrows: a staged backward function which can not fail panics";
+     mk_result_fail_texpr_with_error_id span error_failure_id ty
+   in
+-  (* The tails return [ok? (early_outputs, outputs)] or panic *)
+-  let dest_return (tail : texpr) : texpr * texpr =
+-    let pair = if can_fail then opt_destruct_ret tail else Some tail in
+-    match Option.bind pair opt_dest_tuple_texpr with
+-    | Some [ early; late ] -> (early, late)
++  (* The tails return [ok? (outputs_1, ..., outputs_n)] or panic *)
++  let dest_return (tail : texpr) : texpr list =
++    let outputs = if can_fail then opt_destruct_ret tail else Some tail in
++    match Option.bind outputs opt_dest_tuple_texpr with
++    | Some outputs when List.length outputs = num_stages -> outputs
+     | _ -> [%internal_error] span
+   in
+-  let panic_tys (tail : texpr) : ty * ty =
++  let panic_tys (tail : texpr) : ty list =
+     match opt_destruct_tuple span (unwrap_result_ty span tail.ty) with
+-    | Some [ early; late ] -> (early, late)
++    | Some tys when List.length tys = num_stages -> tys
+     | _ -> [%internal_error] span
+   in
+-  (* The second stage *)
+-  let late =
+-    map_staged_tails span
+-      (fun tag tail ->
+-        if tag = staged_return_tag then wrap (snd (dest_return tail))
+-        else fail (snd (panic_tys tail)))
+-      e
+-  in
+-  let late = mk_closed_lambdas span (mk_level_pats inputs) late in
+-  (* The first stage *)
+-  let early =
++  (* The last stage *)
++  let last =
+     map_staged_tails span
+       (fun tag tail ->
+         if tag = staged_return_tag then
+-          mk_staged_tail staged_early_tag (fst (dest_return tail))
+-        else mk_staged_tail tag tail)
++          wrap (List.nth (dest_return tail) (num_stages - 1))
++        else fail (List.nth (panic_tys tail) (num_stages - 1)))
+       e
+   in
+-  let early =
+-    close_all_texpr span
+-      (remove_unused_staged_lets (open_all_texpr ctx.fresh_fvar_id span early))
+-  in
+-  let late_inputs =
+-    FVarId.Set.of_list
+-      (List.concat_map
+-         (fun (_, vars) -> List.map (fun (v : fvar) -> v.id) vars)
+-         inputs)
+-  in
+-  let used_late_inputs = FVarId.Set.inter (texpr_get_fvars early) late_inputs in
+-  [%cassert] span
+-    (FVarId.Set.is_empty used_late_inputs)
+-    ("Nested borrows: the first stage of the staged backward function of \
+-      region group "
+-    ^ T.RegionGroupId.to_string gid
+-    ^ " of "
+-    ^ name_to_string ctx ctx.fun_decl.item_meta.name
+-    ^ " needs inputs of its second stage ("
+-    ^ String.concat ", "
+-        (List.concat_map
+-           (fun (_, vars) ->
+-             List.filter_map
++  let last = mk_closed_lambdas span (mk_level_pats inputs) last in
++  (* The stages before it, from the last one to the first one *)
++  let later_inputs index =
++    List.concat_map snd
++      (List.concat (List.filteri (fun i _ -> i > index) early_inputs) @ inputs)
++  in
++  let rec build index (next : texpr) : texpr =
++    if index < 0 then next
++    else
++      let stage =
++        map_staged_tails span
++          (fun tag tail ->
++            if tag = staged_return_tag then
++              mk_staged_tail staged_early_tag (List.nth (dest_return tail) index)
++            else mk_staged_tail tag tail)
++          e
++      in
++      let stage =
++        close_all_texpr span
++          (remove_unused_staged_lets
++             (open_all_texpr ctx.fresh_fvar_id span stage))
++      in
++      let later = later_inputs index in
++      let used =
++        FVarId.Set.inter (texpr_get_fvars stage)
++          (FVarId.Set.of_list (List.map (fun (v : fvar) -> v.id) later))
++      in
++      [%cassert] span (FVarId.Set.is_empty used)
++        ("Nested borrows: the stage "
++        ^ string_of_int (index + 1)
++        ^ " of the staged backward function of region group "
++        ^ T.RegionGroupId.to_string gid
++        ^ " of "
++        ^ name_to_string ctx ctx.fun_decl.item_meta.name
++        ^ " needs inputs of its later stages ("
++        ^ String.concat ", "
++            (List.filter_map
+                (fun (v : fvar) ->
+-                 if FVarId.Set.mem v.id used_late_inputs then
+-                   Some (fvar_to_string ctx v)
++                 if FVarId.Set.mem v.id used then Some (fvar_to_string ctx v)
+                  else None)
+-               vars)
+-           inputs)
+-    ^ "): the values it gives back early depend on values given back later");
+-  let early =
+-    map_staged_tails span
+-      (fun tag tail ->
+-        if tag = staged_early_tag then
+-          wrap (mk_simpl_tuple_texpr span [ tail; late ])
+-        else fail (mk_simpl_tuple_ty [ fst (panic_tys tail); late.ty ]))
+-      early
++               later)
++        ^ "): the values it gives back early depend on values given back later"
++        );
++      let stage =
++        map_staged_tails span
++          (fun tag tail ->
++            if tag = staged_early_tag then
++              wrap (mk_simpl_tuple_texpr span [ tail; next ])
++            else
++              fail
++                (mk_simpl_tuple_ty [ List.nth (panic_tys tail) index; next.ty ]))
++          stage
++      in
++      build (index - 1)
++        (mk_closed_lambdas span
++           [ mk_simpl_tuple_pat (mk_level_pats (List.nth early_inputs index)) ]
++           stage)
+   in
+-  mk_closed_lambdas span [ mk_simpl_tuple_pat (mk_level_pats early_inputs) ] early
++  build (num_stages - 2) last
+ 
+ let rec translate_expr (e : S.expr) (ctx : bs_ctx) : texpr =
+   [%ldebug "e:\n" ^ bs_ctx_expr_to_string ctx e];
+@@ -589,7 +614,7 @@ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+               if
+                 Option.is_some
+                   (translate_back_output_ty
+-                     ~staged:(Option.is_some signature.early) ~nested
++                     ?stage:(back_sg_last_stage signature) ~nested
+                      (Some ctx.span) ctx.decls_ctx get_group gid level
+                      ~from_input ty)
+               then Some ty
+@@ -606,7 +631,8 @@ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+     output_values = None;
+     reconstructed_outputs = [];
+     supplied_inputs = [];
+-    early_outputs = None;
++    early_outputs = [];
++    bound_early_outputs = [];
+   }
+ 
+ and translate_function_call (call : S.call) (e : S.expr) (ctx : bs_ctx) : texpr
+@@ -1466,35 +1492,37 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+     (* Introduce fresh variables for the values output by the abstraction,
+        and lookup the values which are bound in the lambda defining the
+        backward function. A staged backward function (see
+-       [Pure.back_early_sg]) receives the values of each side of the outermost
+-       ignored borrows in different stages. *)
+-    let lookup_bound (inputs : fvar list AbsLevelMap.t RegionGroupId.Map.t) =
+-      let bound_values =
+-        [%unwrap_with_span] ctx.span
+-          (RegionGroupId.Map.find_opt rg_id inputs)
+-          "Internal error: please file an issue"
+-      in
++       [Pure.back_sg_info.early]) receives the values of the positions of each
++       stage in a different stage. *)
++    let lookup_level (bound_values : fvar list AbsLevelMap.t) =
+       match AbsLevelMap.find_opt abs_level bound_values with
+       | None -> []
+       | Some values -> values
+     in
++    let find_group inputs =
++      [%unwrap_with_span] ctx.span
++        (RegionGroupId.Map.find_opt rg_id inputs)
++        "Internal error: please file an issue"
++    in
++    let signature = RegionGroupId.Map.find rg_id ctx.sg.fun_ty.back_sg in
+     let ctx, stages =
+-      if Option.is_some (RegionGroupId.Map.find rg_id ctx.sg.fun_ty.back_sg).early
+-      then
+-        let given_back ~early ctx =
+-          let sides = staged_abs_sides ctx.span ~early abs abs_level in
+-          abs_to_given_back ~sides None abs abs_level ctx
+-        in
+-        let ctx, early_values = given_back ~early:true ctx in
+-        let ctx, late_values = given_back ~early:false ctx in
+-        ( ctx,
+-          [
+-            (early_values, lookup_bound ctx.early_backward_inputs);
+-            (late_values, lookup_bound ctx.backward_inputs);
+-          ] )
+-      else
+-        let ctx, input_values = abs_to_given_back None abs abs_level ctx in
+-        (ctx, [ (input_values, lookup_bound ctx.backward_inputs) ])
++      match signature.early with
++      | [] ->
++          let ctx, input_values = abs_to_given_back None abs abs_level ctx in
++          ( ctx,
++            [ (input_values, lookup_level (find_group ctx.backward_inputs)) ] )
++      | _ ->
++          let bound =
++            List.map lookup_level (find_group ctx.early_backward_inputs)
++            @ [ lookup_level (find_group ctx.backward_inputs) ]
++          in
++          List.fold_left_map
++            (fun ctx (index, bound) ->
++              let sides = staged_abs_sides ctx.span signature index abs in
++              let ctx, values = abs_to_given_back ~sides None abs abs_level ctx in
++              (ctx, (values, bound)))
++            ctx
++            (List.mapi (fun index bound -> (index, bound)) bound)
+     in
+ 
+     [%ldebug
+@@ -1543,28 +1571,39 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+   [%ltrace
+     "abs (level: " ^ string_of_int abs_level ^ "):\n" ^ abs_to_string ctx abs];
+-  let late_sides level = fun_call_late_sides ctx abs level in
++  let late_sides = fun_call_late_sides ctx abs in
+   match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+-  (* Staged backward function (see [Pure.back_early_sg]): apply the first
+-     stage as soon as one of the sub-abstractions of the call ends. The
+-     interpreter ends the loans of every sub-level first (see
+-     [InterpBorrows.end_all_sub_abs]), so the values the first stage receives
+-     are available. *)
+-  | Some ({ signature = { early = Some early; _ }; early_outputs = None; _ } as
+-           stage) ->
+-      translate_apply_early_stage ectx abs stage early
+-        (S.EndAbs (ectx, abs, abs_level, e))
+-        ctx
++  (* Staged backward function (see [Pure.back_sg_info.early]): apply the next
++     stage as soon as the values it receives are available. With less than
++     four levels of nested borrows, this happens for the first stage as soon as
++     one of the sub-abstractions of the call ends: the interpreter ends the
++     loans of every sub-level first (see [InterpBorrows.end_all_sub_abs]). *)
++  | Some { signature = { early; _ } as signature; early_outputs; _ }
++    when List.length early_outputs < List.length early
++         && early_stage_available abs signature
++              (List.length early_outputs)
++              (List.nth early (List.length early_outputs))
++              ctx ->
++      (* Bind the outputs of the stages already applied first: this stage may
++         receive them *)
++      let ctx, bindings = bind_early_stage_outputs ~all:false abs abs_level ctx in
++      let stage = V.AbsId.Map.find abs.abs_id ctx.fun_call_stages in
++      mk_closed_checked_lets __FILE__ __LINE__ ctx false bindings
++        (translate_apply_early_stage ectx abs stage
++           (S.EndAbs (ectx, abs, abs_level, e))
++           ctx)
+   (* The loans of a higher level may all have ended from outside (their
+      borrows were ended and gave their values back) without that level being
+      ended as a sub-abstraction: the interpreter only ends sub-abstractions
+      which still hold live borrows or loans. Their consumed values are then
+      still pending inputs of the backward function when a lower level ends.
+-     Supply them first, exactly as ending that level would. *)
+-  | Some { pending_inputs = (level, _) :: _; output_values = None; _ }
+-    when level > abs_level
+-         && abs_to_consumed ?sides:(late_sides level) ctx ectx abs level <> []
+-    ->
++     Supply them first, exactly as ending that level would (once the earlier
++     stages of a staged backward function are applied). *)
++  | Some
++      ({ pending_inputs = (level, _) :: _; output_values = None; _ } as stage)
++    when level > abs_level && fun_call_last_stage_ready stage
++         && abs_consumed_available ?sides:late_sides ctx abs level
++         && abs_to_consumed ?sides:late_sides ctx ectx abs level <> [] ->
+       translate_end_abstraction_fun_call ectx abs level
+         (S.EndAbs (ectx, abs, abs_level, e))
+         ctx
+@@ -1573,53 +1612,77 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+      ends, while the inputs of that lower level have all been consumed (the
+      interpreter ends the loans of every sub-level first, see
+      [InterpBorrows.end_all_sub_abs]): supply them first. With a staged
+-     backward function, the values given back on the side of the first stage
+-     are its outputs, and the inputs of the lower level may depend on them:
+-     we only do this if the second stage gives back values at this level. *)
+-  | Some { pending_inputs = (level, _) :: _; output_values = None; _ }
+-    when level < abs_level
++     backward function, the values given back on the positions of the earlier
++     stages are their outputs, and the inputs of the lower level may depend on
++     them: we only do this if the last stage gives back values at this level. *)
++  | Some
++      ({ pending_inputs = (level, _) :: _; output_values = None; _ } as stage)
++    when level < abs_level && fun_call_last_stage_ready stage
+          && InterpBorrowsCore.get_first_non_ignored_aloan_in_abs ctx.span abs
+               level level
+             = None
+-         && (late_sides abs_level = None
+-            || snd
+-                 (abs_to_given_back ?sides:(late_sides abs_level) None abs
+-                    abs_level ctx)
++         && (late_sides = None
++            || snd (abs_to_given_back ?sides:late_sides None abs abs_level ctx)
+                <> [])
+-         && abs_to_consumed ?sides:(late_sides level) ctx ectx abs level <> []
+-    ->
++         && abs_to_consumed ?sides:late_sides ctx ectx abs level <> [] ->
+       translate_end_abstraction_fun_call ectx abs level
+         (S.EndAbs (ectx, abs, abs_level, e))
+         ctx
+   | _ -> translate_end_abstraction_fun_call_level ectx abs abs_level e ctx
+ 
+-(** Staged backward functions (see [Pure.back_early_sg]): apply the first
++(** Staged backward functions (see [Pure.back_sg_info.early]): whether the
++    values consumed by a function-call abstraction on the positions of the
++    stage [index] (before the last one) are all available. *)
++and early_stage_available (abs : V.abs) (signature : back_sg_info)
++    (index : int) (early : back_early_sg) (ctx : bs_ctx) : bool =
++  let sides = staged_abs_sides ctx.span signature index abs in
++  List.for_all
++    (fun (level, _) -> abs_consumed_available ~sides ctx abs level)
++    early.early_inputs
++
++(** Staged backward functions (see [Pure.back_sg_info.early]): the values
++    consumed by a function-call abstraction on the positions of the stage
++    [index] (before the last one), level by level, if they are all available. *)
++and early_stage_inputs (ectx : C.eval_ctx) (abs : V.abs)
++    (signature : back_sg_info) (index : int) (early : back_early_sg)
++    (ctx : bs_ctx) : texpr list option =
++  let sides = staged_abs_sides ctx.span signature index abs in
++  let inputs =
++    List.map
++      (fun (level, tys) ->
++        let values = abs_to_consumed ~sides ctx ectx abs level in
++        if List.map (fun (v : texpr) -> v.ty) values = List.map snd tys then
++          Some (mk_simpl_tuple_texpr ctx.span values)
++        else None)
++      early.early_inputs
++  in
++  if List.for_all Option.is_some inputs then Some (List.map Option.get inputs)
++  else None
++
++(** Staged backward functions (see [Pure.back_sg_info.early]): apply the next
+     stage of the backward function of a function call, bind its outputs (they
+     are given back by the sub-abstractions of their levels, see
+-    [translate_end_abstraction_fun_call_level]) and continue with the second
++    [translate_end_abstraction_fun_call_level]) and continue with the next
+     stage as the backward function of the call. *)
+ and translate_apply_early_stage (ectx : C.eval_ctx) (abs : V.abs)
+-    (stage : fun_call_stage) (early : back_early_sg) (e : S.expr)
+-    (ctx : bs_ctx) : texpr =
++    (stage : fun_call_stage) (e : S.expr) (ctx : bs_ctx) : texpr =
+   let span = ctx.span in
+   let info =
+     [%unwrap_with_span] span
+       (V.AbsId.Map.find_opt abs.abs_id ctx.abs_id_to_info)
+       "Missing registered backward function of a staged function call"
+   in
++  let index = List.length stage.early_outputs in
++  let early = List.nth stage.signature.early index in
+   let inputs =
+-    List.map
+-      (fun (level, tys) ->
+-        let sides = staged_abs_sides span ~early:true abs level in
+-        let values = abs_to_consumed ~sides ctx ectx abs level in
+-        [%cassert] span
+-          (List.map (fun (v : texpr) -> v.ty) values = List.map snd tys)
+-          ("Nested borrows: the values consumed at level "
+-         ^ string_of_int level
+-         ^ " disagree with the inputs of the first stage of a staged backward \
+-            function");
+-        mk_simpl_tuple_texpr span values)
+-      early.early_inputs
++    match early_stage_inputs ectx abs stage.signature index early ctx with
++    | Some inputs -> inputs
++    | None ->
++        [%craise] span
++          ("Nested borrows: the values consumed by the call disagree with the \
++            inputs of the stage "
++          ^ string_of_int (index + 1)
++          ^ " of a staged backward function")
+   in
+   let call =
+     [%add_loc] mk_app span info.fvar (mk_simpl_tuple_texpr span inputs)
+@@ -1661,52 +1724,122 @@ and translate_apply_early_stage (ectx : C.eval_ctx) (abs : V.abs)
+           ctx.abs_id_to_info;
+       fun_call_stages =
+         V.AbsId.Map.add abs.abs_id
+-          { stage with early_outputs = Some early_outputs }
++          { stage with early_outputs = stage.early_outputs @ [ early_outputs ] }
+           ctx.fun_call_stages;
+     }
+   in
+   [%add_loc] mk_closed_checked_let ctx can_fail pat call (translate_expr e ctx)
+ 
++(** Staged backward functions (see [Pure.back_sg_info.early]): bind the values
++    given back at [abs_level] on the positions of the stages before the last
++    one which have been applied, if they are not bound yet (the next stages may
++    receive them, see [translate_end_abstraction_fun_call]). With [all], the
++    stages which have not been applied must not give back values at this
++    level. *)
++and bind_early_stage_outputs ~(all : bool) (abs : V.abs)
++    (abs_level : abs_level) (ctx : bs_ctx) : bs_ctx * (tpat * texpr) list =
++  match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
++  | Some
++      ({
++         signature = { early = _ :: _ as early; _ } as signature;
++         early_outputs;
++         bound_early_outputs;
++         _;
++       } as stage) ->
++      let indices = List.init (List.length early) Fun.id in
++      let ctx, bindings =
++        List.fold_left_map
++          (fun ctx0 index ->
++            if List.mem (index, abs_level) bound_early_outputs then (ctx0, [])
++            else
++              let early_sides = staged_abs_sides ctx0.span signature index abs in
++              let ctx, pats =
++                abs_to_given_back ~sides:early_sides None abs abs_level ctx0
++              in
++              match List.nth_opt early_outputs index with
++              | None ->
++                  if all then
++                    [%cassert] ctx.span (pats = [])
++                      ("Nested borrows: the values given back at level "
++                      ^ string_of_int abs_level ^ " by the stage "
++                      ^ string_of_int (index + 1)
++                      ^ " of a staged backward function are needed before the \
++                         values it receives are available");
++                  (ctx0, [])
++              | Some values ->
++                  let vars =
++                    match List.assoc_opt abs_level values with
++                    | Some vars -> vars
++                    | None -> []
++                  in
++                  [%cassert] ctx.span
++                    (List.map (fun (p : tpat) -> p.ty) pats
++                    = List.map (fun (v : fvar) -> v.ty) vars)
++                    ("Nested borrows: the values given back at level "
++                    ^ string_of_int abs_level
++                    ^ " disagree with the outputs of the stage "
++                    ^ string_of_int (index + 1)
++                    ^ " of a staged backward function");
++                  List.fold_left_map
++                    (fun ctx (pat, var) ->
++                      decompose_let_match ctx pat (mk_texpr_from_fvar var))
++                    ctx (List.combine pats vars))
++          ctx indices
++      in
++      let bound =
++        List.filter_map
++          (fun index ->
++            if index < List.length early_outputs then Some (index, abs_level)
++            else None)
++          indices
++      in
++      let stage =
++        {
++          stage with
++          bound_early_outputs =
++            List.sort_uniq compare (bound @ bound_early_outputs);
++        }
++      in
++      ( {
++          ctx with
++          fun_call_stages = V.AbsId.Map.add abs.abs_id stage ctx.fun_call_stages;
++        },
++        List.concat bindings )
++  | _ -> (ctx, [])
++
+ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+-  let sides = fun_call_late_sides ctx abs abs_level in
++  let sides = fun_call_late_sides ctx abs in
+   let inputs =
+     match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+-    | Some stage when List.mem abs_level stage.supplied_inputs -> []
++    | Some stage
++      when List.mem abs_level stage.supplied_inputs
++           || not (fun_call_last_stage_ready stage) ->
++        []
+     | _ -> abs_to_consumed ?sides ctx ectx abs abs_level
+   in
+-  (* Staged backward functions (see [Pure.back_early_sg]): the values given
+-     back at this level on the side handled by the first stage are its
+-     outputs, which were computed when it was applied (see
+-     [translate_apply_early_stage]) *)
+-  let ctx, early_bindings =
+-    match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+-    | Some { early_outputs = Some values; _ } ->
+-        let early_sides = staged_abs_sides ctx.span ~early:true abs abs_level in
+-        let ctx, pats =
+-          abs_to_given_back ~sides:early_sides None abs abs_level ctx
+-        in
+-        let vars =
+-          match List.assoc_opt abs_level values with
+-          | Some vars -> vars
+-          | None -> []
+-        in
+-        [%cassert] ctx.span
+-          (List.map (fun (p : tpat) -> p.ty) pats
+-          = List.map (fun (v : fvar) -> v.ty) vars)
+-          ("Nested borrows: the values given back at level "
+-         ^ string_of_int abs_level
+-         ^ " disagree with the outputs of the first stage of a staged \
+-            backward function");
+-        List.fold_left_map
+-          (fun ctx (pat, var) ->
+-            decompose_let_match ctx pat (mk_texpr_from_fvar var))
+-          ctx (List.combine pats vars)
+-    | _ -> (ctx, [])
+-  in
++  (* Staged backward functions (see [Pure.back_sg_info.early]): the values
++     given back at this level on the positions of a stage before the last one
++     are its outputs, which were computed when it was applied (see
++     [translate_apply_early_stage]). They must all have been applied. *)
++  let ctx, early_bindings = bind_early_stage_outputs ~all:true abs abs_level ctx in
+   (* Nested projections can regroup abstraction values, so original argument
+      positions are no longer source-place indices for these output patterns. *)
+   let ctx, outputs = abs_to_given_back ?sides None abs abs_level ctx in
++  match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
++  | Some stage when not (fun_call_last_stage_ready stage) ->
++      (* Staged backward function whose earlier stages are not all applied:
++         the inputs of the last stage at this level stay pending (they are
++         supplied when a lower level ends, see
++         [translate_end_abstraction_fun_call]) *)
++      [%cassert] ctx.span (outputs = [])
++        ("Nested borrows: the values given back at level "
++        ^ string_of_int abs_level
++        ^ " by the last stage of a staged backward function are needed before \
++           the values received by its earlier stages are available");
++      mk_closed_checked_lets __FILE__ __LINE__ ctx false early_bindings
++        (translate_expr e ctx)
++  | _ ->
+   match V.AbsId.Map.find_opt abs.abs_id ctx.abs_id_to_info with
+   | None ->
+       [%sanity_check] ctx.span (V.AbsId.Set.mem abs.abs_id ctx.ignored_abs_ids);
+@@ -2552,11 +2685,13 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+               ctx levels
+           in
+           let ctx, backward_inputs = fresh_level_vars ctx back_sg.inputs in
+-          (* Staged backward functions: the inputs of the first stage *)
++          (* Staged backward functions: the inputs of the stages before the
++             last one *)
+           let ctx, early_inputs =
+-            match back_sg.early with
+-            | None -> (ctx, [])
+-            | Some early -> fresh_level_vars ctx early.early_inputs
++            List.fold_left_map
++              (fun ctx (early : back_early_sg) ->
++                fresh_level_vars ctx early.early_inputs)
++              ctx back_sg.early
+           in
+           (* Update the functions mk_return and mk_panic *)
+           let effect_info = back_sg.effect_info in
+@@ -2571,14 +2706,14 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+              values consumed by the sub-abstractions of these levels (see
+              [deferred_backward_outputs]), on the side selected by the stage
+              (see [staged_abs_sides]) *)
+-          let deferred_outputs ctx ~(early : bool)
++          let deferred_outputs ctx (stage : int)
+               (declared : (abs_level * (string option * ty) list) list) =
+             List.filter_map
+               (fun (level, (ectx, abs)) ->
+                 let sides =
+-                  if Option.is_some back_sg.early then
+-                    Some (staged_abs_sides ctx.span ~early abs level)
+-                  else None
++                  match back_sg.early with
++                  | [] -> None
++                  | _ -> Some (staged_abs_sides ctx.span back_sg stage abs)
+                 in
+                 let consumed = abs_to_consumed ?sides ctx ectx abs level in
+                 match List.assoc_opt level declared with
+@@ -2592,7 +2727,8 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+                       = List.map snd types)
+                       ("Synthesis output state disagrees with the decomposed \
+                         signature at level " ^ string_of_int level
+-                      ^ (if early then " (first stage)" else "")
++                      ^ (if back_sg.early = [] then ""
++                         else " (stage " ^ string_of_int (stage + 1) ^ ")")
+                       ^ ": expected ("
+                       ^ String.concat ", "
+                           (List.map (fun (_, ty) -> pure_ty_to_string ctx ty)
+@@ -2621,7 +2757,7 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+               in
+               (* Nested borrows: the outputs of the levels > 0 *)
+               let deferred =
+-                deferred_outputs ctx ~early:false back_sg.outputs
++                deferred_outputs ctx (List.length back_sg.early) back_sg.outputs
+               in
+               let backward_outputs =
+                 List.map snd
+@@ -2636,31 +2772,31 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+               mk_simpl_tuple_texpr ctx.span outputs
+             in
+             match back_sg.early with
+-            | None ->
++            | [] ->
+                 (* Wrap in a result if the backward function can fail *)
+                 if effect_info.can_fail then mk_result_ok_texpr ctx.span output
+                 else output
+-            | Some early ->
+-                (* Staged backward function: return the outputs of both
++            | early ->
++                (* Staged backward function: return the outputs of all the
+                    stages (see [mk_staged_backward_function]) *)
+-                let deferred =
+-                  deferred_outputs ctx ~early:true early.early_outputs
+-                in
+-                let early_output =
+-                  List.map
+-                    (fun (level, _) ->
+-                      match List.assoc_opt level deferred with
+-                      | Some values -> mk_simpl_tuple_texpr ctx.span values
+-                      | None ->
+-                          [%craise] ctx.span
+-                            ("Nested borrows: missing early outputs of level "
+-                           ^ string_of_int level
+-                           ^ " of a staged backward function"))
+-                    early.early_outputs
++                let early_output stage (early : back_early_sg) =
++                  let deferred = deferred_outputs ctx stage early.early_outputs in
++                  mk_simpl_tuple_texpr ctx.span
++                    (List.map
++                       (fun (level, _) ->
++                         match List.assoc_opt level deferred with
++                         | Some values -> mk_simpl_tuple_texpr ctx.span values
++                         | None ->
++                             [%craise] ctx.span
++                               ("Nested borrows: missing outputs of level "
++                              ^ string_of_int level ^ " of the stage "
++                              ^ string_of_int (stage + 1)
++                              ^ " of a staged backward function"))
++                       early.early_outputs)
+                 in
+                 let output =
+                   mk_simpl_tuple_texpr ctx.span
+-                    [ mk_simpl_tuple_texpr ctx.span early_output; output ]
++                    (List.mapi early_output early @ [ output ])
+                 in
+                 let output =
+                   if effect_info.can_fail then mk_result_ok_texpr ctx.span output
+@@ -2672,13 +2808,18 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+             (* TODO: we should use a [Fail] function *)
+             let output = levels_ty back_sg.outputs in
+             match back_sg.early with
+-            | None ->
++            | [] ->
+                 mk_result_fail_texpr_with_error_id ctx.span error_failure_id
+                   output
+-            | Some early ->
++            | early ->
+                 mk_staged_tail staged_panic_tag
+                   (mk_result_fail_texpr_with_error_id ctx.span error_failure_id
+-                     (mk_simpl_tuple_ty [ levels_ty early.early_outputs; output ]))
++                     (mk_simpl_tuple_ty
++                        (List.map
++                           (fun (early : back_early_sg) ->
++                             levels_ty early.early_outputs)
++                           early
++                        @ [ output ])))
+           in
+           let ctx =
+             {
+@@ -2689,7 +2830,7 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+                   ctx.backward_inputs;
+               early_backward_inputs =
+                 RegionGroupId.Map.add bid
+-                  (AbsLevelMap.of_list early_inputs)
++                  (List.map AbsLevelMap.of_list early_inputs)
+                   ctx.early_backward_inputs;
+               mk_return = Some mk_return;
+               mk_panic = Some mk_panic;
+@@ -2699,7 +2840,7 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+           let e = T.RegionGroupId.Map.find bid back_e in
+           let finish e =
+             match back_sg.early with
+-            | None ->
++            | [] ->
+                 (* Wrap in lambdas if necessary *)
+                 let inputs =
+                   List.map
+@@ -2709,7 +2850,7 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+                     backward_inputs
+                 in
+                 mk_closed_lambdas ctx.span inputs e
+-            | Some _ ->
++            | _ :: _ ->
+                 mk_staged_backward_function ctx bid effect_info.can_fail
+                   early_inputs backward_inputs e
+           in
+@@ -2762,7 +2903,7 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+     List.map
+       (fun (sg : back_sg_info) ->
+         if !Config.simplify_merged_fwd_backs then
+-          sg.inputs = [] && sg.early = None && sg.effect_info.can_fail
++          sg.inputs = [] && sg.early = [] && sg.effect_info.can_fail
+         else false)
+       (RegionGroupId.Map.values ctx.sg.fun_ty.back_sg)
+   in
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index 54e4052..a565315 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -749,6 +749,140 @@ and back_ty_levels (span : Meta.span option) (decls_ctx : C.decls_ctx)
+   in
+   levels [] ty
+ 
++(** Nested borrows: the paths from a type to its mutable borrows of the region
++    group [gid], through the ignored mutable borrows (outermost first; [true]:
++    the value given back to the borrow, [false]: the borrowed value). The
++    fields and type arguments of ADTs, tuples, boxes and arrays are
++    transparent. This mirrors [back_ty_levels]: the levels are the numbers of
++    [true] in the paths. *)
++and back_ty_paths (_ : Meta.span option) (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (ty : T.ty) : bool list list =
++  back_ty_paths_for_regions decls_ctx
++    (fun (r : T.region) ->
++      match r with
++      | T.RVar (Free _) -> get_region_group r = gid
++      | _ -> false)
++    ty
++
++(** See [back_ty_paths]: the mutable borrows are those whose region satisfies
++    [keep_region]. *)
++and back_ty_paths_for_regions (decls_ctx : C.decls_ctx)
++    (keep_region : T.region -> bool) (ty : T.ty) : bool list list =
++  let type_infos = decls_ctx.type_ctx.type_infos in
++  let has_mut ty =
++    TypesUtils.ty_has_mut_borrow_for_region_in_pred type_infos keep_region ty
++  in
++  let union l = List.sort_uniq compare (List.concat l) in
++  let rec paths (visited : T.ty list) (ty : T.ty) : bool list list =
++    if not (has_mut ty) then []
++    else
++      match ty with
++      | T.TRef (r, rty, RMut) ->
++          if keep_region r then [ [] ]
++          else
++            let inner = paths visited rty in
++            union
++              [
++                List.map (fun p -> false :: p) inner;
++                List.map (fun p -> true :: p) inner;
++              ]
++      | T.TRef (_, _, RShared) -> []
++      | T.TAdt { id = TTuple | TBuiltin _; generics } ->
++          union (List.map (paths visited) generics.types)
++      | T.TAdt { id = TAdtId adt_id; generics } ->
++          if List.mem ty visited then []
++          else (
++            match
++              T.TypeDeclId.Map.find_opt adt_id decls_ctx.type_ctx.type_decls
++            with
++            | Some ({ kind = Struct _ | Enum _; _ } as def) ->
++                (* The positions of a transparent ADT are those of its fields
++                   (unlike [back_ty_levels], which is an over-approximation) *)
++                union
++                  (List.map
++                     (paths (ty :: visited))
++                     (List.concat_map snd
++                        (Substitute
++                         .type_decl_get_instantiated_variants_fields_types def
++                           generics)))
++            | _ ->
++                (* The region may be used directly by an opaque type *)
++                union ([ [] ] :: List.map (paths visited) generics.types))
++      | T.TArray (ty, _) | T.TSlice ty -> paths visited ty
++      | _ -> []
++  in
++  paths [] ty
++
++(** Staged backward functions: the stage of a position, before merging (see
++    [back_sig_stage_map]), and whether the backward function receives it
++    ([true]) or gives it back. The consumer protocol of a value is a list of
++    stages [inputs -> outputs]: a mutable borrow of the region group has one
++    stage [() -> itself], and a mutable borrow [&'a mut X] of another region
++    whose value [X] has the stages [I_j -> O_j] has the stages
++    [in(c.I_j) -> out(g.I_j)] then [in(g.O_j) -> out(c.O_j)] for every [j]
++    ([c]: the borrowed value, [g]: the value given back): the values the caller
++    gives back to the borrows of [X] it gets back are those the lender of the
++    borrow receives, and the caller and the callee both use [X] with its own
++    protocol. *)
++and back_path_raw_stage (path : bool list) : int * bool =
++  List.fold_right
++    (fun given_back (j, received) ->
++      match (given_back, received) with
++      | false, true -> (2 * j, true)
++      | true, true -> (2 * j, false)
++      | true, false -> ((2 * j) + 1, true)
++      | false, false -> ((2 * j) + 1, false))
++    path (0, false)
++
++(** Staged backward functions: the stage of every position of the region group
++    [gid] in a signature (see [Pure.back_sg_info.stage_map]), or [[]] if the
++    backward function has a single stage. The signature is a mutable borrow
++    whose borrowed value holds the inputs and whose value given back holds the
++    output, and the paths are aligned by prefixing the shorter ones with
++    borrowed values (see [back_path_raw_stage]). Consecutive stages merge when
++    no output separates their inputs. *)
++and back_sig_stage_map (span : Meta.span option) (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (inputs : T.ty list) (output : T.ty) : ((bool * bool list) * int) list =
++  let paths = back_ty_paths span decls_ctx get_region_group gid in
++  let positions =
++    List.sort_uniq compare
++      (List.concat_map (fun ty -> List.map (fun p -> (true, p)) (paths ty)) inputs
++      @ List.map (fun p -> (false, p)) (paths output))
++  in
++  let depth =
++    List.fold_left (fun d (_, p) -> max d (List.length p)) 0 positions
++  in
++  let raw =
++    List.map
++      (fun ((from_input, p) as position) ->
++        let pad = List.init (depth - List.length p) (fun _ -> false) in
++        (position, back_path_raw_stage ((not from_input) :: (pad @ p))))
++      positions
++  in
++  let has k received =
++    List.exists (fun (_, (k', r)) -> k' = k && r = received) raw
++  in
++  let _, _, groups =
++    List.fold_left
++      (fun (group, seen_output, groups) k ->
++        let group, seen_output =
++          if has k true && seen_output then (group + 1, false)
++          else (group, seen_output)
++        in
++        (group, seen_output || has k false, (k, group) :: groups))
++      (0, false, [])
++      (List.sort_uniq compare (List.map (fun (_, (k, _)) -> k) raw))
++  in
++  if List.for_all (fun (_, group) -> group = 0) groups then []
++  else List.map (fun (position, (k, _)) -> (position, List.assoc k groups)) raw
++
++(** The number of stages of a staged backward function (see
++    [back_sig_stage_map]). *)
++and back_num_stages (stage_map : ((bool * bool list) * int) list) : int =
++  List.fold_left (fun n (_, stage) -> max n (stage + 1)) 1 stage_map
++
+ (** The highest level at which a type contains mutable borrows of the region
+     group [gid] (-1 if it doesn't contain any). *)
+ and back_ty_max_level (span : Meta.span option) (decls_ctx : C.decls_ctx)
+@@ -761,11 +895,48 @@ and back_ty_max_level (span : Meta.span option) (decls_ctx : C.decls_ctx)
+   | None -> -1
+   | Some l -> l
+ 
++(** Nested borrows: the number of values given back to the ignored borrows on
++    a path (see [back_ty_paths]), that is, its level. *)
++and back_path_level (path : bool list) : int =
++  List.length (List.filter Fun.id path)
++
++(** Nested borrows: the views of an ADT (or array) at a relative [level]. The
++    positions of the ADT at this level whose path is selected are grouped by
++    their path without its trailing borrowed values: positions of the same
++    group lie on one path through the ignored borrows of the ADT (the shorter
++    ones are prefixes of the longer ones), so one value of the ADT holds all of
++    them. Positions of different groups need different values of the ADT (the
++    borrowed value and the value given back of one ignored borrow inside the
++    ADT). We translate an ADT at a level as one value per view, in the order of
++    their keys: most ADTs have a single view. *)
++and back_adt_view_keys (paths : bool list list) ~(select : bool list -> bool)
++    (level : int) : bool list list =
++  List.sort_uniq compare
++    (List.filter_map
++       (fun path ->
++         if back_path_level path = level && select path then
++           Some (back_path_view_key path)
++         else None)
++       paths)
++
++(** The key of the view of an ADT which holds a position (see
++    [back_adt_view_keys]): its path without its trailing borrowed values. *)
++and back_path_view_key (path : bool list) : bool list =
++  match path with
++  | [] -> []
++  | given_back :: rest -> (
++      match (given_back, back_path_view_key rest) with
++      | false, [] -> []
++      | _, rest -> given_back :: rest)
++
+ (** Nested borrows with three levels or more (see [back_ty_levels]): the type
+     consumed or given back at a given level for a value of type [ty]. When the
+     borrowed value and the value given back by the same ignored borrow both
+     contain values at this level, we return the pair of both. This mirrors the
+-    translation of region abstraction values ([SymbolicToPureValues]). *)
++    translation of region abstraction values ([SymbolicToPureValues]). With
++    [SelectPaths], we only keep the positions whose path (see [back_ty_paths])
++    is selected. An ADT at a level is translated as a whole, as one value per
++    view (see [back_adt_view_keys]). *)
+ and translate_back_nested_ty ?(side : back_side = BothSides)
+     (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+@@ -779,47 +950,49 @@ and translate_back_nested_ty ?(side : back_side = BothSides)
+   let has_mut ty =
+     TypesUtils.ty_has_mut_borrow_for_region_in_pred type_infos keep_region ty
+   in
+-  let rec explore ~(side : back_side) (current : int) (ty : T.ty) :
++  let selected (rev_path : bool list) (suffix : bool list) =
++    match side with
++    | BothSides -> true
++    | SelectPaths select -> select (List.rev_append rev_path suffix)
++  in
++  let rec explore (rev_path : bool list) (current : int) (ty : T.ty) :
+       ty option =
+-    let explore_both = explore ~side:BothSides in
+     if level < current || not (has_mut ty) then None
+     else
+       match ty with
+       | T.TRef (r, rty, RMut) when keep_region r ->
+-          if current = level && side <> GivenBackSide then
++          if current = level && selected rev_path [] then
+             Some (translate_fwd_ty span decls_ctx rty)
+           else None
+       | T.TRef (_, rty, RMut) -> (
+-          let child =
+-            if side = GivenBackSide then None else explore_both current rty
+-          in
+-          let given_back =
+-            if side = BorrowedSide then None
+-            else explore_both (current + 1) rty
+-          in
++          let child = explore (false :: rev_path) current rty in
++          let given_back = explore (true :: rev_path) (current + 1) rty in
+           match (child, given_back) with
+           | Some child, Some given_back ->
+               Some (mk_simpl_tuple_ty [ child; given_back ])
+           | Some v, None | None, Some v -> Some v
+           | None, None -> None)
+       | T.TRef (_, _, RShared) -> None
+-      | T.TAdt { id = TTuple; _ } when side = GivenBackSide -> None
+       | T.TAdt { id = TTuple; generics } -> (
+-          match List.filter_map (explore_both current) generics.types with
++          match List.filter_map (explore rev_path current) generics.types with
+           | [] -> None
+           | tys -> Some (mk_simpl_tuple_ty tys))
+       | T.TAdt { id = TBuiltin TBox; generics = { types = [ bty ]; _ } } ->
+-          explore ~side current bty
+-      | T.TAdt _ | T.TArray _ | T.TSlice _ ->
+-          if
+-            side <> GivenBackSide
+-            && Collections.IntSet.mem (level - current)
+-                 (back_ty_levels span decls_ctx get_region_group gid ty)
+-          then Some (translate_fwd_ty span decls_ctx ty)
+-          else None
++          explore rev_path current bty
++      | T.TAdt _ | T.TArray _ | T.TSlice _ -> (
++          (* One value of the ADT per view (see [back_adt_view_keys]) *)
++          match
++            back_adt_view_keys
++              (back_ty_paths span decls_ctx get_region_group gid ty)
++              ~select:(selected rev_path) (level - current)
++          with
++          | [] -> None
++          | keys ->
++              let ty = translate_fwd_ty span decls_ctx ty in
++              Some (mk_simpl_tuple_ty (List.map (fun _ -> ty) keys)))
+       | _ -> None
+   in
+-  explore ~side 0 ty
++  explore [] 0 ty
+ 
+ (** Types with three levels of nested borrows or more, or whose levels of
+     nested borrows come from the fields of ADTs (e.g., a closure capturing
+@@ -901,85 +1074,80 @@ and compute_back_tys_num_levels (span : Meta.span option)
+ and back_level_is_output ~(from_input : bool) (level : int) : bool =
+   if from_input then level mod 2 = 0 else level mod 2 = 1
+ 
+-(** With a staged backward function (see [Pure.back_early_sg]), the first
+-    stage handles, for the input arguments, the inputs of the odd levels on the
+-    borrowed side of the outermost ignored borrow and the outputs of the even
+-    levels > 0 on the given back side, and, for the output, the outputs of the
+-    odd levels (e.g., the values a constructor moves from its inputs into its
+-    output, given back to the borrows of the output at level 1 before the
+-    caller gives back the values of level 0); the second stage handles the
+-    rest. [None] means: nothing. *)
+-and back_staged_side ~(early : bool) ~(from_input : bool) (level : int) :
+-    back_side option =
+-  if not from_input then
+-    if back_level_is_output ~from_input level = early then Some BothSides
+-    else None
+-  else if back_level_is_output ~from_input level then
+-    if level = 0 then if early then None else Some BothSides
+-    else if early then Some GivenBackSide
+-    else Some BorrowedSide
+-  else if early then Some BorrowedSide
+-  else Some GivenBackSide
+-
+-and translate_back_output_ty ?(staged : bool = false) ~(nested : bool)
++(** Staged backward functions (see [Pure.back_sg_info.early]): whether a type
++    which is not deeply nested has all its positions in the last stage. We then
++    keep its two-level translation ([translate_back_ty_aux]). *)
++and back_stage_ty_is_late (stage : back_stage) (span : Meta.span option)
++    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
++    (gid : T.region_group_id) ~(from_input : bool) (ty : T.ty) : bool =
++  let last = back_num_stages stage.positions - 1 in
++  List.for_all
++    (fun path ->
++      List.assoc_opt (from_input, path) stage.positions = Some last)
++    (back_ty_paths span decls_ctx get_region_group gid ty)
++
++(** The type of the values given back by a backward function at [level] for
++    the value of type [ty] of an input ([from_input]) or of the output, in the
++    stage [stage] if the backward function is staged. *)
++and translate_back_output_ty ?(stage : back_stage option) ~(nested : bool)
+     (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+     (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
+-  if back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+-  then
+-    if back_level_is_output ~from_input level then (
+-      match
+-        if staged then back_staged_side ~early:false ~from_input level
+-        else Some BothSides
+-      with
+-      | None -> None
+-      | Some side ->
+-          translate_back_nested_ty ~side span decls_ctx get_region_group gid
+-            level ty)
+-    else None
+-  else if from_input && level > 0 then None
+-  else if (not from_input) && level = 0 then None
+-  else translate_back_ty_aux span decls_ctx get_region_group gid level ty
++  let deep =
++    back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
++  in
++  match stage with
++  | Some stage
++    when deep
++         || not
++              (back_stage_ty_is_late stage span decls_ctx get_region_group gid
++                 ~from_input ty) ->
++      if back_level_is_output ~from_input level then
++        translate_back_nested_ty
++          ~side:(back_stage_side stage ~from_input)
++          span decls_ctx get_region_group gid level ty
++      else None
++  | Some stage when stage.index <> back_num_stages stage.positions - 1 -> None
++  | _ ->
++      if deep then
++        if back_level_is_output ~from_input level then
++          translate_back_nested_ty span decls_ctx get_region_group gid level ty
++        else None
++      else if from_input && level > 0 then None
++      else if (not from_input) && level = 0 then None
++      else translate_back_ty_aux span decls_ctx get_region_group gid level ty
+ 
+-(** Translate the input type of a backward function, for a given region group.
++(** Translate the input type of a backward function, for a given region group
++    (see [translate_back_output_ty]).
+ 
+     We return an option, because the translated type may be empty. *)
+-and translate_back_input_ty ?(staged : bool = false) ~(nested : bool)
++and translate_back_input_ty ?(stage : back_stage option) ~(nested : bool)
+     (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+     (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
+-  if back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+-  then
+-    if back_level_is_output ~from_input level then None
+-    else (
+-      match
+-        if staged then back_staged_side ~early:false ~from_input level
+-        else Some BothSides
+-      with
+-      | None -> None
+-      | Some side ->
+-          translate_back_nested_ty ~side span decls_ctx get_region_group gid
+-            level ty)
+-  else if (not from_input) && level > 0 then None
+-  else if from_input && level = 0 then None
+-  else translate_back_ty_aux span decls_ctx get_region_group gid level ty
+-
+-(** The types of the first stage of a staged backward function (see
+-    [Pure.back_early_sg]). *)
+-and translate_back_early_ty ~(nested : bool) (span : Meta.span option)
+-    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
+-    (gid : T.region_group_id) (level : int) ~(to_input : bool)
+-    ~(from_input : bool) (ty : T.ty) : ty option =
+-  if
++  let deep =
+     back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+-    && back_level_is_output ~from_input level <> to_input
+-  then (
+-    match back_staged_side ~early:true ~from_input level with
+-    | None -> None
+-    | Some side ->
+-        translate_back_nested_ty ~side span decls_ctx get_region_group gid level
+-          ty)
+-  else None
++  in
++  match stage with
++  | Some stage
++    when deep
++         || not
++              (back_stage_ty_is_late stage span decls_ctx get_region_group gid
++                 ~from_input ty) ->
++      if back_level_is_output ~from_input level then None
++      else
++        translate_back_nested_ty
++          ~side:(back_stage_side stage ~from_input)
++          span decls_ctx get_region_group gid level ty
++  | Some stage when stage.index <> back_num_stages stage.positions - 1 -> None
++  | _ ->
++      if deep then
++        if back_level_is_output ~from_input level then None
++        else
++          translate_back_nested_ty span decls_ctx get_region_group gid level ty
++      else if (not from_input) && level > 0 then None
++      else if from_input && level = 0 then None
++      else translate_back_ty_aux span decls_ctx get_region_group gid level ty
+ 
+ (** Small utility. *)
+ and compute_raw_fun_effect_info (span : Meta.span option)
+@@ -1085,23 +1253,17 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+   let gid_is_nested (gid : T.RegionGroupId.id) : bool =
+     back_sig_is_nested span decls_ctx get_region_group gid sg.inputs sg.output
+   in
+-  let back_gid_is_staged (gid : T.RegionGroupId.id) : bool =
+-    let num_levels =
+-      compute_back_tys_num_levels span decls_ctx get_region_group gid sg.inputs
++  (* Staged backward functions (see [Pure.back_sg_info.early]) *)
++  let gid_stage_map (gid : T.RegionGroupId.id) : ((bool * bool list) * int) list
++      =
++    if gid_is_nested gid then
++      back_sig_stage_map span decls_ctx get_region_group gid sg.inputs
+         sg.output
+-    in
+-    let nested = gid_is_nested gid in
+-    List.exists
+-      (fun (ty, from_input) ->
+-        List.exists
+-          (fun level ->
+-            translate_back_early_ty ~nested span decls_ctx get_region_group gid
+-              level ~to_input:false ~from_input ty
+-            <> None)
+-          (List.init num_levels (fun l -> l)))
+-      (List.map (fun ty -> (ty, true)) sg.inputs @ [ (sg.output, false) ])
++    else []
+   in
+-  let translate_back_inputs_or_outputs_for_gid ?(early : bool = false)
++  (* [stage]: [None] for the last stage (or the only one), [Some j] for the
++     stage [j] before the last one *)
++  let translate_back_inputs_or_outputs_for_gid ?(stage : int option)
+       ~(to_input : bool) (gid : T.RegionGroupId.id) :
+       (abs_level * (string option * ty) list) list =
+     (* Translate the inputs level by level, starting with the highest level *)
+@@ -1109,17 +1271,24 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+       compute_back_tys_num_levels span decls_ctx get_region_group gid sg.inputs
+         sg.output
+     in
+-    let staged = back_gid_is_staged gid in
+     let nested = gid_is_nested gid in
++    let stage =
++      match gid_stage_map gid with
++      | [] -> None
++      | positions ->
++          let index =
++            match stage with
++            | Some index -> index
++            | None -> back_num_stages positions - 1
++          in
++          Some { positions; index }
++    in
+     let translate_ty ~from_input level =
+-      if early then
+-        translate_back_early_ty ~nested span decls_ctx get_region_group gid
+-          level ~to_input ~from_input
+-      else if to_input then
+-        translate_back_input_ty ~staged ~nested span decls_ctx get_region_group
++      if to_input then
++        translate_back_input_ty ?stage ~nested span decls_ctx get_region_group
+           gid level ~from_input
+       else
+-        translate_back_output_ty ~staged ~nested span decls_ctx
++        translate_back_output_ty ?stage ~nested span decls_ctx
+           get_region_group gid level ~from_input
+     in
+     let translate_level (level : int) :
+@@ -1248,48 +1417,33 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+     let filter =
+       !Config.simplify_merged_fwd_backs && inputs = [] && outputs = []
+     in
++    let stage_map = gid_stage_map gid in
+     let early =
+-      if back_gid_is_staged gid then (
+-        let num_levels =
+-          compute_back_tys_num_levels span decls_ctx get_region_group gid
+-            sg.inputs sg.output
+-        in
+-        (* The staging only covers three levels of nested borrows *)
+-        if num_levels > 3 then
+-          [%craise_opt_span] span
+-            (let ctx = Print.Contexts.decls_ctx_to_fmt_env decls_ctx in
+-             "Unsupported: nested borrows with "
+-             ^ string_of_int num_levels
+-             ^ " levels of sub-abstractions (at most 3 are supported) for the \
+-                region group "
+-             ^ T.RegionGroupId.to_string gid
+-             ^ " (regions "
+-             ^ String.concat ", "
+-                 (List.map
+-                    (fun rid -> Print.region_to_string ctx (T.RVar (Free rid)))
+-                    rg.regions)
+-             ^ ") of the signature: ("
+-             ^ String.concat ", " (List.map (Print.ty_to_string ctx) sg.inputs)
+-             ^ ") -> "
+-             ^ Print.ty_to_string ctx sg.output);
+-        Some
++      List.init
++        (back_num_stages stage_map - 1)
++        (fun stage ->
+           {
+             early_inputs =
+-              translate_back_inputs_or_outputs_for_gid ~early:true
+-                ~to_input:true gid;
++              translate_back_inputs_or_outputs_for_gid ~stage ~to_input:true gid;
+             early_outputs =
+-              translate_back_inputs_or_outputs_for_gid ~early:true
+-                ~to_input:false gid;
++              translate_back_inputs_or_outputs_for_gid ~stage ~to_input:false
++                gid;
+           })
+-      else None
+     in
+     let back_effect_info =
+-      let b = inputs <> [] || Option.is_some early in
++      let b = inputs <> [] || early <> [] in
+       { back_effect_info with can_fail = back_effect_info.can_fail && b }
+     in
+-    let filter = filter && Option.is_none early in
++    let filter = filter && early = [] in
+     let info =
+-      { inputs; outputs; effect_info = back_effect_info; filter; early }
++      {
++        inputs;
++        outputs;
++        effect_info = back_effect_info;
++        filter;
++        early;
++        stage_map;
++      }
+     in
+     (gid, info)
+   in
+@@ -1467,17 +1621,17 @@ and compute_back_tys_with_info (dsg : Pure.decomposed_fun_type) :
+       (* Filter if necessary *)
+       if
+         !Config.simplify_merged_fwd_backs
+-        && inputs = [] && outputs = [] && back_sg.early = None
++        && inputs = [] && outputs = [] && back_sg.early = []
+       then None
+       else
+         let output = mk_simpl_tuple_ty outputs in
+         match back_sg.early with
+-        | None ->
++        | [] ->
+             let output =
+               mk_back_output_ty_from_effect_info effect_info inputs output
+             in
+             Some (back_sg, mk_arrows inputs output)
+-        | Some early ->
++        | early ->
+             let output =
+               if effect_info.can_fail then mk_result_ty output else output
+             in
+@@ -1487,20 +1641,23 @@ and compute_back_tys_with_info (dsg : Pure.decomposed_fun_type) :
+                   (mk_arrows inputs output) ))
+     (RegionGroupId.Map.values dsg.back_sg)
+ 
+-(** The type of a staged backward function (see [Pure.back_early_sg]), given
+-    the type of its second stage:
+-    [early_inputs -> (early_outputs * second_stage)], in the result monad if
+-    the backward function can fail. *)
+-and mk_staged_back_ty ~(can_fail : bool) (early : back_early_sg)
+-    (second_stage : ty) : ty =
++(** The type of a staged backward function (see [Pure.back_sg_info.early]),
++    given the type of its last stage: for every stage before it,
++    [early_inputs -> (early_outputs * next_stage)], in the result monad if the
++    backward function can fail. *)
++and mk_staged_back_ty ~(can_fail : bool) (early : back_early_sg list)
++    (last_stage : ty) : ty =
+   let tys l =
+     mk_simpl_tuple_ty
+       (List.map (fun (_, tys) -> mk_simpl_tuple_ty (List.map snd tys)) l)
+   in
+-  let output = mk_simpl_tuple_ty [ tys early.early_outputs; second_stage ] in
+-  mk_arrows
+-    [ tys early.early_inputs ]
+-    (if can_fail then mk_result_ty output else output)
++  List.fold_right
++    (fun (stage : back_early_sg) next_stage ->
++      let output = mk_simpl_tuple_ty [ tys stage.early_outputs; next_stage ] in
++      mk_arrows
++        [ tys stage.early_inputs ]
++        (if can_fail then mk_result_ty output else output))
++    early last_stage
+ 
+ and compute_back_tys (dsg : Pure.decomposed_fun_type) : ty option list =
+   List.map (Option.map snd) (compute_back_tys_with_info dsg)
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 2834603..e8872cb 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -287,12 +287,15 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+               [%add_loc] mk_apps span func args)
+             original updates
+       | T.TRef (r, inner, T.RMut) -> (
+-          (* Shared captures are retained, not reconstructed. Require the
+-             shallow-borrow shape only where a mutable projection is merged. *)
+-          [%sanity_check] span
+-            (not
+-               (TypesUtils.ty_has_nested_borrows (Some span)
+-                  decls_ctx.type_ctx.type_infos ty));
++          let check_shallow () =
++            (* Shared captures are retained, not reconstructed. Require the
++               shallow-borrow shape only where a mutable projection is merged
++               into the value given back to an owned borrow. *)
++            [%sanity_check] span
++              (not
++                 (TypesUtils.ty_has_nested_borrows (Some span)
++                    decls_ctx.type_ctx.type_infos ty))
++          in
+           if not (TypesUtils.region_in_set r owned) then
+             (* An unowned mutable wrapper does not freeze separately owned
+                inner borrows. Reconcile their payload without claiming the
+@@ -320,7 +323,8 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+             | [ (_, _, e) ] ->
+                 [%sanity_check] span (e.ty = original.ty);
+                 if inner_updates = [] then e
+-                else
++                else (
++                  check_shallow ();
+                   (* Nested borrows: the value given back to the owned borrow
+                      is authoritative, except at the positions of the inner
+                      mutable borrows selected by the other projections *)
+@@ -330,7 +334,7 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+                          match ty with
+                          | T.TRef (_, inner, T.RMut) -> (inner, regions, e)
+                          | _ -> [%internal_error] span)
+-                       inner_updates)
++                       inner_updates))
+             | _ ->
+                 [%craise] span
+                   "Overlapping mutable projections in a consumed symbolic loan")
+@@ -1128,9 +1132,11 @@ let rec tavalue_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
+              the meta-value was produced by a projector (and not introduced
+              because of a join, because when doing joins we destructure the
+              values): there **must** be a meta-value. The consumed value
+-             is the meta-value. *)
++             is the meta-value. The only exception is the side of an ignored
++             borrow or loan which a stage of a staged backward function does
++             not select (see [select_back_side]): it consumes nothing. *)
+           match mv with
+-          | None -> [%craise] ctx.span "Unreachable"
++          | None -> None
+           | Some mv -> Some (tvalue_to_texpr ctx ectx mv))
+   in
+   (* Sanity check - Rk.: we do this at every recursive call, which is a bit
+@@ -1356,62 +1362,233 @@ and aproj_to_consumed_aux (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+   | [] -> None
+   | _ -> Some (mk_simpl_tuple_texpr ctx.span (List.rev values))
+ 
+-(** Staged backward functions (see [Pure.back_early_sg]): select the
+-    positions of an abstraction value on one side of its outermost ignored
+-    mutable borrow or loan, and the level at which the selected value lies.
+-    This mirrors [SymbolicToPureTypes.translate_back_nested_ty]: when the value
+-    does not start with an ignored mutable borrow (up to boxes), all its
+-    positions are on the borrowed side. *)
+-let rec select_back_side (span : Meta.span) (abs_regions : T.RegionId.Set.t)
+-    (side : back_side) (level : abs_level) (av : V.tavalue) :
+-    (abs_level * V.tavalue) option =
+-  let borrowed_only () = if side = GivenBackSide then None else Some (level, av) in
+-  match (side, av.value) with
+-  | BothSides, _ -> Some (level, av)
+-  | _, ALoan (AEndedIgnoredMutLoan { child; given_back; _ })
+-  | _, ABorrow (AEndedIgnoredMutBorrow { child; given_back; _ }) ->
+-      if side = BorrowedSide then Some (level, child)
+-      else Some (level + 1, given_back)
+-  | _, ALoan (AIgnoredMutLoan (_, child)) | _, ABorrow (AIgnoredMutBorrow (_, child))
+-    ->
+-      if side = BorrowedSide then Some (level, child) else None
+-  | _, AAdt { fields = [ field ]; _ }
+-    when (match av.ty with
+-          | T.TAdt { id = TBuiltin TBox; _ } -> true
+-          | _ -> false) ->
+-      select_back_side span abs_regions side level field
+-  | _, ASymbolic (_, aproj) -> (
+-      let outer_ignored =
+-        match av.ty with
+-        | T.TRef (T.RVar (Free rid), _, RMut) ->
+-            not (T.RegionId.Set.mem rid abs_regions)
+-        | T.TRef (_, _, RMut) -> true
+-        | _ -> false
++(** Nested borrows: select the positions of an abstraction value whose path
++    through the ignored mutable borrows and loans is selected (see
++    [SymbolicToPureCore.back_side]), for the translation of the values of the
++    sub-abstraction level [abs_level] (all of them with [BothSides]). This
++    mirrors [SymbolicToPureTypes.translate_back_nested_ty]:
++    - the positions of this level which are not selected are replaced with
++      placeholders ([AIgnored] with the value consumed by an ended loan, which
++      the translation ignores or uses as a placeholder inside ADTs);
++    - an ADT (or array) whose positions of this level have several views (see
++      [SymbolicToPureTypes.back_adt_view_keys]) is replaced with the tuple of
++      one copy per view: in the copy of a view, the positions of the other
++      views are placeholders, and so are all the positions on the side of an
++      ignored borrow inside the ADT which the view does not follow;
++    - a symbolic value is kept or replaced as a whole: its projectors do not
++      distinguish the paths of its values of the same level. *)
++let select_back_side (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
++    (side : back_side) (abs_level : abs_level) (av : V.tavalue) : V.tavalue =
++  let span = ctx.span in
++  let keep_region (r : T.region) =
++    match r with
++    | T.RVar (Free rid) -> T.RegionId.Set.mem rid abs_regions
++    | _ -> false
++  in
++  let paths ty =
++    SymbolicToPureTypes.back_ty_paths_for_regions ctx.decls_ctx keep_region ty
++  in
++  let select =
++    match side with
++    | BothSides -> fun _ -> true
++    | SelectPaths select -> select
++  in
++  (* Placeholder for a position which is not selected *)
++  let placeholder (av : V.tavalue) : V.tavalue =
++    let mv =
++      match av.value with
++      | ALoan (AEndedMutLoan { given_back_meta; _ }) -> Some given_back_meta
++      | ASymbolic (_, (AProjLoans { proj = { sv_id; _ }; _ } | AEndedProjLoans { proj = sv_id; _ })) ->
++          Some { V.value = VSymbolic { sv_id; sv_ty = av.ty }; ty = av.ty }
++      | _ -> None
++    in
++    { av with value = V.AIgnored mv }
++  in
++  let in_view (view : (bool list * bool list) option) (path : bool list) =
++    match view with
++    | None -> true
++    | Some (key, taken) ->
++        SymbolicToPureTypes.back_path_view_key (List.rev_append taken path)
++        = key
++  in
++  (* Whether a value of type [ty] at [level], reached through [rev_path],
++     holds positions of the level [abs_level] which are selected *)
++  let has_selected ~(off : bool) view (rev_path : bool list)
++      (level : abs_level) (ty : T.ty) : bool =
++    (not off)
++    && List.exists
++         (fun path ->
++           SymbolicToPureTypes.back_path_level path = abs_level - level
++           && in_view view path
++           && select (List.rev_append rev_path path))
++         (paths ty)
++  in
++  (* [view]: inside the copy of an ADT for a view (see
++     [SymbolicToPureTypes.back_adt_view_keys]), the key of the view and the
++     sides taken at the ignored borrows since the root of the ADT (in reverse
++     order). [off]: no position is selected (a side which the view does not
++     follow). [in_adt]: inside an ADT (whose fields are all translated). *)
++  let rec prune ~(off : bool) ~(in_adt : bool)
++      (view : (bool list * bool list) option) (rev_path : bool list)
++      (level : abs_level) (av : V.tavalue) : V.tavalue =
++    let follows given_back =
++      match view with
++      | None -> true
++      | Some (key, taken) ->
++          Option.value ~default:false (List.nth_opt key (List.length taken))
++          = given_back
++    in
++    let take given_back =
++      Option.map (fun (key, taken) -> (key, given_back :: taken)) view
++    in
++    let child =
++      prune
++        ~off:(off || not (follows false))
++        ~in_adt (take false) (false :: rev_path) level
++    in
++    let given_back =
++      prune
++        ~off:(off || not (follows true))
++        ~in_adt (take true) (true :: rev_path) (level + 1)
++    in
++    let prune_fields ~in_adt (adt : V.adt_avalue) view : V.tavalue =
++      {
++        av with
++        value =
++          AAdt
++            {
++              adt with
++              fields =
++                List.map (prune ~off ~in_adt view rev_path level) adt.fields;
++            };
++      }
++    in
++    (* Outside of ADTs and in the copies of an ADT for its views, the side of
++       an ended ignored borrow or loan which holds no selected position is
++       ignored, except the borrowed value if none of the sides does: it is
++       then a placeholder (see [combine_nested_sides]). Inside an ADT with a
++       single view, the borrowed value of an ended ignored borrow is the
++       carrier of the value given back to it (see
++       [aborrow_content_to_consumed_aux]): we keep both. *)
++    let ended_sides (c : V.tavalue) (g : V.tavalue) : V.tavalue * V.tavalue =
++      let selected_child =
++        has_selected
++          ~off:(off || not (follows false))
++          (take false) (false :: rev_path) level c.ty
+       in
+-      let has_children =
+-        match aproj with
+-        | AProjLoans { consumed; borrows; _ }
+-        | AEndedProjLoans { consumed; borrows; _ } ->
+-            consumed <> [] || borrows <> []
+-        | AProjBorrows { loans; _ } | AEndedProjBorrows { loans; _ } ->
+-            loans <> []
+-        | APendingLoans _ | AEmpty -> false
++      let selected_given_back =
++        has_selected
++          ~off:(off || not (follows true))
++          (take true) (true :: rev_path) (level + 1) g.ty
+       in
+-      match side with
+-      | GivenBackSide when outer_ignored && has_children ->
+-          [%craise] span
+-            "Nested borrows: a staged backward function needs the value given \
+-             back to the outermost ignored borrow of a symbolic value, which \
+-             projectors do not distinguish from the values given back to \
+-             inner ignored borrows (unsupported)"
+-      | BorrowedSide when outer_ignored && has_children ->
++      if in_adt && Option.is_none view then (child c, given_back g)
++      else
++        ( (if selected_child || not selected_given_back then child c
++           else { c with value = V.AIgnored None }),
++          if selected_given_back then given_back g
++          else { g with value = V.AIgnored None } )
++    in
++    match av.value with
++    | ALoan (AEndedIgnoredMutLoan lc) ->
++        let child, given_back = ended_sides lc.child lc.given_back in
++        {
++          av with
++          value = ALoan (AEndedIgnoredMutLoan { lc with child; given_back });
++        }
++    | ABorrow (AEndedIgnoredMutBorrow bc) ->
++        let child, given_back = ended_sides bc.child bc.given_back in
++        {
++          av with
++          value = ABorrow (AEndedIgnoredMutBorrow { bc with child; given_back });
++        }
++    | ALoan (AIgnoredMutLoan (id, c)) ->
++        { av with value = ALoan (AIgnoredMutLoan (id, child c)) }
++    | ABorrow (AIgnoredMutBorrow (id, c)) ->
++        { av with value = ABorrow (AIgnoredMutBorrow (id, child c)) }
++    | AAdt adt -> (
++        match av.ty with
++        | T.TAdt { id = TTuple | TBuiltin TBox; _ } ->
++            prune_fields ~in_adt adt view
++        | _ when off || Option.is_some view ->
++            prune_fields ~in_adt:true adt view
++        | _ -> (
++            match
++              SymbolicToPureTypes.back_adt_view_keys (paths av.ty)
++                ~select:(fun path -> select (List.rev_append rev_path path))
++                (abs_level - level)
++            with
++            | [] | [ _ ] -> prune_fields ~in_adt:true adt None
++            | keys ->
++                {
++                  value =
++                    AAdt
++                      {
++                        adt with
++                        variant_id = None;
++                        fields =
++                          List.map
++                            (fun key ->
++                              prune_fields ~in_adt:true adt (Some (key, [])))
++                            keys;
++                      };
++                  ty =
++                    T.TAdt
++                      {
++                        id = TTuple;
++                        generics =
++                          TypesUtils.mk_generic_args_from_types
++                            (List.map (fun _ -> av.ty) keys);
++                      };
++                }))
++    | ASymbolic (_, aproj) ->
++        let level_paths =
++          List.filter
++            (fun path ->
++              SymbolicToPureTypes.back_path_level path = abs_level - level)
++            (paths av.ty)
++        in
++        let selected =
++          List.filter
++            (fun path ->
++              (not off) && in_view view path
++              && select (List.rev_append rev_path path))
++            level_paths
++        in
++        (* The number of projections of the symbolic value at this level *)
++        let projections =
++          fold_aproj_at_level abs_level level
++            (fun n aproj _ ->
++              match aproj with
++              | V.AEmpty -> n
++              | _ -> n + 1)
++            0 aproj av.ty
++        in
++        if List.length selected = List.length level_paths || projections = 0
++        then av
++        else if selected = [] then placeholder av
++        else
+           [%craise] span
+-            "Nested borrows: a staged backward function needs the borrowed \
+-             side of the outermost ignored borrow of a symbolic value, which \
+-             projectors do not distinguish from the values given back to it \
+-             (unsupported)"
+-      | _ -> borrowed_only ())
+-  | _ -> borrowed_only ()
++            ("Nested borrows: a stage of a staged backward function needs a \
++              part of the values of level " ^ string_of_int abs_level
++           ^ " of a symbolic value of type " ^ ty_to_string ctx av.ty
++           ^ ", whose projectors do not distinguish the paths of the values \
++              of a level (unsupported)")
++    | ALoan (AMutLoan _ | AEndedMutLoan _)
++    | ABorrow (AMutBorrow _ | AEndedMutBorrow _) ->
++        if level = abs_level && (off || not (select (List.rev rev_path))) then
++          placeholder av
++        else av
++    | ALoan _ | ABorrow _ | AIgnored _ -> av
++  in
++  match side with
++  | BothSides
++    when List.for_all (fun path -> List.length path < 2) (paths av.ty) ->
++      (* No ADT has several views *)
++      av
++  | _ ->
++      if has_selected ~off:false None [] 0 av.ty then
++        prune ~off:false ~in_adt:false None [] 0 av
++      else { av with value = V.AIgnored None }
+ 
+ let tavalue_to_consumed ?(side : back_side = BothSides) (ctx : bs_ctx)
+     (ectx : C.eval_ctx) (abs_regions : T.RegionId.Set.t)
+@@ -1426,24 +1603,21 @@ let tavalue_to_consumed ?(side : back_side = BothSides) (ctx : bs_ctx)
+     ^ ":\n"
+     ^ tavalue_to_string ~with_ended:true ctx av
+     ^ "\n<: " ^ ty_to_string ctx av.ty];
+-  match select_back_side ctx.span abs_regions side 0 av with
+-  | None -> None
+-  | Some (current_level, av) -> (
+-      match
+-        compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-          abs_level current_level av
+-      with
+-      | LoanProj BMut ->
+-          [%ltrace "the value contains mutable loan projectors"];
+-          tavalue_to_consumed_aux ~filter:true ctx ectx abs_regions abs_level
+-            current_level av
+-      | LoanProj BShared | BorrowProj _ | UnknownProj ->
+-          (* If it is a borrow proj we ignore it. If it is an unknown projection,
+-             it means the value doesn't contain loans nor borrows, so nothing
+-             is consumed upon ending the abstraction: we can ignore it as well. *)
+-          [%ltrace
+-            "the value doesn't contains mutable loan projectors (ignoring it)"];
+-          None)
++  let av = select_back_side ctx abs_regions side abs_level av in
++  match
++    compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
++      abs_level 0 av
++  with
++  | LoanProj BMut ->
++      [%ltrace "the value contains mutable loan projectors"];
++      tavalue_to_consumed_aux ~filter:true ctx ectx abs_regions abs_level 0 av
++  | LoanProj BShared | BorrowProj _ | UnknownProj ->
++      (* If it is a borrow proj we ignore it. If it is an unknown projection,
++         it means the value doesn't contain loans nor borrows, so nothing
++         is consumed upon ending the abstraction: we can ignore it as well. *)
++      [%ltrace
++        "the value doesn't contains mutable loan projectors (ignoring it)"];
++      None
+ 
+ (** The sides selected for each value of an abstraction (see
+     [select_back_side]); [None] ignores the value. *)
+@@ -1480,6 +1654,51 @@ let abs_to_consumed ?(sides : back_side option list option) (ctx : bs_ctx)
+     ^ Print.list_to_string (texpr_to_string ctx) values];
+   values
+ 
++(** Staged backward functions: whether the values consumed at [abs_level] on
++    the selected positions of an abstraction (see [abs_back_sides]) are all
++    available, that is, no loan of this level on these positions is still
++    live (see [abs_to_consumed]). *)
++let abs_consumed_available ?(sides : back_side option list option)
++    (ctx : bs_ctx) (abs : V.abs) (abs_level : abs_level) : bool =
++  let live = ref false in
++  let visitor =
++    object
++      inherit [_] InterpBorrowsCore.iter_tavalue_with_levels as super
++      method incr_level (level, ty) = (level + 1, ty)
++
++      method! visit_tavalue (level, _) av =
++        super#visit_tavalue (level, av.ty) av
++
++      method! visit_ALoan (level, ty) lc =
++        (match lc with
++        | V.AMutLoan _ when level = abs_level -> live := true
++        | _ -> ());
++        super#visit_ALoan (level, ty) lc
++
++      method! visit_aproj (level, ty) aproj =
++        fold_aproj_at_level abs_level level
++          (fun () aproj ty ->
++            match aproj with
++            | V.AProjLoans { proj; _ }
++              when TypesUtils.ty_has_mut_borrow_for_region_in_set
++                     ctx.type_ctx.type_infos abs.regions.owned proj.proj_ty ->
++                ignore ty;
++                live := true
++            | V.APendingLoans _ -> live := true
++            | _ -> ())
++          () aproj ty
++    end
++  in
++  List.iter
++    (fun (side, av) ->
++      match side with
++      | None -> ()
++      | Some side ->
++          let av = select_back_side ctx abs.regions.owned side abs_level av in
++          visitor#visit_tavalue (0, av.ty) av)
++    (abs_back_sides abs sides);
++  not !live
++
+ let translate_mprojection_elem _span (pe : E.projection_elem) :
+     mprojection_elem option =
+   match pe with
+@@ -1767,21 +1986,18 @@ let tavalue_to_given_back ?(side : back_side = BothSides)
+      it contains mutable borrows we generate a given back pattern (because
+      upon ending the borrow the abstraction gave back a value).
+      Otherwise we ignore it. *)
+-  match select_back_side ctx.span abs_regions side 0 v with
+-  | None -> (ctx, None)
+-  | Some (current_level, v) -> (
+-      match
+-        compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-          abs_level current_level v
+-      with
+-      | BorrowProj BMut ->
+-          tavalue_to_given_back_aux abs_regions abs_level current_level mp
+-            ~filter:true v ctx
+-      | BorrowProj BShared | LoanProj _ | UnknownProj ->
+-          (* If it is a loan proj we ignore it. If it is an unknown projection,
+-             it means the value doesn't contain loans nor borrows, so nothing
+-             is given back: we can ignore it as well. *)
+-          (ctx, None))
++  let v = select_back_side ctx abs_regions side abs_level v in
++  match
++    compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
++      abs_level 0 v
++  with
++  | BorrowProj BMut ->
++      tavalue_to_given_back_aux abs_regions abs_level 0 mp ~filter:true v ctx
++  | BorrowProj BShared | LoanProj _ | UnknownProj ->
++      (* If it is a loan proj we ignore it. If it is an unknown projection,
++         it means the value doesn't contain loans nor borrows, so nothing
++         is given back: we can ignore it as well. *)
++      (ctx, None)
+ 
+ (** Convert the abstraction values in an abstraction to given back values.
+ 
+diff --git a/tests/lean/NestedBorrowsFourLevels/Checks.lean b/tests/lean/NestedBorrowsFourLevels/Checks.lean
+new file mode 100644
+index 0000000..0088a1b
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFourLevels/Checks.lean
+@@ -0,0 +1,28 @@
++import NestedBorrowsFourLevels.NestedBorrowsFourLevels
++
++/-! Evaluate the model of `tests/src/nested-borrows-four-levels.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_four_levels.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def val {α β} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++def once (v : Nat) := val (·.val) (incr4_once (u v))
++def swap (v w : Nat) :=
++  val (fun (p : U32 × U32) => (p.1.val, p.2.val)) (incr4_swap (u v) (u w))
++
++#guard once 0 == some 1
++#guard once 41 == some 42
++#guard once 4294967295 == some 0
++#guard once 7 == some 8
++
++#guard swap 0 0 == some (0, 1)
++#guard swap 5 41 == some (5, 42)
++#guard swap 3 4294967295 == some (3, 0)
++
++end nested_borrows_four_levels.checks
+diff --git a/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+new file mode 100644
+index 0000000..800cc95
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFourLevels/NestedBorrowsFourLevels.lean
+@@ -0,0 +1,75 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_four_levels]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_four_levels
++
++/-- [nested_borrows_four_levels::incr4]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 8:0-10:1
++    Visibility: public -/
++def incr4
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → (_root_.Aeneas.Std.U32
++    × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))) ×
++    (_root_.Aeneas.Std.U32 → (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32
++    → (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 →
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))))))))
++  := do
++  let x1 ← lift (core.num.U32.wrapping_add x 1#u32)
++  let back'c :=
++    (fun x2 => (x2, fun x3 => x3) : _root_.Aeneas.Std.U32 →
++      (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)))
++  let back'd :=
++    (fun x2 => (x2, fun x3 => (x3, fun x4 => (x4, fun x5 => x5))) :
++      _root_.Aeneas.Std.U32 → (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.U32 → (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.U32 → (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)))))))
++  _root_.Aeneas.Std.Result.ok (x1, fun x2 => x2, back'c, back'd)
++
++/-- [nested_borrows_four_levels::incr4_once]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 12:0-21:1
++    Visibility: public -/
++def incr4_once
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, incr4_back, incr4_back1, incr4_back2) ←
++    _root_.nested_borrows_four_levels.incr4 v
++  let i1 := incr4_back i
++  let (i2, back) := incr4_back1 i1
++  let i3 := back i2
++  let (i4, back1) := incr4_back2 i3
++  let (i5, back2) := back1 i4
++  let (i6, back3) := back2 i5
++  _root_.Aeneas.Std.Result.ok (back3 i6)
++
++/-- [nested_borrows_four_levels::incr4_swap]:
++    Source: 'tests/src/nested-borrows-four-levels.rs', lines 24:0-35:1
++    Visibility: public -/
++def incr4_swap
++  (v : _root_.Aeneas.Std.U32) (w : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i, incr4_back, incr4_back1, incr4_back2) ←
++    _root_.nested_borrows_four_levels.incr4 w
++  let i1 := incr4_back i
++  let (i2, back) := incr4_back1 i1
++  let i3 := back i2
++  let (i4, back1) := incr4_back2 i3
++  let (i5, back2) := back1 i4
++  let (i6, back3) := back2 i5
++  let w1 := back3 i6
++  _root_.Aeneas.Std.Result.ok (v, w1)
++
++end nested_borrows_four_levels
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ba9f999..195e6b5 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -25,6 +25,7 @@ package «tests» {}
+ @[default_target] lean_lib ClosureSharedContext
+ @[default_target] lean_lib ClosureMutContext
+ @[default_target] lean_lib ZipBorrowedAdapters
++@[default_target] lean_lib NestedBorrowsFourLevels
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectGenericClosure
+diff --git a/tests/src/nested-borrows-four-levels.rs b/tests/src/nested-borrows-four-levels.rs
+new file mode 100644
+index 0000000..6068fbd
+--- /dev/null
++++ b/tests/src/nested-borrows-four-levels.rs
+@@ -0,0 +1,55 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsFourLevels
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Four levels of nested mutable borrows: the region group of the innermost
++//! borrow of `incr4` is nested under three ignored mutable borrows, so that its
++//! backward function has four stages (see `Pure.back_sg_info.early`).
++
++pub fn incr4<'a, 'b, 'c, 'd>(x: &'a mut &'b mut &'c mut &'d mut u32) {
++    ****x = (****x).wrapping_add(1);
++}
++
++pub fn incr4_once(v: u32) -> u32 {
++    let mut v = v;
++    {
++        let mut r1 = &mut v;
++        let mut r2 = &mut r1;
++        let mut r3 = &mut r2;
++        incr4(&mut r3);
++    }
++    v
++}
++
++/// The same chain, whose innermost borrow is replaced before the call.
++pub fn incr4_swap(v: u32, w: u32) -> (u32, u32) {
++    let mut v = v;
++    let mut w = w;
++    {
++        let mut r1 = &mut v;
++        let mut r2 = &mut r1;
++        let mut r3 = &mut r2;
++        **r3 = &mut w;
++        incr4(&mut r3);
++    }
++    (v, w)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn incr4_once_native() {
++        assert_eq!(incr4_once(0), 1);
++        assert_eq!(incr4_once(41), 42);
++        assert_eq!(incr4_once(u32::MAX), 0);
++        assert_eq!(incr4_once(7), 8);
++    }
++
++    #[test]
++    fn incr4_swap_native() {
++        assert_eq!(incr4_swap(0, 0), (0, 1));
++        assert_eq!(incr4_swap(5, 41), (5, 42));
++        assert_eq!(incr4_swap(3, u32::MAX), (3, 0));
++    }
++}

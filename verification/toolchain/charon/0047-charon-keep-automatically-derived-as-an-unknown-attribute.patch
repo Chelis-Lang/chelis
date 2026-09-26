@@ -1,0 +1,125 @@
+# charon integration step 47 after 546078ea5d: commit 5fd1554b3c352efc22e4d4c3eff0aa7c68ca9e01
+# first parent a5d32339e971fcb0c8959178542d6628f56ceb6b
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: keep #[automatically_derived] as an unknown attribute
+#
+# rustc parses #[automatically_derived] (AttributeKind::AutomaticallyDerived),
+# and translate_attribute dropped every parsed attribute but doc comments, so
+# consumers could not tell a derived impl from a hand-written one. Keep it as
+# Attribute::Unknown { path: "automatically_derived", args: None }: Aeneas
+# admits sort models over #[derive(Ord)] types by it.
+#
+# Test: crate_data automatically_derived (a derived and a hand-written
+# PartialEq impl; only the derived impls carry the attribute).
+
+diff --git a/src/bin/charon-driver/translate/translate_meta.rs b/src/bin/charon-driver/translate/translate_meta.rs
+index b0a866e..748cb30 100644
+--- a/src/bin/charon-driver/translate/translate_meta.rs
++++ b/src/bin/charon-driver/translate/translate_meta.rs
+@@ -675,8 +675,9 @@ impl<'tcx> TranslateCtx<'tcx> {
+     }
+ 
+     /// Translates a rust attribute. Returns `None` for attributes we don't keep, among which doc
+-    /// comments (rustc encodes them as attributes) unless `--doc-comments` is set. For now we use
+-    /// `String`s for `Attributes`.
++    /// comments (rustc encodes them as attributes) unless `--doc-comments` is set. Of the
++    /// attributes rustc parses, `#[automatically_derived]` is kept as an unknown attribute. For
++    /// now we use `String`s for `Attributes`.
+     pub(crate) fn translate_attribute(
+         &mut self,
+         def_id: &hax::DefId,
+@@ -689,6 +690,15 @@ impl<'tcx> TranslateCtx<'tcx> {
+                 .options
+                 .doc_comments
+                 .then(|| Attribute::DocComment(comment.to_string())),
++            // rustc marks the impls that `#[derive(..)]` generates with `#[automatically_derived]`;
++            // consumers use it to recognize a derived impl, whose items follow the derive's
++            // documented definition.
++            hir::Attribute::Parsed(hir_attrs::AttributeKind::AutomaticallyDerived(..)) => {
++                Some(Attribute::Unknown(RawAttribute {
++                    path: "automatically_derived".to_owned(),
++                    args: None,
++                }))
++            }
+             hir::Attribute::Parsed(_) => None,
+             hir::Attribute::Unparsed(attr) => {
+                 let raw_attr = RawAttribute {
+diff --git a/tests/crate_data.rs b/tests/crate_data.rs
+index 6b9ae16..901eb0b 100644
+--- a/tests/crate_data.rs
++++ b/tests/crate_data.rs
+@@ -366,6 +366,73 @@ fn attributes() -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
++#[test]
++fn automatically_derived() -> anyhow::Result<()> {
++    // rustc marks the impls that `#[derive(..)]` generates with the (parsed) attribute
++    // `#[automatically_derived]`: only those impls carry it, as an unknown attribute.
++    let crate_data = translate(
++        r#"
++        #[derive(PartialEq)]
++        struct Derived(u32);
++
++        struct Manual(u32);
++
++        impl PartialEq for Manual {
++            fn eq(&self, other: &Self) -> bool {
++                self.0 == other.0
++            }
++        }
++        "#,
++    )?;
++    // (trait, implementing type, attributes) of each impl of the crate.
++    let impls = crate_data
++        .trait_impls
++        .iter()
++        .filter(|timpl| timpl.item_meta.is_local)
++        .map(|timpl| {
++            let trait_name = trait_name(&crate_data, timpl.impl_trait.id);
++            let self_ty = match timpl.impl_trait.generics.types[0].kind() {
++                TyKind::Adt(TypeDeclRef {
++                    id: TypeId::Adt(id),
++                    ..
++                }) => repr_name(&crate_data, &crate_data.type_decls[*id].item_meta.name),
++                ty => panic!("unexpected implementing type: {ty:?}"),
++            };
++            let attrs = timpl
++                .item_meta
++                .attr_info
++                .attributes
++                .iter()
++                .map(|a| a.as_unknown().map(|a| a.to_string()))
++                .collect_vec();
++            (trait_name.to_owned(), self_ty, attrs)
++        })
++        .sorted()
++        .collect_vec();
++    let derived = vec![Some("automatically_derived".to_owned())];
++    assert_eq!(
++        impls,
++        vec![
++            (
++                "PartialEq".to_owned(),
++                "test_crate::Derived".to_owned(),
++                derived.clone()
++            ),
++            (
++                "PartialEq".to_owned(),
++                "test_crate::Manual".to_owned(),
++                vec![]
++            ),
++            (
++                "StructuralPartialEq".to_owned(),
++                "test_crate::Derived".to_owned(),
++                derived
++            ),
++        ]
++    );
++    Ok(())
++}
++
+ #[test]
+ fn doc_comments() -> anyhow::Result<()> {
+     let code = r#"

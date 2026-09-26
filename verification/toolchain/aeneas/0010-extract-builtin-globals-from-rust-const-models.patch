@@ -1,0 +1,56 @@
+# aeneas integration step 10 after cba11f3beb: commit a59626a33c219a4ff120e1d75c79e80bef24a91c
+# first parent 112880c2ad9adee9c003edf0139dc088c2505af1
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# extract: builtin globals from rust_const models
+#
+# The generated lean_builtin_consts table was never concatenated as a list of
+# lists and had no mk_global constructor, and references to a builtin global
+# used the default Rust-derived name instead of its model's name.
+
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index 57d08f3..338e462 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -2545,9 +2545,13 @@ let ctx_compute_fun_global_name_no_suffix (item_meta : T.item_meta)
+ 
+ let ctx_add_global_decl_and_body (def : global_decl) (ctx : extraction_ctx) :
+     extraction_ctx =
++  (* A builtin global is not extracted: references must use its model's name. *)
+   let name =
+-    ctx_compute_fun_global_name_no_suffix def.item_meta def.src ctx
+-      ~is_trait_decl_field:false ~is_fun:false
++    match def.builtin_info with
++    | Some info -> info.extract_name
++    | None ->
++        ctx_compute_fun_global_name_no_suffix def.item_meta def.src ctx
++          ~is_trait_decl_field:false ~is_fun:false
+   in
+   ctx_add def.item_meta.span (GlobalId def.def_id) name ctx
+ 
+diff --git a/src/extract/ExtractBuiltin.ml b/src/extract/ExtractBuiltin.ml
+index 2f74012..e9af114 100644
+--- a/src/extract/ExtractBuiltin.ml
++++ b/src/extract/ExtractBuiltin.ml
+@@ -43,7 +43,7 @@ let builtin_globals () : Pure.builtin_global_info list =
+          unit_metadata;
+        ];
+      ]
+-    @ mk_lean_only lean_builtin_consts)
++    @ [ mk_lean_only lean_builtin_consts ])
+ 
+ let mk_builtin_globals_map () : Pure.builtin_global_info NameMatcherMap.t =
+   NameMatcherMap.of_list
+diff --git a/src/extract/ExtractBuiltinCore.ml b/src/extract/ExtractBuiltinCore.ml
+index 6b87854..612ed65 100644
+--- a/src/extract/ExtractBuiltinCore.ml
++++ b/src/extract/ExtractBuiltinCore.ml
+@@ -201,3 +201,8 @@ let mk_trait_impl ?(keep_params : bool list option = None)
+     (extract_name : string) : pattern * Pure.builtin_trait_impl_info =
+   let rust_name = parse_pattern rust_name in
+   (rust_name, { extract_name; keep_params; keep_trait_clauses })
++
++(** A global (Rust `const`/`static`) modeled by a Lean definition (`rust_const`). *)
++let mk_global ?(can_fail = false) (rust_name : string) (extract_name : string) :
++    Pure.builtin_global_info =
++  { rust_name; extract_name; can_fail }

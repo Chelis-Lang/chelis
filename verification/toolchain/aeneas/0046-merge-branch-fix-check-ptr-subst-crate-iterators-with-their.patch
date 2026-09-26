@@ -1,0 +1,1024 @@
+# aeneas integration step 46 after cba11f3beb: commit a971f79377de13bb019be091de2eb55db132a523
+# first parent ffa170e5de50aeec3f5838edfb77f5515d341541, merged 8a7680537b9e6e2e0a5ea8ec33a5d0e3fef5612d
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch fix/check-ptr-subst (crate iterators with their own size_hint under a totality obligation)
+#
+# # Conflicts:
+# #	tests/src/collect-user-iterator-hint.lean.out
+
+diff --git a/src/Config.ml b/src/Config.ml
+index 7a05028..a4e581a 100644
+--- a/src/Config.ml
++++ b/src/Config.ml
+@@ -72,6 +72,15 @@ let emit_manifest : string option ref = ref None
+ 
+ let set_emit_manifest (s : string) : unit = emit_manifest := Some s
+ 
++(** Where to write the collection obligations (see [CollectionContracts]): the
++    propositions that the generated code states but does not prove, and that a
++    checked theorem must discharge. A collection which needs one is rejected
++    unless this is set. *)
++let emit_collection_obligations : string option ref = ref None
++
++let set_emit_collection_obligations (s : string) : unit =
++  emit_collection_obligations := Some s
++
+ (** If [true], we do not generate code and simply borrow-check the program
+     instead. This allows us to relax some sanity checks which are present in the
+     symbolic execution only to make sure we will be able to generate the pure
+diff --git a/src/Main.ml b/src/Main.ml
+index 754d852..a082cf2 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -138,6 +138,12 @@ let () =
+         Arg.String set_emit_manifest,
+         " Lean with -canonical-names: write the manifest of the declarations \
+          emitted by this chunk to the given file." );
++      ( "-emit-collection-obligations",
++        Arg.String set_emit_collection_obligations,
++        " Lean: write to the given file (JSON) the collection obligations: \
++         propositions stated by the generated code which checked theorems \
++         must prove (e.g. the totality of a crate iterator's size_hint). \
++         Collections which need one are rejected without this option." );
+       ( "-checks",
+         Arg.Set sanity_checks,
+         " Activate extensive sanity checks (warning: causes a ~100 times slow \
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 0313a85..0f81a1e 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -2079,6 +2079,35 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+       ctx trans_trait_impls
+   in
+ 
++  (* Collection obligations (see [CollectionContracts]): the propositions of the
++     generated code that admitted collections rely on *)
++  (match !Config.emit_collection_obligations with
++  | None -> ()
++  | Some file ->
++      let obligation id =
++        let impl = TraitImplId.Map.find id crate.trait_impls in
++        let prop =
++          ExtractBase.ctx_get_trait_impl impl.item_meta.span id ctx
++          ^ ".size_hint_total"
++        in
++        `Assoc
++          [
++            ("kind", `String "iterator_size_hint_total");
++            ("impl", `String (name_to_string trans_ctx impl.item_meta.name));
++            ("proposition", `String prop);
++          ]
++      in
++      Yojson.Basic.to_file file
++        (`Assoc
++           [
++             ("version", `Int 1);
++             ( "obligations",
++               `List
++                 (List.map obligation
++                    (TraitImplId.Set.elements
++                       !CollectionContracts.size_hint_obligations)) );
++           ]));
++
+   (* Separate compilation: check the external views, and import their owners *)
+   sc_dest_dir := dest_dir;
+   if SC.enabled () then (
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index 326c70e..41e8930 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -3650,6 +3650,57 @@ let extract_inline_trait_impl (ctx : extraction_ctx) (fmt : F.formatter)
+   if has_params then F.pp_print_string fmt ")";
+   F.pp_close_box fmt ()
+ 
++(** The collection obligation of a crate iterator with its own size_hint (see
++    [CollectionContracts]): native collectors call it, so its model must be
++    total, given that the size_hint of each Iterator clause of the impl is.
++    {[
++      def Impl.size_hint_total : Prop :=
++        forall {T : Type} (inst : Iterator I T),
++        (forall x, exists r, inst.size_hint x = ok r) ->
++        forall s, exists r, (@Impl T inst).size_hint s = ok r
++    ]}
++    Only stated here: a checked theorem must prove it. *)
++let extract_size_hint_total (span : Meta.span) (ctx : extraction_ctx)
++    (fmt : F.formatter) (impl : trait_impl) (impl_name : string)
++    (type_params : string list) (cg_params : string list)
++    (trait_clauses : string list) : unit =
++  let ok = "_root_.Aeneas.Std.Result.ok" in
++  let total inst =
++    "(forall x, exists r, (" ^ inst ^ ").size_hint x = " ^ ok ^ " r)"
++  in
++  F.pp_print_break fmt 0 0;
++  extract_doc_comment fmt
++    [
++      "Collection obligation: the size_hint of ["
++      ^ name_to_string ctx impl.item_meta.name
++      ^ "] is total. Native collectors call it, so a checked theorem must \
++         prove this.";
++    ];
++  F.pp_print_break fmt 0 0;
++  F.pp_open_hovbox fmt ctx.indent_incr;
++  F.pp_print_string fmt ("def " ^ impl_name ^ ".size_hint_total : Prop :=");
++  extract_generic_params span ctx fmt TypeDeclId.Set.empty ~use_forall:true
++    ~use_forall_use_sep:false Item impl.generics (Some impl.explicit_info)
++    type_params cg_params trait_clauses;
++  if type_params <> [] || cg_params <> [] || trait_clauses <> [] then
++    F.pp_print_string fmt ",";
++  List.iter2
++    (fun (clause : trait_param) name ->
++      if
++        ctx_get_trait_decl span clause.trait_id ctx
++        = CollectionContracts.iterator
++      then (
++        F.pp_print_space fmt ();
++        F.pp_print_string fmt (total name ^ " ->")))
++    impl.generics.trait_clauses trait_clauses;
++  F.pp_print_space fmt ();
++  F.pp_print_string fmt
++    (total
++       (String.concat " "
++          (("@" ^ impl_name) :: (type_params @ cg_params @ trait_clauses))));
++  F.pp_close_box fmt ();
++  F.pp_print_break fmt 0 0
++
+ (** Extract a trait implementation *)
+ let extract_trait_impl (ctx : extraction_ctx) (fmt : F.formatter)
+     ~(is_rec : bool) (impl : trait_impl) : unit =
+@@ -3785,7 +3836,13 @@ let extract_trait_impl (ctx : extraction_ctx) (fmt : F.formatter)
+       F.pp_print_string fmt "}"));
+   F.pp_close_box fmt ();
+   (* Add breaks to insert new lines between definitions *)
+-  F.pp_print_break fmt 0 0
++  F.pp_print_break fmt 0 0;
++  if
++    backend () = Lean
++    && TraitImplId.Set.mem impl.def_id !CollectionContracts.size_hint_impls
++  then
++    extract_size_hint_total span ctx fmt impl impl_name type_params cg_params
++      trait_clauses
+ 
+ (** Extract a unit test, if the function is a unit function (takes no
+     parameters, returns unit).
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 0a1d14a..aa208d2 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -9,10 +9,12 @@
+     function's own generics, becomes an obligation of the function, and every
+     call instantiates it and checks the instance (or defers it further to the
+     caller's clauses). Only reviewed iterators, and crate iterators that define
+-    nothing but next, ever discharge an obligation, so the next-driven models
+-    are used exactly where every native consumer path (next, fold, for_each,
+-    try_fold, size_hint) agrees with them: see [LawfulIterator] in the Lean
+-    library. *)
++    nothing but next and size_hint, ever discharge an obligation, so the
++    next-driven models are used exactly where every native consumer path (next,
++    fold, for_each, try_fold, size_hint) agrees with them: see [LawfulIterator]
++    in the Lean library. A crate iterator's own size_hint leaves a collection
++    obligation, its totality, stated in the generated Lean and listed by
++    [-emit-collection-obligations] for a checked theorem to prove. *)
+ 
+ open Types
+ open Expressions
+@@ -31,6 +33,17 @@ let extend = prefix ^ "core.iter.traits.collect.Extend"
+ let step = prefix ^ "core.iter.range.Step"
+ let double_ended = prefix ^ "core.iter.traits.double_ended.DoubleEndedIterator"
+ 
++(** Crate iterator impls whose size_hint is their own translated function. The
++    Lean extraction states, next to each, the proposition
++    [<impl>.size_hint_total]: the size_hint model is total, given that the
++    size_hint of each Iterator clause of the impl is. *)
++let size_hint_impls : TraitImplId.Set.t ref = ref TraitImplId.Set.empty
++
++(** The impls of [size_hint_impls] whose [size_hint_total] an admitted
++    collection relies on: written by [-emit-collection-obligations], for a
++    checked theorem to discharge. *)
++let size_hint_obligations : TraitImplId.Set.t ref = ref TraitImplId.Set.empty
++
+ let check ~(evidence : crate) (crate : crate) : crate =
+   if Config.backend () <> Config.Lean then crate
+   else
+@@ -176,7 +189,30 @@ let check ~(evidence : crate) (crate : crate) : crate =
+     in
+     (* Charon keeps every method that a Transparent impl defines (it marks them
+        used), and only copies of the trait's defaults otherwise. Admit the impl
+-       only if every method other than next is such a copy. *)
++       only if every method other than next and size_hint is such a copy.
++       Returns whether size_hint is the impl's own. *)
++    let own_size_hint (impl : trait_impl) =
++      match List.assoc_opt "size_hint" impl.methods with
++      | Some method_ref -> (
++          match
++            FunDeclId.Map.find_opt method_ref.binder_value.id evidence.fun_decls
++          with
++          | Some { src = TraitImplItem (_, _, _, false); body = StructuredBody _; _ }
++            -> true
++          | _ -> false)
++      | None -> false
++    in
++    size_hint_impls :=
++      TraitImplId.Map.fold
++        (fun id (impl : trait_impl) impls ->
++          if
++            crate_iterator impl
++            && trait_name impl.impl_trait.id = Some iterator
++            && own_size_hint impl
++          then TraitImplId.Set.add id impls
++          else impls)
++        evidence.trait_impls TraitImplId.Set.empty;
++    size_hint_obligations := TraitImplId.Set.empty;
+     let check_default_consumers span (impl : trait_impl) =
+       let impl_text =
+         Print.name_to_string (Print.crate_to_fmt_env evidence) impl.item_meta.name
+@@ -196,13 +232,27 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               | StructuredBody _ -> ()
+               | _ -> reject span ("opaque next of the crate iterator " ^ impl_text))
+           | Some { src = TraitImplItem (_, _, _, true); _ } -> ()
++          | Some _ when name = "size_hint" ->
++              if not (TraitImplId.Set.mem impl.def_id !size_hint_impls) then
++                reject span ("opaque size_hint of the crate iterator " ^ impl_text)
+           | Some _ ->
+               reject span
+                 ("the crate iterator " ^ impl_text ^ " overrides Iterator::" ^ name
+-               ^ "; only an iterator whose methods other than next are the \
+-                  trait's defaults has the native collection schedule of \
+-                  repeated next with the total (0, None) size_hint"))
+-        impl.methods
++               ^ "; only an iterator whose methods other than next and \
++                  size_hint are the trait's defaults has the native collection \
++                  schedule of repeated next"))
++        impl.methods;
++      let own = TraitImplId.Set.mem impl.def_id !size_hint_impls in
++      if own then (
++        if Option.is_none !Config.emit_collection_obligations then
++          reject span
++            ("the crate iterator " ^ impl_text
++           ^ " defines size_hint, which native collectors call: its \
++              totality is a collection obligation, which needs \
++              -emit-collection-obligations");
++        size_hint_obligations :=
++          TraitImplId.Set.add impl.def_id !size_hint_obligations);
++      own
+     in
+     (* Types that are Copy (hence have no drop glue) whatever their instances:
+        scalars, shared references, and tuples and arrays of them. *)
+@@ -297,20 +347,33 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                    collectors fold it without the surplus left next of \
+                    repeated Zip::next"
+           | _ -> reject span "missing or ambiguous Zip iterator evidence")
+-      (* A crate iterator that only defines next (check_default_consumers): every
+-         native consumer (fold, try_fold, for_each, nth, and the Vec/BTree
+-         collectors' next loop) is repeated next, and size_hint is the total,
+-         pure (0, None), which only sizes capacity. The specializations a
+-         collector could select instead need unsafe impls whose contracts
+-         (0, None) breaks: TrustedLen and TrustedRandomAccess require an exact
+-         hint (TrustedLen allows None only past usize::MAX items, where the
+-         native collector and the model both fail), and TrustedRandomAccess
+-         dispatch calls __iterator_get_unchecked, which would be an override.
+-         FusedIterator only changes Fuse after exhaustion, which no admitted
+-         consumer polls. Any other crate iterator, including one whose
+-         size_hint is overridden (its lawfulness is not checked here), is
+-         rejected. *)
+-      | None when crate_iterator impl -> check_default_consumers span impl
++      (* A crate iterator that only defines next, and possibly size_hint
++         (check_default_consumers): every native consumer (fold, try_fold,
++         for_each, nth, and the collectors' next loop) is repeated next. The
++         Vec collector (BTreeMap/BTreeSet collect into a Vec first,
++         alloc/src/collections/btree/map.rs:2385) only calls size_hint to size
++         capacity: alloc/src/vec/spec_from_iter_nested.rs:27 (with_capacity of
++         lower + 1) and Vec::extend_desugared, alloc/src/vec/mod.rs:3907 (reserve
++         of lower + 1), in rust-src 1.95.0-nightly-2026-02-07. The collected
++         values therefore do not depend on the hint's value, and its lawfulness
++         is not needed; allocation failure and capacity overflow are outside the
++         value model (trust boundary). What native does observe is that
++         size_hint is user code it calls: a default size_hint is the total, pure
++         (0, None), an own one must be proved total (the obligation
++         [<impl>.size_hint_total], which assumes the hints of the impl's
++         Iterator clauses total: those arguments are checked here as well).
++         The specializations a collector could select instead need unsafe
++         impls: TrustedLen (spec_from_iter_nested.rs:51) with an exact hint only
++         pre-sizes the same next/fold schedule, and with (_, None) promises more
++         than usize::MAX items, where the native collector and the model both
++         fail; TrustedRandomAccess dispatch calls __iterator_get_unchecked,
++         which would be an override. FusedIterator only changes Fuse after
++         exhaustion, which no admitted consumer polls. *)
++      | None when crate_iterator impl ->
++          if check_default_consumers span impl then
++            List.iter
++              (check_iterator span seen)
++              (List.filter (fun tr -> ref_name tr = Some iterator) args)
+       | _ ->
+           reject span
+             ("unreviewed iterator hint or collector specialization in "
+diff --git a/tests/lean/CollectUserIteratorHint.lean b/tests/lean/CollectUserIteratorHint.lean
+new file mode 100644
+index 0000000..21ad955
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorHint.lean
+@@ -0,0 +1 @@
++import CollectUserIteratorHint.Checks
+diff --git a/tests/lean/CollectUserIteratorHint/Checks.lean b/tests/lean/CollectUserIteratorHint/Checks.lean
+new file mode 100644
+index 0000000..3d7183a
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorHint/Checks.lean
+@@ -0,0 +1,41 @@
++import CollectUserIteratorHint.CollectUserIteratorHint
++
++/-! Evaluate the model of `tests/src/collect-user-iterator-hint.rs` on the inputs
++    of its `native` test module and compare with the native results, and prove
++    the collection obligations listed in obligations.json. -/
++namespace collect_user_iterator_hint.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def sl {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice α := ⟨xs, h⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (countdowns (u 3)) == some [1, 0, 0]
++def arms : Slice (alloc.vec.Vec U32) := sl [vec [u 10, u 11], vec [], vec [u 12]]
++#guard nats (successor_arms (sl [u 2, u 0, u 1]) false arms) == some [12, 10, 11]
++#guard nats (successor_arms (sl [u 1, u 2, u 0]) true arms) == some [12]
++
++theorem countdown_size_hint_total :
++    Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total :=
++  fun _ => ⟨_, rfl⟩
++
++theorem successors_size_hint_total :
++    Successors.Insts.CoreIterTraitsIteratorIterator.size_hint_total := by
++  intro E A inst h s
++  cases s with
++  | Arms arms =>
++    obtain ⟨r, hr⟩ := h arms
++    exact ⟨r, by simp [Successors.Insts.CoreIterTraitsIteratorIterator.size_hint, hr]⟩
++  | Fixed first second =>
++    have bit : ∀ b : Bool, (core.convert.num.FromUsizeBool.from b).val ≤ 1 := by
++      intro b; cases b <;> simp [core.convert.num.FromUsizeBool.from]
++    have := bit first.isSome
++    have := bit second.isSome
++    have hmax : (core.convert.num.FromUsizeBool.from first.isSome).val +
++        (core.convert.num.FromUsizeBool.from second.isSome).val ≤ UScalar.max .Usize := by
++      scalar_tac
++    obtain ⟨z, hz, -⟩ := WP.spec_imp_exists (UScalar.add_spec hmax)
++    exact ⟨(z, some z), by
++      simp [Successors.Insts.CoreIterTraitsIteratorIterator.size_hint,
++        core.option.Option.is_some, lift, hz]⟩
++end collect_user_iterator_hint.checks
+diff --git a/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean b/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean
+new file mode 100644
+index 0000000..7b532a2
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean
+@@ -0,0 +1,342 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_user_iterator_hint]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_user_iterator_hint
++
++/-- [collect_user_iterator_hint::Countdown]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 14:0-14:30
++    Visibility: public -/
++@[reducible]
++def Countdown := _root_.Aeneas.Std.U32
++
++/-- [collect_user_iterator_hint::Countdown]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 14:0-14:30 -/
++def Countdown.ctor
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.collect_user_iterator_hint.Countdown
++  := do
++  _root_.Aeneas.Std.Result.ok i
++
++/-- [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}::size_hint]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 29:4-31:5
++    Visibility: public -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint
++  (self : _root_.collect_user_iterator_hint.Countdown) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize))
++  := do
++  _root_.Aeneas.Std.Result.ok (0#usize, some 1#usize)
++
++/-- [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}::next]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 19:4-26:5
++    Visibility: public -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.next
++  (self : _root_.collect_user_iterator_hint.Countdown) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.collect_user_iterator_hint.Countdown)
++  := do
++  if self = 0#u32
++  then _root_.Aeneas.Std.Result.ok (none, self)
++  else let i ← self - 1#u32
++       _root_.Aeneas.Std.Result.ok (some i, i)
++
++/-- Trait implementation: [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 16:0-32:1 -/
++@[reducible]
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32 :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  _root_.collect_user_iterator_hint.Countdown _root_.Aeneas.Std.U32 := {
++  next :=
++    fun arg =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.next
++          arg
++      _root_.Aeneas.Std.Result.ok (output, captured)
++  size_hint :=
++    fun arg =>
++      do
++      let output ←
++        _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint
++          arg
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- Collection obligation: the size_hint of [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}] is total. Native collectors call it, so a checked theorem must prove this. -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total : Prop :=
++  (forall x, exists r, (@Countdown.Insts.CoreIterTraitsIteratorIteratorU32).size_hint x = _root_.Aeneas.Std.Result.ok r)
++
++/-- [collect_user_iterator_hint::countdowns]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 34:0-36:1
++    Visibility: public -/
++def countdowns
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32)
++      (BuiltinFnMut _root_.Aeneas.Std.U32
++      _root_.collect_user_iterator_hint.Countdown) n
++      (_root_.collect_user_iterator_hint.Countdown.ctor)
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32)
++      (BuiltinFnMut _root_.Aeneas.Std.U32
++      _root_.collect_user_iterator_hint.Countdown))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_user_iterator_hint::Successors]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 40:0-43:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Successors (E : Type) (A : Type) where
++| Fixed : _root_.Option E → _root_.Option E → Successors E A
++| Arms : A → Successors E A
++
++/-- [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}::size_hint]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 58:4-66:5
++    Visibility: public -/
++def Successors.Insts.CoreIterTraitsIteratorIterator.size_hint
++  {E : Type} {A : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E)
++  (self : _root_.collect_user_iterator_hint.Successors E A) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize))
++  := do
++  match self with
++  | _root_.collect_user_iterator_hint.Successors.Fixed first second =>
++    let b := _root_.Aeneas.Std.core.option.Option.is_some first
++    let i ← lift (core.convert.num.FromUsizeBool.from b)
++    let b1 := _root_.Aeneas.Std.core.option.Option.is_some second
++    let i1 ← lift (core.convert.num.FromUsizeBool.from b1)
++    let remaining ← i + i1
++    _root_.Aeneas.Std.Result.ok (remaining, some remaining)
++  | _root_.collect_user_iterator_hint.Successors.Arms arms =>
++    coreitertraitsiteratorIteratorInst.size_hint arms
++
++/-- [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}::next]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 48:4-56:5
++    Visibility: public -/
++def Successors.Insts.CoreIterTraitsIteratorIterator.next
++  {E : Type} {A : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E)
++  (self : _root_.collect_user_iterator_hint.Successors E A) :
++  _root_.Aeneas.Std.Result ((_root_.Option E) ×
++    (_root_.collect_user_iterator_hint.Successors E A))
++  := do
++  match self with
++  | _root_.collect_user_iterator_hint.Successors.Fixed first second =>
++    let (o, o1) := _root_.Aeneas.Std.core.option.Option.take first
++    match o with
++    | none =>
++      let (o2, o3) := _root_.Aeneas.Std.core.option.Option.take second
++      _root_.Aeneas.Std.Result.ok (o2,
++        _root_.collect_user_iterator_hint.Successors.Fixed o1 o3)
++    | some _ =>
++      _root_.Aeneas.Std.Result.ok (o,
++        _root_.collect_user_iterator_hint.Successors.Fixed o1 second)
++  | _root_.collect_user_iterator_hint.Successors.Arms arms =>
++    let (model_state, model_state1) ←
++      coreitertraitsiteratorIteratorInst.next arms
++    _root_.Aeneas.Std.Result.ok (model_state,
++      _root_.collect_user_iterator_hint.Successors.Arms model_state1)
++
++/-- Trait implementation: [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 45:0-67:1 -/
++@[reducible]
++def Successors.Insts.CoreIterTraitsIteratorIterator {E : Type} {A : Type}
++  (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E) :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.collect_user_iterator_hint.Successors E A) E := {
++  next :=
++    fun arg =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator.next
++          coreitertraitsiteratorIteratorInst arg
++      _root_.Aeneas.Std.Result.ok (output, captured)
++  size_hint :=
++    fun arg =>
++      do
++      let output ←
++        _root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator.size_hint
++          coreitertraitsiteratorIteratorInst arg
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- Collection obligation: the size_hint of [collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}] is total. Native collectors call it, so a checked theorem must prove this. -/
++def Successors.Insts.CoreIterTraitsIteratorIterator.size_hint_total : Prop :=
++  forall {E : Type} {A : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E),
++  (forall x, exists r, (coreitertraitsiteratorIteratorInst).size_hint x = _root_.Aeneas.Std.Result.ok r) ->
++  (forall x, exists r, (@Successors.Insts.CoreIterTraitsIteratorIterator E A coreitertraitsiteratorIteratorInst).size_hint x = _root_.Aeneas.Std.Result.ok r)
++
++/-- [collect_user_iterator_hint::successors]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 69:0-75:1
++    Visibility: public -/
++def successors
++  (targets : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (fixed : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.collect_user_iterator_hint.Successors
++    _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32))
++  := do
++  if fixed
++  then
++    let o ← _root_.Aeneas.Std.core.slice.Slice.first targets
++    let o1 ←
++      _root_.Aeneas.Std.core.slice.Slice.get
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) targets 1#usize
++    _root_.Aeneas.Std.Result.ok
++      (_root_.collect_user_iterator_hint.Successors.Fixed o o1)
++  else
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter targets
++    _root_.Aeneas.Std.Result.ok
++      (_root_.collect_user_iterator_hint.Successors.Arms i)
++
++/-- [collect_user_iterator_hint::successor_arms::closure]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 78:40-78:72 -/
++@[reducible]
++def successor_arms.closure :=
++  _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)
++
++/-- [collect_user_iterator_hint::successor_arms::{core::ops::function::FnMut<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator_hint::successor_arms::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 78:40-78:72 -/
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++  (c : _root_.collect_user_iterator_hint.successor_arms.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) ×
++    _root_.collect_user_iterator_hint.successor_arms.closure)
++  := do
++  let i ← lift (UScalar.cast .Usize tupled_args)
++  let v ← Slice.index_usize c i
++  _root_.Aeneas.Std.Result.ok (v, c)
++
++/-- [collect_user_iterator_hint::successor_arms::{core::ops::function::FnOnce<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator_hint::successor_arms::closure<0>}::call_once]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 78:40-78:72 -/
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32.call_once
++  (c : _root_.collect_user_iterator_hint.successor_arms.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (v, _) ←
++    _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok v
++
++/-- Trait implementation: [collect_user_iterator_hint::successor_arms::{core::ops::function::FnOnce<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator_hint::successor_arms::closure<0>}]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 78:40-78:72 -/
++@[reducible]
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_user_iterator_hint.successor_arms.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_user_iterator_hint::successor_arms::{core::ops::function::FnMut<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator_hint::successor_arms::closure<0>}]
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 78:40-78:72 -/
++@[reducible]
++def successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_user_iterator_hint.successor_arms.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  := {
++  FnOnceInst :=
++    _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_user_iterator_hint::successor_arms]:
++    Source: 'tests/src/collect-user-iterator-hint.rs', lines 77:0-79:1
++    Visibility: public -/
++def successor_arms
++  (targets : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (fixed : _root_.Bool)
++  (arms : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let s ← _root_.collect_user_iterator_hint.successors targets fixed
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32
++      s arms
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator_hint.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state1
++
++end collect_user_iterator_hint
+diff --git a/tests/lean/CollectUserIteratorHint/obligations.json b/tests/lean/CollectUserIteratorHint/obligations.json
+new file mode 100644
+index 0000000..0f62e30
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorHint/obligations.json
+@@ -0,0 +1 @@
++{"version":1,"obligations":[{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}","proposition":"_root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total"},{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}","proposition":"_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator.size_hint_total"}]}
+diff --git a/tests/lean/CollectUserIteratorPanickingHint.lean b/tests/lean/CollectUserIteratorPanickingHint.lean
+new file mode 100644
+index 0000000..f370034
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorPanickingHint.lean
+@@ -0,0 +1 @@
++import CollectUserIteratorPanickingHint.Checks
+diff --git a/tests/lean/CollectUserIteratorPanickingHint/Checks.lean b/tests/lean/CollectUserIteratorPanickingHint/Checks.lean
+new file mode 100644
+index 0000000..ded1570
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorPanickingHint/Checks.lean
+@@ -0,0 +1,21 @@
++import CollectUserIteratorPanickingHint.CollectUserIteratorPanickingHint
++
++/-! The model of `tests/src/collect-user-iterator-panicking-hint.rs` returns the
++    items where native collection panics in size_hint (see its `native` test
++    module): the collection obligation listed in obligations.json is false. -/
++namespace collect_user_iterator_panicking_hint.checks
++open Aeneas Aeneas.Std Result
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (countdowns 3#u32) == some [2, 1, 0]
++-- Native: panics ("attempt to divide by zero").
++#guard nats (countdowns 5#u32) == some [4, 3, 2, 1, 0]
++
++theorem size_hint_not_total :
++    ¬ Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total := by
++  intro h
++  obtain ⟨r, hr⟩ := h 0#u32
++  have : Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint 0#u32 =
++      fail .divisionByZero := rfl
++  simp [this] at hr
++end collect_user_iterator_panicking_hint.checks
+diff --git a/tests/lean/CollectUserIteratorPanickingHint/CollectUserIteratorPanickingHint.lean b/tests/lean/CollectUserIteratorPanickingHint/CollectUserIteratorPanickingHint.lean
+new file mode 100644
+index 0000000..64b90f2
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorPanickingHint/CollectUserIteratorPanickingHint.lean
+@@ -0,0 +1,87 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_user_iterator_panicking_hint]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_user_iterator_panicking_hint
++
++/-- [collect_user_iterator_panicking_hint::Countdown]
++    Source: 'tests/src/collect-user-iterator-panicking-hint.rs', lines 11:0-11:30
++    Visibility: public -/
++@[reducible]
++def Countdown := _root_.Aeneas.Std.U32
++
++/-- [collect_user_iterator_panicking_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_panicking_hint::Countdown}::size_hint]:
++    Source: 'tests/src/collect-user-iterator-panicking-hint.rs', lines 26:4-28:5
++    Visibility: public -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint
++  (self : _root_.collect_user_iterator_panicking_hint.Countdown) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize))
++  := do
++  let i ← 10#u32 / self
++  let i1 ← lift (UScalar.cast .Usize i)
++  _root_.Aeneas.Std.Result.ok (0#usize, some i1)
++
++/-- [collect_user_iterator_panicking_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_panicking_hint::Countdown}::next]:
++    Source: 'tests/src/collect-user-iterator-panicking-hint.rs', lines 16:4-23:5
++    Visibility: public -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.next
++  (self : _root_.collect_user_iterator_panicking_hint.Countdown) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.collect_user_iterator_panicking_hint.Countdown)
++  := do
++  if self = 0#u32
++  then _root_.Aeneas.Std.Result.ok (none, self)
++  else let i ← self - 1#u32
++       _root_.Aeneas.Std.Result.ok (some i, i)
++
++/-- Trait implementation: [collect_user_iterator_panicking_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_panicking_hint::Countdown}]
++    Source: 'tests/src/collect-user-iterator-panicking-hint.rs', lines 13:0-29:1 -/
++@[reducible]
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32 :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  _root_.collect_user_iterator_panicking_hint.Countdown _root_.Aeneas.Std.U32
++  := {
++  next :=
++    fun arg =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator_panicking_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.next
++          arg
++      _root_.Aeneas.Std.Result.ok (output, captured)
++  size_hint :=
++    fun arg =>
++      do
++      let output ←
++        _root_.collect_user_iterator_panicking_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint
++          arg
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- Collection obligation: the size_hint of [collect_user_iterator_panicking_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_panicking_hint::Countdown}] is total. Native collectors call it, so a checked theorem must prove this. -/
++def Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total : Prop :=
++  (forall x, exists r, (@Countdown.Insts.CoreIterTraitsIteratorIteratorU32).size_hint x = _root_.Aeneas.Std.Result.ok r)
++
++/-- [collect_user_iterator_panicking_hint::countdowns]:
++    Source: 'tests/src/collect-user-iterator-panicking-hint.rs', lines 31:0-33:1
++    Visibility: public -/
++def countdowns
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      _root_.collect_user_iterator_panicking_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) n
++  _root_.Aeneas.Std.Result.ok model_state
++
++end collect_user_iterator_panicking_hint
+diff --git a/tests/lean/CollectUserIteratorPanickingHint/obligations.json b/tests/lean/CollectUserIteratorPanickingHint/obligations.json
+new file mode 100644
+index 0000000..724753d
+--- /dev/null
++++ b/tests/lean/CollectUserIteratorPanickingHint/obligations.json
+@@ -0,0 +1 @@
++{"version":1,"obligations":[{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_panicking_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_panicking_hint::Countdown}","proposition":"_root_.collect_user_iterator_panicking_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total"}]}
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 8d6ed6e..ec0a8b6 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -32,6 +32,8 @@ package «tests» {}
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectGenericClosure
+ @[default_target] lean_lib CollectUserIterator
++@[default_target] lean_lib CollectUserIteratorHint
++@[default_target] lean_lib CollectUserIteratorPanickingHint
+ @[default_target] lean_lib Constants
+ @[default_target] lean_lib ConstantsLean
+ @[default_target] lean_lib Curve25519
+diff --git a/tests/src/collect-user-iterator-hint.lean.out b/tests/src/collect-user-iterator-hint.lean.out
+deleted file mode 100644
+index b1b5e66..0000000
+--- a/tests/src/collect-user-iterator-hint.lean.out
++++ /dev/null
+@@ -1,5 +0,0 @@
+-[[92mInfo[39m ] Imported: tests/llbc/collect_user_iterator_hint.llbc
+-[[91mError[39m] E_UNSUPPORTED_COLLECTION: the crate iterator collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown} overrides Iterator::size_hint; only an iterator whose methods other than next are the trait's defaults has the native collection schedule of repeated next with the total (0, None) size_hint. The value-only Vec/BTree collection model cannot preserve native size_hint/consumer dispatch for this dictionary. Use an explicit next-driven production loop, or provide a reviewed collector model with the required capacity and specialization semantics.
+-Source: 'tests/src/collect-user-iterator-hint.rs', lines 32:4-32:46
+-Compiler source: llbc/CollectionContracts.ml, line 65
+-
+diff --git a/tests/src/collect-user-iterator-hint.rs b/tests/src/collect-user-iterator-hint.rs
+index 18753de..600afb2 100644
+--- a/tests/src/collect-user-iterator-hint.rs
++++ b/tests/src/collect-user-iterator-hint.rs
+@@ -1,12 +1,15 @@
+-//@ [lean] known-failure
+ //@ [!lean] skip
+-//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
+-//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+-//! A crate-local iterator that overrides `size_hint`, here with an inexact
+-//! upper bound. The native collectors call it at capacity and specialization
+-//! points, and CollectionContracts does not check its lawfulness, so it
+-//! rejects the collection (E_UNSUPPORTED_COLLECTION) rather than admit the
+-//! next-driven model.
++//@ [lean] subdir=CollectUserIteratorHint
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::copied::Copied
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors -emit-collection-obligations tests/lean/CollectUserIteratorHint/obligations.json
++//! Crate-local iterators that override `size_hint`: `Countdown` with an
++//! inexact upper bound, and a generic `Successors` whose exact hint delegates
++//! to its inner iterator. The native collectors only use the hint to size capacity, so
++//! the collected values do not depend on it; they do call it, so
++//! CollectionContracts admits the collection with the obligation
++//! `size_hint_total` (listed in obligations.json), which
++//! CollectUserIteratorHint/Checks.lean proves. It also compares the model with
++//! the native results asserted in the native test module.
+ 
+ pub struct Countdown(pub u32);
+ 
+@@ -32,6 +35,49 @@ pub fn countdowns(n: u32) -> Vec<u32> {
+     Countdown(n).flat_map(Countdown).collect()
+ }
+ 
++/// The successors of a block, with an exact hint that delegates to the arms
++/// iterator: its obligation assumes that iterator's hint total.
++pub enum Successors<E, A> {
++    Fixed { first: Option<E>, second: Option<E> },
++    Arms(A),
++}
++
++impl<E, A: Iterator<Item = E>> Iterator for Successors<E, A> {
++    type Item = E;
++
++    fn next(&mut self) -> Option<E> {
++        match self {
++            Successors::Fixed { first, second } => match first.take() {
++                Some(target) => Some(target),
++                None => second.take(),
++            },
++            Successors::Arms(arms) => arms.next(),
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        match self {
++            Successors::Fixed { first, second } => {
++                let remaining = usize::from(first.is_some()) + usize::from(second.is_some());
++                (remaining, Some(remaining))
++            }
++            Successors::Arms(arms) => arms.size_hint(),
++        }
++    }
++}
++
++pub fn successors(targets: &[u32], fixed: bool) -> Successors<&u32, std::slice::Iter<'_, u32>> {
++    if fixed {
++        Successors::Fixed { first: targets.first(), second: targets.get(1) }
++    } else {
++        Successors::Arms(targets.iter())
++    }
++}
++
++pub fn successor_arms(targets: &[u32], fixed: bool, arms: &[Vec<u32>]) -> Vec<u32> {
++    successors(targets, fixed).flat_map(|target| &arms[*target as usize]).copied().collect()
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -41,5 +87,9 @@ mod native {
+         assert_eq!(Countdown(3).size_hint(), (0, Some(1)));
+         assert_eq!(Countdown(3).count(), 3);
+         assert_eq!(countdowns(3), vec![1, 0, 0]);
++        let arms = vec![vec![10, 11], vec![], vec![12]];
++        assert_eq!(successors(&[2, 0], true).size_hint(), (2, Some(2)));
++        assert_eq!(successor_arms(&[2, 0, 1], false, &arms), vec![12, 10, 11]);
++        assert_eq!(successor_arms(&[1, 2, 0], true, &arms), vec![12]);
+     }
+ }
+diff --git a/tests/src/collect-user-iterator-panicking-hint.rs b/tests/src/collect-user-iterator-panicking-hint.rs
+new file mode 100644
+index 0000000..8f3e4f4
+--- /dev/null
++++ b/tests/src/collect-user-iterator-panicking-hint.rs
+@@ -0,0 +1,49 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectUserIteratorPanickingHint
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors -emit-collection-obligations tests/lean/CollectUserIteratorPanickingHint/obligations.json
++//! A crate-local iterator whose own `size_hint` can panic. Native collection
++//! calls it once the vector is full, so `countdowns(5)` panics natively while
++//! the next-driven value model returns the items: the admission is only sound
++//! through the obligation `size_hint_total` (listed in obligations.json), and
++//! CollectUserIteratorPanickingHint/Checks.lean proves that obligation false.
++
++pub struct Countdown(pub u32);
++
++impl Iterator for Countdown {
++    type Item = u32;
++
++    fn next(&mut self) -> Option<u32> {
++        if self.0 == 0 {
++            None
++        } else {
++            self.0 -= 1;
++            Some(self.0)
++        }
++    }
++
++    /// Divides by zero once the countdown is exhausted.
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        (0, Some((10 / self.0) as usize))
++    }
++}
++
++pub fn countdowns(n: u32) -> Vec<u32> {
++    Countdown(n).collect()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn collects_before_the_hint_panics() {
++        assert_eq!(countdowns(3), vec![2, 1, 0]);
++    }
++
++    #[test]
++    #[should_panic(expected = "attempt to divide by zero")]
++    fn full_vector_calls_the_panicking_hint() {
++        countdowns(5);
++    }
++}

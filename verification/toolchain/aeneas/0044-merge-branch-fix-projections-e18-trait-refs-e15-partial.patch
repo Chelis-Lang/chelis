@@ -1,0 +1,1780 @@
+# aeneas integration step 44 after cba11f3beb: commit 22d3b239944ea1f6c5e16400702a2cd9c3976034
+# first parent 12d2d9924df00759a77f5c5423497894cf6a2d6b, merged ebab5a7254c1813760934e6c1b0f7c8fd0c20ece
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch fix/projections (E18 trait refs, E15 partial enum projections, nested join ends)
+
+diff --git a/src/extract/ExtractTypes.ml b/src/extract/ExtractTypes.ml
+index da15df5..83ed76e 100644
+--- a/src/extract/ExtractTypes.ml
++++ b/src/extract/ExtractTypes.ml
+@@ -686,14 +686,26 @@ and extract_trait_decl_ref (span : Meta.span) (ctx : extraction_ctx)
+   if use_brackets then F.pp_print_string fmt "(";
+   F.pp_print_string fmt name;
+   (* Lookup the information about the implicit/explicit parameters *)
+-  let explicit =
+-    match TraitDeclId.Map.find_opt tr.trait_decl_id ctx.trans_trait_decls with
+-    | None -> (* The declaration might be missing if there was an error *) None
+-    | Some d -> Some d.explicit_info
+-  in
++  let decl = TraitDeclId.Map.find_opt tr.trait_decl_id ctx.trans_trait_decls in
++  (* The declaration might be missing if there was an error *)
++  let explicit = Option.map (fun (d : trait_decl) -> d.explicit_info) decl in
+   (* There is something subtle here: the trait obligations for the implemented
+-     trait are put inside the parent clauses, so we must ignore them here *)
+-  let generics = { tr.decl_generics with trait_refs = [] } in
++     trait are put inside the parent clauses, so we must ignore them here.
++     The trait clauses of a specialized declaration (e.g. those of the closure
++     type in [FnOnce::<closure<..>[TraitClause@0], (&mut _,), _>]) are
++     parameters of its structure instead: they must be supplied. *)
++  let trait_refs =
++    match decl with
++    | Some d when d.generics.trait_clauses <> [] ->
++        [%cassert] span
++          (List.length d.generics.trait_clauses
++          = List.length tr.decl_generics.trait_refs)
++          ("The reference to the trait declaration '" ^ name
++         ^ "' does not supply its trait clause parameters");
++        tr.decl_generics.trait_refs
++    | _ -> []
++  in
++  let generics = { tr.decl_generics with trait_refs } in
+   extract_generic_args span ctx fmt no_params_tys ~explicit generics;
+   if use_brackets then F.pp_print_string fmt ")"
+ 
+@@ -898,9 +910,14 @@ and extract_trait_clause_type (span : Meta.span) (ctx : extraction_ctx)
+     (clause : trait_param) : unit =
+   let trait_name = ctx_get_trait_decl span clause.trait_id ctx in
+   F.pp_print_string fmt trait_name;
+-  (* let span = (TraitDeclId.Map.find clause.trait_id ctx.trans_trait_decls).span in
+-   *)
+-  extract_generic_args span ctx fmt no_params_tys clause.generics
++  (* The type parameters of the declaration which are inferred from its trait
++     clause parameters are implicit (see [extract_trait_decl_ref]) *)
++  let explicit =
++    Option.map
++      (fun (d : trait_decl) -> d.explicit_info)
++      (TraitDeclId.Map.find_opt clause.trait_id ctx.trans_trait_decls)
++  in
++  extract_generic_args span ctx fmt no_params_tys ~explicit clause.generics
+ 
+ (** Compute the names for all the top-level identifiers used in a type
+     definition (type name, variant names, field names, etc. but not type
+diff --git a/src/pure/PureMicroPassesAnnots.ml b/src/pure/PureMicroPassesAnnots.ml
+index 045b520..76f0f23 100644
+--- a/src/pure/PureMicroPassesAnnots.ml
++++ b/src/pure/PureMicroPassesAnnots.ml
+@@ -261,6 +261,26 @@ let add_type_annotations_to_fun_decl (trans_ctx : trans_ctx)
+             (* Dummy, won't be used since we're not substituting for a trait. *)
+             | _ -> UnknownTrait "add_type_annotations_to_fun_decl"
+           in
++          (* The signature of a trait method binds the generics of its trait
++             declaration (including the trait clauses of a specialized
++             declaration, e.g. the clauses of the closure type in
++             [FnOnce::<closure<..>[TraitClause@0], (&mut _,), _>]) followed by
++             those of the method: the call must supply all of them. *)
++          if
++            not
++              (List.length sg.generics.types = List.length generics.types
++              && List.length sg.generics.const_generics
++                 = List.length generics.const_generics
++              && List.length sg.generics.trait_clauses
++                 = List.length generics.trait_refs)
++          then
++            [%craise] span
++              ("The generic arguments of a call to '"
++              ^ PrintPure.regular_fun_id_to_string fmt (FromLlbc (fid, lp_id))
++              ^ "' do not match its signature: expected "
++              ^ generic_params_to_string sg.generics
++              ^ ", got "
++              ^ generic_args_to_string generics);
+           (* Replace all the unknown implicit type variables with holes.
+              Note that we assume that all the trait refs are there, meaning
+              we can use them to infer some implicit variables.
+@@ -282,7 +302,7 @@ let add_type_annotations_to_fun_decl (trans_ctx : trans_ctx)
+                 | Unknown -> cg_hole)
+               (List.combine known.known_const_generics generics.const_generics)
+           in
+-          let generics = { qualif.generics with types; const_generics } in
++          let generics = { generics with types; const_generics } in
+           (* Compute the types of the arguments *)
+           [%ldebug
+             "- sg.generics: "
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 9282876..d2d5e5a 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -1107,8 +1107,13 @@ let einput_to_texpr (ctx : bs_ctx) (ectx : C.eval_ctx) (rids : T.RegionId.Set.t)
+             (* Return the meta-value *)
+             let out = Some (tvalue_to_texpr ctx ectx given_back_meta) in
+             (ctx, false, out)
+-        | V.EIgnoredMutLoan _ | V.EEndedIgnoredMutLoan _ ->
+-            [%internal_error] span)
++        | V.EIgnoredMutLoan (_, child) | V.EEndedIgnoredMutLoan { child; _ } ->
++            (* The loan belongs to a region the abstraction does not own: the
++               abstraction only lends the inner values of the borrowed value,
++               whose loans its child describes. The value given back to the
++               loan lies one level deeper: its inner borrows were given back at
++               level 1 (see [cont_nested_given_back_bindings]). *)
++            to_texpr_aux ~filter rids current_level ctx child)
+     | V.EBorrow (V.EIgnoredMutBorrow (_, child)) ->
+         to_texpr_aux ~filter rids current_level ctx child
+     | V.EBorrow _ -> [%internal_error] span
+@@ -1565,7 +1570,16 @@ and eproj_to_given_back_aux (_abs_level : abs_level)
+   match eproj with
+   | V.EEndedProjLoans _ -> [%craise] ctx.span "Unreachable"
+   | EEndedProjBorrows { mvalues = mv; loans } ->
+-      [%cassert] ctx.span (loans = []) "Unreachable";
++      (* The nested loans are ended: the values they consumed are reconciled
++         into the given back value (see [abs_nested_loan_updates]). *)
++      [%cassert] ctx.span
++        (List.for_all
++           (fun (_, (p : V.eproj)) ->
++             match p with
++             | V.EEndedProjLoans _ -> true
++             | _ -> false)
++           loans)
++        "Unreachable";
+       (* Return the meta-value *)
+       let ctx, var = fresh_var_for_symbolic_value mv.given_back ctx in
+       let pat = mk_tpat_from_fvar mp var in
+@@ -1605,6 +1619,120 @@ let tevalue_to_given_back (abs_regions : T.RegionId.Set.t)
+          is given back: we can ignore it as well. *)
+       (ctx, None)
+ 
++(** The borrow projections which were ended at level [abs_level] in the input
++    of a continuation, with their paths from the root of the input.
++
++    Such a projection appears in the value given back to a mutable loan of the
++    input, one level deeper than the loan: its inner borrows are borrowed from
++    the abstraction. *)
++let cont_input_nested_borrows (abs_level : abs_level) (input : V.tevalue) :
++    (value_path_step list * V.ended_proj_borrow_meta) list =
++  let found = ref [] in
++  let rec visit level rev_path (v : V.tevalue) =
++    match v.value with
++    | V.EAdt { variant_id; fields; _ } ->
++        List.iteri
++          (fun i field -> visit level (PField (variant_id, i) :: rev_path) field)
++          fields
++    | V.ELoan (V.EEndedMutLoan { child; given_back; _ })
++    | V.ELoan (V.EEndedIgnoredMutLoan { child; given_back; _ }) ->
++        visit level (PDeref :: rev_path) child;
++        visit (level + 1) (PDeref :: rev_path) given_back
++    | V.ESymbolic (_, V.EEndedProjBorrows { mvalues; _ }) when level = abs_level
++      -> found := (List.rev rev_path, mvalues) :: !found
++    | _ -> ()
++  in
++  visit 0 [] input;
++  List.rev !found
++
++(** Whether a value given back by an abstraction carries mutable borrows of the
++    abstraction: the value given back for shared borrows is ignored. *)
++let gives_back_mut (ctx : bs_ctx) (abs : V.abs) (sv : V.symbolic_value) : bool
++    =
++  TypesUtils.ty_has_mut_borrow_for_region_in_set ctx.type_ctx.type_infos
++    abs.regions.owned sv.sv_ty
++
++(** The symbolic values given back by the mutable borrows of an abstraction
++    which were ended at level [abs_level]. *)
++let abs_ended_borrows_at_level (ctx : bs_ctx) (abs : V.abs)
++    (abs_level : abs_level) : V.symbolic_value list =
++  let found = ref [] in
++  let visitor =
++    object
++      inherit [_] InterpBorrowsCore.iter_tavalue_with_levels as super
++      method incr_level level = level + 1
++
++      method! visit_AEndedMutBorrow level meta child =
++        if level = abs_level then found := meta.given_back :: !found;
++        super#visit_AEndedMutBorrow level meta child
++
++      method! visit_aended_proj_borrows level proj =
++        if level = abs_level && gives_back_mut ctx abs proj.mvalues.given_back
++        then found := proj.mvalues.given_back :: !found;
++        super#visit_aended_proj_borrows level proj
++    end
++  in
++  List.iter (visitor#visit_tavalue 0) abs.avalues;
++  List.rev !found
++
++(** The mutable borrows of the input of a continuation abstraction which were
++    ended at level 1 (see [cont_input_nested_borrows]). *)
++let cont_input_nested_mut_borrows (ctx : bs_ctx) (abs : V.abs)
++    (input : V.tevalue) :
++    (value_path_step list * V.ended_proj_borrow_meta) list =
++  List.filter
++    (fun (_, (mvalues : V.ended_proj_borrow_meta)) ->
++      gives_back_mut ctx abs mvalues.given_back)
++    (cont_input_nested_borrows 1 input)
++
++(** The values given back at level 1 by a continuation abstraction (join, loop
++    or reborrow).
++
++    The continuation maps the value it lends back to the value it borrows (see
++    [abs_cont]): both have the same shape. Its level-1 loans are nested in its
++    borrow of the whole value: they consumed the current value of the inner
++    borrows of that value (see [abs_nested_loan_updates]). Its level-1 borrows
++    lie in the value given back to a mutable loan of its input, at some path:
++    the value given back for such a borrow is its carrier updated with the
++    current value found at the same path. *)
++let cont_nested_given_back_bindings (ctx : bs_ctx) (abs : V.abs) :
++    bs_ctx * (V.symbolic_value * tpat * texpr) list =
++  let span = ctx.span in
++  let input =
++    match abs.cont with
++    | Some { input = Some input; _ } -> input
++    | _ -> [%internal_error] span
++  in
++  let update_ty, update_regions, update =
++    match abs_nested_loan_updates ctx abs with
++    | [ (1, update) ] -> update
++    | _ ->
++        [%craise] span
++          "Nested borrows: the level-1 borrows of a join, loop or reborrow \
++           abstraction need exactly one current update"
++  in
++  let binding ctx (path, (mvalues : V.ended_proj_borrow_meta)) =
++    let carrier_ty = mvalues.given_back.sv_ty in
++    let carrier =
++      symbolic_value_to_texpr ctx { sv_id = mvalues.consumed; sv_ty = carrier_ty }
++    in
++    let leaf ty (e : texpr) =
++      [%unwrap_with_span] span
++        (recombine_nested_projection_exprs span ctx.decls_ctx abs.regions.owned
++           carrier_ty carrier
++           [ (ty, update_regions, e) ]
++           ctx.fresh_fvar_id)
++        "Nested reborrow has no authoritative current update"
++    in
++    let value =
++      project_along_path span ctx.decls_ctx ctx.fresh_fvar_id update_ty update
++        path leaf carrier
++    in
++    let ctx, var = fresh_var_for_symbolic_value mvalues.given_back ctx in
++    (ctx, (mvalues.given_back, mk_tpat_from_fvar None var, value))
++  in
++  List.fold_left_map binding ctx (cont_input_nested_mut_borrows ctx abs input)
++
+ let ended_abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (output : V.tevalue) (input : V.tevalue) :
+     bs_ctx * bool * tpat * texpr =
+@@ -1617,6 +1745,32 @@ let ended_abs_cont_to_texpr_aux (ctx : bs_ctx) (ectx : C.eval_ctx) (abs : V.abs)
+       fvar_to_texpr abs_level input
+   in
+   [%sanity_check] span (not can_fail);
++  (* The loans nested in the borrows of the abstraction consumed the current
++     values of the inner borrows of the value given back. If the input has
++     level-1 borrows, level 1 routed these values to them and the input
++     already carries them (see [cont_nested_given_back_bindings]); otherwise,
++     reconcile them here. *)
++  let input_e =
++    match abs_nested_loan_updates ctx abs with
++    | [] -> input_e
++    | _ when cont_input_nested_mut_borrows ctx abs input <> [] -> input_e
++    | updates ->
++        [%cassert] span
++          (List.for_all (fun (level, _) -> level = 1) updates)
++          "Nested borrows: the loans of a join, loop or reborrow abstraction \
++           are nested more than one level deep";
++        [%cassert] span
++          (match output.value with
++          | V.ESymbolic (_, V.EEndedProjBorrows _) -> true
++          | _ -> false)
++          "Nested borrows: the nested loans of a reborrow abstraction must \
++           update a single given back projection";
++        [%unwrap_with_span] span
++          (recombine_nested_projection_exprs span ctx.decls_ctx
++             abs.regions.owned output.ty input_e (List.map snd updates)
++             ctx.fresh_fvar_id)
++          "Nested reborrow has no authoritative current update"
++  in
+   let ctx, pat =
+     tevalue_to_given_back abs.regions.owned abs_level None output ctx
+   in
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 4e14a6c..39c2c45 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -2454,7 +2454,15 @@ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+ and translate_end_abstraction_join_or_loop (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+   let span = ctx.span in
+-  [%cassert] span (abs_level = 0) "Unimplemented";
++  if abs_level > 0 then translate_end_cont_abs_nested_level abs abs_level e ctx
++  else (
++  (* The continuation of the abstraction was computed when it was introduced:
++     it cannot carry the current values consumed by nested loans since then
++     (see [abs_nested_loan_updates]). *)
++  [%cassert] span
++    (abs_nested_loan_updates ctx abs = [])
++    "Nested borrows: the nested loans of a join or loop abstraction consumed \
++     current values of mutable borrows; this is not supported";
+   (* Compute the input and output values *)
+   let back_inputs = abs_to_consumed ctx ectx abs abs_level in
+   let ctx, outputs = abs_to_given_back None abs abs_level ctx in
+@@ -2504,23 +2512,54 @@ and translate_end_abstraction_join_or_loop (ectx : C.eval_ctx) (abs : V.abs)
+         "About to reconstruct let-bindings:" ^ "\n- output: "
+         ^ tpat_to_string ctx output ^ "\n- call: " ^ texpr_to_string ctx call
+         ^ "\n- next:\n" ^ texpr_to_string ctx next_e];
+-      [%add_loc] mk_closed_checked_let ctx can_fail output call next_e
++      [%add_loc] mk_closed_checked_let ctx can_fail output call next_e)
+ 
+ and translate_end_abstraction_with_cont (ectx : C.eval_ctx) (abs : V.abs)
+     (abs_level : abs_level) (e : S.expr) (ctx : bs_ctx) : texpr =
+   [%ldebug "abs:\n" ^ abs_to_string ctx abs];
+-  [%cassert] ctx.span (abs_level = 0) "Unimplemented";
+-  (* Translate the continuation *)
+-  let ctx, can_fail, output, abs_e =
+-    translate_ended_abs_to_texpr ctx ectx abs abs_level
+-  in
+-  [%ldebug
+-    "- output:\n" ^ tpat_to_string ctx output ^ "\n- abs_e:\n"
+-    ^ texpr_to_string ctx abs_e];
+-  (* Translate the next expression *)
+-  let next_e = translate_expr e ctx in
+-  (* Put everything together *)
+-  [%add_loc] mk_closed_checked_let ctx can_fail output abs_e next_e
++  if abs_level > 0 then translate_end_cont_abs_nested_level abs abs_level e ctx
++  else
++    (* Translate the continuation *)
++    let ctx, can_fail, output, abs_e =
++      translate_ended_abs_to_texpr ctx ectx abs abs_level
++    in
++    [%ldebug
++      "- output:\n" ^ tpat_to_string ctx output ^ "\n- abs_e:\n"
++      ^ texpr_to_string ctx abs_e];
++    (* Translate the next expression *)
++    let next_e = translate_expr e ctx in
++    (* Put everything together *)
++    [%add_loc] mk_closed_checked_let ctx can_fail output abs_e next_e
++
++(** End a nested level of a continuation abstraction (join, loop or reborrow).
++
++    The continuation of such an abstraction consumes and gives back its values
++    at level 0, except for its nested borrows and loans (see
++    [abs_nested_loan_updates]): at level 1, its nested loans consumed the
++    current values of the inner borrows of the value it gives back; they are
++    routed to its level-1 borrows (see [cont_nested_given_back_bindings]), or
++    reconciled into its level-0 outputs if it has none. Deeper levels which give
++    values back are not supported. *)
++and translate_end_cont_abs_nested_level (abs : V.abs) (abs_level : abs_level)
++    (e : S.expr) (ctx : bs_ctx) : texpr =
++  let given_back = abs_ended_borrows_at_level ctx abs abs_level in
++  if given_back = [] then translate_expr e ctx
++  else (
++    [%cassert] ctx.span (abs_level = 1)
++      ("Nested borrows: a join, loop or reborrow abstraction gives back values \
++        at level " ^ string_of_int abs_level);
++    let ctx, bindings = cont_nested_given_back_bindings ctx abs in
++    let ids svl =
++      List.sort compare
++        (List.map (fun (sv : V.symbolic_value) -> sv.sv_id) svl)
++    in
++    [%cassert] ctx.span
++      (ids given_back = ids (List.map (fun (sv, _, _) -> sv) bindings))
++      "Nested borrows: the level-1 borrows of a join, loop or reborrow \
++       abstraction disagree with its continuation";
++    mk_closed_checked_lets __FILE__ __LINE__ ctx false
++      (List.map (fun (_, pat, value) -> (pat, value)) bindings)
++      (translate_expr e ctx))
+ 
+ and translate_global_eval (gid : A.GlobalDeclId.id) (generics : T.generic_args)
+     (sval : V.symbolic_value) (e : S.expr) (ctx : bs_ctx) : texpr =
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 978f8c5..902d23a 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -77,9 +77,25 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+     Print.ty_to_string (Print.Contexts.decls_ctx_to_fmt_env decls_ctx)
+   in
+   [%sanity_check] span (original_expr.ty = translate_ty original_ty);
+-  (* Callback binders are closed before being inserted into the caller, so their
+-     fresh variables need only be distinct within this reconstruction. *)
+-  let _, fresh_id = FVarId.fresh_stateful_generator () in
++  (* Binders are closed before being inserted into the caller, so their fresh
++     variables need only be distinct within this reconstruction and from the
++     free variables of the expressions it embeds: a match branch closes its
++     pattern variables over the original and current values. *)
++  let _, fresh_id =
++    let max_id = ref (-1) in
++    let visitor =
++      object
++        inherit [_] iter_expr
++
++        method! visit_fvar_id _ id =
++          max_id := max !max_id (FVarId.to_int id)
++      end
++    in
++    List.iter
++      (visitor#visit_texpr ())
++      (original_expr :: List.map (fun (_, _, e) -> e) updates);
++    FVarId.mk_stateful_generator_starting_at_id (FVarId.of_int (!max_id + 1))
++  in
+   let model_mergers = ref T.TypeDeclId.Map.empty in
+   let model_merger id =
+     match T.TypeDeclId.Map.find_opt id !model_mergers with
+@@ -145,6 +161,37 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+     not
+       (TypesUtils.ty_has_regions_in_pred (fun r -> not (selected regions r)) ty)
+   in
++  (* Every region position is selected or lies strictly under a selected
++     mutable borrow. The value given back to a mutable borrow is authoritative
++     for its whole payload, including the current contents of the borrows
++     nested in it: an unselected lifetime there (e.g. ['1] in
++     [Option<&'0 mut Frame<'1>>] owned by [{0}]) is not a separate position of
++     this value, and the abstractions owning it give back the final values of
++     its inner borrows separately. *)
++  let covered regions ty =
++    let uncovered = ref false in
++    let visitor =
++      object
++        inherit [_] T.iter_ty as super
++
++        method! visit_region _ r =
++          if not (selected regions r) then uncovered := true
++
++        method! visit_TRef env r ty kind =
++          if kind = T.RMut && selected regions r then ()
++          else super#visit_TRef env r ty kind
++
++        method! visit_TFnDef _ _ = ()
++        method! visit_trait_ref _ _ = ()
++
++        method! visit_TDynTrait env tr =
++          if Config.type_analysis_ignore_dyn then ()
++          else super#visit_TDynTrait env tr
++      end
++    in
++    visitor#visit_ty () ty;
++    not !uncovered
++  in
+   (* Region coverage alone does not make an enum's ordinary payload
+      authoritative. For transparent types, also check that every payload
+      position is under a selected mutable borrow (or has no fields). Opaque
+@@ -367,30 +414,37 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+              (for an opaque type), so neither may be reconstructed by field
+              projection. Require one authoritative value and coverage of EVERY
+              region position on both sides, not merely equality with the owned
+-             subset. In particular, a projection of one lifetime of a two-region
+-             opaque value cannot overwrite the other lifetime's contents.
++             subset: each position is selected or lies under a selected mutable
++             borrow (see [covered]). In particular, a projection of one
++             lifetime of a two-region opaque value cannot overwrite the other
++             lifetime's contents. Otherwise, an enum is recombined variant by
++             variant (see [update_enum]).
+ 
+              Keep structs on the fieldwise path even with complete coverage:
+              this preserves their non-borrowed fields from the original. *)
++          let decl = T.TypeDeclId.Map.find id decls_ctx.type_ctx.type_decls in
+           match updates with
+           | [ (proj_ty, regions, e) ]
+-            when complete owned ty && complete regions proj_ty
++            when covered owned ty && covered regions proj_ty
+                  && complete_value [] owned ty
+                  && complete_value [] regions proj_ty ->
+               [%sanity_check] span (e.ty = original.ty);
+               e
++          | _ when (match decl.kind with
++                    | T.Enum _ -> true
++                    | _ -> false)
++                   && not (List.mem ty seen) ->
++              update_enum seen ty decl original updates
+           | _ ->
+               let kind =
+-                match
+-                  (T.TypeDeclId.Map.find id decls_ctx.type_ctx.type_decls).kind
+-                with
++                match decl.kind with
+                 | T.Opaque ->
+                     "Opaque partial projections require the real type body; a \
+                      modeled constructor's field names alone do not establish \
+                      the LLBC field types"
+                 | _ ->
+-                    "Partial enum projections require variant-preserving \
+-                     structural recombination"
++                    "Recombining partial enum projections through a recursive \
++                     type is unsupported"
+               in
+               [%craise] span
+                 (kind ^ "\nOriginal type: " ^ ty_to_string ty
+@@ -461,11 +515,141 @@ let recombine_projection_exprs (span : Meta.span) (decls_ctx : C.decls_ctx)
+           [%craise] span
+             "Recombining partial mutable projections through this type is \
+              unsupported"
++  (* Variant-preserving structural recombination of an enum. The loan owns
++     the discriminant: a projection gives back the payload of the variant it
++     was taken from, so the fields of the original variant are recombined
++     with those of the same variant in every current value (recursively, as
++     for a struct). A current value of another variant cannot be given back
++     to this loan; the original is then kept.
++     {[
++       match original with
++       | V x0 .. xn =>
++         match current0 with
++         | V y0 .. yn => V (update x0 [y0 ..]) .. (update xn [yn ..])
++         | _ => V x0 .. xn
++       | ...
++     ]} *)
++  and update_enum seen (ty : T.ty) (decl : T.type_decl) (original : texpr)
++      (updates : (T.ty * T.RegionId.Set.t * texpr) list) : texpr =
++    let generics_of (ty : T.ty) =
++      match ty with
++      | T.TAdt { generics; _ } -> generics
++      | _ -> [%internal_error] span
++    in
++    let variants =
++      match decl.kind with
++      | T.Enum variants -> variants
++      | _ -> [%internal_error] span
++    in
++    let fresh_vars (tys : T.ty list) : fvar list =
++      List.map
++        (fun ty : fvar -> { id = fresh_id (); basename = None; ty = translate_ty ty })
++        tys
++    in
++    let mk_pat vid (vars : fvar list) =
++      mk_adt_pat original.ty (Some vid)
++        (List.map (mk_tpat_from_fvar None) vars)
++    in
++    let branch i (_ : T.variant) : match_branch =
++      let vid = T.VariantId.of_int i in
++      let field_tys ty =
++        Substitute.type_decl_get_instantiated_field_types decl (Some vid)
++          (generics_of ty)
++      in
++      let tys = field_tys ty in
++      let xs = fresh_vars tys in
++      let kept = mk_adt_texpr span original.ty (Some vid) (List.map mk_texpr_from_fvar xs) in
++      (* Match every current value on the same variant, then recombine the
++         fields *)
++      let rec match_updates currents = function
++        | [] ->
++            let fields =
++              List.mapi
++                (fun k (field_ty, x) ->
++                  update (ty :: seen) field_ty (mk_texpr_from_fvar x)
++                    (List.map
++                       (fun (tys, regions, ys) ->
++                         ( List.nth tys k,
++                           regions,
++                           mk_texpr_from_fvar (List.nth ys k) ))
++                       (List.rev currents)))
++                (List.combine tys xs)
++            in
++            mk_adt_texpr span original.ty (Some vid) fields
++        | (proj_ty, regions, (e : texpr)) :: rest ->
++            let proj_tys = field_tys proj_ty in
++            [%sanity_check] span (List.length proj_tys = List.length tys);
++            let ys = fresh_vars proj_tys in
++            let body = match_updates ((proj_tys, regions, ys) :: currents) rest in
++            let same = close_branch span (mk_pat vid ys) body in
++            let other = { pat = mk_ignored_pat e.ty; branch = kept } in
++            mk_switch ~empty_ty:original.ty e
++              (Match (if List.length variants = 1 then [ same ] else [ same; other ]))
++      in
++      let body =
++        if List.exists (selects_mutable owned) tys then match_updates [] updates
++        else kept
++      in
++      close_branch span (mk_pat vid xs) body
++    in
++    mk_switch ~empty_ty:original.ty original (Match (List.mapi branch variants))
+   in
+   let result = update [] original_ty original_expr updates in
+   [%sanity_check] span (result.ty = original_expr.ty);
+   result
+ 
++(** A step in the path from a value to one of its sub-values *)
++type value_path_step =
++  | PField of T.VariantId.id option * int
++      (** A field of an ADT value (of the given variant, for an enumeration) *)
++  | PDeref  (** The value below a mutable borrow *)
++
++(** [project_along_path span decls_ctx fresh_id ty e path leaf default]: the
++    sub-value of [e] (of type [ty]) at [path], given to [leaf] with its type,
++    or [default] if [e] is not of the variants of the path. *)
++let project_along_path (span : Meta.span) (decls_ctx : C.decls_ctx)
++    (fresh_id : unit -> FVarId.id) (ty : T.ty) (e : texpr)
++    (path : value_path_step list) (leaf : T.ty -> texpr -> texpr)
++    (default : texpr) : texpr =
++  let translate_ty = translate_fwd_ty (Some span) decls_ctx in
++  let rec project (ty : T.ty) (e : texpr) path =
++    match (path, ty) with
++    | [], _ -> leaf ty e
++    | PDeref :: path, T.TRef (_, ty, T.RMut) -> project ty e path
++    | PField (variant_id, i) :: path, T.TAdt { id = T.TAdtId id; generics } ->
++        let decl = T.TypeDeclId.Map.find id decls_ctx.type_ctx.type_decls in
++        let tys =
++          Substitute.type_decl_get_instantiated_field_types decl variant_id
++            generics
++        in
++        let xs =
++          List.map
++            (fun ty : fvar ->
++              { id = fresh_id (); basename = None; ty = translate_ty ty })
++            tys
++        in
++        let pat =
++          mk_adt_pat e.ty variant_id (List.map (mk_tpat_from_fvar None) xs)
++        in
++        let body =
++          project (List.nth tys i) (mk_texpr_from_fvar (List.nth xs i)) path
++        in
++        let same = close_branch span pat body in
++        let single =
++          match decl.kind with
++          | T.Enum variants -> List.length variants = 1
++          | _ -> true
++        in
++        let other = { pat = mk_ignored_pat e.ty; branch = default } in
++        mk_switch ~empty_ty:default.ty e
++          (Match (if single then [ same ] else [ same; other ]))
++    | _ ->
++        [%craise] span
++          ("Nested borrows: unsupported path to a sub-value of "
++          ^ T.show_ty ty)
++  in
++  project ty e path
++
+ (** Reconcile a reborrowed carrier with the current payloads consumed at a
+     deeper abstraction level. Model recombination callbacks update only the
+     selected payload; the carrier supplies private state, never the update. *)
+@@ -2094,6 +2278,52 @@ let abs_to_given_back ?(sides : back_side option list option)
+     ^ Print.list_to_string (tpat_to_string ctx) values];
+   (ctx, values)
+ 
++(** The values consumed by the loans nested in a continuation abstraction (the
++    abstraction of a join, a loop or a reborrow), with the level of each loan.
++
++    Such an abstraction borrows a value [s0] and lends a value [s1]. When a
++    lower level gives the outer borrows of [s0] back as [s2], the inner borrows
++    of [s2] still come from the abstraction: its borrow projection over [s0]
++    now contains a loan projection over [s2], one level deeper. The value this
++    nested loan consumes is the current value of those inner borrows, which the
++    value given back for [s0] at level 0 must carry. The loans of level 0 are
++    the inputs of the continuation: they are not listed. Neither are the loans
++    of shared borrows only, which consume nothing. *)
++let abs_nested_loan_updates (ctx : bs_ctx) (abs : V.abs) :
++    (abs_level * (T.ty * T.RegionId.Set.t * texpr)) list =
++  let updates = ref [] in
++  let record level (consumed : (V.mconsumed_symb * V.aproj) list) =
++    if level > 0 then
++      List.iter
++        (fun ((m : V.mconsumed_symb), _) ->
++          if
++            TypesUtils.ty_has_mut_borrow_for_region_in_set
++              ctx.type_ctx.type_infos m.proj_regions m.proj_ty
++          then
++            let e =
++              symbolic_value_to_texpr ctx
++                { sv_id = m.sv_id; sv_ty = m.proj_ty }
++            in
++            updates := (level, (m.proj_ty, m.proj_regions, e)) :: !updates)
++        consumed
++  in
++  let visitor =
++    object
++      inherit [_] InterpBorrowsCore.iter_tavalue_with_levels as super
++      method incr_level level = level + 1
++
++      method! visit_aproj_loans level proj =
++        record level proj.consumed;
++        super#visit_aproj_loans level proj
++
++      method! visit_aended_proj_loans level proj =
++        record level proj.consumed;
++        super#visit_aended_proj_loans level proj
++    end
++  in
++  List.iter (visitor#visit_tavalue 0) abs.avalues;
++  List.rev !updates
++
+ (** Current updates available to descendant reborrows: concrete values consumed
+     at this level and returned symbolic projections in the immediately enclosing
+     loan layer. Retain each supplier's own region mask. *)
+diff --git a/tests/lean/OptionMutNestedRegion.lean b/tests/lean/OptionMutNestedRegion.lean
+new file mode 100644
+index 0000000..050bcff
+--- /dev/null
++++ b/tests/lean/OptionMutNestedRegion.lean
+@@ -0,0 +1 @@
++import OptionMutNestedRegion.Checks
+diff --git a/tests/lean/OptionMutNestedRegion/Checks.lean b/tests/lean/OptionMutNestedRegion/Checks.lean
+new file mode 100644
+index 0000000..2dc87f3
+--- /dev/null
++++ b/tests/lean/OptionMutNestedRegion/Checks.lean
+@@ -0,0 +1,81 @@
++import OptionMutNestedRegion.OptionMutNestedRegion
++
++/-! Evaluate the model of `tests/src/option-mut-nested-region.rs` on the
++    inputs of its `native` test module and compare with the native results.
++
++    The value returned for `Option<&mut Frame<'_>>` is the frame after the
++    call (the outer borrow ends at the return); for `Counter`, whose own
++    lifetime borrows `total` mutably, the backward function gives back the
++    final counter. -/
++
++namespace option_mut_nested_region.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def steps : Slice U32 := ⟨[u 5, u 7], by simp; scalar_tac⟩
++
++def frame (pos : Nat) : Frame := { steps, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def counter (total : Nat) : Counter := { steps, total := u total, pos := ⟨BitVec.ofNat _ 0⟩ }
++
++/-- The result and the position of the frame after the call -/
++def withPos (r : Result (U32 × Option Frame)) : Option (Nat × Option Nat) :=
++  match r with
++  | ok (v, f) => some (v.val, f.map (fun f => f.pos.val))
++  | _ => none
++
++/-- `frames`: two calls of `outer` on the same frame, then none -/
++def outerTwice : Result (U32 × Nat × U32 × Nat) := do
++  let (r1, f1) ← outer (some (frame 0)) (u 10)
++  let f1 ← match f1 with | some f => ok f | none => fail .panic
++  let (r2, f2) ← outer (some f1) (u 1)
++  let f2 ← match f2 with | some f => ok f | none => fail .panic
++  ok (r1, f1.pos.val, r2, f2.pos.val)
++
++def checkThenStepTwice : Result (U32 × Nat × U32 × Nat) := do
++  let (r1, f1) ← check_then_step (some (frame 0)) (u 10)
++  let f1 ← match f1 with | some f => ok f | none => fail .panic
++  let (r2, f2) ← check_then_step (some f1) (u 1)
++  let f2 ← match f2 with | some f => ok f | none => fail .panic
++  ok (r1, f1.pos.val, r2, f2.pos.val)
++
++def res4 (r : Result (U32 × Nat × U32 × Nat)) : Option (Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d) => some (a.val, b, c.val, d)
++  | _ => none
++
++#guard res4 outerTwice == some (16, 1, 9, 2)
++#guard withPos (outer none (u 3)) == some (3, none)
++#guard withPos (step (some (frame 1)) (u 2)) == some (9, some 2)
++#guard withPos (step none (u 4)) == some (4, none)
++#guard res4 checkThenStepTwice == some (16, 1, 10, 2)
++#guard withPos (check_then_step none (u 6)) == some (7, none)
++#guard withPos (step_then_check (some (frame 0)) (u 10)) == some (16, some 1)
++#guard withPos (step_then_check none (u 3)) == some (3, none)
++
++/-- `counters`: `has_counter` on a counter whose own lifetime borrows `total`
++    mutably, then the caller advances the counter and calls it again. The
++    forward results carry the counter (native `counter.pos`); the backward
++    functions give back the state of the inner lifetime, `total` (native
++    `total` once the counter is dropped). -/
++def counters : Result (Nat × Nat × Nat × Nat × Option Nat) := do
++  let (r1, c1, back1) ← has_counter (some (counter 100)) (u 3)
++  let c1 ← match c1 with | some c => ok c | none => fail .panic
++  let (s, c2, _) ← Counter.advance c1
++  let (r2, c3, back2) ← has_counter (some c2) (u 1)
++  let c3 ← match c3 with | some c => ok c | none => fail .panic
++  let final := back1 (back2 (some c3))
++  ok (r1.val, s.val, r2.val, c3.pos.val, final.map (fun c => c.total.val))
++
++#guard (match counters with | ok v => some v | _ => none) == some (4, 5, 2, 1, some 105)
++
++def noCounter (r : Result (U32 × Option Counter × (Option Counter → Option Counter))) :
++    Option (Nat × Bool) :=
++  match r with
++  | ok (v, c, back) => some (v.val, c.isNone && (back none).isNone)
++  | _ => none
++
++#guard noCounter (has_counter none (u 3)) == some (3, true)
++
++end option_mut_nested_region.checks
+diff --git a/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean b/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean
+new file mode 100644
+index 0000000..4b74124
+--- /dev/null
++++ b/tests/lean/OptionMutNestedRegion/OptionMutNestedRegion.lean
+@@ -0,0 +1,181 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [option_mut_nested_region]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace option_mut_nested_region
++
++/-- [option_mut_nested_region::Counter]
++    Source: 'tests/src/option-mut-nested-region.rs', lines 28:0-32:1
++    Visibility: public -/
++structure Counter where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  total : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [option_mut_nested_region::Frame]
++    Source: 'tests/src/option-mut-nested-region.rs', lines 14:0-17:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [option_mut_nested_region::{option_mut_nested_region::Frame<'a>}::advance]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 20:4-24:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.option_mut_nested_region.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.option_mut_nested_region.Frame)
++  := do
++  let s ← Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  _root_.Aeneas.Std.Result.ok (s, { self with pos := i })
++
++/-- [option_mut_nested_region::{option_mut_nested_region::Counter<'a>}::advance]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 35:4-40:5
++    Visibility: public -/
++def Counter.advance
++  (self : _root_.option_mut_nested_region.Counter) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.option_mut_nested_region.Counter ×
++    (_root_.option_mut_nested_region.Counter →
++    _root_.option_mut_nested_region.Counter))
++  := do
++  let s ← Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← self.total + s
++  let back'a :=
++    (fun self1 => { self with total := self1.total } :
++      _root_.option_mut_nested_region.Counter →
++      _root_.option_mut_nested_region.Counter)
++  _root_.Aeneas.Std.Result.ok (s, { self with total := i1, pos := i }, back'a)
++
++/-- [option_mut_nested_region::step]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 43:0-48:1
++    Visibility: public -/
++def step
++  (execution : _root_.Option _root_.option_mut_nested_region.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Frame))
++  := do
++  match execution with
++  | none => _root_.Aeneas.Std.Result.ok (n, none)
++  | some f =>
++    let (i, f1) ← _root_.option_mut_nested_region.Frame.advance f
++    let n1 ← n + i
++    _root_.Aeneas.Std.Result.ok (n1, some f1)
++
++/-- [option_mut_nested_region::step_then_check]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 51:0-64:1
++    Visibility: public -/
++def step_then_check
++  (execution : _root_.Option _root_.option_mut_nested_region.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Frame))
++  := do
++  let (acc, stepped, back) ←
++    match execution with
++    | none => _root_.Aeneas.Std.Result.ok (n, false, none)
++    | some f =>
++      do
++      let (i, f1) ← _root_.option_mut_nested_region.Frame.advance f
++      let acc1 ← n + i
++      _root_.Aeneas.Std.Result.ok (acc1, true, some f1)
++  if stepped
++  then let acc1 ← acc + 1#u32
++       _root_.Aeneas.Std.Result.ok (acc1, back)
++  else _root_.Aeneas.Std.Result.ok (acc, back)
++
++/-- [option_mut_nested_region::check_then_step]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 67:0-78:1
++    Visibility: public -/
++def check_then_step
++  (execution : _root_.Option _root_.option_mut_nested_region.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Frame))
++  := do
++  let acc ← if n > 5#u32
++              then n + 1#u32
++              else n + 2#u32
++  match execution with
++  | none => _root_.Aeneas.Std.Result.ok (acc, none)
++  | some f =>
++    let (i, f1) ← _root_.option_mut_nested_region.Frame.advance f
++    let acc1 ← acc + i
++    _root_.Aeneas.Std.Result.ok (acc1, some f1)
++
++/-- [option_mut_nested_region::outer]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 81:0-83:1
++    Visibility: public -/
++def outer
++  (execution : _root_.Option _root_.option_mut_nested_region.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Frame))
++  := do
++  _root_.option_mut_nested_region.step_then_check execution n
++
++/-- [option_mut_nested_region::has_counter]:
++    Source: 'tests/src/option-mut-nested-region.rs', lines 85:0-91:1
++    Visibility: public -/
++def has_counter
++  (execution : _root_.Option _root_.option_mut_nested_region.Counter)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.option_mut_nested_region.Counter) × (_root_.Option
++    _root_.option_mut_nested_region.Counter → _root_.Option
++    _root_.option_mut_nested_region.Counter))
++  := do
++  let b := _root_.Aeneas.Std.core.option.Option.is_some execution
++  if b
++  then
++    let n1 ← n + 1#u32
++    let back :=
++      (fun execution1 =>
++         let o :=
++           match execution with
++           | none => none
++           | some c =>
++             match execution1 with
++             | some c1 => some { c with total := c1.total }
++             | _ => execution
++         match execution with
++         | none => none
++         | some c =>
++           match o with
++           | some c1 => some { c with total := c1.total }
++           | _ => execution : _root_.Option
++        _root_.option_mut_nested_region.Counter → _root_.Option
++        _root_.option_mut_nested_region.Counter)
++    _root_.Aeneas.Std.Result.ok (n1, execution, back)
++  else
++    let back :=
++      (fun execution1 =>
++         let o :=
++           match execution with
++           | none => none
++           | some c =>
++             match execution1 with
++             | some c1 => some { c with total := c1.total }
++             | _ => execution
++         match execution with
++         | none => none
++         | some c =>
++           match o with
++           | some c1 => some { c with total := c1.total }
++           | _ => execution : _root_.Option
++        _root_.option_mut_nested_region.Counter → _root_.Option
++        _root_.option_mut_nested_region.Counter)
++    _root_.Aeneas.Std.Result.ok (n, execution, back)
++
++end option_mut_nested_region
+diff --git a/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+new file mode 100644
+index 0000000..3322a53
+--- /dev/null
++++ b/tests/lean/SpecializedClosureClauses/SpecializedClosureClauses.lean
+@@ -0,0 +1,577 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [specialized_closure_clauses]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace specialized_closure_clauses
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst"])]
++structure
++  core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair T0 T1 T2 T3
++  call_mut : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T0 × T1)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst"])]
++structure
++  core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :
++    _root_.specialized_closure_clauses.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++    T0 T1 T2 T3
++  call : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1)
++
++/-- [specialized_closure_clauses::with_state::closure]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++def with_state.closure {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R) :=
++  T2 × S
++
++/-- Trait declaration: [core::ops::function::FnOnce::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++  {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy T0)
++  (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 T0 T1) where
++  call_once : _root_.specialized_closure_clauses.with_state.closure
++    markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst → T3
++    → _root_.Aeneas.Std.Result (T4 ×
++    (_root_.specialized_closure_clauses.with_state.closure markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst) ×
++    T3)
++
++/-- Trait declaration: [core::ops::function::FnMut::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"
++  (parentClauses := ["FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst"])]
++structure
++  core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++  {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy T0)
++  (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 T0 T1) where
++  FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst :
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++    T3 T4 markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  call_mut : _root_.specialized_closure_clauses.with_state.closure
++    markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst → T3
++    → _root_.Aeneas.Std.Result (T4 ×
++    (_root_.specialized_closure_clauses.with_state.closure markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst) ×
++    (_root_.specialized_closure_clauses.with_state.closure markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst →
++    _root_.specialized_closure_clauses.with_state.closure markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst) ×
++    T3)
++
++/-- Trait declaration: [core::ops::function::Fn::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::Fn<specialized_closure_clauses::with_state::closure<'0, @T0, @T1, @T2>, (&'1 mut @T3), @T4>"
++  (parentClauses := ["FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst"])]
++structure
++  core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
++  {T0 : Type} {T1 : Type} {T2 : Type} (T3 : Type) (T4 : Type) (markerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy T0)
++  (FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 T0 T1) where
++  FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst :
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++    T3 T4 markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  call : _root_.specialized_closure_clauses.with_state.closure markerCopyInst
++    FnT2PairMut0U32T0T1_specialized_1b57b25c37009051a1184d723a4cd435Inst → T3
++    → _root_.Aeneas.Std.Result (T4 × T3)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T0 × T1)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1)), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1), @T2>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::Fn<@T0, (&'0 mut @T1), @T2>"
++  (parentClauses := ["FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953dInst"])]
++structure
++  core.ops.function.FnT0TupleMut0T1T2_specialized_376f35bc3609dcb1a6c11d6093e4cc92
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953dInst :
++    _root_.specialized_closure_clauses.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++    T0 T1 T2
++  call : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1)
++
++/-- [specialized_closure_clauses::apply]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 20:0-22:1
++    Visibility: public -/
++def apply
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnT1TupleMut0U32R_specialized_376f35bc3609dcb1a6c11d6093e4cc92Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0TupleMut0T1T2_specialized_376f35bc3609dcb1a6c11d6093e4cc92
++  T1 _root_.Aeneas.Std.U32 R) (x : _root_.Aeneas.Std.U32) (f : T1) :
++  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32)
++  := do
++  coreopsfunctionFnT1TupleMut0U32R_specialized_376f35bc3609dcb1a6c11d6093e4cc92Inst.call
++    f x
++
++/-- [specialized_closure_clauses::apply::<0, T0, specialized_closure_clauses::with_state::closure<1, T1, T2, T3>[TraitClause@1, TraitClause@2]>]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 20:0-22:1
++    Visibility: public -/
++def apply0T0closure_specialized_f82cd5b4f4035dd8ee52e9294de894e5
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
++  (coreopsfunctionFnclosureTupleMut0U32T0_specialized_1643b505530fb7e921e18a8b32f11983Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
++  _root_.Aeneas.Std.U32 T0 coremarkerCopyInst
++  coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  (coremarkerCopyInst : _root_.Aeneas.Std.core.marker.Copy T1)
++  (coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T3 _root_.Aeneas.Std.U32 T1 T2) (x : _root_.Aeneas.Std.U32)
++  (f : _root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++  coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  :
++  _root_.Aeneas.Std.Result (T0 × _root_.Aeneas.Std.U32 ×
++    (_root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++    coreopsfunctionFnT3PairMut0U32T1T2_specialized_1b57b25c37009051a1184d723a4cd435Inst))
++  := do
++  let (t, x1) ←
++    coreopsfunctionFnclosureTupleMut0U32T0_specialized_1643b505530fb7e921e18a8b32f11983Inst.call
++      f x
++  _root_.Aeneas.Std.Result.ok (t, x1, f)
++
++/-- [specialized_closure_clauses::with_state::{core::ops::function::Fn::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++def
++  core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R)
++  (c : _root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32)
++  := do
++  let (t, t1) := c
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst.call
++    t (tupled_args, t1)
++
++/-- [specialized_closure_clauses::with_state::{core::ops::function::FnMut::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call_mut]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++def
++  core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R)
++  (state : _root_.specialized_closure_clauses.with_state.closure
++  coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  (args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (R ×
++    (_root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++    × (_root_.specialized_closure_clauses.with_state.closure
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++    → _root_.specialized_closure_clauses.with_state.closure
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++    × _root_.Aeneas.Std.U32)
++  := do
++  let (t, _) := state
++  let (t1, args1) ←
++    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++      state args
++  let back :=
++    (fun state1 => let (_, t2) := state1
++                   (t, t2) :
++      _root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++      → _root_.specialized_closure_clauses.with_state.closure
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  _root_.Aeneas.Std.Result.ok (t1, state, back, args1)
++
++/-- [specialized_closure_clauses::with_state::{core::ops::function::FnOnce::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}::call_once]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++def
++  core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket.call_once
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R)
++  (c : _root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (R ×
++    (_root_.specialized_closure_clauses.with_state.closure coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++    × (_root_.specialized_closure_clauses.with_state.closure
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++    × _root_.Aeneas.Std.U32)
++  := do
++  let (t, _) := c
++  let (t1, c1, call_mut_back, i1) ←
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++      c i
++  let c2 := call_mut_back c1
++  let (_, t2) := c2
++  _root_.Aeneas.Std.Result.ok (t1, c1, (t, t2), i1)
++
++/-- Trait implementation: [specialized_closure_clauses::with_state::{core::ops::function::FnOnce::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++@[reducible]
++def
++  core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R) :
++  _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554
++  _root_.Aeneas.Std.U32 R coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  := {
++  call_once :=
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket.call_once
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++}
++
++/-- Trait implementation: [specialized_closure_clauses::with_state::{core::ops::function::FnMut::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++@[reducible]
++def
++  core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R) :
++  _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aa
++  _root_.Aeneas.Std.U32 R coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  := {
++  FnOnceclosureTupleMut1T3T4_specialized_ec69ff4e5301de8560f61938b37f7554Inst
++    :=
++    _root_.specialized_closure_clauses.core.ops.function.FnOnceclosureTupleMutU32R_specialized_ec69ff4e5301de8560f61938b37f7554.Blanket
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  call_mut :=
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket.call_mut
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++}
++
++/-- Trait implementation: [specialized_closure_clauses::with_state::{core::ops::function::Fn::<specialized_closure_clauses::with_state::closure<0, T0, T1, T2>[TraitClause@0, TraitClause@1], (&1 mut (T3)), T4><0, '_, R, T2, u32, R>[TraitClause@0, TraitClause@1] for S}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 25:13-25:34 -/
++@[reducible]
++def
++  core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R) :
++  _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMut1T3T4_specialized_1643b505530fb7e921e18a8b32f11983
++  _root_.Aeneas.Std.U32 R coremarkerCopyInst
++  coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  := {
++  FnMutclosureTupleMut1T3T4_specialized_1df76051a9d3be94565f75f49f45e7aaInst :=
++    _root_.specialized_closure_clauses.core.ops.function.FnMutclosureTupleMutU32R_specialized_1df76051a9d3be94565f75f49f45e7aa.Blanket
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  call :=
++    _root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket.call
++    coremarkerCopyInst
++    coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++}
++
++/-- [specialized_closure_clauses::with_state]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 24:0-26:1
++    Visibility: public -/
++def with_state
++  {S : Type} {R : Type} {T2 : Type} (coremarkerCopyInst :
++  _root_.Aeneas.Std.core.marker.Copy S)
++  (coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T2 _root_.Aeneas.Std.U32 S R) (x : _root_.Aeneas.Std.U32) (state : S)
++  (f : T2) :
++  _root_.Aeneas.Std.Result (R × _root_.Aeneas.Std.U32 × S)
++  := do
++  let (t, x1, c) ←
++    _root_.specialized_closure_clauses.apply0T0closure_specialized_f82cd5b4f4035dd8ee52e9294de894e5
++      (_root_.specialized_closure_clauses.core.ops.function.FnclosureTupleMutU32R_specialized_1643b505530fb7e921e18a8b32f11983.Blanket
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst)
++      coremarkerCopyInst
++      coreopsfunctionFnT2PairMut0U32SR_specialized_1b57b25c37009051a1184d723a4cd435Inst
++      x (f, state)
++  let (_, state1) := c
++  _root_.Aeneas.Std.Result.ok (t, x1, state1)
++
++/-- [specialized_closure_clauses::scaled::closure]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++@[reducible]
++def scaled.closure := _root_.Unit
++
++/-- [specialized_closure_clauses::scaled::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}::call]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnPairMutU32U32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++  (c : _root_.specialized_closure_clauses.scaled.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (x, k) := tupled_args
++  let x1 ← lift (core.num.U32.wrapping_mul x k)
++  _root_.Aeneas.Std.Result.ok (x1, x1)
++
++/-- [specialized_closure_clauses::scaled::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}::call_mut]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32U32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++  (state : _root_.specialized_closure_clauses.scaled.closure)
++  (args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.specialized_closure_clauses.scaled.closure)
++  := do
++  let (i, args1) ←
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32U32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, args1, state)
++
++/-- [specialized_closure_clauses::scaled::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}::call_once]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++  (c : _root_.specialized_closure_clauses.scaled.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i, i1, _) ←
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32U32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- Trait implementation: [specialized_closure_clauses::scaled::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair
++  _root_.specialized_closure_clauses.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++}
++
++/-- Trait implementation: [specialized_closure_clauses::scaled::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32U32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  _root_.specialized_closure_clauses.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :=
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  call_mut :=
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32U32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++}
++
++/-- Trait implementation: [specialized_closure_clauses::scaled::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, u32, u32> for specialized_closure_clauses::scaled::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 30:21-33:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnPairMutU32U32U32_specialized_1b57b25c37009051a1184d723a4cd435
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  _root_.specialized_closure_clauses.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :=
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32U32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++  call :=
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32U32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++}
++
++/-- [specialized_closure_clauses::scaled]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 29:0-34:1
++    Visibility: public -/
++def scaled
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.specialized_closure_clauses.with_state core.marker.CopyU32
++    _root_.specialized_closure_clauses.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32U32U32_specialized_1b57b25c37009051a1184d723a4cd435
++    x k ()
++
++/-- [specialized_closure_clauses::offset::closure]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++@[reducible]
++def offset.closure := _root_.Unit
++
++/-- [specialized_closure_clauses::offset::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}::call]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++def
++  offset.closure.Insts.CoreOpsFunctionFnPairMutU32U64U64_specialized_1b57b25c37009051a1184d723a4cd435.call
++  (c : _root_.specialized_closure_clauses.offset.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32)
++  := do
++  let (x, base) := tupled_args
++  let x1 ← lift (core.num.U32.wrapping_add x 1#u32)
++  let i ← lift (UScalar.cast .U64 x1)
++  let i1 ← lift (core.num.U64.wrapping_add base i)
++  _root_.Aeneas.Std.Result.ok (i1, x1)
++
++/-- [specialized_closure_clauses::offset::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}::call_mut]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++def
++  offset.closure.Insts.CoreOpsFunctionFnMutPairMutU32U64U64_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++  (state : _root_.specialized_closure_clauses.offset.closure)
++  (args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32 ×
++    _root_.specialized_closure_clauses.offset.closure)
++  := do
++  let (i, args1) ←
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnPairMutU32U64U64_specialized_1b57b25c37009051a1184d723a4cd435.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, args1, state)
++
++/-- [specialized_closure_clauses::offset::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}::call_once]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++def
++  offset.closure.Insts.CoreOpsFunctionFnOncePairMutU32U64U64_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++  (c : _root_.specialized_closure_clauses.offset.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32)
++  := do
++  let (i, i1, _) ←
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnMutPairMutU32U64U64_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- Trait implementation: [specialized_closure_clauses::offset::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++@[reducible]
++def
++  offset.closure.Insts.CoreOpsFunctionFnOncePairMutU32U64U64_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair
++  _root_.specialized_closure_clauses.offset.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U64 := {
++  call_once :=
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnOncePairMutU32U64U64_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++}
++
++/-- Trait implementation: [specialized_closure_clauses::offset::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++@[reducible]
++def
++  offset.closure.Insts.CoreOpsFunctionFnMutPairMutU32U64U64_specialized_f6c258c007f6ef4b68b676eb0292141b
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  _root_.specialized_closure_clauses.offset.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U64 := {
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :=
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnOncePairMutU32U64U64_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  call_mut :=
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnMutPairMutU32U64U64_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++}
++
++/-- Trait implementation: [specialized_closure_clauses::offset::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, u64, u64> for specialized_closure_clauses::offset::closure}]
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 38:24-41:5 -/
++@[reducible]
++def
++  offset.closure.Insts.CoreOpsFunctionFnPairMutU32U64U64_specialized_1b57b25c37009051a1184d723a4cd435
++  :
++  _root_.specialized_closure_clauses.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  _root_.specialized_closure_clauses.offset.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U64 := {
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :=
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnMutPairMutU32U64U64_specialized_f6c258c007f6ef4b68b676eb0292141b
++  call :=
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnPairMutU32U64U64_specialized_1b57b25c37009051a1184d723a4cd435.call
++}
++
++/-- [specialized_closure_clauses::offset]:
++    Source: 'tests/src/specialized-closure-clauses.rs', lines 37:0-42:1
++    Visibility: public -/
++def offset
++  (x : _root_.Aeneas.Std.U32) (base : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64)
++  := do
++  _root_.specialized_closure_clauses.with_state core.marker.CopyU64
++    _root_.specialized_closure_clauses.offset.closure.Insts.CoreOpsFunctionFnPairMutU32U64U64_specialized_1b57b25c37009051a1184d723a4cd435
++    x base ()
++
++end specialized_closure_clauses
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 107d661..83f169b 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -81,6 +81,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedLoopExits
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
++@[default_target] lean_lib OptionMutNestedRegion
+ @[default_target] lean_lib Order
+ @[default_target] lean_lib Paper
+ @[default_target] lean_lib PoloniusList
+diff --git a/tests/src/option-mut-nested-region.rs b/tests/src/option-mut-nested-region.rs
+new file mode 100644
+index 0000000..c920670
+--- /dev/null
++++ b/tests/src/option-mut-nested-region.rs
+@@ -0,0 +1,130 @@
++//@ [!lean] skip
++//@ [lean] subdir=OptionMutNestedRegion
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! An optional mutable borrow of a struct which has its own lifetime
++//! (`Option<&mut Frame<'_>>`), matched, joined, inspected again and forwarded
++//! to a callee, as `chelis_ir::eval` threads its execution frame. The
++//! abstractions which reborrow or join such a value own the outer region
++//! only: they end at two levels.
++//! `OptionMutNestedRegion/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++/// A frame whose own lifetime only borrows shared data
++pub struct Frame<'a> {
++    steps: &'a [u32],
++    pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        s
++    }
++}
++
++/// A frame whose own lifetime also borrows mutable state
++pub struct Counter<'a> {
++    steps: &'a [u32],
++    total: &'a mut u32,
++    pos: usize,
++}
++
++impl<'a> Counter<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.total += s;
++        s
++    }
++}
++
++pub fn step(execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    match execution {
++        Some(f) => n + f.advance(),
++        None => n,
++    }
++}
++
++/// Advance the frame if there is one, join, then use what was observed
++pub fn step_then_check(execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = n;
++    let stepped = match execution {
++        Some(f) => {
++            acc += f.advance();
++            true
++        }
++        None => false,
++    };
++    if stepped {
++        acc += 1;
++    }
++    acc
++}
++
++/// Join while the frame is live, then advance it
++pub fn check_then_step(execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = n;
++    if n > 5 {
++        acc += 1;
++    } else {
++        acc += 2;
++    }
++    match execution {
++        Some(f) => acc + f.advance(),
++        None => acc,
++    }
++}
++
++/// Forward the optional frame, as `eval_tensor_internal` does
++pub fn outer(execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    step_then_check(execution, n)
++}
++
++pub fn has_counter(execution: Option<&mut Counter<'_>>, n: u32) -> u32 {
++    if execution.is_some() {
++        n + 1
++    } else {
++        n
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn frames() {
++        let steps = [5, 7];
++        let mut frame = Frame { steps: &steps, pos: 0 };
++        assert_eq!(outer(Some(&mut frame), 10), 16);
++        assert_eq!(frame.pos, 1);
++        assert_eq!(outer(Some(&mut frame), 1), 9);
++        assert_eq!(frame.pos, 2);
++        assert_eq!(outer(None, 3), 3);
++        let mut frame = Frame { steps: &steps, pos: 1 };
++        assert_eq!(step(Some(&mut frame), 2), 9);
++        assert_eq!(frame.pos, 2);
++        assert_eq!(step(None, 4), 4);
++        let mut frame = Frame { steps: &steps, pos: 0 };
++        assert_eq!(check_then_step(Some(&mut frame), 10), 16);
++        assert_eq!(frame.pos, 1);
++        assert_eq!(check_then_step(Some(&mut frame), 1), 10);
++        assert_eq!(frame.pos, 2);
++        assert_eq!(check_then_step(None, 6), 7);
++    }
++
++    #[test]
++    fn counters() {
++        let steps = [5, 7];
++        let mut total = 100;
++        let mut counter = Counter { steps: &steps, total: &mut total, pos: 0 };
++        assert_eq!(has_counter(Some(&mut counter), 3), 4);
++        assert_eq!(counter.advance(), 5);
++        assert_eq!(has_counter(Some(&mut counter), 1), 2);
++        assert_eq!(counter.pos, 1);
++        assert_eq!(total, 105);
++        assert_eq!(has_counter(None, 3), 3);
++    }
++}
+diff --git a/tests/src/specialized-closure-clauses.rs b/tests/src/specialized-closure-clauses.rs
+new file mode 100644
+index 0000000..8bb94bc
+--- /dev/null
++++ b/tests/src/specialized-closure-clauses.rs
+@@ -0,0 +1,67 @@
++//@ [!lean] skip
++//@ [lean] subdir=SpecializedClosureClauses
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A closure that captures `&mut S` keeps the trait clause of the generic
++//! callback it also captures, so `--monomorphize-mut` specializes the closure
++//! traits for it with a trait-clause parameter, e.g.
++//! `Fn::<with_state::closure<'_, S, R, F>[TraitClause@0], (&mut u32,), R>`.
++//! The call through such a clause (`f(x)` in `apply`) supplies the trait refs
++//! of the specialized declaration along with its types.
++//! The generated Lean does not compile yet (so it is not a lakefile target):
++//! the specialized `apply` binds its `Fn<closure[TraitClause@1]>` clause before
++//! the closure's own clause `TraitClause@1` (Charon's partial
++//! monomorphization appends merged clauses), and the `FnOnce`/`FnMut`
++//! implementations for the closure, which carries `&'0 mut S`, return the
++//! closure state in a different shape than the specialized declarations;
++//! the user closures' `FnMut<(&mut u32, S)>` `call_mut` also return the
++//! closure and the argument in the opposite order of the pair model.
++
++pub fn apply<R>(x: &mut u32, f: impl Fn(&mut u32) -> R) -> R {
++    f(x)
++}
++
++pub fn with_state<S: Copy, R>(x: &mut u32, state: &mut S, f: impl Fn(&mut u32, S) -> R) -> R {
++    apply(x, move |y| f(y, *state))
++}
++
++/// `with_state` with a factor read through the capture.
++pub fn scaled(x: &mut u32, k: &mut u32) -> u32 {
++    with_state(x, k, |x, k| {
++        *x = x.wrapping_mul(k);
++        *x
++    })
++}
++
++/// `with_state` at another instance, with a different result type.
++pub fn offset(x: &mut u32, base: &mut u64) -> u64 {
++    with_state(x, base, |x, base| {
++        *x = x.wrapping_add(1);
++        base.wrapping_add(*x as u64)
++    })
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn scaled_reads_the_capture() {
++        let (mut x, mut k) = (3, 7);
++        assert_eq!(scaled(&mut x, &mut k), 21);
++        assert_eq!((x, k), (21, 7));
++        let (mut x, mut k) = (0x8000_0001, 2);
++        assert_eq!(scaled(&mut x, &mut k), 2);
++        assert_eq!((x, k), (2, 2));
++    }
++
++    #[test]
++    fn offset_reads_the_capture() {
++        let (mut x, mut base) = (4, 100);
++        assert_eq!(offset(&mut x, &mut base), 105);
++        assert_eq!((x, base), (5, 100));
++        let (mut x, mut base) = (u32::MAX, u64::MAX);
++        assert_eq!(offset(&mut x, &mut base), u64::MAX);
++        assert_eq!((x, base), (0, u64::MAX));
++    }
++}

@@ -1,0 +1,259 @@
+# charon integration step 7 after 546078ea5d: commit b243503033c0ff333e2210c305fd442abb4d8ae0
+# first parent 84516ed72106422f4afaf2523071c424cb19f7dd
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: export dependency closure region relations
+
+diff --git a/src/bin/charon-driver/closure_regions.rs b/src/bin/charon-driver/closure_regions.rs
+index fc43db9..356e65c 100644
+--- a/src/bin/charon-driver/closure_regions.rs
++++ b/src/bin/charon-driver/closure_regions.rs
+@@ -3,11 +3,19 @@
+ //! Closure signatures erase free lifetimes independently at each occurrence.
+ //! Freshening these occurrences is necessary, but their borrowck constraints
+ //! must accompany them: they are not independent lifetime parameters.
++//!
++//! rustc keeps these requirements only while borrow-checking the defining
++//! crate. Workspace and registry dependencies compiled through the driver
++//! therefore export their closures' relations beside the crate artifact, keyed
++//! by stable definition-path hash. Translating an external closure definition
++//! reads the table belonging to the exact artifact rustc loaded; a missing
++//! table or entry is an error, never an unconstrained default.
+ use rustc_borrowck::consumers::{ConsumerOptions, get_bodies_with_borrowck_facts};
+ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
+ use rustc_hir::def::DefKind;
+-use rustc_hir::def_id::LocalDefId;
++use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
+ use rustc_middle::ty::{self, TyCtxt};
++use std::path::{Path, PathBuf};
+ use std::sync::{LazyLock, Mutex};
+ 
+ #[derive(Clone, Debug)]
+@@ -31,6 +39,112 @@ pub fn lookup(def_id: LocalDefId) -> Option<ClosureRegionRelations> {
+     RELATIONS.lock().expect("closure-region cache poisoned").get(&def_id).cloned()
+ }
+ 
++/// Extension of the relation table written beside a dependency artifact.
++const TABLE_EXTENSION: &str = "charon-closures";
++
++type ExternalTable = FxHashMap<String, ClosureRegionRelations>;
++static EXTERNAL: LazyLock<Mutex<FxHashMap<CrateNum, ExternalTable>>> =
++    LazyLock::new(|| Mutex::new(FxHashMap::default()));
++
++fn relation_key(tcx: TyCtxt<'_>, def_id: DefId) -> String {
++    format!("{:?}", tcx.def_path_hash(def_id))
++}
++
++fn artifact_table_path(artifact: &Path) -> PathBuf {
++    artifact.with_extension(TABLE_EXTENSION)
++}
++
++/// Write this crate's closure relations beside the artifact dependents load.
++/// Call after analysis, before metadata is emitted to pipelined dependents.
++pub fn export_dependency_table(tcx: TyCtxt<'_>) {
++    // Same stem as the `.rlib`/`.rmeta` a dependent crate loads.
++    let artifact = match tcx.output_filenames(()).path(rustc_session::config::OutputType::Metadata) {
++        rustc_session::config::OutFileName::Real(path) => path,
++        rustc_session::config::OutFileName::Stdout => {
++            panic!("cannot export closure-region relations for metadata written to stdout")
++        }
++    };
++    let mut lines = Vec::new();
++    for (id, relation) in RELATIONS.lock().expect("closure-region cache poisoned").iter() {
++        let edges = relation.outlives.iter()
++            .map(|(longer, shorter)| format!("{longer}:{shorter}"))
++            .collect::<Vec<_>>()
++            .join(",");
++        lines.push(format!(
++            "{}\t{}\t{}\t{}",
++            relation_key(tcx, id.to_def_id()),
++            relation.signature_regions,
++            relation.capture_regions,
++            edges,
++        ));
++    }
++    lines.sort();
++    let path = artifact_table_path(&artifact);
++    std::fs::write(&path, lines.join("\n")).unwrap_or_else(|error| {
++        panic!("cannot write closure-region table {}: {error}", path.display())
++    });
++}
++
++fn parse_table(path: &Path) -> ExternalTable {
++    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
++        panic!(
++            "missing closure-region table {}: {error}; rebuild the dependency with charon",
++            path.display()
++        )
++    });
++    let mut table = ExternalTable::default();
++    for line in text.lines().filter(|line| !line.is_empty()) {
++        let fields = line.split('\t').collect::<Vec<_>>();
++        let [key, signature, capture, edges] = fields[..] else {
++            panic!("malformed closure-region table {}: {line:?}", path.display());
++        };
++        let parse = |value: &str| -> usize {
++            value.parse().unwrap_or_else(|_| {
++                panic!("malformed closure-region table {}: {line:?}", path.display())
++            })
++        };
++        let outlives = edges.split(',')
++            .filter(|edge| !edge.is_empty())
++            .map(|edge| {
++                let (longer, shorter) = edge.split_once(':').unwrap_or_else(|| {
++                    panic!("malformed closure-region table {}: {line:?}", path.display())
++                });
++                (parse(longer), parse(shorter))
++            })
++            .collect();
++        let relation = ClosureRegionRelations {
++            signature_regions: parse(signature),
++            capture_regions: parse(capture),
++            outlives,
++        };
++        assert!(
++            table.insert(key.to_string(), relation).is_none(),
++            "duplicate closure-region entry {key} in {}",
++            path.display()
++        );
++    }
++    table
++}
++
++/// Relations exported when the external crate defining `def_id` was compiled.
++pub fn lookup_external(tcx: TyCtxt<'_>, def_id: DefId) -> ClosureRegionRelations {
++    let key = relation_key(tcx, def_id);
++    let mut tables = EXTERNAL.lock().expect("closure-region cache poisoned");
++    let table = tables.entry(def_id.krate).or_insert_with(|| {
++        let source = tcx.used_crate_source(def_id.krate);
++        let artifact = source.rlib.as_ref().or(source.rmeta.as_ref()).unwrap_or_else(|| {
++            panic!("no artifact recorded for external closure {def_id:?}")
++        });
++        parse_table(&artifact_table_path(artifact))
++    });
++    table.get(&key).cloned().unwrap_or_else(|| {
++        panic!(
++            "external closure {def_id:?} has no exported region relations; \
++             its crate must be compiled by the charon driver"
++        )
++    })
++}
++
+ type BorrowckProvider = for<'tcx> fn(
+     TyCtxt<'tcx>,
+     LocalDefId,
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index c142873..00a0a89 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -121,8 +121,14 @@ pub fn run_rustc_driver() -> Result<Option<(TransformCtx, CliOpts)>, CharonFailu
+ 
+     let output = if !is_selected_crate {
+         trace!("Skipping charon; running compiler normally instead.");
+-        // Run the compiler normally.
+-        run_compiler_with_callbacks(compiler_args, &mut RunCompilerNormallyCallbacks)?;
++        if is_target {
++            // A dependency whose bodies may be translated as external items:
++            // compile it normally, and export its closures' borrowck relations.
++            run_compiler_with_callbacks(compiler_args, &mut DependencyCallbacks)?;
++        } else {
++            // Build scripts and proc macros only run on the host.
++            run_compiler_with_callbacks(compiler_args, &mut RunCompilerNormallyCallbacks)?;
++        }
+         None
+     } else {
+         let mut error_ctx = ErrorCtx::new();
+@@ -213,6 +219,27 @@ impl Callbacks for RunCompilerNormallyCallbacks {
+     }
+ }
+ 
++/// Compile a target dependency normally while retaining the closure lifetime
++/// relations its borrow checker computes, so that dependents can translate its
++/// closures from optimized MIR without inventing unconstrained regions.
++pub struct DependencyCallbacks;
++
++impl Callbacks for DependencyCallbacks {
++    fn config(&mut self, config: &mut Config) {
++        setup_compiler(config, &Default::default(), false);
++        crate::closure_regions::clear();
++        config.override_queries = Some(|_sess, providers| {
++            crate::closure_regions::install(providers);
++        });
++    }
++
++    fn after_analysis<'tcx>(&mut self, _: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
++        // Every body has been borrow-checked; metadata has not been emitted yet.
++        crate::closure_regions::export_dependency_table(tcx);
++        Compilation::Continue
++    }
++}
++
+ /// Custom `DefId` debug routine that doesn't print unstable values like ids and hashes.
+ fn def_id_debug(def_id: rustc_hir::def_id::DefId, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+     rustc_middle::ty::tls::with_opt(|opt_tcx| {
+diff --git a/src/bin/charon-driver/hax/types/ty.rs b/src/bin/charon-driver/hax/types/ty.rs
+index 2c97d82..a491f40 100644
+--- a/src/bin/charon-driver/hax/types/ty.rs
++++ b/src/bin/charon-driver/hax/types/ty.rs
+@@ -1606,21 +1606,34 @@ impl ClosureArgs {
+             facts.outlives.into_iter()
+                 .map(|(longer, shorter)| (regions[longer].clone(), regions[shorter].clone()))
+                 .collect()
+-        } else {
++        } else if regions.len() <= 1
++            || (erased_signature_regions == 0 && erased_capture_regions == 0)
++        {
+             // Named and static regions retain their identities in the types,
+             // and the closure inherits its parent's predicates through its
+             // parameter environment. No relationship needs restoring if there
+-            // is at most one free region occurrence either: the local collector
+-            // can only emit pairs of distinct occurrences. Otherwise freshening
+-            // any erased region requires metadata unavailable for external bodies.
+-            assert!(
+-                regions.len() <= 1
+-                    || (erased_signature_regions == 0 && erased_capture_regions == 0),
+-                "rustc does not export closure region requirements for external body {def_id:?} \
+-                 with {erased_signature_regions} erased signature regions and \
+-                 {erased_capture_regions} erased capture regions; free regions: {regions:?}",
+-            );
++            // is at most one free region occurrence either: the collector can
++            // only emit pairs of distinct occurrences.
+             Vec::new()
++        } else {
++            // Freshened erased regions of an external body need the relations
++            // borrowck computed when its defining crate was compiled. The
++            // driver exported them beside that crate's artifact; absence fails.
++            let facts = crate::closure_regions::lookup_external(tcx, def_id);
++            assert_eq!(
++                facts.signature_regions, signature_regions,
++                "external closure {def_id:?}: signature region count differs from its \
++                 exported borrowck facts; free regions: {regions:?}"
++            );
++            assert_eq!(
++                facts.capture_regions,
++                regions.len() - signature_regions,
++                "external closure {def_id:?}: capture region count differs from its \
++                 exported borrowck facts; free regions: {regions:?}"
++            );
++            facts.outlives.into_iter()
++                .map(|(longer, shorter)| (regions[longer].clone(), regions[shorter].clone()))
++                .collect()
+         };
+         ClosureArgs {
+             item,
+diff --git a/src/bin/charon-driver/translate/translate_closures.rs b/src/bin/charon-driver/translate/translate_closures.rs
+index 3c2b763..06fe0c2 100644
+--- a/src/bin/charon-driver/translate/translate_closures.rs
++++ b/src/bin/charon-driver/translate/translate_closures.rs
+@@ -252,7 +252,10 @@ impl ItemTransCtx<'_, '_> {
+         assert_eq!(
+             args.erased_capture_regions,
+             self.the_only_binder().closure_upvar_regions.len(),
+-            "closure capture lifetime traversal changed during type translation",
++            "closure capture lifetime traversal changed during type translation; \
++             rustc captures: {:?}; translated captures: {:?}",
++            args.upvar_tys,
++            self.the_only_binder().closure_upvar_tys,
+         );
+         let mut translate = |region: &hax::ClosureRegion| -> Result<Option<Region>, Error> {
+             Ok(Some(match region {

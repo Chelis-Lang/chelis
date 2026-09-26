@@ -408,7 +408,8 @@ rules for the retained crates. The local Charon patches preserve branching Box
 initialization, closure trait clauses and nonlocal continuations. The Aeneas patches
 make unknown externals fail in strict-warning mode and normalize function-returning
 loop continuations without joining uninitialized return slots. Independent branches
-remain joined. Exact revisions and patches are recorded in `verification/toolchain.json`.
+remain joined. Exact revisions are recorded in `verification/toolchain.json` and the patch
+series in `verification/toolchain/`.
 
 `verification/check_production_ad.py` is the separate production AD acceptance gate.
 It builds the supplied pinned patched Lean library, invokes the same extraction

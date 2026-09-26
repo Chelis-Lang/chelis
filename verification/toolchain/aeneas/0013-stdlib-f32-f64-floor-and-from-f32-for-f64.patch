@@ -1,0 +1,350 @@
+# aeneas integration step 13 after cba11f3beb: commit 777dd803792386e5dd625b1f384463ddbe43a4d3
+# first parent f584676d71ff62f642ae0c2023d4f161af1f8537
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# stdlib: f32/f64 floor and From<f32> for f64
+#
+# floor rounds toward negative infinity keeping the sign of zero; the
+# widening From impl is the exact F32.toF64 cast.
+
+diff --git a/backends/lean/Aeneas/Std/Float.lean b/backends/lean/Aeneas/Std/Float.lean
+index 601d89c..7033a24 100644
+--- a/backends/lean/Aeneas/Std/Float.lean
++++ b/backends/lean/Aeneas/Std/Float.lean
+@@ -1,5 +1,6 @@
+ import Aeneas.Std.Scalar.Core
+ import Aeneas.Std.Core.Cmp
++import Aeneas.Std.Core.Core
+ 
+ namespace Aeneas.Std
+ 
+@@ -193,6 +194,15 @@ def trunc {f} (x : BinaryFloat f) : BinaryFloat f :=
+ 
+ def fract {f} (x : BinaryFloat f) : BinaryFloat f := sub x (trunc x)
+ 
++/-- Round toward negative infinity; the result keeps the sign of `x` (so
++    `floor (-0.0) = -0.0` and `floor (-0.5) = -1.0`). -/
++def floor {f} (x : BinaryFloat f) : BinaryFloat f :=
++  if x.isNaN then nan f
++  else if x.isInfinite then x
++  else
++    let (n, d) := x.ratio
++    round f x.sign (if x.sign then (n + d - 1) / d else n / d) 1
++
+ /-- Binary exponentiation with an IEEE rounding at each multiplication. The
+     accumulator follows compiler-rt's low-bit-first evaluation order. Rust does
+     not specify powi's rounding order; this fixes that implementation choice.
+@@ -266,6 +276,8 @@ def abs (x : F32) : Result F32 := .ok (BinaryFloat.abs x)
+ def trunc (x : F32) : Result F32 := .ok (BinaryFloat.trunc x)
+ @[rust_fun "std::f32::{f32}::fract"]
+ def fract (x : F32) : Result F32 := .ok (BinaryFloat.fract x)
++@[rust_fun "std::f32::{f32}::floor"]
++def floor (x : F32) : Result F32 := .ok (BinaryFloat.floor x)
+ @[rust_fun "std::f32::{f32}::powi"]
+ def powi (x : F32) (n : I32) : Result F32 := .ok (BinaryFloat.powi x n.val)
+ 
+@@ -344,6 +356,8 @@ def abs (x : F64) : Result F64 := .ok (BinaryFloat.abs x)
+ def trunc (x : F64) : Result F64 := .ok (BinaryFloat.trunc x)
+ @[rust_fun "std::f64::{f64}::fract"]
+ def fract (x : F64) : Result F64 := .ok (BinaryFloat.fract x)
++@[rust_fun "std::f64::{f64}::floor"]
++def floor (x : F64) : Result F64 := .ok (BinaryFloat.floor x)
+ @[rust_fun "std::f64::{f64}::powi"]
+ def powi (x : F64) (n : I32) : Result F64 := .ok (BinaryFloat.powi x n.val)
+ 
+@@ -387,6 +401,13 @@ def core.marker.CopyF64 : core.marker.Copy F64 := { cloneInst := core.clone.Clon
+ def F32.toF64 (x : F32) : F64 := BinaryFloat.cast .binary64 x
+ def F64.toF32 (x : F64) : F32 := BinaryFloat.cast .binary32 x
+ 
++@[rust_fun "core::convert::num::{core::convert::From<f64, f32>}::from"]
++def core.convert.num.FromF64F32.from_ (x : F32) : Result F64 := .ok (F32.toF64 x)
++@[reducible, rust_trait_impl "core::convert::From<f64, f32>"]
++def core.convert.num.FromF64F32 : core.convert.From F64 F32 := {
++  from_ := core.convert.num.FromF64F32.from_
++}
++
+ namespace F16
+ 
+ def ofBits (x : U16) : F16 := ⟨x.bv⟩
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 05ab996..5efb3aa 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -148,9 +148,9 @@ let lean_builtin_types = [
+   mk_type "core::sync::atomic::AtomicBool" "_root_.Aeneas.Std.core.sync.atomic.AtomicBool";
+   (* file: "Aeneas/Std/Core/Atomic.lean", line: 10 *)
+   mk_type "core::sync::atomic::AtomicU32" "_root_.Aeneas.Std.core.sync.atomic.AtomicU32";
+-  (* file: "Aeneas/Std/Float.lean", line: 35 *)
++  (* file: "Aeneas/Std/Float.lean", line: 36 *)
+   mk_type "half::bfloat::bf16" "_root_.Aeneas.Std.BF16";
+-  (* file: "Aeneas/Std/Float.lean", line: 33 *)
++  (* file: "Aeneas/Std/Float.lean", line: 34 *)
+   mk_type "half::binary16::f16" "_root_.Aeneas.Std.F16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 22 *)
+   mk_type "num_bigint::TryFromBigIntError" "_root_.Aeneas.Std.num_bigint.TryFromBigIntError" ~kind:(KStruct [("original", Some "original")]);
+@@ -464,9 +464,9 @@ let lean_builtin_funs = [
+   mk_fun "core::clone::impls::{core::clone::Clone<&'0 @T>}::clone" "_root_.Aeneas.Std.core.clone.impls.CloneShared.clone";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 89 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<char>}::clone" "_root_.Aeneas.Std.core.clone.CloneChar.clone";
+-  (* file: "Aeneas/Std/Float.lean", line: 302 *)
++  (* file: "Aeneas/Std/Float.lean", line: 314 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<f32>}::clone" "_root_.Aeneas.Std.F32.clone";
+-  (* file: "Aeneas/Std/Float.lean", line: 380 *)
++  (* file: "Aeneas/Std/Float.lean", line: 394 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<f64>}::clone" "_root_.Aeneas.Std.F64.clone";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 203 *)
+   mk_fun "core::cmp::impls::{core::cmp::Ord<()>}::cmp" "_root_.Aeneas.Std.core.cmp.impls.OrdUnit.cmp";
+@@ -480,35 +480,35 @@ let lean_builtin_funs = [
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<(), ()>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqUnit.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 207 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<bool, bool>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqBool.eq";
+-  (* file: "Aeneas/Std/Float.lean", line: 273 *)
++  (* file: "Aeneas/Std/Float.lean", line: 285 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f32, f32>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF32.eq";
+-  (* file: "Aeneas/Std/Float.lean", line: 275 *)
++  (* file: "Aeneas/Std/Float.lean", line: 287 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f32, f32>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF32.ne";
+-  (* file: "Aeneas/Std/Float.lean", line: 351 *)
++  (* file: "Aeneas/Std/Float.lean", line: 365 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f64, f64>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF64.eq";
+-  (* file: "Aeneas/Std/Float.lean", line: 353 *)
++  (* file: "Aeneas/Std/Float.lean", line: 367 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f64, f64>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF64.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 199 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<(), ()>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdUnit.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 291 *)
++  (* file: "Aeneas/Std/Float.lean", line: 303 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::ge" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.ge";
+-  (* file: "Aeneas/Std/Float.lean", line: 289 *)
++  (* file: "Aeneas/Std/Float.lean", line: 301 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::gt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.gt";
+-  (* file: "Aeneas/Std/Float.lean", line: 287 *)
++  (* file: "Aeneas/Std/Float.lean", line: 299 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::le" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.le";
+-  (* file: "Aeneas/Std/Float.lean", line: 285 *)
++  (* file: "Aeneas/Std/Float.lean", line: 297 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::lt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.lt";
+-  (* file: "Aeneas/Std/Float.lean", line: 282 *)
++  (* file: "Aeneas/Std/Float.lean", line: 294 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 369 *)
++  (* file: "Aeneas/Std/Float.lean", line: 383 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::ge" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.ge";
+-  (* file: "Aeneas/Std/Float.lean", line: 367 *)
++  (* file: "Aeneas/Std/Float.lean", line: 381 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::gt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.gt";
+-  (* file: "Aeneas/Std/Float.lean", line: 365 *)
++  (* file: "Aeneas/Std/Float.lean", line: 379 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::le" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.le";
+-  (* file: "Aeneas/Std/Float.lean", line: 363 *)
++  (* file: "Aeneas/Std/Float.lean", line: 377 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::lt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.lt";
+-  (* file: "Aeneas/Std/Float.lean", line: 360 *)
++  (* file: "Aeneas/Std/Float.lean", line: 374 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.partial_cmp";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 182 *)
+   mk_fun "core::cmp::max" "_root_.Aeneas.Std.core.cmp.max";
+@@ -520,6 +520,8 @@ let lean_builtin_funs = [
+   mk_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<i64, usize, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromI64Usize.try_from";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 36 *)
+   mk_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<usize, i32, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI32.try_from";
++  (* file: "Aeneas/Std/Float.lean", line: 404 *)
++  mk_fun "core::convert::num::{core::convert::From<f64, f32>}::from" "_root_.Aeneas.Std.core.convert.num.FromF64F32.from_";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 27 *)
+   mk_fun "core::convert::{core::convert::From<@T, @T>}::from" "_root_.Aeneas.Std.core.convert.FromSame.from_" ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 15 *)
+@@ -528,33 +530,33 @@ let lean_builtin_funs = [
+   mk_fun "core::convert::{core::convert::TryInto<@T, @U, @Error>}::try_into" "_root_.Aeneas.Std.core.convert.TryInto.Blanket.try_into";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 9 *)
+   mk_fun "core::default::{core::default::Default<bool>}::default" "_root_.Aeneas.Std.core.default.DefaultBool.default";
+-  (* file: "Aeneas/Std/Float.lean", line: 263 *)
++  (* file: "Aeneas/Std/Float.lean", line: 273 *)
+   mk_fun "core::f32::{f32}::abs" "_root_.Aeneas.Std.F32.abs";
+-  (* file: "Aeneas/Std/Float.lean", line: 234 *)
++  (* file: "Aeneas/Std/Float.lean", line: 244 *)
+   mk_fun "core::f32::{f32}::from_bits" "_root_.Aeneas.Std.F32.from_bits";
+-  (* file: "Aeneas/Std/Float.lean", line: 259 *)
++  (* file: "Aeneas/Std/Float.lean", line: 269 *)
+   mk_fun "core::f32::{f32}::is_finite" "_root_.Aeneas.Std.F32.is_finite";
+-  (* file: "Aeneas/Std/Float.lean", line: 257 *)
++  (* file: "Aeneas/Std/Float.lean", line: 267 *)
+   mk_fun "core::f32::{f32}::is_infinite" "_root_.Aeneas.Std.F32.is_infinite";
+-  (* file: "Aeneas/Std/Float.lean", line: 255 *)
++  (* file: "Aeneas/Std/Float.lean", line: 265 *)
+   mk_fun "core::f32::{f32}::is_nan" "_root_.Aeneas.Std.F32.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 261 *)
++  (* file: "Aeneas/Std/Float.lean", line: 271 *)
+   mk_fun "core::f32::{f32}::is_sign_negative" "_root_.Aeneas.Std.F32.is_sign_negative";
+-  (* file: "Aeneas/Std/Float.lean", line: 236 *)
++  (* file: "Aeneas/Std/Float.lean", line: 246 *)
+   mk_fun "core::f32::{f32}::to_bits" "_root_.Aeneas.Std.F32.to_bits";
+-  (* file: "Aeneas/Std/Float.lean", line: 341 *)
++  (* file: "Aeneas/Std/Float.lean", line: 353 *)
+   mk_fun "core::f64::{f64}::abs" "_root_.Aeneas.Std.F64.abs";
+-  (* file: "Aeneas/Std/Float.lean", line: 312 *)
++  (* file: "Aeneas/Std/Float.lean", line: 324 *)
+   mk_fun "core::f64::{f64}::from_bits" "_root_.Aeneas.Std.F64.from_bits";
+-  (* file: "Aeneas/Std/Float.lean", line: 337 *)
++  (* file: "Aeneas/Std/Float.lean", line: 349 *)
+   mk_fun "core::f64::{f64}::is_finite" "_root_.Aeneas.Std.F64.is_finite";
+-  (* file: "Aeneas/Std/Float.lean", line: 335 *)
++  (* file: "Aeneas/Std/Float.lean", line: 347 *)
+   mk_fun "core::f64::{f64}::is_infinite" "_root_.Aeneas.Std.F64.is_infinite";
+-  (* file: "Aeneas/Std/Float.lean", line: 333 *)
++  (* file: "Aeneas/Std/Float.lean", line: 345 *)
+   mk_fun "core::f64::{f64}::is_nan" "_root_.Aeneas.Std.F64.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 339 *)
++  (* file: "Aeneas/Std/Float.lean", line: 351 *)
+   mk_fun "core::f64::{f64}::is_sign_negative" "_root_.Aeneas.Std.F64.is_sign_negative";
+-  (* file: "Aeneas/Std/Float.lean", line: 314 *)
++  (* file: "Aeneas/Std/Float.lean", line: 326 *)
+   mk_fun "core::f64::{f64}::to_bits" "_root_.Aeneas.Std.F64.to_bits";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 151 *)
+   mk_fun "core::fmt::float::{core::fmt::Debug<f32>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugF32.fmt";
+@@ -1290,7 +1292,7 @@ let lean_builtin_funs = [
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::lt" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.lt";
+   (* file: "Aeneas/Std/Tuple.lean", line: 34 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::partial_cmp" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 414 *)
++  (* file: "Aeneas/Std/Float.lean", line: 435 *)
+   mk_fun "half::bfloat::{core::clone::Clone<half::bfloat::bf16>}::clone" "_root_.Aeneas.Std.BF16.clone";
+   (* file: "Aeneas/Std/Half.lean", line: 357 *)
+   mk_fun "half::bfloat::{core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>}::eq" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16.eq";
+@@ -1310,7 +1312,7 @@ let lean_builtin_funs = [
+   mk_fun "half::bfloat::{core::fmt::Debug<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 182 *)
+   mk_fun "half::bfloat::{core::fmt::Display<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBF16.fmt";
+-  (* file: "Aeneas/Std/Float.lean", line: 410 *)
++  (* file: "Aeneas/Std/Float.lean", line: 431 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_bits" "_root_.Aeneas.Std.BF16.from_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 326 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_f32" "_root_.Aeneas.Std.BF16.from_f32";
+@@ -1318,13 +1320,13 @@ let lean_builtin_funs = [
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_f64" "_root_.Aeneas.Std.BF16.from_f64";
+   (* file: "Aeneas/Std/Half.lean", line: 334 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::is_nan" "_root_.Aeneas.Std.BF16.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 412 *)
++  (* file: "Aeneas/Std/Float.lean", line: 433 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_bits" "_root_.Aeneas.Std.BF16.to_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 330 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_f32" "_root_.Aeneas.Std.BF16.to_f32";
+   (* file: "Aeneas/Std/Half.lean", line: 332 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_f64" "_root_.Aeneas.Std.BF16.to_f64";
+-  (* file: "Aeneas/Std/Float.lean", line: 397 *)
++  (* file: "Aeneas/Std/Float.lean", line: 418 *)
+   mk_fun "half::binary16::{core::clone::Clone<half::binary16::f16>}::clone" "_root_.Aeneas.Std.F16.clone";
+   (* file: "Aeneas/Std/Half.lean", line: 287 *)
+   mk_fun "half::binary16::{core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>}::eq" "_root_.Aeneas.Std.half.binary16.PartialEqF16.eq";
+@@ -1344,13 +1346,13 @@ let lean_builtin_funs = [
+   mk_fun "half::binary16::{core::fmt::Debug<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 173 *)
+   mk_fun "half::binary16::{core::fmt::Display<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayF16.fmt";
+-  (* file: "Aeneas/Std/Float.lean", line: 393 *)
++  (* file: "Aeneas/Std/Float.lean", line: 414 *)
+   mk_fun "half::binary16::{half::binary16::f16}::from_bits" "_root_.Aeneas.Std.F16.from_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 258 *)
+   mk_fun "half::binary16::{half::binary16::f16}::from_f32" "_root_.Aeneas.Std.F16.from_f32";
+   (* file: "Aeneas/Std/Half.lean", line: 264 *)
+   mk_fun "half::binary16::{half::binary16::f16}::is_nan" "_root_.Aeneas.Std.F16.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 395 *)
++  (* file: "Aeneas/Std/Float.lean", line: 416 *)
+   mk_fun "half::binary16::{half::binary16::f16}::to_bits" "_root_.Aeneas.Std.F16.to_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 260 *)
+   mk_fun "half::binary16::{half::binary16::f16}::to_f32" "_root_.Aeneas.Std.F16.to_f32";
+@@ -1392,17 +1394,21 @@ let lean_builtin_funs = [
+   mk_fun "num_bigint::biguint::{core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::eq" "_root_.Aeneas.Std.num_bigint.BigUint.PartialEqBigUint.eq";
+   (* file: "Aeneas/Std/BigUint.lean", line: 89 *)
+   mk_fun "num_bigint::biguint::{core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::partial_cmp" "_root_.Aeneas.Std.num_bigint.BigUint.PartialOrdBigUint.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 267 *)
++  (* file: "Aeneas/Std/Float.lean", line: 279 *)
++  mk_fun "std::f32::{f32}::floor" "_root_.Aeneas.Std.F32.floor";
++  (* file: "Aeneas/Std/Float.lean", line: 277 *)
+   mk_fun "std::f32::{f32}::fract" "_root_.Aeneas.Std.F32.fract";
+-  (* file: "Aeneas/Std/Float.lean", line: 269 *)
++  (* file: "Aeneas/Std/Float.lean", line: 281 *)
+   mk_fun "std::f32::{f32}::powi" "_root_.Aeneas.Std.F32.powi";
+-  (* file: "Aeneas/Std/Float.lean", line: 265 *)
++  (* file: "Aeneas/Std/Float.lean", line: 275 *)
+   mk_fun "std::f32::{f32}::trunc" "_root_.Aeneas.Std.F32.trunc";
+-  (* file: "Aeneas/Std/Float.lean", line: 345 *)
++  (* file: "Aeneas/Std/Float.lean", line: 359 *)
++  mk_fun "std::f64::{f64}::floor" "_root_.Aeneas.Std.F64.floor";
++  (* file: "Aeneas/Std/Float.lean", line: 357 *)
+   mk_fun "std::f64::{f64}::fract" "_root_.Aeneas.Std.F64.fract";
+-  (* file: "Aeneas/Std/Float.lean", line: 347 *)
++  (* file: "Aeneas/Std/Float.lean", line: 361 *)
+   mk_fun "std::f64::{f64}::powi" "_root_.Aeneas.Std.F64.powi";
+-  (* file: "Aeneas/Std/Float.lean", line: 343 *)
++  (* file: "Aeneas/Std/Float.lean", line: 355 *)
+   mk_fun "std::f64::{f64}::trunc" "_root_.Aeneas.Std.F64.trunc";
+   (* file: "Aeneas/Std/Std/Io.lean", line: 5 *)
+   mk_fun "std::io::stdio::_print" "_root_.Aeneas.Std.std.io.stdio._print";
+@@ -1568,13 +1574,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<core::num::niche_types::NonZeroUsizeInner>" "_root_.Aeneas.Std.core.clone.CloneNonZeroUsizeInner";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 23 *)
+   mk_trait_impl "core::clone::Clone<core::option::Option<@T>>" "_root_.Aeneas.Std.core.clone.CloneOption";
+-  (* file: "Aeneas/Std/Float.lean", line: 304 *)
++  (* file: "Aeneas/Std/Float.lean", line: 316 *)
+   mk_trait_impl "core::clone::Clone<f32>" "_root_.Aeneas.Std.core.clone.CloneF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 382 *)
++  (* file: "Aeneas/Std/Float.lean", line: 396 *)
+   mk_trait_impl "core::clone::Clone<f64>" "_root_.Aeneas.Std.core.clone.CloneF64";
+-  (* file: "Aeneas/Std/Float.lean", line: 419 *)
++  (* file: "Aeneas/Std/Float.lean", line: 440 *)
+   mk_trait_impl "core::clone::Clone<half::bfloat::bf16>" "_root_.Aeneas.Std.core.clone.CloneBF16";
+-  (* file: "Aeneas/Std/Float.lean", line: 402 *)
++  (* file: "Aeneas/Std/Float.lean", line: 423 *)
+   mk_trait_impl "core::clone::Clone<half::binary16::f16>" "_root_.Aeneas.Std.core.clone.CloneF16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 96 *)
+   mk_trait_impl "core::clone::Clone<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.CloneBigUint";
+@@ -1610,9 +1616,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>" "_root_.Aeneas.Std.core.cmp.PartialEqVec" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 210 *)
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+-  (* file: "Aeneas/Std/Float.lean", line: 277 *)
++  (* file: "Aeneas/Std/Float.lean", line: 289 *)
+   mk_trait_impl "core::cmp::PartialEq<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialEqF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 355 *)
++  (* file: "Aeneas/Std/Float.lean", line: 369 *)
+   mk_trait_impl "core::cmp::PartialEq<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialEqF64";
+   (* file: "Aeneas/Std/Half.lean", line: 360 *)
+   mk_trait_impl "core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16";
+@@ -1626,9 +1632,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialOrd<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialOrdPair";
+   (* file: "Aeneas/Std/String.lean", line: 127 *)
+   mk_trait_impl "core::cmp::PartialOrd<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialOrdString";
+-  (* file: "Aeneas/Std/Float.lean", line: 293 *)
++  (* file: "Aeneas/Std/Float.lean", line: 305 *)
+   mk_trait_impl "core::cmp::PartialOrd<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialOrdF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 371 *)
++  (* file: "Aeneas/Std/Float.lean", line: 385 *)
+   mk_trait_impl "core::cmp::PartialOrd<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialOrdF64";
+   (* file: "Aeneas/Std/Half.lean", line: 379 *)
+   mk_trait_impl "core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16";
+@@ -1652,6 +1658,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+   (* file: "Aeneas/Std/Vec.lean", line: 473 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
++  (* file: "Aeneas/Std/Float.lean", line: 406 *)
++  mk_trait_impl "core::convert::From<f64, f32>" "_root_.Aeneas.Std.core.convert.num.FromF64F32";
+   (* file: "Aeneas/Std/Half.lean", line: 354 *)
+   mk_trait_impl "core::convert::From<f64, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.FromF64BF16";
+   (* file: "Aeneas/Std/Half.lean", line: 284 *)
+@@ -1912,13 +1920,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::marker::Copy<core::num::niche_types::NonZeroU8Inner>" "_root_.Aeneas.Std.core.marker.CopyNonZeroU8Inner";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 250 *)
+   mk_trait_impl "core::marker::Copy<core::num::niche_types::NonZeroUsizeInner>" "_root_.Aeneas.Std.core.marker.CopyNonZeroUsizeInner";
+-  (* file: "Aeneas/Std/Float.lean", line: 306 *)
++  (* file: "Aeneas/Std/Float.lean", line: 318 *)
+   mk_trait_impl "core::marker::Copy<f32>" "_root_.Aeneas.Std.core.marker.CopyF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 384 *)
++  (* file: "Aeneas/Std/Float.lean", line: 398 *)
+   mk_trait_impl "core::marker::Copy<f64>" "_root_.Aeneas.Std.core.marker.CopyF64";
+-  (* file: "Aeneas/Std/Float.lean", line: 421 *)
++  (* file: "Aeneas/Std/Float.lean", line: 442 *)
+   mk_trait_impl "core::marker::Copy<half::bfloat::bf16>" "_root_.Aeneas.Std.core.marker.CopyBF16";
+-  (* file: "Aeneas/Std/Float.lean", line: 404 *)
++  (* file: "Aeneas/Std/Float.lean", line: 425 *)
+   mk_trait_impl "core::marker::Copy<half::binary16::f16>" "_root_.Aeneas.Std.core.marker.CopyF16";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 454 *)
+   mk_trait_impl "core::num::nonzero::ZeroablePrimitive<char, core::num::niche_types::NonZeroCharInner>" "_root_.Aeneas.Std.core.num.nonzero.ZeroablePrimitiveChar";

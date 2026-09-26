@@ -1,0 +1,3101 @@
+# aeneas integration step 48 after cba11f3beb: commit 755ced428ab71904a59b202514a09646a5c6e506
+# first parent de9fe5ee5d27c7394e8d2a1907e576bdf85b1a0d, merged 1d5e89416955573151352cf312e153ab5dcfdd39
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-5' (evaluator-kernel and metadata models, E18-d region order, generic loop items, Box<str> clone)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Borrow.lean b/backends/lean/Aeneas/Std/Core/Borrow.lean
+index d26eb96..32cf584 100644
+--- a/backends/lean/Aeneas/Std/Core/Borrow.lean
++++ b/backends/lean/Aeneas/Std/Core/Borrow.lean
+@@ -1,5 +1,7 @@
+ import Aeneas.Std.Alloc
+ import Aeneas.Std.String
++import Aeneas.Std.Core.Core
++import Aeneas.Std.Core.Ops
+ 
+ namespace Aeneas.Std
+ 
+@@ -26,4 +28,64 @@ def core.borrow.BorrowString : core.borrow.Borrow String Str := {
+   borrow := alloc.str.BorrowString.borrow
+ }
+ 
++/-- `alloc::borrow::ToOwned` (alloc/src/borrow.rs). The associated type
++    `Owned: Borrow<Self>` is lifted to the parameter `Owned`. -/
++@[rust_trait "alloc::borrow::ToOwned"
++  (parentClauses := ["coreborrowBorrowInst"]) (defaultMethods := ["clone_into"])]
++structure alloc.borrow.ToOwned (Self Owned : Type) where
++  coreborrowBorrowInst : core.borrow.Borrow Owned Self
++  to_owned : Self → Result Owned
++  /-- `fn clone_into(&self, target: &mut Owned) { *target = self.to_owned(); }` -/
++  clone_into : Self → Owned → Result Owned := fun self _ => to_owned self
++
++/-- The blanket `impl<T: Clone> ToOwned for T { type Owned = T; }`:
++    `to_owned` is `self.clone()`. -/
++@[rust_fun "alloc::borrow::{alloc::borrow::ToOwned<@T, @T>}::to_owned"]
++def alloc.borrow.ToOwnedClone.to_owned {T : Type} (cloneInst : core.clone.Clone T) (self : T) :
++  Result T :=
++  cloneInst.clone self
++
++/-- Blanket `clone_into`: `target.clone_from(self)`. -/
++@[rust_fun "alloc::borrow::{alloc::borrow::ToOwned<@T, @T>}::clone_into"]
++def alloc.borrow.ToOwnedClone.clone_into {T : Type} (cloneInst : core.clone.Clone T)
++  (self target : T) : Result T :=
++  cloneInst.clone_from target self
++
++@[reducible, rust_trait_impl "alloc::borrow::ToOwned<@T, @T>"]
++def alloc.borrow.ToOwnedClone {T : Type} (cloneInst : core.clone.Clone T) :
++  alloc.borrow.ToOwned T T := {
++  coreborrowBorrowInst := core.borrow.BorrowSelf T
++  to_owned := alloc.borrow.ToOwnedClone.to_owned cloneInst
++  clone_into := alloc.borrow.ToOwnedClone.clone_into cloneInst
++}
++
++/-- `impl ToOwned for str { type Owned = String; }` (alloc/src/str.rs): its
++    `clone_into` replaces the target with `self.to_owned()`, the default. -/
++@[reducible, rust_trait_impl "alloc::borrow::ToOwned<str, alloc::string::String>"]
++def alloc.borrow.ToOwnedStr : alloc.borrow.ToOwned Str String := {
++  coreborrowBorrowInst := core.borrow.BorrowString
++  to_owned := alloc.str.ToOwnedStr.to_owned
++}
++
++/-- `enum Cow<'a, B: ?Sized + ToOwned> { Borrowed(&'a B), Owned(<B as ToOwned>::Owned) }`
++    (alloc/src/borrow.rs); the lifted associated type is the parameter `O`. -/
++@[rust_type "alloc::borrow::Cow"]
++inductive alloc.borrow.Cow (B : Type) (O : Type) where
++| Borrowed : B → alloc.borrow.Cow B O
++| Owned : O → alloc.borrow.Cow B O
++
++/-- `impl Deref for Cow<'_, B>`:
++    `match *self { Borrowed(borrowed) => borrowed, Owned(ref owned) => owned.borrow() }`. -/
++@[rust_fun "alloc::borrow::{core::ops::deref::Deref<alloc::borrow::Cow<'0, @B, @O>, @B>}::deref"]
++def alloc.borrow.DerefCow.deref {B O : Type} (toOwnedInst : alloc.borrow.ToOwned B O) :
++  alloc.borrow.Cow B O → Result B
++  | .Borrowed borrowed => .ok borrowed
++  | .Owned owned => toOwnedInst.coreborrowBorrowInst.borrow owned
++
++@[reducible, rust_trait_impl "core::ops::deref::Deref<alloc::borrow::Cow<'0, @B, @O>, @B>"]
++def alloc.borrow.DerefCow {B O : Type} (toOwnedInst : alloc.borrow.ToOwned B O) :
++  core.ops.deref.Deref (alloc.borrow.Cow B O) B := {
++  deref := alloc.borrow.DerefCow.deref toOwnedInst
++}
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Core/Convert.lean b/backends/lean/Aeneas/Std/Core/Convert.lean
+index 61e9a6e..b6b2a39 100644
+--- a/backends/lean/Aeneas/Std/Core/Convert.lean
++++ b/backends/lean/Aeneas/Std/Core/Convert.lean
+@@ -27,6 +27,21 @@ def core.convert.IntoFrom {T : Type} {U : Type} (fromInst : core.convert.From U
+ structure core.convert.TryFrom (Self T Error : Type) where
+   try_from : T → Result (core.result.Result Self Error)
+ 
++/-- The infallible blanket `impl<T, U: Into<T>> TryFrom<U> for T`
++    (core/src/convert/mod.rs): `Ok(U::into(value))`. -/
++@[rust_fun "core::convert::{core::convert::TryFrom<@T, @U, core::convert::Infallible>}::try_from"]
++def core.convert.TryFromTUInfallible.Blanket.try_from {T U : Type}
++  (IntoInst : core.convert.Into U T) (value : U) :
++  Result (core.result.Result T core.convert.Infallible) := do
++  let converted ← IntoInst.into value
++  ok (.Ok converted)
++
++@[reducible, rust_trait_impl "core::convert::TryFrom<@T, @U, core::convert::Infallible>"]
++def core.convert.TryFromTUInfallible.Blanket {T U : Type} (IntoInst : core.convert.Into U T) :
++  core.convert.TryFrom T U core.convert.Infallible := {
++  try_from := core.convert.TryFromTUInfallible.Blanket.try_from IntoInst
++}
++
+ @[rust_fun "core::convert::{core::convert::TryInto<@T, @U, @Error>}::try_into"]
+ def core.convert.TryInto.Blanket.try_into
+   {T : Type} {U : Type} {Error : Type} (TryFromInst : core.convert.TryFrom U T Error) (x : T) :
+diff --git a/backends/lean/Aeneas/Std/Core/Core.lean b/backends/lean/Aeneas/Std/Core/Core.lean
+index 0a41689..abccefe 100644
+--- a/backends/lean/Aeneas/Std/Core/Core.lean
++++ b/backends/lean/Aeneas/Std/Core/Core.lean
+@@ -15,6 +15,13 @@ attribute [rust_type "core::option::Option" -prefixVariantNames] Option
+ def alloc.boxed.AsMutBox.as_mut {T : Type} (x : T) : T × (T → T) :=
+   (x, fun x => x)
+ 
++/-! Rust's primitive ordered comparisons of `bool` (MIR `Lt`/`Le`/`Ge`/`Gt`,
++    `impl PartialOrd for bool`): `false < true`. -/
++def Bool.lt (x y : Bool) : Bool := !x && y
++def Bool.le (x y : Bool) : Bool := !x || y
++def Bool.ge (x y : Bool) : Bool := x || !y
++def Bool.gt (x y : Bool) : Bool := x && !y
++
+ namespace core
+ 
+ @[rust_type "core::convert::Infallible"]
+diff --git a/backends/lean/Aeneas/Std/Float.lean b/backends/lean/Aeneas/Std/Float.lean
+index 7033a24..fdec262 100644
+--- a/backends/lean/Aeneas/Std/Float.lean
++++ b/backends/lean/Aeneas/Std/Float.lean
+@@ -325,6 +325,12 @@ def ofBits (x : U64) : F64 := ⟨x.bv⟩
+ def from_bits (x : U64) : Result F64 := .ok (ofBits x)
+ @[rust_fun "core::f64::{f64}::to_bits"]
+ def to_bits (x : F64) : Result U64 := .ok ⟨x.bits⟩
++/-- `f64::INFINITY = 1.0_f64 / 0.0_f64` (core/src/num/f64.rs): bits 0x7ff0000000000000. -/
++@[rust_const "core::f64::{f64}::INFINITY"]
++def INFINITY : F64 := BinaryFloat.ofNat _ 0x7FF0000000000000
++/-- `f64::NEG_INFINITY = -1.0_f64 / 0.0_f64`: bits 0xfff0000000000000. -/
++@[rust_const "core::f64::{f64}::NEG_INFINITY"]
++def NEG_INFINITY : F64 := BinaryFloat.ofNat _ 0xFFF0000000000000
+ 
+ def ofIScalar {ty} (x : IScalar ty) : F64 := BinaryFloat.ofInt _ x.val
+ def ofUScalar {ty} (x : UScalar ty) : F64 := BinaryFloat.round _ false x.val 1
+diff --git a/backends/lean/Aeneas/Std/IteratorSources.lean b/backends/lean/Aeneas/Std/IteratorSources.lean
+index 1f0afaf..62bfad9 100644
+--- a/backends/lean/Aeneas/Std/IteratorSources.lean
++++ b/backends/lean/Aeneas/Std/IteratorSources.lean
+@@ -363,4 +363,42 @@ def core.iter.sources.once.IteratorOnce.advance_by
+   core.iter.traits.iterator.Iterator.advance_by.default
+     (core.iter.traits.iterator.IteratorOnce T) self n
+ 
++/-- `option::Iter<'a, A> { inner: Item<&'a A> }` with `Item<A> { opt: Option<A> }`
++    (core/src/option.rs). Its `Iterator` impl defines only `next`
++    (`self.opt.take()`) and the exact `size_hint` `(len, Some(len))`; it is
++    `TrustedLen`, `FusedIterator` and flatten's `OneShot`, and not
++    `TrustedRandomAccess`. -/
++@[rust_type "core::option::Iter" (body := .opaque)]
++structure core.option.Iter (A : Type) where
++  opt : Option A
++
++/-- `Option::iter`: `Iter { inner: Item { opt: self.as_ref() } }`. -/
++@[rust_fun "core::option::{core::option::Option<@T>}::iter"]
++def core.option.Option.iter {T : Type} (self : Option T) : Result (core.option.Iter T) :=
++  ok ⟨self⟩
++
++@[rust_fun
++  "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::next"]
++def core.option.IteratorIter.next {A : Type} (self : core.option.Iter A) :
++  Result (Option A × core.option.Iter A) :=
++  ok (self.opt, ⟨none⟩)
++
++@[rust_fun
++  "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::size_hint"]
++def core.option.IteratorIter.size_hint {A : Type} (self : core.option.Iter A) :
++  Result (Usize × Option Usize) :=
++  let len := if self.opt.isSome then 1#usize else 0#usize
++  ok (len, some len)
++
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>"]
++def core.iter.traits.iterator.IteratorOptionIter (A : Type) :
++  core.iter.traits.iterator.Iterator (core.option.Iter A) A := {
++  next := core.option.IteratorIter.next
++  size_hint := core.option.IteratorIter.size_hint
++  trusted_len := true
++  one_shot := true
++  fused := true
++}
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Scalar/CoreConvertNum.lean b/backends/lean/Aeneas/Std/Scalar/CoreConvertNum.lean
+index b06929f..a5e689a 100644
+--- a/backends/lean/Aeneas/Std/Scalar/CoreConvertNum.lean
++++ b/backends/lean/Aeneas/Std/Scalar/CoreConvertNum.lean
+@@ -68,6 +68,58 @@ def TryFromU64I64 : core.convert.TryFrom U64 I64 core.num.error.TryFromIntError
+   try_from := TryFromU64I64.try_from
+ }
+ 
++/-- `usize::try_from(i64)`, core/src/convert/num.rs `ptr_try_from_impls`
++    (`try_from_lower_bounded` on 64-bit targets, `try_from_both_bounded` on
++    32-bit ones): `Ok(value as usize)` when `0 ≤ value ≤ usize::MAX`. -/
++@[rust_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<usize, i64, core::num::error::TryFromIntError>}::try_from"]
++def TryFromUsizeI64.try_from (value : I64) :
++    Result (core.result.Result Usize core.num.error.TryFromIntError) :=
++  if 0 ≤ value.val ∧ value.val ≤ (Usize.max : Int) then .ok (.Ok ⟨value.bv.setWidth _⟩)
++  else .ok (.Err ())
++
++@[reducible, rust_trait_impl "core::convert::TryFrom<usize, i64, core::num::error::TryFromIntError>"]
++def TryFromUsizeI64 : core.convert.TryFrom Usize I64 core.num.error.TryFromIntError := {
++  try_from := TryFromUsizeI64.try_from
++}
++
++/-- `i8::try_from(i64)`, core/src/convert/num.rs `try_from_both_bounded`:
++    `Ok(value as i8)` when `i8::MIN ≤ value ≤ i8::MAX`. The truncation keeps
++    the value of an in-range two's complement integer. -/
++@[rust_fun "core::convert::num::{core::convert::TryFrom<i8, i64, core::num::error::TryFromIntError>}::try_from"]
++def TryFromI8I64.try_from (value : I64) :
++    Result (core.result.Result I8 core.num.error.TryFromIntError) :=
++  if I8.min ≤ value.val ∧ value.val ≤ I8.max then .ok (.Ok ⟨value.bv.setWidth _⟩)
++  else .ok (.Err ())
++
++@[reducible, rust_trait_impl "core::convert::TryFrom<i8, i64, core::num::error::TryFromIntError>"]
++def TryFromI8I64 : core.convert.TryFrom I8 I64 core.num.error.TryFromIntError := {
++  try_from := TryFromI8I64.try_from
++}
++
++/-- `i16::try_from(i64)`, `try_from_both_bounded` (see `TryFromI8I64`). -/
++@[rust_fun "core::convert::num::{core::convert::TryFrom<i16, i64, core::num::error::TryFromIntError>}::try_from"]
++def TryFromI16I64.try_from (value : I64) :
++    Result (core.result.Result I16 core.num.error.TryFromIntError) :=
++  if I16.min ≤ value.val ∧ value.val ≤ I16.max then .ok (.Ok ⟨value.bv.setWidth _⟩)
++  else .ok (.Err ())
++
++@[reducible, rust_trait_impl "core::convert::TryFrom<i16, i64, core::num::error::TryFromIntError>"]
++def TryFromI16I64 : core.convert.TryFrom I16 I64 core.num.error.TryFromIntError := {
++  try_from := TryFromI16I64.try_from
++}
++
++/-- `i32::try_from(i64)`, `try_from_both_bounded` (see `TryFromI8I64`). -/
++@[rust_fun "core::convert::num::{core::convert::TryFrom<i32, i64, core::num::error::TryFromIntError>}::try_from"]
++def TryFromI32I64.try_from (value : I64) :
++    Result (core.result.Result I32 core.num.error.TryFromIntError) :=
++  if I32.min ≤ value.val ∧ value.val ≤ I32.max then .ok (.Ok ⟨value.bv.setWidth _⟩)
++  else .ok (.Err ())
++
++@[reducible, rust_trait_impl "core::convert::TryFrom<i32, i64, core::num::error::TryFromIntError>"]
++def TryFromI32I64 : core.convert.TryFrom I32 I64 core.num.error.TryFromIntError := {
++  try_from := TryFromI32I64.try_from
++}
++
+ -- Conversions
+ def FromUsizeBool.from (b : Bool) : Usize :=
+   if b then 1#usize else 0#usize
+diff --git a/backends/lean/Aeneas/Std/String.lean b/backends/lean/Aeneas/Std/String.lean
+index 9502e78..16f4030 100644
+--- a/backends/lean/Aeneas/Std/String.lean
++++ b/backends/lean/Aeneas/Std/String.lean
+@@ -84,6 +84,31 @@ def core.cmp.PartialEqStringStr : core.cmp.PartialEq String Str := {
+   ne := alloc.string.PartialEqStringStr.ne
+ }
+ 
++/-- `impl PartialEq<&'a str> for String` (alloc/src/string.rs `impl_eq!`):
++    compares with the referenced `str`. -/
++@[rust_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, &'a str>}::eq"]
++def alloc.string.PartialEqStringSharedStr.eq (left : String) (right : Str) : Result Bool :=
++  .ok (stringEqStr left right)
++
++@[rust_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, &'a str>}::ne"]
++def alloc.string.PartialEqStringSharedStr.ne (left : String) (right : Str) : Result Bool :=
++  .ok (!stringEqStr left right)
++
++@[reducible, rust_trait_impl "core::cmp::PartialEq<alloc::string::String, &'a str>"]
++def core.cmp.PartialEqStringSharedStr : core.cmp.PartialEq String Str := {
++  eq := alloc.string.PartialEqStringSharedStr.eq
++  ne := alloc.string.PartialEqStringSharedStr.ne
++}
++
++/-- `str::to_ascii_lowercase` (alloc/src/str.rs): `self.to_owned()` with
++    `make_ascii_lowercase`, which maps the bytes `A..=Z` to `a..=z` and keeps
++    every other byte (so non-ASCII UTF-8 sequences are unchanged). -/
++@[rust_fun "alloc::str::{str}::to_ascii_lowercase"]
++def alloc.str.Str.to_ascii_lowercase (s : Str) : Result String :=
++  Str.toString ⟨s.val.map (fun byte =>
++    if 0x41 ≤ byte.val ∧ byte.val ≤ 0x5A then ⟨byte.bv + 32⟩ else byte), by
++    simpa only [List.length_map] using s.property⟩
++
+ @[rust_fun "core::str::traits::{core::cmp::PartialEq<str, str>}::eq"]
+ def core.str.traits.PartialEqStr.eq (left right : Str) : Result Bool :=
+   .ok (left.val == right.val)
+@@ -166,6 +191,16 @@ def core.clone.CloneString : core.clone.Clone String := {
+   clone := alloc.string.CloneString.clone
+ }
+ 
++/-- `impl Clone for Box<str>` (alloc/src/boxed.rs): a new allocation with the
++    same bytes; `Box` is erased, so the model is the identity on `Str`. -/
++@[rust_fun "alloc::boxed::{core::clone::Clone<Box<str>>}::clone"]
++def alloc.boxed.CloneBoxStr.clone (value : Str) : Result Str := .ok value
++
++@[reducible, rust_trait_impl "core::clone::Clone<Box<str>>"]
++def core.clone.CloneBoxStr : core.clone.Clone Str := {
++  clone := alloc.boxed.CloneBoxStr.clone
++}
++
+ @[rust_fun "alloc::string::{core::ops::deref::Deref<alloc::string::String, str>}::deref"]
+ def alloc.string.DerefString.deref (value : String) : Result Str := Str.ofString value
+ 
+diff --git a/backends/lean/Aeneas/Std/StringIter.lean b/backends/lean/Aeneas/Std/StringIter.lean
+index c1a7853..3060bb6 100644
+--- a/backends/lean/Aeneas/Std/StringIter.lean
++++ b/backends/lean/Aeneas/Std/StringIter.lean
+@@ -178,4 +178,76 @@ def core.iter.traits.iterator.IteratorLines :
+   fused := true
+ }
+ 
++/-- `core::str::Bytes<'a>(Copied<slice::Iter<'a, u8>>)` (core/src/str/iter.rs).
++    Every method of its `Iterator` impl forwards to the copied slice iterator;
++    `fold`/`try_fold` are the next-driven defaults. -/
++@[rust_type "core::str::iter::Bytes" (body := .opaque)]
++structure core.str.iter.Bytes where
++  iter : core.slice.iter.Iter U8
++
++/-- `str::bytes`: `Bytes(self.as_bytes().iter().copied())`. -/
++@[rust_fun "core::str::{str}::bytes"]
++def core.str.Str.bytes (s : Str) : Result core.str.iter.Bytes :=
++  .ok { iter := { slice := s, i := 0 } }
++
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::next"]
++def core.str.iter.IteratorBytes.next (self : core.str.iter.Bytes) :
++    Result (Option U8 × core.str.iter.Bytes) := do
++  let (byte, iter) ← core.slice.iter.IteratorSliceIter.next self.iter
++  .ok (byte, { iter })
++
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::size_hint"]
++def core.str.iter.IteratorBytes.size_hint (self : core.str.iter.Bytes) :
++    Result (Usize × Option Usize) :=
++  core.slice.iter.IteratorSliceIter.size_hint self.iter
++
++/-- `count(self)` is the remaining length (`Copied<slice::Iter>::count`). -/
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::count"]
++def core.str.iter.IteratorBytes.count (self : core.str.iter.Bytes) :
++    Result (Usize × core.str.iter.Bytes) := do
++  let (count, _) ← core.slice.iter.IteratorSliceIter.count self.iter
++  .ok (count, self)
++
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::any"]
++def core.str.iter.IteratorBytes.any {F : Type}
++    (fnInst : core.ops.function.FnMut F U8 Bool) (self : core.str.iter.Bytes) (f : F) :
++    Result (Bool × core.str.iter.Bytes × F) := do
++  let (found, iter, f) ← core.slice.iter.IteratorSliceIter.any fnInst self.iter f
++  .ok (found, { iter }, f)
++
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::all"]
++def core.str.iter.IteratorBytes.all {F : Type}
++    (fnInst : core.ops.function.FnMut F U8 Bool) (self : core.str.iter.Bytes) (f : F) :
++    Result (Bool × core.str.iter.Bytes × F) := do
++  let (holds, iter, f) ← core.slice.iter.IteratorSliceIter.all fnInst self.iter f
++  .ok (holds, { iter }, f)
++
++/-- The predicate takes `&u8`, which is `U8` in the model. -/
++@[rust_fun
++  "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::find"]
++def core.str.iter.IteratorBytes.find {P : Type}
++    (fnInst : core.ops.function.FnMut P U8 Bool) (self : core.str.iter.Bytes) (predicate : P) :
++    Result (Option U8 × core.str.iter.Bytes × P) := do
++  let (found, iter, predicate) ← core.slice.iter.IteratorSliceIter.find fnInst self.iter predicate
++  .ok (found, { iter }, predicate)
++
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>"]
++def core.iter.traits.iterator.IteratorBytes :
++  core.iter.traits.iterator.Iterator core.str.iter.Bytes U8 := {
++  next := core.str.iter.IteratorBytes.next
++  size_hint := core.str.iter.IteratorBytes.size_hint
++  count := core.str.iter.IteratorBytes.count
++  any := core.str.iter.IteratorBytes.any
++  all := core.str.iter.IteratorBytes.all
++  find := core.str.iter.IteratorBytes.find
++  trusted_len := true
++  fused := true
++}
++
+ end Aeneas.Std
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 12b79e1..69024cf 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -2715,6 +2715,162 @@ let normalize_modeled_trait_specializations (crate : crate) : crate =
+       in
+       visitor#visit_crate () crate
+ 
++(** Lay out the region parameters of every method as those of its trait (or
++    implementation) followed by its own.
++
++    This is how Charon lays out the parameters of methods, except for the
++    methods specialized by its partial monomorphization ([--monomorphize-mut]):
++    the regions extracted from the specialized arguments are appended after the
++    regions of the original method, including the method's own (late-bound)
++    regions. For instance, for [impl Fn(&mut u32, &u32) -> u32]:
++    {[
++      trait FnMut::<_, (&_ mut _, _), _><'_0, T0, T1, T2, T3> {
++        fn call_mut<'_0_1> = FnMut::call_mut::<..><'_0_1, '_0, T0, T1, T2, T3>
++      }
++      fn FnMut::call_mut::<..><'_0, '_1, T0, T1, T2, T3>
++        (_1: &'_0 mut T0, _2: (&'_1 mut T1, T2)) -> T3
++    ]}
++    while the implementation for a closure is laid out as usual:
++    {[
++      fn {impl FnMut::<..> for closure}::call_mut<'_0, '_1, '_2>
++        (state_1: &'_2 mut closure, args_2: (&'_0 mut u32, &'_1 u32)) -> u32
++    ]}
++    The order of the region parameters of a function determines the order of its
++    region groups, and thus of the values its backward functions give back: the
++    method field of the trait and the implementations of the method must agree
++    on it. *)
++let order_method_region_params (crate : crate) : crate =
++  (* The instantiation of a method by its trait or implementation, whose
++     binder binds the method's own parameters *)
++  let owner_ref (f : fun_decl) : fun_decl_ref option =
++    match f.src with
++    | TraitDeclItem (trait_ref, name, _) ->
++        Option.bind (TraitDeclId.Map.find_opt trait_ref.id crate.trait_decls)
++          (fun (decl : trait_decl) ->
++            List.find_map
++              (fun (m : trait_method binder) ->
++                let m = m.binder_value in
++                if m.name = name && m.item.id = f.def_id then Some m.item
++                else None)
++              decl.methods)
++    | TraitImplItem (impl_ref, _, name, _) ->
++        Option.bind (TraitImplId.Map.find_opt impl_ref.id crate.trait_impls)
++          (fun (impl : trait_impl) ->
++            List.find_map
++              (fun ((n, m) : _ * fun_decl_ref binder) ->
++                if n = name && m.binder_value.id = f.def_id then
++                  Some m.binder_value
++                else None)
++              impl.methods)
++    | TopLevelItem
++    | ClosureItem _
++    | VTableTyItem _
++    | VTableInstanceItem _
++    | VTableMethodShimItem
++    | VTableInstanceMonoItem
++    | VTableMethodPreShimItem _ -> None
++  in
++  (* For every method whose region parameters must be reordered: the positions
++     of its region parameters, in their new order. The regions of the owner are
++     free variables, the regions of the method are bound by the method binder. *)
++  let orders : int list FunDeclId.Map.t =
++    FunDeclId.Map.filter_map
++      (fun _ (f : fun_decl) ->
++        match owner_ref f with
++        | None -> None
++        | Some fref ->
++            let regions = List.mapi (fun i r -> (i, r)) fref.generics.regions in
++            let owner, own =
++              List.partition
++                (fun (_, r) ->
++                  match r with
++                  | RVar (Free _) -> true
++                  | _ -> false)
++                regions
++            in
++            let is_own (_, r) =
++              match r with
++              | RVar (Bound (0, _)) -> true
++              | _ -> false
++            in
++            let order = List.map fst (owner @ own) in
++            if
++              List.for_all is_own own
++              && List.length regions = List.length f.generics.regions
++              && order <> List.map fst regions
++            then Some order
++            else None)
++      crate.fun_decls
++  in
++  if FunDeclId.Map.is_empty orders then crate
++  else
++    let reorder (order : int list) l = List.map (List.nth l) order in
++    let reorder_args (fid : FunDeclId.id) (generics : generic_args) =
++      match FunDeclId.Map.find_opt fid orders with
++      | None -> generics
++      | Some order -> { generics with regions = reorder order generics.regions }
++    in
++    (* Reorder the region parameters of a method, and rename accordingly its
++       free region variables, which are those parameters. Its name keeps its own
++       specialization binder. *)
++    let reorder_params (f : fun_decl) (order : int list) : fun_decl =
++      let params = reorder order f.generics.regions in
++      let renaming =
++        RegionId.Map.of_list
++          (List.mapi
++             (fun i (r : region_param) -> (r.index, RegionId.of_int i))
++             params)
++      in
++      let rename =
++        object
++          inherit [_] map_crate as super
++
++          method! visit_region env r =
++            match r with
++            | RVar (Free id) -> RVar (Free (RegionId.Map.find id renaming))
++            | _ -> super#visit_region env r
++        end
++      in
++      let f = rename#visit_fun_decl () f in
++      let regions =
++        List.mapi
++          (fun i (r : region_param) -> { r with index = RegionId.of_int i })
++          params
++      in
++      { f with generics = { f.generics with regions } }
++    in
++    let fun_decls =
++      FunDeclId.Map.map
++        (fun (f : fun_decl) ->
++          match FunDeclId.Map.find_opt f.def_id orders with
++          | None -> f
++          | Some order ->
++              let f = reorder_params f order in
++              [%ltrace
++                let env = Print.crate_to_fmt_env crate in
++                "Reordered the region parameters of: "
++                ^ Print.fun_decl_to_string env "" " " f];
++              f)
++        crate.fun_decls
++    in
++    let visitor =
++      object
++        inherit [_] map_crate as super
++
++        method! visit_fun_decl_ref env fref =
++          let fref = super#visit_fun_decl_ref env fref in
++          { fref with generics = reorder_args fref.id fref.generics }
++
++        method! visit_fn_ptr env ptr =
++          let ptr = super#visit_fn_ptr env ptr in
++          match ptr.kind with
++          | FunId (FRegular fid) ->
++              { ptr with generics = reorder_args fid ptr.generics }
++          | FunId (FBuiltin _) | TraitMethod _ -> ptr
++      end
++    in
++    visitor#visit_crate () { crate with fun_decls }
++
+ (** Some provided methods cannot occur in the model record because their bounds
+     depend on that record (Iterator.collect / FromIterator). The model must
+     explicitly restrict them to inherited-default dictionaries. Check Rust
+@@ -3723,6 +3879,7 @@ let expand_char_switches (_crate : crate) (f : fun_decl) : fun_decl =
+ let apply_passes (crate : crate) : crate =
+   (* Passes that apply to the whole crate *)
+   let crate = normalize_modeled_trait_specializations crate in
++  let crate = order_method_region_params crate in
+   let crate = resolve_default_only_dispatch crate in
+   let crate = update_array_default crate in
+   (* Passes that apply to individual function bodies *)
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index bf7400a..d60fbe6 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -961,6 +961,14 @@ let float_primitive_name ty op =
+   | _ ->
+       failwith "Floating-point primitives are only modeled by the Lean backend"
+ 
++(** Ordered comparisons of booleans: [Aeneas.Std.Bool.lt] etc. *)
++let bool_primitive_name op =
++  match backend () with
++  | Lean -> "_root_.Aeneas.Std.Bool." ^ op
++  | _ ->
++      failwith
++        "Ordered comparisons of booleans are only modeled by the Lean backend"
++
+ (** Small helper to compute the name of a unary operation *)
+ let unop_name (unop : unop) : string =
+   match unop with
+@@ -1003,6 +1011,7 @@ let named_binop_name (binop : binop) : string =
+   match binop with
+   | FloatBinop (ty, op) ->
+       float_primitive_name ty (PrintPure.float_binop_to_string op)
++  | BoolBinop op -> bool_primitive_name (PrintPure.bool_binop_to_string op)
+   | Div (_, ty) -> add_int_name ty ^ "div"
+   | Rem (_, ty) -> add_int_name ty ^ "rem"
+   | Add (_, ty) -> add_int_name ty ^ "add"
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index fb91629..d3803b6 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -4,6 +4,8 @@ open ExtractBuiltinCore
+ let lean_builtin_types = [
+   (* file: "Aeneas/Std/Alloc.lean", line: 16 *)
+   mk_type "alloc::alloc::Global" "_root_.Aeneas.Std.Global" ~kind:(KEnum [("Mk", Some "mk")]);
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 72 *)
++  mk_type "alloc::borrow::Cow" "_root_.Aeneas.Std.alloc.borrow.Cow" ~kind:(KEnum [("Borrowed", Some "Borrowed"); ("Owned", Some "Owned")]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 16 *)
+   mk_type "alloc::collections::btree::map::BTreeMap" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap" ~keep_params:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 36 *)
+@@ -50,7 +52,7 @@ let lean_builtin_types = [
+   mk_type "core::array::iter::IntoIter" "_root_.Aeneas.Std.core.array.iter.IntoIter";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 32 *)
+   mk_type "core::cmp::Ordering" "_root_.Ordering" ~kind:(KEnum [("Less", Some "lt"); ("Equal", Some "eq"); ("Greater", Some "gt")]);
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 20 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 27 *)
+   mk_type "core::convert::Infallible" "_root_.Aeneas.Std.core.convert.Infallible" ~kind:(KEnum []);
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 129 *)
+   mk_type "core::fmt::Arguments" "_root_.Aeneas.Std.core.fmt.Arguments" ~kind:(KEnum [("Literal", Some "literal"); ("Template", Some "template")]);
+@@ -122,17 +124,19 @@ let lean_builtin_types = [
+   mk_type "core::ops::control_flow::ControlFlow" "_root_.Aeneas.Std.core.ops.control_flow.ControlFlow" ~kind:(KEnum [("Continue", Some "Continue"); ("Break", Some "Break")]);
+   (* file: "Aeneas/Std/Range.lean", line: 14 *)
+   mk_type "core::ops::range::Range" "_root_.Aeneas.Std.core.ops.range.Range" ~kind:(KStruct [("start", Some "start"); ("end", Some "«end»")]);
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 166 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 173 *)
+   mk_type "core::ops::range::RangeFrom" "_root_.Aeneas.Std.core.ops.range.RangeFrom" ~kind:(KStruct [("start", Some "start")]);
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 21 *)
+   mk_type "core::ops::range::RangeInclusive" "_root_.Aeneas.Std.core.ops.range.RangeInclusive";
+   (* file: "Aeneas/Std/Range.lean", line: 20 *)
+   mk_type "core::ops::range::RangeTo" "_root_.Aeneas.Std.core.ops.range.RangeTo" ~kind:(KStruct [("end", Some "«end»")]);
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 371 *)
++  mk_type "core::option::Iter" "_root_.Aeneas.Std.core.option.Iter";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 12 *)
+   mk_type "core::option::Option" "_root_.Option" ~prefix_variant_names:false ~kind:(KEnum [("None", Some "none"); ("Some", Some "some")]);
+   (* file: "Aeneas/Std/Core/Panic.lean", line: 6 *)
+   mk_type "core::panic::panic_info::PanicInfo" "_root_.Aeneas.Std.core.panic.panic_info.PanicInfo";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 170 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 177 *)
+   mk_type "core::panicking::AssertKind" "_root_.Aeneas.Std.core.panicking.AssertKind" ~kind:(KEnum [("Eq", Some "Eq"); ("Ne", Some "Ne"); ("Match", Some "Match")]);
+   (* file: "Aeneas/Std/Core/Pin.lean", line: 6 *)
+   mk_type "core::pin::Pin" "_root_.Aeneas.Std.core.pin.Pin";
+@@ -154,11 +158,13 @@ let lean_builtin_types = [
+   mk_type "core::slice::iter::IterMut" "_root_.Aeneas.Std.core.slice.iter.IterMut" ~mut_regions:([0]);
+   (* file: "Aeneas/Std/SliceIter.lean", line: 320 *)
+   mk_type "core::slice::iter::Windows" "_root_.Aeneas.Std.core.slice.iter.Windows";
++  (* file: "Aeneas/Std/StringIter.lean", line: 184 *)
++  mk_type "core::str::iter::Bytes" "_root_.Aeneas.Std.core.str.iter.Bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 7 *)
+   mk_type "core::str::iter::Chars" "_root_.Aeneas.Std.core.str.iter.Chars";
+   (* file: "Aeneas/Std/StringIter.lean", line: 107 *)
+   mk_type "core::str::iter::Lines" "_root_.Aeneas.Std.core.str.iter.Lines";
+-  (* file: "Aeneas/Std/String.lean", line: 189 *)
++  (* file: "Aeneas/Std/String.lean", line: 224 *)
+   mk_type "core::str::pattern::StrSearcher" "_root_.Aeneas.Std.core.str.pattern.StrSearcher";
+   (* file: "Aeneas/Std/Core/Atomic.lean", line: 6 *)
+   mk_type "core::sync::atomic::AtomicBool" "_root_.Aeneas.Std.core.sync.atomic.AtomicBool";
+@@ -175,6 +181,10 @@ let lean_builtin_types = [
+ ]
+ 
+ let lean_builtin_consts = [
++  (* file: "Aeneas/Std/Float.lean", line: 329 *)
++  mk_global "core::f64::{f64}::INFINITY" "_root_.Aeneas.Std.F64.INFINITY" ~can_fail:false;
++  (* file: "Aeneas/Std/Float.lean", line: 332 *)
++  mk_global "core::f64::{f64}::NEG_INFINITY" "_root_.Aeneas.Std.F64.NEG_INFINITY" ~can_fail:false;
+   (* file: "Aeneas/Std/Half.lean", line: 343 *)
+   mk_global "half::bfloat::{half::bfloat::bf16}::INFINITY" "_root_.Aeneas.Std.BF16.INFINITY" ~can_fail:false;
+   (* file: "Aeneas/Std/Half.lean", line: 347 *)
+@@ -204,14 +214,22 @@ let lean_builtin_consts = [
+ let lean_builtin_funs = [
+   (* file: "Aeneas/Std/Alloc.lean", line: 25 *)
+   mk_fun "alloc::alloc::{core::clone::Clone<alloc::alloc::Global>}::clone" "_root_.Aeneas.Std.alloc.alloc.CloneGlobal.clone";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 35 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 49 *)
++  mk_fun "alloc::borrow::{alloc::borrow::ToOwned<@T, @T>}::clone_into" "_root_.Aeneas.Std.alloc.borrow.ToOwnedClone.clone_into";
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 43 *)
++  mk_fun "alloc::borrow::{alloc::borrow::ToOwned<@T, @T>}::to_owned" "_root_.Aeneas.Std.alloc.borrow.ToOwnedClone.to_owned";
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 79 *)
++  mk_fun "alloc::borrow::{core::ops::deref::Deref<alloc::borrow::Cow<'0, @B, @O>, @B>}::deref" "_root_.Aeneas.Std.alloc.borrow.DerefCow.deref";
++  (* file: "Aeneas/Std/Core/Core.lean", line: 42 *)
+   mk_fun "alloc::boxed::convert::{core::convert::From<Box<@T>, @T>}::from" "_root_.Aeneas.Std.core.convert.FromBox.from_" ~can_fail:false;
+   (* file: "Aeneas/Std/VecIter.lean", line: 137 *)
+   mk_fun "alloc::boxed::iter::{core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.boxed.IntoIteratorBoxSlice.into_iter" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 77 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 84 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<@T>>}::clone" "_root_.Aeneas.Std.core.alloc.boxed.CloneBox.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 587 *)
+   mk_fun "alloc::boxed::{core::clone::Clone<Box<[@T]>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/String.lean", line: 196 *)
++  mk_fun "alloc::boxed::{core::clone::Clone<Box<str>>}::clone" "_root_.Aeneas.Std.alloc.boxed.CloneBoxStr.clone";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 292 *)
+   mk_fun "alloc::boxed::{core::cmp::Ord<Box<@T>>}::cmp" "_root_.Aeneas.Std.alloc.boxed.OrdBox.cmp" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 232 *)
+@@ -350,24 +368,30 @@ let lean_builtin_funs = [
+   mk_fun "alloc::slice::{[@T]}::sort_by_key" "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key";
+   (* file: "Aeneas/Std/Vec.lean", line: 421 *)
+   mk_fun "alloc::slice::{[@T]}::to_vec" "_root_.Aeneas.Std.alloc.slice.Slice.to_vec";
+-  (* file: "Aeneas/Std/String.lean", line: 232 *)
++  (* file: "Aeneas/Std/String.lean", line: 267 *)
+   mk_fun "alloc::str::{alloc::borrow::ToOwned<str, alloc::string::String>}::to_owned" "_root_.Aeneas.Std.alloc.str.ToOwnedStr.to_owned";
+   (* file: "Aeneas/Std/StringJoin.lean", line: 34 *)
+   mk_fun "alloc::str::{alloc::slice::Join<[@S], &'a str, alloc::string::String>}::join" "_root_.Aeneas.Std.alloc.str.JoinStr.join";
+-  (* file: "Aeneas/Std/Core/Borrow.lean", line: 20 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 22 *)
+   mk_fun "alloc::str::{core::borrow::Borrow<alloc::string::String, str>}::borrow" "_root_.Aeneas.Std.alloc.str.BorrowString.borrow";
+-  (* file: "Aeneas/Std/String.lean", line: 172 *)
++  (* file: "Aeneas/Std/String.lean", line: 106 *)
++  mk_fun "alloc::str::{str}::to_ascii_lowercase" "_root_.Aeneas.Std.alloc.str.Str.to_ascii_lowercase";
++  (* file: "Aeneas/Std/String.lean", line: 207 *)
+   mk_fun "alloc::string::{alloc::string::String}::as_str" "_root_.Aeneas.Std.alloc.string.String.as_str";
+-  (* file: "Aeneas/Std/String.lean", line: 175 *)
++  (* file: "Aeneas/Std/String.lean", line: 210 *)
+   mk_fun "alloc::string::{alloc::string::String}::is_empty" "_root_.Aeneas.Std.alloc.string.String.is_empty";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 182 *)
+   mk_fun "alloc::string::{alloc::string::ToString<@T>}::to_string" "_root_.Aeneas.Std.alloc.string.ToStringBlanket.to_string";
+-  (* file: "Aeneas/Std/String.lean", line: 161 *)
++  (* file: "Aeneas/Std/String.lean", line: 186 *)
+   mk_fun "alloc::string::{core::clone::Clone<alloc::string::String>}::clone" "_root_.Aeneas.Std.alloc.string.CloneString.clone";
+-  (* file: "Aeneas/Std/String.lean", line: 101 *)
++  (* file: "Aeneas/Std/String.lean", line: 126 *)
+   mk_fun "alloc::string::{core::cmp::Eq<alloc::string::String>}::assert_receiver_is_total_eq" "_root_.Aeneas.Std.alloc.string.EqString.assert_receiver_is_total_eq";
+-  (* file: "Aeneas/Std/String.lean", line: 119 *)
++  (* file: "Aeneas/Std/String.lean", line: 144 *)
+   mk_fun "alloc::string::{core::cmp::Ord<alloc::string::String>}::cmp" "_root_.Aeneas.Std.alloc.string.OrdString.cmp";
++  (* file: "Aeneas/Std/String.lean", line: 89 *)
++  mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, &'a str>}::eq" "_root_.Aeneas.Std.alloc.string.PartialEqStringSharedStr.eq";
++  (* file: "Aeneas/Std/String.lean", line: 93 *)
++  mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, &'a str>}::ne" "_root_.Aeneas.Std.alloc.string.PartialEqStringSharedStr.ne";
+   (* file: "Aeneas/Std/String.lean", line: 59 *)
+   mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, alloc::string::String>}::eq" "_root_.Aeneas.Std.alloc.string.PartialEqString.eq";
+   (* file: "Aeneas/Std/String.lean", line: 63 *)
+@@ -376,17 +400,17 @@ let lean_builtin_funs = [
+   mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, str>}::eq" "_root_.Aeneas.Std.alloc.string.PartialEqStringStr.eq";
+   (* file: "Aeneas/Std/String.lean", line: 77 *)
+   mk_fun "alloc::string::{core::cmp::PartialEq<alloc::string::String, str>}::ne" "_root_.Aeneas.Std.alloc.string.PartialEqStringStr.ne";
+-  (* file: "Aeneas/Std/String.lean", line: 123 *)
++  (* file: "Aeneas/Std/String.lean", line: 148 *)
+   mk_fun "alloc::string::{core::cmp::PartialOrd<alloc::string::String, alloc::string::String>}::partial_cmp" "_root_.Aeneas.Std.alloc.string.PartialOrdString.partial_cmp";
+-  (* file: "Aeneas/Std/String.lean", line: 235 *)
++  (* file: "Aeneas/Std/String.lean", line: 270 *)
+   mk_fun "alloc::string::{core::convert::From<Box<str>, alloc::string::String>}::from" "_root_.Aeneas.Std.alloc.string.FromStringBoxStr.from_";
+-  (* file: "Aeneas/Std/String.lean", line: 224 *)
++  (* file: "Aeneas/Std/String.lean", line: 259 *)
+   mk_fun "alloc::string::{core::convert::From<alloc::string::String, &'a str>}::from" "_root_.Aeneas.Std.alloc.string.FromStrString.from_";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 55 *)
+   mk_fun "alloc::string::{core::fmt::Debug<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugString.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 60 *)
+   mk_fun "alloc::string::{core::fmt::Display<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayString.fmt";
+-  (* file: "Aeneas/Std/String.lean", line: 169 *)
++  (* file: "Aeneas/Std/String.lean", line: 204 *)
+   mk_fun "alloc::string::{core::ops::deref::Deref<alloc::string::String, str>}::deref" "_root_.Aeneas.Std.alloc.string.DerefString.deref";
+   (* file: "Aeneas/Std/Sync.lean", line: 35 *)
+   mk_fun "alloc::sync::{alloc::sync::Arc<@T>}::new" "_root_.Aeneas.Std.alloc.sync.Arc.new" ~can_fail:false;
+@@ -586,17 +610,17 @@ let lean_builtin_funs = [
+   mk_fun "core::array::{core::ops::index::Index<[@T; @N], @I, @O>}::index" "_root_.Aeneas.Std.core.array.Array.index";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 92 *)
+   mk_fun "core::array::{core::ops::index::IndexMut<[@T; @N], @I, @O>}::index_mut" "_root_.Aeneas.Std.core.array.Array.index_mut";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 46 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 53 *)
+   mk_fun "core::bool::{bool}::then_some" "_root_.Aeneas.Std.core.bool.then_some" ~can_fail:false;
+-  (* file: "Aeneas/Std/Core/Borrow.lean", line: 10 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 12 *)
+   mk_fun "core::borrow::{core::borrow::Borrow<@T, @T>}::borrow" "_root_.Aeneas.Std.core.borrow.BorrowSelf.borrow";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 176 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 183 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<&'0 @T>}::clone" "_root_.Aeneas.Std.core.clone.impls.CloneShared.clone";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 89 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<char>}::clone" "_root_.Aeneas.Std.core.clone.CloneChar.clone";
+   (* file: "Aeneas/Std/Float.lean", line: 314 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<f32>}::clone" "_root_.Aeneas.Std.F32.clone";
+-  (* file: "Aeneas/Std/Float.lean", line: 394 *)
++  (* file: "Aeneas/Std/Float.lean", line: 400 *)
+   mk_fun "core::clone::impls::{core::clone::Clone<f64>}::clone" "_root_.Aeneas.Std.F64.clone";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 203 *)
+   mk_fun "core::cmp::impls::{core::cmp::Ord<()>}::cmp" "_root_.Aeneas.Std.core.cmp.impls.OrdUnit.cmp";
+@@ -614,9 +638,9 @@ let lean_builtin_funs = [
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f32, f32>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF32.eq";
+   (* file: "Aeneas/Std/Float.lean", line: 287 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f32, f32>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF32.ne";
+-  (* file: "Aeneas/Std/Float.lean", line: 365 *)
++  (* file: "Aeneas/Std/Float.lean", line: 371 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f64, f64>}::eq" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF64.eq";
+-  (* file: "Aeneas/Std/Float.lean", line: 367 *)
++  (* file: "Aeneas/Std/Float.lean", line: 373 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialEq<f64, f64>}::ne" "_root_.Aeneas.Std.core.cmp.impls.PartialEqF64.ne";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 199 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<(), ()>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdUnit.partial_cmp";
+@@ -630,15 +654,15 @@ let lean_builtin_funs = [
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::lt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.lt";
+   (* file: "Aeneas/Std/Float.lean", line: 294 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f32, f32>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF32.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 383 *)
++  (* file: "Aeneas/Std/Float.lean", line: 389 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::ge" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.ge";
+-  (* file: "Aeneas/Std/Float.lean", line: 381 *)
++  (* file: "Aeneas/Std/Float.lean", line: 387 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::gt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.gt";
+-  (* file: "Aeneas/Std/Float.lean", line: 379 *)
++  (* file: "Aeneas/Std/Float.lean", line: 385 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::le" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.le";
+-  (* file: "Aeneas/Std/Float.lean", line: 377 *)
++  (* file: "Aeneas/Std/Float.lean", line: 383 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::lt" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.lt";
+-  (* file: "Aeneas/Std/Float.lean", line: 374 *)
++  (* file: "Aeneas/Std/Float.lean", line: 380 *)
+   mk_fun "core::cmp::impls::{core::cmp::PartialOrd<f64, f64>}::partial_cmp" "_root_.Aeneas.Std.core.cmp.impls.PartialOrdF64.partial_cmp";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 182 *)
+   mk_fun "core::cmp::max" "_root_.Aeneas.Std.core.cmp.max";
+@@ -650,15 +674,25 @@ let lean_builtin_funs = [
+   mk_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<i64, usize, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromI64Usize.try_from";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 36 *)
+   mk_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<usize, i32, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI32.try_from";
+-  (* file: "Aeneas/Std/Float.lean", line: 404 *)
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 74 *)
++  mk_fun "core::convert::num::ptr_try_from_impls::{core::convert::TryFrom<usize, i64, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI64.try_from";
++  (* file: "Aeneas/Std/Float.lean", line: 410 *)
+   mk_fun "core::convert::num::{core::convert::From<f64, f32>}::from" "_root_.Aeneas.Std.core.convert.num.FromF64F32.from_";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 100 *)
++  mk_fun "core::convert::num::{core::convert::TryFrom<i16, i64, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromI16I64.try_from";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 112 *)
++  mk_fun "core::convert::num::{core::convert::TryFrom<i32, i64, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromI32I64.try_from";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 88 *)
++  mk_fun "core::convert::num::{core::convert::TryFrom<i8, i64, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromI8I64.try_from";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 60 *)
+   mk_fun "core::convert::num::{core::convert::TryFrom<u64, i64, core::num::error::TryFromIntError>}::try_from" "_root_.Aeneas.Std.core.convert.num.TryFromU64I64.try_from";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 27 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 34 *)
+   mk_fun "core::convert::{core::convert::From<@T, @T>}::from" "_root_.Aeneas.Std.core.convert.FromSame.from_" ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 15 *)
+   mk_fun "core::convert::{core::convert::Into<@T, @U>}::into" "_root_.Aeneas.Std.core.convert.IntoFrom.into";
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 30 *)
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 32 *)
++  mk_fun "core::convert::{core::convert::TryFrom<@T, @U, core::convert::Infallible>}::try_from" "_root_.Aeneas.Std.core.convert.TryFromTUInfallible.Blanket.try_from";
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 45 *)
+   mk_fun "core::convert::{core::convert::TryInto<@T, @U, @Error>}::try_into" "_root_.Aeneas.Std.core.convert.TryInto.Blanket.try_into";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 9 *)
+   mk_fun "core::default::{core::default::Default<bool>}::default" "_root_.Aeneas.Std.core.default.DefaultBool.default";
+@@ -676,17 +710,17 @@ let lean_builtin_funs = [
+   mk_fun "core::f32::{f32}::is_sign_negative" "_root_.Aeneas.Std.F32.is_sign_negative";
+   (* file: "Aeneas/Std/Float.lean", line: 246 *)
+   mk_fun "core::f32::{f32}::to_bits" "_root_.Aeneas.Std.F32.to_bits";
+-  (* file: "Aeneas/Std/Float.lean", line: 353 *)
++  (* file: "Aeneas/Std/Float.lean", line: 359 *)
+   mk_fun "core::f64::{f64}::abs" "_root_.Aeneas.Std.F64.abs";
+   (* file: "Aeneas/Std/Float.lean", line: 324 *)
+   mk_fun "core::f64::{f64}::from_bits" "_root_.Aeneas.Std.F64.from_bits";
+-  (* file: "Aeneas/Std/Float.lean", line: 349 *)
++  (* file: "Aeneas/Std/Float.lean", line: 355 *)
+   mk_fun "core::f64::{f64}::is_finite" "_root_.Aeneas.Std.F64.is_finite";
+-  (* file: "Aeneas/Std/Float.lean", line: 347 *)
++  (* file: "Aeneas/Std/Float.lean", line: 353 *)
+   mk_fun "core::f64::{f64}::is_infinite" "_root_.Aeneas.Std.F64.is_infinite";
+-  (* file: "Aeneas/Std/Float.lean", line: 345 *)
+-  mk_fun "core::f64::{f64}::is_nan" "_root_.Aeneas.Std.F64.is_nan";
+   (* file: "Aeneas/Std/Float.lean", line: 351 *)
++  mk_fun "core::f64::{f64}::is_nan" "_root_.Aeneas.Std.F64.is_nan";
++  (* file: "Aeneas/Std/Float.lean", line: 357 *)
+   mk_fun "core::f64::{f64}::is_sign_negative" "_root_.Aeneas.Std.F64.is_sign_negative";
+   (* file: "Aeneas/Std/Float.lean", line: 326 *)
+   mk_fun "core::f64::{f64}::to_bits" "_root_.Aeneas.Std.F64.to_bits";
+@@ -800,7 +834,7 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_fmt" "_root_.Aeneas.Std.core.fmt.Formatter.write_fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 216 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_str" "_root_.Aeneas.Std.core.fmt.Formatter.write_str";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 43 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 50 *)
+   mk_fun "core::hint::must_use" "_root_.Aeneas.Std.core.hint.must_use" ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Discriminant.lean", line: 34 *)
+   mk_fun "core::intrinsics::discriminant_value" "_root_.Aeneas.Std.core.intrinsics.discriminant_value";
+@@ -1128,9 +1162,9 @@ let lean_builtin_funs = [
+   mk_fun "core::iter::traits::iterator::{core::iter::traits::iterator::Iterator<&'a mut @I, @Item>}::size_hint" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut.size_hint";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 433 *)
+   mk_fun "core::iter::traits::iterator::{core::iter::traits::iterator::Iterator<&'a mut @I, @Item>}::try_fold" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut.try_fold";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 113 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 120 *)
+   mk_fun "core::mem::replace" "_root_.Aeneas.Std.core.mem.replace" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 117 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 124 *)
+   mk_fun "core::mem::swap" "_root_.Aeneas.Std.core.mem.swap" ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 163 *)
+   mk_fun "core::num::error::{core::fmt::Debug<core::num::error::TryFromIntError>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugTryFromIntError.fmt";
+@@ -1180,7 +1214,7 @@ let lean_builtin_funs = [
+   mk_fun "core::ops::range::{core::ops::range::Range<@Idx>}::contains" "_root_.Aeneas.Std.core.ops.range.Range.contains";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 27 *)
+   mk_fun "core::ops::range::{core::ops::range::RangeInclusive<@Idx>}::new" "_root_.Aeneas.Std.core.ops.range.RangeInclusive.new";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 132 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 139 *)
+   mk_fun "core::option::Option::Some" "_root_.Aeneas.Std.core.option.Option.Some";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 7 *)
+   mk_fun "core::option::unwrap_failed" "_root_.Aeneas.Std.core.option.unwrap_failed";
+@@ -1190,19 +1224,25 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq" "_root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 149 *)
+   mk_fun "core::option::{core::fmt::Debug<core::option::Option<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugOption.fmt";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 380 *)
++  mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::next" "_root_.Aeneas.Std.core.option.IteratorIter.next";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 386 *)
++  mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::size_hint" "_root_.Aeneas.Std.core.option.IteratorIter.size_hint";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 32 *)
+   mk_fun "core::option::{core::option::Option<@T>}::expect" "_root_.Aeneas.Std.core.option.Option.expect";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 159 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 166 *)
+   mk_fun "core::option::{core::option::Option<@T>}::is_none" "_root_.Aeneas.Std.core.option.Option.is_none" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 163 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 170 *)
+   mk_fun "core::option::{core::option::Option<@T>}::is_some" "_root_.Aeneas.Std.core.option.Option.is_some" ~can_fail:false ~lift:false;
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 376 *)
++  mk_fun "core::option::{core::option::Option<@T>}::iter" "_root_.Aeneas.Std.core.option.Option.iter";
+   (* file: "Aeneas/Std/Core/CoreOption.lean", line: 36 *)
+   mk_fun "core::option::{core::option::Option<@T>}::ok_or" "_root_.Aeneas.Std.core.option.Option.ok_or";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 156 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 163 *)
+   mk_fun "core::option::{core::option::Option<@T>}::take" "_root_.Aeneas.Std.core.option.Option.take" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 135 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 142 *)
+   mk_fun "core::option::{core::option::Option<@T>}::unwrap" "_root_.Aeneas.Std.core.option.Option.unwrap";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 144 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 151 *)
+   mk_fun "core::option::{core::option::Option<@T>}::unwrap_or" "_root_.Aeneas.Std.core.option.Option.unwrap_or" ~can_fail:false;
+   (* file: "Aeneas/Std/ResultIter.lean", line: 104 *)
+   mk_fun "core::result::{core::iter::traits::collect::FromIterator<core::result::Result<@V, @E>, core::result::Result<@A, @E>>}::from_iter" "_root_.Aeneas.Std.core.result.FromIteratorResult.from_iter";
+@@ -1418,6 +1458,18 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::swap" "_root_.Aeneas.Std.core.slice.Slice.swap";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 326 *)
+   mk_fun "core::slice::{[@T]}::windows" "_root_.Aeneas.Std.core.slice.Slice.windows";
++  (* file: "Aeneas/Std/StringIter.lean", line: 222 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::all" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.all";
++  (* file: "Aeneas/Std/StringIter.lean", line: 214 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::any" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.any";
++  (* file: "Aeneas/Std/StringIter.lean", line: 207 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::count" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.count";
++  (* file: "Aeneas/Std/StringIter.lean", line: 231 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::find" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.find";
++  (* file: "Aeneas/Std/StringIter.lean", line: 193 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.next";
++  (* file: "Aeneas/Std/StringIter.lean", line: 200 *)
++  mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.size_hint";
+   (* file: "Aeneas/Std/StringIter.lean", line: 73 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>}::advance_by" "_root_.Aeneas.Std.core.str.iter.IteratorChars.advance_by";
+   (* file: "Aeneas/Std/StringIter.lean", line: 90 *)
+@@ -1432,27 +1484,29 @@ let lean_builtin_funs = [
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorLines.next";
+   (* file: "Aeneas/Std/StringIter.lean", line: 163 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorLines.size_hint";
+-  (* file: "Aeneas/Std/String.lean", line: 202 *)
++  (* file: "Aeneas/Std/String.lean", line: 237 *)
+   mk_fun "core::str::pattern::{core::str::pattern::Pattern<&'b str>}::is_prefix_of" "_root_.Aeneas.Std.core.str.pattern.PatternSharedStr.is_prefix_of";
+-  (* file: "Aeneas/Std/String.lean", line: 110 *)
++  (* file: "Aeneas/Std/String.lean", line: 135 *)
+   mk_fun "core::str::traits::{core::cmp::Eq<str>}::assert_receiver_is_total_eq" "_root_.Aeneas.Std.core.str.traits.EqStr.assert_receiver_is_total_eq";
+-  (* file: "Aeneas/Std/String.lean", line: 140 *)
++  (* file: "Aeneas/Std/String.lean", line: 165 *)
+   mk_fun "core::str::traits::{core::cmp::Ord<str>}::cmp" "_root_.Aeneas.Std.core.str.traits.OrdStr.cmp";
+-  (* file: "Aeneas/Std/String.lean", line: 87 *)
++  (* file: "Aeneas/Std/String.lean", line: 112 *)
+   mk_fun "core::str::traits::{core::cmp::PartialEq<str, str>}::eq" "_root_.Aeneas.Std.core.str.traits.PartialEqStr.eq";
+-  (* file: "Aeneas/Std/String.lean", line: 91 *)
++  (* file: "Aeneas/Std/String.lean", line: 116 *)
+   mk_fun "core::str::traits::{core::cmp::PartialEq<str, str>}::ne" "_root_.Aeneas.Std.core.str.traits.PartialEqStr.ne";
+-  (* file: "Aeneas/Std/String.lean", line: 144 *)
++  (* file: "Aeneas/Std/String.lean", line: 169 *)
+   mk_fun "core::str::traits::{core::cmp::PartialOrd<str, str>}::partial_cmp" "_root_.Aeneas.Std.core.str.traits.PartialOrdStr.partial_cmp";
++  (* file: "Aeneas/Std/StringIter.lean", line: 189 *)
++  mk_fun "core::str::{str}::bytes" "_root_.Aeneas.Std.core.str.Str.bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 99 *)
+   mk_fun "core::str::{str}::chars" "_root_.Aeneas.Std.core.str.Str.chars";
+-  (* file: "Aeneas/Std/String.lean", line: 178 *)
++  (* file: "Aeneas/Std/String.lean", line: 213 *)
+   mk_fun "core::str::{str}::is_empty" "_root_.Aeneas.Std.core.str.Str.is_empty";
+-  (* file: "Aeneas/Std/String.lean", line: 183 *)
++  (* file: "Aeneas/Std/String.lean", line: 218 *)
+   mk_fun "core::str::{str}::len" "_root_.Aeneas.Std.core.str.Str.len";
+   (* file: "Aeneas/Std/StringIter.lean", line: 113 *)
+   mk_fun "core::str::{str}::lines" "_root_.Aeneas.Std.core.str.Str.lines";
+-  (* file: "Aeneas/Std/String.lean", line: 212 *)
++  (* file: "Aeneas/Std/String.lean", line: 247 *)
+   mk_fun "core::str::{str}::starts_with" "_root_.Aeneas.Std.core.str.Str.starts_with";
+   (* file: "Aeneas/Std/Tuple.lean", line: 88 *)
+   mk_fun "core::tuple::{core::cmp::Ord<(@U, @T)>}::cmp" "_root_.Aeneas.Std.core.tuple.OrdPair.cmp";
+@@ -1470,7 +1524,7 @@ let lean_builtin_funs = [
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::lt" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.lt";
+   (* file: "Aeneas/Std/Tuple.lean", line: 34 *)
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::partial_cmp" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.partial_cmp";
+-  (* file: "Aeneas/Std/Float.lean", line: 435 *)
++  (* file: "Aeneas/Std/Float.lean", line: 441 *)
+   mk_fun "half::bfloat::{core::clone::Clone<half::bfloat::bf16>}::clone" "_root_.Aeneas.Std.BF16.clone";
+   (* file: "Aeneas/Std/Half.lean", line: 357 *)
+   mk_fun "half::bfloat::{core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>}::eq" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16.eq";
+@@ -1490,7 +1544,7 @@ let lean_builtin_funs = [
+   mk_fun "half::bfloat::{core::fmt::Debug<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 182 *)
+   mk_fun "half::bfloat::{core::fmt::Display<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBF16.fmt";
+-  (* file: "Aeneas/Std/Float.lean", line: 431 *)
++  (* file: "Aeneas/Std/Float.lean", line: 437 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_bits" "_root_.Aeneas.Std.BF16.from_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 326 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_f32" "_root_.Aeneas.Std.BF16.from_f32";
+@@ -1498,13 +1552,13 @@ let lean_builtin_funs = [
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_f64" "_root_.Aeneas.Std.BF16.from_f64";
+   (* file: "Aeneas/Std/Half.lean", line: 334 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::is_nan" "_root_.Aeneas.Std.BF16.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 433 *)
++  (* file: "Aeneas/Std/Float.lean", line: 439 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_bits" "_root_.Aeneas.Std.BF16.to_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 330 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_f32" "_root_.Aeneas.Std.BF16.to_f32";
+   (* file: "Aeneas/Std/Half.lean", line: 332 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_f64" "_root_.Aeneas.Std.BF16.to_f64";
+-  (* file: "Aeneas/Std/Float.lean", line: 418 *)
++  (* file: "Aeneas/Std/Float.lean", line: 424 *)
+   mk_fun "half::binary16::{core::clone::Clone<half::binary16::f16>}::clone" "_root_.Aeneas.Std.F16.clone";
+   (* file: "Aeneas/Std/Half.lean", line: 287 *)
+   mk_fun "half::binary16::{core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>}::eq" "_root_.Aeneas.Std.half.binary16.PartialEqF16.eq";
+@@ -1524,13 +1578,13 @@ let lean_builtin_funs = [
+   mk_fun "half::binary16::{core::fmt::Debug<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 173 *)
+   mk_fun "half::binary16::{core::fmt::Display<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayF16.fmt";
+-  (* file: "Aeneas/Std/Float.lean", line: 414 *)
++  (* file: "Aeneas/Std/Float.lean", line: 420 *)
+   mk_fun "half::binary16::{half::binary16::f16}::from_bits" "_root_.Aeneas.Std.F16.from_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 258 *)
+   mk_fun "half::binary16::{half::binary16::f16}::from_f32" "_root_.Aeneas.Std.F16.from_f32";
+   (* file: "Aeneas/Std/Half.lean", line: 264 *)
+   mk_fun "half::binary16::{half::binary16::f16}::is_nan" "_root_.Aeneas.Std.F16.is_nan";
+-  (* file: "Aeneas/Std/Float.lean", line: 416 *)
++  (* file: "Aeneas/Std/Float.lean", line: 422 *)
+   mk_fun "half::binary16::{half::binary16::f16}::to_bits" "_root_.Aeneas.Std.F16.to_bits";
+   (* file: "Aeneas/Std/Half.lean", line: 260 *)
+   mk_fun "half::binary16::{half::binary16::f16}::to_f32" "_root_.Aeneas.Std.F16.to_f32";
+@@ -1580,30 +1634,32 @@ let lean_builtin_funs = [
+   mk_fun "std::f32::{f32}::powi" "_root_.Aeneas.Std.F32.powi";
+   (* file: "Aeneas/Std/Float.lean", line: 275 *)
+   mk_fun "std::f32::{f32}::trunc" "_root_.Aeneas.Std.F32.trunc";
+-  (* file: "Aeneas/Std/Float.lean", line: 359 *)
++  (* file: "Aeneas/Std/Float.lean", line: 365 *)
+   mk_fun "std::f64::{f64}::floor" "_root_.Aeneas.Std.F64.floor";
+-  (* file: "Aeneas/Std/Float.lean", line: 357 *)
++  (* file: "Aeneas/Std/Float.lean", line: 363 *)
+   mk_fun "std::f64::{f64}::fract" "_root_.Aeneas.Std.F64.fract";
+-  (* file: "Aeneas/Std/Float.lean", line: 361 *)
++  (* file: "Aeneas/Std/Float.lean", line: 367 *)
+   mk_fun "std::f64::{f64}::powi" "_root_.Aeneas.Std.F64.powi";
+-  (* file: "Aeneas/Std/Float.lean", line: 355 *)
++  (* file: "Aeneas/Std/Float.lean", line: 361 *)
+   mk_fun "std::f64::{f64}::trunc" "_root_.Aeneas.Std.F64.trunc";
+   (* file: "Aeneas/Std/Std/Io.lean", line: 5 *)
+   mk_fun "std::io::stdio::_print" "_root_.Aeneas.Std.std.io.stdio._print";
+ ]
+ 
+ let lean_builtin_trait_decls = [
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 33 *)
++  mk_trait_decl "alloc::borrow::ToOwned" "_root_.Aeneas.Std.alloc.borrow.ToOwned" ~parent_clauses:["coreborrowBorrowInst"] ~methods:[("to_owned", "to_owned"); ("clone_into", "clone_into")] ~default_methods:["clone_into"];
+   (* file: "Aeneas/Std/StringJoin.lean", line: 5 *)
+   mk_trait_decl "alloc::slice::Join" "_root_.Aeneas.Std.alloc.slice.Join" ~methods:[("join", "join")];
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 178 *)
+   mk_trait_decl "alloc::string::ToString" "_root_.Aeneas.Std.alloc.string.ToString" ~methods:[("to_string", "to_string")];
+   (* file: "Aeneas/Std/Core/Ptr.lean", line: 83 *)
+   mk_trait_decl "core::alloc::global::GlobalAlloc" "_root_.Aeneas.Std.core.alloc.global.GlobalAlloc" ~methods:[("alloc", "alloc"); ("dealloc", "dealloc")];
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 101 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 108 *)
+   mk_trait_decl "core::any::Any" "_root_.Aeneas.Std.core.any.Any";
+-  (* file: "Aeneas/Std/Core/Borrow.lean", line: 6 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 8 *)
+   mk_trait_decl "core::borrow::Borrow" "_root_.Aeneas.Std.core.borrow.Borrow" ~methods:[("borrow", "borrow")];
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 53 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 60 *)
+   mk_trait_decl "core::clone::Clone" "_root_.Aeneas.Std.core.clone.Clone" ~methods:[("clone", "clone"); ("clone_from", "clone_from")] ~default_methods:["clone_from"];
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 14 *)
+   mk_trait_decl "core::cmp::Eq" "_root_.Aeneas.Std.core.cmp.Eq" ~parent_clauses:["partialEqInst"] ~methods:[("assert_receiver_is_total_eq", "assert_receiver_is_total_eq")] ~default_methods:["assert_receiver_is_total_eq"];
+@@ -1613,15 +1669,15 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::cmp::PartialEq" "_root_.Aeneas.Std.core.cmp.PartialEq" ~methods:[("eq", "eq"); ("ne", "ne")] ~default_methods:["ne"];
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 70 *)
+   mk_trait_decl "core::cmp::PartialOrd" "_root_.Aeneas.Std.core.cmp.PartialOrd" ~parent_clauses:["partialEqInst"] ~methods:[("partial_cmp", "partial_cmp"); ("lt", "lt"); ("le", "le"); ("gt", "gt"); ("ge", "ge"); ("__chaining_lt", "__chaining_lt"); ("__chaining_le", "__chaining_le"); ("__chaining_gt", "__chaining_gt"); ("__chaining_ge", "__chaining_ge")] ~default_methods:["lt"; "le"; "gt"; "ge"; "__chaining_lt"; "__chaining_le"; "__chaining_gt"; "__chaining_ge"];
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 58 *)
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 73 *)
+   mk_trait_decl "core::convert::AsMut" "_root_.Aeneas.Std.core.convert.AsMut" ~methods:[("as_mut", "as_mut")];
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 23 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 30 *)
+   mk_trait_decl "core::convert::From" "_root_.Aeneas.Std.core.convert.From" ~methods:[("from", "from_")];
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 11 *)
+   mk_trait_decl "core::convert::Into" "_root_.Aeneas.Std.core.convert.Into" ~methods:[("into", "into")];
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 26 *)
+   mk_trait_decl "core::convert::TryFrom" "_root_.Aeneas.Std.core.convert.TryFrom" ~methods:[("try_from", "try_from")];
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 36 *)
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 51 *)
+   mk_trait_decl "core::convert::TryInto" "_root_.Aeneas.Std.core.convert.TryInto" ~methods:[("try_into", "try_into")];
+   (* file: "Aeneas/Std/Core/Default.lean", line: 5 *)
+   mk_trait_decl "core::default::Default" "_root_.Aeneas.Std.core.default.Default" ~methods:[("default", "default")];
+@@ -1657,7 +1713,7 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::iter::traits::exact_size::ExactSizeIterator" "_root_.Aeneas.Std.core.iter.traits.exact_size.ExactSizeIterator" ~parent_clauses:["iteratorInst"] ~methods:[("len", "len")] ~default_methods:["len"];
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 312 *)
+   mk_trait_decl "core::iter::traits::iterator::Iterator" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator" ~methods:[("next", "next"); ("fold", "fold"); ("try_fold", "try_fold"); ("advance_by", "advance_by"); ("nth", "nth"); ("size_hint", "size_hint"); ("step_by", "step_by"); ("enumerate", "enumerate"); ("take", "take"); ("filter_map", "filter_map"); ("count", "count"); ("any", "any"); ("all", "all"); ("find", "find"); ("find_map", "find_map"); ("position", "position")] ~default_methods:["step_by"; "enumerate"; "take"; "filter_map"; "count"; "any"; "all"; "find"; "find_map"; "position"; "advance_by"; "nth"; "fold"; "try_fold"; "size_hint"] ~default_only_methods:["collect"];
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 88 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 95 *)
+   mk_trait_decl "core::marker::Copy" "_root_.Aeneas.Std.core.marker.Copy" ~parent_clauses:["cloneInst"];
+   (* file: "Aeneas/Std/Core/Discriminant.lean", line: 16 *)
+   mk_trait_decl "core::marker::DiscriminantKind" "_root_.Aeneas.Std.DiscriminantKind" ~parent_clauses:["cloneInst"; "copyInst"; "debugInst"; "partialEqInst"; "eqInst"; "hashInst"] ~types:[("Discriminant", "Discriminant")];
+@@ -1701,38 +1757,44 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+   (* file: "Aeneas/Std/Slice.lean", line: 295 *)
+   mk_trait_decl "core::slice::index::private_slice_index::Sealed" "_root_.Aeneas.Std.core.slice.index.private_slice_index.Sealed";
+-  (* file: "Aeneas/Std/String.lean", line: 196 *)
++  (* file: "Aeneas/Std/String.lean", line: 231 *)
+   mk_trait_decl "core::str::pattern::Pattern" "_root_.Aeneas.Std.core.str.pattern.Pattern" ~methods:[("is_prefix_of", "is_prefix_of")];
+ ]
+ 
+ let lean_builtin_trait_impls = [
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 54 *)
++  mk_trait_impl "alloc::borrow::ToOwned<@T, @T>" "_root_.Aeneas.Std.alloc.borrow.ToOwnedClone";
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 64 *)
++  mk_trait_impl "alloc::borrow::ToOwned<str, alloc::string::String>" "_root_.Aeneas.Std.alloc.borrow.ToOwnedStr";
+   (* file: "Aeneas/Std/StringJoin.lean", line: 52 *)
+   mk_trait_impl "alloc::slice::Join<[@S], &'a str, alloc::string::String>" "_root_.Aeneas.Std.alloc.slice.JoinStr";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 189 *)
+   mk_trait_impl "alloc::string::ToString<@T>" "_root_.Aeneas.Std.alloc.string.ToStringBlanket";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 105 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 112 *)
+   mk_trait_impl "core::any::Any<@T>" "_root_.Aeneas.Std.core.any.AnyBlanket";
+-  (* file: "Aeneas/Std/Core/Borrow.lean", line: 13 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 15 *)
+   mk_trait_impl "core::borrow::Borrow<@T, @T>" "_root_.Aeneas.Std.core.borrow.BorrowSelf";
+-  (* file: "Aeneas/Std/Core/Borrow.lean", line: 24 *)
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 26 *)
+   mk_trait_impl "core::borrow::Borrow<alloc::string::String, str>" "_root_.Aeneas.Std.core.borrow.BorrowString";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 82 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 89 *)
+   mk_trait_impl "core::clone::Clone<Box<@T>>" "_root_.Aeneas.Std.core.core.clone.CloneBox" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 593 *)
+   mk_trait_impl "core::clone::Clone<Box<[@T]>>" "_root_.Aeneas.Std.core.clone.CloneBoxSlice" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/String.lean", line: 199 *)
++  mk_trait_impl "core::clone::Clone<Box<str>>" "_root_.Aeneas.Std.core.clone.CloneBoxStr";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 254 *)
+   mk_trait_impl "core::clone::Clone<[@T; @N]>" "_root_.Aeneas.Std.core.clone.CloneArray";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 62 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 69 *)
+   mk_trait_impl "core::clone::Clone<alloc::alloc::Global>" "_root_.Aeneas.Std.core.core.clone.CloneGlobal";
+   (* file: "Aeneas/Std/Sync.lean", line: 57 *)
+   mk_trait_impl "core::clone::Clone<alloc::rc::Rc<@T>>" "_root_.Aeneas.Std.core.clone.CloneRc" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/String.lean", line: 164 *)
++  (* file: "Aeneas/Std/String.lean", line: 189 *)
+   mk_trait_impl "core::clone::Clone<alloc::string::String>" "_root_.Aeneas.Std.core.clone.CloneString";
+   (* file: "Aeneas/Std/Sync.lean", line: 46 *)
+   mk_trait_impl "core::clone::Clone<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.clone.CloneArc" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 578 *)
+   mk_trait_impl "core::clone::Clone<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.clone.CloneallocvecVec" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 71 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 78 *)
+   mk_trait_impl "core::clone::Clone<bool>" "_root_.Aeneas.Std.core.clone.CloneBool";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 92 *)
+   mk_trait_impl "core::clone::Clone<char>" "_root_.Aeneas.Std.core.clone.CloneChar";
+@@ -1766,11 +1828,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<core::option::Option<@T>>" "_root_.Aeneas.Std.core.clone.CloneOption";
+   (* file: "Aeneas/Std/Float.lean", line: 316 *)
+   mk_trait_impl "core::clone::Clone<f32>" "_root_.Aeneas.Std.core.clone.CloneF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 396 *)
++  (* file: "Aeneas/Std/Float.lean", line: 402 *)
+   mk_trait_impl "core::clone::Clone<f64>" "_root_.Aeneas.Std.core.clone.CloneF64";
+-  (* file: "Aeneas/Std/Float.lean", line: 440 *)
++  (* file: "Aeneas/Std/Float.lean", line: 446 *)
+   mk_trait_impl "core::clone::Clone<half::bfloat::bf16>" "_root_.Aeneas.Std.core.clone.CloneBF16";
+-  (* file: "Aeneas/Std/Float.lean", line: 423 *)
++  (* file: "Aeneas/Std/Float.lean", line: 429 *)
+   mk_trait_impl "core::clone::Clone<half::binary16::f16>" "_root_.Aeneas.Std.core.clone.CloneF16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 96 *)
+   mk_trait_impl "core::clone::Clone<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.CloneBigUint";
+@@ -1780,11 +1842,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::Eq<Box<@T>>" "_root_.Aeneas.Std.core.cmp.EqBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 70 *)
+   mk_trait_impl "core::cmp::Eq<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.EqSliceInst";
+-  (* file: "Aeneas/Std/String.lean", line: 104 *)
++  (* file: "Aeneas/Std/String.lean", line: 129 *)
+   mk_trait_impl "core::cmp::Eq<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.EqString";
+   (* file: "Aeneas/Std/BigUint.lean", line: 106 *)
+   mk_trait_impl "core::cmp::Eq<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.EqBigUint";
+-  (* file: "Aeneas/Std/String.lean", line: 113 *)
++  (* file: "Aeneas/Std/String.lean", line: 138 *)
+   mk_trait_impl "core::cmp::Eq<str>" "_root_.Aeneas.Std.core.cmp.EqStr";
+   (* file: "Aeneas/Std/Tuple.lean", line: 96 *)
+   mk_trait_impl "core::cmp::Ord<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.OrdPair";
+@@ -1792,11 +1854,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::Ord<Box<@T>>" "_root_.Aeneas.Std.core.cmp.OrdBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 146 *)
+   mk_trait_impl "core::cmp::Ord<[@T]>" "_root_.Aeneas.Std.core.slice.cmp.OrdSliceInst";
+-  (* file: "Aeneas/Std/String.lean", line: 133 *)
++  (* file: "Aeneas/Std/String.lean", line: 158 *)
+   mk_trait_impl "core::cmp::Ord<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.OrdString";
+   (* file: "Aeneas/Std/BigUint.lean", line: 117 *)
+   mk_trait_impl "core::cmp::Ord<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.OrdBigUint";
+-  (* file: "Aeneas/Std/String.lean", line: 154 *)
++  (* file: "Aeneas/Std/String.lean", line: 179 *)
+   mk_trait_impl "core::cmp::Ord<str>" "_root_.Aeneas.Std.core.cmp.OrdStr";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 225 *)
+   mk_trait_impl "core::cmp::PartialEq<&'a @A, &'b @B>" "_root_.Aeneas.Std.core.cmp.PartialEqShared";
+@@ -1810,6 +1872,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<[@T], [@U]>" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 204 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
++  (* file: "Aeneas/Std/String.lean", line: 97 *)
++  mk_trait_impl "core::cmp::PartialEq<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.cmp.PartialEqStringSharedStr";
+   (* file: "Aeneas/Std/String.lean", line: 67 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialEqString";
+   (* file: "Aeneas/Std/String.lean", line: 81 *)
+@@ -1820,7 +1884,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+   (* file: "Aeneas/Std/Float.lean", line: 289 *)
+   mk_trait_impl "core::cmp::PartialEq<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialEqF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 369 *)
++  (* file: "Aeneas/Std/Float.lean", line: 375 *)
+   mk_trait_impl "core::cmp::PartialEq<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialEqF64";
+   (* file: "Aeneas/Std/Half.lean", line: 360 *)
+   mk_trait_impl "core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16";
+@@ -1828,7 +1892,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>" "_root_.Aeneas.Std.half.binary16.PartialEqF16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 100 *)
+   mk_trait_impl "core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.PartialEqBigUint";
+-  (* file: "Aeneas/Std/String.lean", line: 95 *)
++  (* file: "Aeneas/Std/String.lean", line: 120 *)
+   mk_trait_impl "core::cmp::PartialEq<str, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStr";
+   (* file: "Aeneas/Std/Tuple.lean", line: 76 *)
+   mk_trait_impl "core::cmp::PartialOrd<(@U, @T), (@U, @T)>" "_root_.Aeneas.Std.core.cmp.PartialOrdPair";
+@@ -1836,11 +1900,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialOrd<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialOrdBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 120 *)
+   mk_trait_impl "core::cmp::PartialOrd<[@T], [@T]>" "_root_.Aeneas.Std.core.slice.cmp.PartialOrdSliceInst";
+-  (* file: "Aeneas/Std/String.lean", line: 127 *)
++  (* file: "Aeneas/Std/String.lean", line: 152 *)
+   mk_trait_impl "core::cmp::PartialOrd<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialOrdString";
+   (* file: "Aeneas/Std/Float.lean", line: 305 *)
+   mk_trait_impl "core::cmp::PartialOrd<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialOrdF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 385 *)
++  (* file: "Aeneas/Std/Float.lean", line: 391 *)
+   mk_trait_impl "core::cmp::PartialOrd<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialOrdF64";
+   (* file: "Aeneas/Std/Half.lean", line: 379 *)
+   mk_trait_impl "core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16";
+@@ -1848,23 +1912,23 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>" "_root_.Aeneas.Std.half.binary16.PartialOrdF16";
+   (* file: "Aeneas/Std/BigUint.lean", line: 110 *)
+   mk_trait_impl "core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.PartialOrdBigUint";
+-  (* file: "Aeneas/Std/String.lean", line: 148 *)
++  (* file: "Aeneas/Std/String.lean", line: 173 *)
+   mk_trait_impl "core::cmp::PartialOrd<str, str>" "_root_.Aeneas.Std.core.cmp.PartialOrdStr";
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 62 *)
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 77 *)
+   mk_trait_impl "core::convert::AsMut<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.AsMutBox";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 30 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 37 *)
+   mk_trait_impl "core::convert::From<@Self, @Self>" "_root_.Aeneas.Std.core.convert.FromSame";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 38 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 45 *)
+   mk_trait_impl "core::convert::From<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.FromBox";
+   (* file: "Aeneas/Std/Vec.lean", line: 543 *)
+   mk_trait_impl "core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.FromBoxSliceVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/String.lean", line: 238 *)
++  (* file: "Aeneas/Std/String.lean", line: 273 *)
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+-  (* file: "Aeneas/Std/String.lean", line: 227 *)
++  (* file: "Aeneas/Std/String.lean", line: 262 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+   (* file: "Aeneas/Std/Vec.lean", line: 527 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
+-  (* file: "Aeneas/Std/Float.lean", line: 406 *)
++  (* file: "Aeneas/Std/Float.lean", line: 412 *)
+   mk_trait_impl "core::convert::From<f64, f32>" "_root_.Aeneas.Std.core.convert.num.FromF64F32";
+   (* file: "Aeneas/Std/Half.lean", line: 354 *)
+   mk_trait_impl "core::convert::From<f64, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.FromF64BF16";
+@@ -1880,19 +1944,29 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::Into<@Self, @T>" "_root_.Aeneas.Std.core.convert.IntoFrom";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 195 *)
+   mk_trait_impl "core::convert::TryFrom<&'a [@T; @N], &'a [@T], core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.convert.TryFromSharedArraySliceTryFromSliceError";
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 39 *)
++  mk_trait_impl "core::convert::TryFrom<@T, @U, core::convert::Infallible>" "_root_.Aeneas.Std.core.convert.TryFromTUInfallible.Blanket";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 106 *)
++  mk_trait_impl "core::convert::TryFrom<i16, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI16I64";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 118 *)
++  mk_trait_impl "core::convert::TryFrom<i32, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI32I64";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 31 *)
+   mk_trait_impl "core::convert::TryFrom<i32, usize, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI32Usize";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 53 *)
+   mk_trait_impl "core::convert::TryFrom<i64, usize, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI64Usize";
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 94 *)
++  mk_trait_impl "core::convert::TryFrom<i8, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI8I64";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 66 *)
+   mk_trait_impl "core::convert::TryFrom<u64, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromU64I64";
+   (* file: "Aeneas/Std/BigUint.lean", line: 136 *)
+   mk_trait_impl "core::convert::TryFrom<u64, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>" "_root_.Aeneas.Std.num_bigint.TryFromU64BigUint";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 42 *)
+   mk_trait_impl "core::convert::TryFrom<usize, i32, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI32";
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 51 *)
++  (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 80 *)
++  mk_trait_impl "core::convert::TryFrom<usize, i64, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI64";
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 66 *)
+   mk_trait_impl "core::convert::TryInto<@T, @U, @E>" "_root_.Aeneas.Std.core.convert.TryInto.Blanket";
+-  (* file: "Aeneas/Std/Core/Convert.lean", line: 45 *)
++  (* file: "Aeneas/Std/Core/Convert.lean", line: 60 *)
+   mk_trait_impl "core::convert::{core::convert::TryInto<@T, @U>}" "_root_.Aeneas.Std.core.convert.TryIntoFrom";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 306 *)
+   mk_trait_impl "core::default::Default<[@T; 0]>" "_root_.Aeneas.Std.core.default.DefaultArrayEmpty";
+@@ -2108,6 +2182,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::ops::range::Range<@A>, @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 239 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::ops::range::RangeInclusive<@A>, @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRangeInclusive";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 393 *)
++  mk_trait_impl "core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 517 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Chunks<'a, @T>, &'a [@T]>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChunks";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 621 *)
+@@ -2116,11 +2192,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Iter<'a, @T>, &'a @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 402 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Windows<'a, @T>, &'a [@T]>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorWindows";
++  (* file: "Aeneas/Std/StringIter.lean", line: 239 *)
++  mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 79 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChars";
+   (* file: "Aeneas/Std/StringIter.lean", line: 172 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorLines";
+-  (* file: "Aeneas/Std/Core/Core.lean", line: 92 *)
++  (* file: "Aeneas/Std/Core/Core.lean", line: 99 *)
+   mk_trait_impl "core::marker::Copy<bool>" "_root_.Aeneas.Std.core.core.marker.CopyBool";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 97 *)
+   mk_trait_impl "core::marker::Copy<char>" "_root_.Aeneas.Std.core.marker.CopyChar";
+@@ -2152,11 +2230,11 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::marker::Copy<core::num::niche_types::NonZeroUsizeInner>" "_root_.Aeneas.Std.core.marker.CopyNonZeroUsizeInner";
+   (* file: "Aeneas/Std/Float.lean", line: 318 *)
+   mk_trait_impl "core::marker::Copy<f32>" "_root_.Aeneas.Std.core.marker.CopyF32";
+-  (* file: "Aeneas/Std/Float.lean", line: 398 *)
++  (* file: "Aeneas/Std/Float.lean", line: 404 *)
+   mk_trait_impl "core::marker::Copy<f64>" "_root_.Aeneas.Std.core.marker.CopyF64";
+-  (* file: "Aeneas/Std/Float.lean", line: 442 *)
++  (* file: "Aeneas/Std/Float.lean", line: 448 *)
+   mk_trait_impl "core::marker::Copy<half::bfloat::bf16>" "_root_.Aeneas.Std.core.marker.CopyBF16";
+-  (* file: "Aeneas/Std/Float.lean", line: 425 *)
++  (* file: "Aeneas/Std/Float.lean", line: 431 *)
+   mk_trait_impl "core::marker::Copy<half::binary16::f16>" "_root_.Aeneas.Std.core.marker.CopyF16";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 454 *)
+   mk_trait_impl "core::num::nonzero::ZeroablePrimitive<char, core::num::niche_types::NonZeroCharInner>" "_root_.Aeneas.Std.core.num.nonzero.ZeroablePrimitiveChar";
+@@ -2214,6 +2292,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::arith::MulAssign<usize, &'a usize>" "_root_.Aeneas.Std.core.ops.arith.MulAssignUsizeShared";
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 29 *)
+   mk_trait_impl "core::ops::deref::Deref<Box<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefBoxInst" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 85 *)
++  mk_trait_impl "core::ops::deref::Deref<alloc::borrow::Cow<'0, @B, @O>, @B>" "_root_.Aeneas.Std.alloc.borrow.DerefCow";
+   (* file: "Aeneas/Std/Sync.lean", line: 77 *)
+   mk_trait_impl "core::ops::deref::Deref<alloc::rc::Rc<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefRc" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 67 *)
+@@ -2256,7 +2336,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::RangeTo<usize>>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedRangeToUsize";
+   (* file: "Aeneas/Std/Slice.lean", line: 527 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<usize>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedUsize";
+-  (* file: "Aeneas/Std/String.lean", line: 206 *)
++  (* file: "Aeneas/Std/String.lean", line: 241 *)
+   mk_trait_impl "core::str::pattern::Pattern<&'b str>" "_root_.Aeneas.Std.core.str.pattern.PatternSharedStr";
+ ]
+ 
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index fa3d9f4..1b076c5 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -1186,6 +1186,17 @@ let eval_binary_op_concrete_compute (span : Meta.span) (binop : binop)
+             [%craise] span
+               ("Unimplemented binary operation: " ^ binop_to_string binop)
+       end
++    | VLiteral (VBool b1), VLiteral (VBool b2) ->
++        (* Ordered comparison of booleans: [false < true] *)
++        let b =
++          match binop with
++          | Lt -> (not b1) && b2
++          | Le -> (not b1) || b2
++          | Ge -> b1 || not b2
++          | Gt -> b1 && not b2
++          | _ -> [%craise] span ("Invalid inputs for binop: " ^ binop_to_string binop)
++        in
++        Ok { value = VLiteral (VBool b); ty = TLiteral TBool }
+     | _ -> [%craise] span ("Invalid inputs for binop: " ^ binop_to_string binop)
+ 
+ let eval_binary_op_concrete (config : config) (span : Meta.span) (binop : binop)
+@@ -1247,6 +1258,11 @@ let eval_binary_op_symbolic (config : config) (span : Meta.span) (binop : binop)
+                  than the operand *)
+               TLiteral (integer_as_literal int_ty1)
+           | Ne | Eq -> [%craise] span "Unreachable")
++      | TLiteral TBool, TLiteral TBool -> (
++          (* Ordered comparison of booleans: [false < true] *)
++          match binop with
++          | Lt | Le | Ge | Gt -> TLiteral TBool
++          | _ -> [%craise] span "Invalid inputs for binop")
+       | _ -> [%craise] span "Invalid inputs for binop"
+   in
+   let res_sv = { sv_id = res_sv_id; sv_ty = res_sv_ty } in
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 4c2bbbd..d84b5c5 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -276,13 +276,17 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       (* Sources. Lines (core str/iter.rs) is SplitInclusive's next mapped by
+          LinesMap, with the default size_hint (0, None) and next-driven fold.
+          BTree Keys/Values (alloc btree/map.rs) project Iter's next and forward
+-         its exact size_hint; their fold is the next-driven default. *)
++         its exact size_hint; their fold is the next-driven default.
++         option::Iter (core option.rs) defines only next (Item::next is
++         opt.take()) and the exact size_hint (len, Some(len)); it is TrustedLen
++         but not TrustedRandomAccess, so the collectors' TrustedLen path folds
++         it with the next-driven default. *)
+       | Some name when
+           List.mem name
+             (List.map (( ^ ) iterator)
+                [ "SliceIter"; "ArrayIntoIter"; "VecIntoIter"; "BTreeIter";
+                  "BTreeIntoIter"; "BTreeSetIntoIter"; "BTreeSetIter"; "Chunks"; "ChunksExact"; "Windows";
+-                 "Once"; "Chars"; "Lines"; "BTreeKeys"; "BTreeValues" ]) -> ()
++                 "Once"; "Chars"; "Lines"; "BTreeKeys"; "BTreeValues"; "OptionIter" ]) -> ()
+       | Some name when
+           List.mem name
+             (List.map (( ^ ) iterator)
+diff --git a/src/pure/PrintPure.ml b/src/pure/PrintPure.ml
+index 2b94e71..3ff2cd4 100644
+--- a/src/pure/PrintPure.ml
++++ b/src/pure/PrintPure.ml
+@@ -931,6 +931,12 @@ let float_binop_to_string = function
+   | FloatGe -> "ge"
+   | FloatGt -> "gt"
+ 
++let bool_binop_to_string = function
++  | BoolLt -> "lt"
++  | BoolLe -> "le"
++  | BoolGe -> "ge"
++  | BoolGt -> "gt"
++
+ let binop_to_string (env : fmt_env) (binop : binop) =
+   let int_ty_to_string int_ty = "::<" ^ integer_type_to_string int_ty ^ ">" in
+   let int_tys_to_string int_ty0 int_ty1 =
+@@ -973,6 +979,7 @@ let binop_to_string (env : fmt_env) (binop : binop) =
+   | MulChecked int_ty -> "checked.*" ^ int_ty_to_string int_ty
+   | Cmp int_ty -> "cmp" ^ int_ty_to_string int_ty
+   | FloatBinop (ty, op) -> show_float_type ty ^ "." ^ float_binop_to_string op
++  | BoolBinop op -> "bool." ^ bool_binop_to_string op
+   | BoolOr -> "||"
+ 
+ let fun_or_op_id_to_string (env : fmt_env) (fun_id : fun_or_op_id) : string =
+diff --git a/src/pure/Pure.ml b/src/pure/Pure.ml
+index fe4f290..8656095 100644
+--- a/src/pure/Pure.ml
++++ b/src/pure/Pure.ml
+@@ -630,6 +630,8 @@ and binop =
+   | Shr of overflow_mode * integer_type * integer_type
+   | Cmp of integer_type
+   | FloatBinop of float_type * float_binop
++  | BoolBinop of bool_binop
++      (** Ordered comparison of booleans, where [false < true]. *)
+   | BoolOr
+       (** This doesn't exist in the MIR because && and || are elaborated to lazy
+           boolean operations. We introduce || in the pure code to be able to
+@@ -650,6 +652,8 @@ and float_binop =
+   | FloatGe
+   | FloatGt
+ 
++and bool_binop = BoolLt | BoolLe | BoolGe | BoolGt
++
+ and builtin_impl_data =
+   | BuiltinCopy
+   | BuiltinClone
+diff --git a/src/pure/PureMicroPassesGeneral.ml b/src/pure/PureMicroPassesGeneral.ml
+index 9d41af2..e21c22d 100644
+--- a/src/pure/PureMicroPassesGeneral.ml
++++ b/src/pure/PureMicroPassesGeneral.ml
+@@ -691,7 +691,7 @@ let inline_unop unop = not (lift_unop unop)
+ (** A helper predicate *)
+ let lift_binop (binop : binop) : bool =
+   match binop with
+-  | Eq _ | Lt _ | Le _ | Ne _ | Ge _ | Gt _ | BoolOr -> false
++  | Eq _ | Lt _ | Le _ | Ne _ | Ge _ | Gt _ | BoolBinop _ | BoolOr -> false
+   | FloatBinop (_, (FloatEq | FloatNe | FloatLt | FloatLe | FloatGe | FloatGt))
+     -> false
+   | BitXor _
+diff --git a/src/pure/PureUtils.ml b/src/pure/PureUtils.ml
+index ff0d309..0982ae5 100644
+--- a/src/pure/PureUtils.ml
++++ b/src/pure/PureUtils.ml
+@@ -2355,6 +2355,26 @@ let filter_generic_params_used_in_texpr (generic : generic_params) (e : texpr) :
+     end
+   in
+   visitor#visit_texpr () e;
++  (* The trait clauses we preserve may refer to generic parameters which do not
++     appear in the expression. For instance, when looping over
++     [I : IntoIterator<Item = u32>], the loop body only refers to the lifted
++     associated type [Clause0_IntoIter] and to the clause
++     [IntoIterator<I, u32, Clause0_IntoIter>], not to [I]. We need to preserve
++     those parameters as well, otherwise the preserved clauses would refer to
++     unbound parameters. The generics of a clause may themselves refer to other
++     clauses: we iterate until we reach a fixed point. *)
++  let rec close_over_trait_clauses (visited : TraitClauseId.Set.t) : unit =
++    let to_visit = TraitClauseId.Set.diff !clause_ids visited in
++    if not (TraitClauseId.Set.is_empty to_visit) then begin
++      List.iter
++        (fun (clause : trait_param) ->
++          if TraitClauseId.Set.mem clause.clause_id to_visit then
++            visitor#visit_generic_args () clause.generics)
++        generic.trait_clauses;
++      close_over_trait_clauses (TraitClauseId.Set.union visited to_visit)
++    end
++  in
++  close_over_trait_clauses TraitClauseId.Set.empty;
+ 
+   (* Filter *)
+   let { types; const_generics; trait_clauses } : generic_params = generic in
+@@ -2793,7 +2813,7 @@ let get_tuple_size (e : texpr) : int option =
+   | _ -> None
+ 
+ let binop_can_fail : binop -> bool = function
+-  | FloatBinop _ -> false
++  | FloatBinop _ | BoolBinop _ -> false
+   | BitXor _ | BitAnd _ | BitOr _ | Eq _ | Lt _ | Le _ | Ne _ | Ge _ | Gt _
+   | Add (OWrap, _)
+   | Sub (OWrap, _)
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 39c2c45..92bbc63 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1159,6 +1159,17 @@ and translate_function_call_aux (call : S.call) (e : S.expr) (ctx : bs_ctx) :
+                     | _ -> [%craise] ctx.span "Invalid floating-point operation"
+                   in
+                   FloatBinop (ty, op)
++              | TLiteral TBool
++                when match binop with
++                     | Expressions.Lt | Le | Ge | Gt -> true
++                     | _ -> false ->
++                  [%sanity_check] ctx.span (arg0.ty = arg1.ty);
++                  BoolBinop
++                    (match binop with
++                    | Expressions.Lt -> BoolLt
++                    | Expressions.Le -> BoolLe
++                    | Expressions.Ge -> BoolGe
++                    | _ -> BoolGt)
+               | _ -> (
+                   match binop with
+                   | Expressions.BitXor -> BitXor (get_single_int_ty ())
+diff --git a/tests/lean/BoolOrder.lean b/tests/lean/BoolOrder.lean
+new file mode 100644
+index 0000000..2af0787
+--- /dev/null
++++ b/tests/lean/BoolOrder.lean
+@@ -0,0 +1,83 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [bool_order]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace bool_order
++
++/-- [bool_order::lt]:
++    Source: 'tests/src/bool-order.rs', lines 7:0-9:1
++    Visibility: public -/
++def lt
++  (a : _root_.Bool) (b : _root_.Bool) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Bool.lt a b)
++
++/-- [bool_order::order]:
++    Source: 'tests/src/bool-order.rs', lines 11:0-13:1
++    Visibility: public -/
++def order
++  (a : _root_.Bool) (b : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Bool × _root_.Bool ×
++    _root_.Bool)
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Bool.lt a b,
++    _root_.Aeneas.Std.Bool.le a b, _root_.Aeneas.Std.Bool.gt a b,
++    _root_.Aeneas.Std.Bool.ge a b)
++
++/-- [bool_order::max_flag]: loop body 0:
++    Source: 'tests/src/bool-order.rs', lines 18:4-23:5
++    Visibility: public -/
++@[rust_loop_body]
++def max_flag_loop.body
++  (flags : _root_.Aeneas.Std.Slice _root_.Bool) (max : _root_.Bool)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (_root_.Bool ×
++    _root_.Aeneas.Std.Usize) _root_.Bool)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len flags
++  if i < i1
++  then
++    let b ← Slice.index_usize flags i
++    let max1 ←
++      if _root_.Aeneas.Std.Bool.gt b max
++      then _root_.Aeneas.Std.Result.ok b
++      else _root_.Aeneas.Std.Result.ok max
++    let i2 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (max1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done max)
++
++/-- [bool_order::max_flag]: loop 0:
++    Source: 'tests/src/bool-order.rs', lines 18:4-23:5
++    Visibility: public -/
++@[rust_loop]
++def max_flag_loop
++  (flags : _root_.Aeneas.Std.Slice _root_.Bool) (max : _root_.Bool)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun (max1, i1) => _root_.bool_order.max_flag_loop.body flags max1 i1 :
++      (_root_.Bool × _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Bool × _root_.Aeneas.Std.Usize)
++      _root_.Bool))
++    (max, i)
++
++/-- [bool_order::max_flag]:
++    Source: 'tests/src/bool-order.rs', lines 15:0-25:1
++    Visibility: public -/
++@[reducible]
++def max_flag
++  (flags : _root_.Aeneas.Std.Slice _root_.Bool) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.bool_order.max_flag_loop flags false 0#usize
++
++end bool_order
+diff --git a/tests/lean/ClosureMutArgOrder.lean b/tests/lean/ClosureMutArgOrder.lean
+new file mode 100644
+index 0000000..9706201
+--- /dev/null
++++ b/tests/lean/ClosureMutArgOrder.lean
+@@ -0,0 +1 @@
++import ClosureMutArgOrder.Checks
+diff --git a/tests/lean/ClosureMutArgOrder/Checks.lean b/tests/lean/ClosureMutArgOrder/Checks.lean
+new file mode 100644
+index 0000000..af877a2
+--- /dev/null
++++ b/tests/lean/ClosureMutArgOrder/Checks.lean
+@@ -0,0 +1,41 @@
++import ClosureMutArgOrder.ClosureMutArgOrder
++
++/-! Evaluate the model of `tests/src/closure-mut-arg-order.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace closure_mut_arg_order.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def val {α} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++def pair : Result (U32 × U32) → Option (Nat × Nat) :=
++  val fun (r, x) => (r.val, x.val)
++
++def triple : Result ((U32 × U32) × U32) → Option (Nat × Nat × Nat) :=
++  val fun ((r, s), x) => (r.val, s.val, x.val)
++
++-- `Fn`: the argument is given back
++#guard pair (scaled (u 3) (u 7)) == some (21, 21)
++#guard pair (scaled (u 0) (u 5)) == some (0, 0)
++#guard pair (scaled (u 4294967295) (u 2)) == some (4294967294, 4294967294)
++
++-- `FnMut` mutably borrowing its state: the argument and the state are given back
++#guard triple (accumulate (u 1) (u 2)) == some (10, 4, 7)
++#guard triple (accumulate (u 0) (u 0)) == some (0, 0, 0)
++
++-- `FnMut` owning its state, of the same type as the argument
++#guard pair (counted (u 2) (u 3)) == some (30, 23)
++#guard pair (counted (u 5) (u 0)) == some (3, 2)
++
++-- `FnOnce` mutably borrowing its state
++#guard pair (once (u 1) (u 2)) == some (15, 8)
++
++-- A single mutable borrow
++#guard triple (bumped (u 10)) == some (35, 9, 22)
++#guard pair (stepped (u 1)) == some (26, 21)
++
++end closure_mut_arg_order.checks
+diff --git a/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean b/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean
+new file mode 100644
+index 0000000..5627664
+--- /dev/null
++++ b/tests/lean/ClosureMutArgOrder/ClosureMutArgOrder.lean
+@@ -0,0 +1,708 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [closure_mut_arg_order]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace closure_mut_arg_order
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst"])]
++structure
++  core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair T0 T1 T2 T3
++  call_mut : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1 × T0)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst"])]
++structure
++  core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :
++    _root_.closure_mut_arg_order.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++    T0 T1 T2 T3
++  call : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1)
++
++/-- [closure_mut_arg_order::accumulate::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 34:30-38:5 -/
++@[reducible]
++def accumulate.closure := _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<closure_mut_arg_order::accumulate::closure<'0>, (&'1 mut @T0, @T1), @T2>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<closure_mut_arg_order::accumulate::closure<'0>, (&'1 mut @T0, @T1), @T2>"]
++structure
++  core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29f
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  call_once : _root_.closure_mut_arg_order.accumulate.closure → (T0 × T1)
++    → _root_.Aeneas.Std.Result (T2 ×
++    _root_.closure_mut_arg_order.accumulate.closure × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<closure_mut_arg_order::accumulate::closure<'0>, (&'1 mut @T0, @T1), @T2>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<closure_mut_arg_order::accumulate::closure<'0>, (&'1 mut @T0, @T1), @T2>"
++  (parentClauses := ["FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29fInst"])]
++structure
++  core.ops.function.FnMutclosurePairMut1T0T1T2_specialized_20a690bd1b1d11bbd8b1c4ef9f583530
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29fInst
++    :
++    _root_.closure_mut_arg_order.core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29f
++    T0 T1 T2
++  call_mut : _root_.closure_mut_arg_order.accumulate.closure → (T0 × T1) →
++    _root_.Aeneas.Std.Result (T2 ×
++    _root_.closure_mut_arg_order.accumulate.closure ×
++    (_root_.closure_mut_arg_order.accumulate.closure →
++    _root_.closure_mut_arg_order.accumulate.closure) × T0)
++
++/-- [closure_mut_arg_order::bumped::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 74:26-78:5 -/
++@[reducible]
++def bumped.closure := _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<closure_mut_arg_order::bumped::closure<'0>, (&'1 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<closure_mut_arg_order::bumped::closure<'0>, (&'1 mut @T0), @T1>"]
++structure
++  core.ops.function.FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6ecc
++  (T0 : Type) (T1 : Type) where
++  call_once : _root_.closure_mut_arg_order.bumped.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.closure_mut_arg_order.bumped.closure
++    × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<closure_mut_arg_order::bumped::closure<'0>, (&'1 mut @T0), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<closure_mut_arg_order::bumped::closure<'0>, (&'1 mut @T0), @T1>"
++  (parentClauses := ["FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6eccInst"])]
++structure
++  core.ops.function.FnMutclosureTupleMut1T0T1_specialized_521b9eb6e14a11b51faf161ac3451bf3
++  (T0 : Type) (T1 : Type) where
++  FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6eccInst :
++    _root_.closure_mut_arg_order.core.ops.function.FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6ecc
++    T0 T1
++  call_mut : _root_.closure_mut_arg_order.bumped.closure → T0 →
++    _root_.Aeneas.Std.Result (T1 × _root_.closure_mut_arg_order.bumped.closure
++    × (_root_.closure_mut_arg_order.bumped.closure →
++    _root_.closure_mut_arg_order.bumped.closure) × T0)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1)), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1), @T2>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
++
++/-- [closure_mut_arg_order::once::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 58:29-62:5 -/
++@[reducible]
++def once.closure := _root_.Aeneas.Std.U32
++
++/-- Trait declaration: [core::ops::function::FnOnce::<closure_mut_arg_order::once::closure<0>, (&1 mut (T0), T1), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<closure_mut_arg_order::once::closure<'0>, (&'1 mut @T0, @T1), @T2>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<closure_mut_arg_order::once::closure<'0>, (&'1 mut @T0, @T1), @T2>"]
++structure
++  core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_a6e53c592721fd8fb5c040e4f18f35a0
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  call_once : _root_.closure_mut_arg_order.once.closure → (T0 × T1) →
++    _root_.Aeneas.Std.Result (T2 × _root_.closure_mut_arg_order.once.closure
++    × T0)
++
++/-- [closure_mut_arg_order::apply2]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 14:0-16:1
++    Visibility: public -/
++def apply2
++  {T0 : Type}
++  (coreopsfunctionFnT0PairMut0U32Shared1U32U32_specialized_1b57b25c37009051a1184d723a4cd435Inst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  coreopsfunctionFnT0PairMut0U32Shared1U32U32_specialized_1b57b25c37009051a1184d723a4cd435Inst.call
++    f (x, k)
++
++/-- [closure_mut_arg_order::scaled::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++@[reducible]
++def scaled.closure := _root_.Unit
++
++/-- [closure_mut_arg_order::scaled::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}::call]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnPairMutU32SharedU32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++  (c : _root_.closure_mut_arg_order.scaled.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (x, k) := tupled_args
++  let x1 ← lift (core.num.U32.wrapping_mul x k)
++  _root_.Aeneas.Std.Result.ok (x1, x1)
++
++/-- [closure_mut_arg_order::scaled::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}::call_mut]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++  (state : _root_.closure_mut_arg_order.scaled.closure)
++  (args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.scaled.closure)
++  := do
++  let (i, args1) ←
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32SharedU32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, args1, state)
++
++/-- [closure_mut_arg_order::scaled::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++def
++  scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++  (c : _root_.closure_mut_arg_order.scaled.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i, i1, _) ←
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- Trait implementation: [closure_mut_arg_order::scaled::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair
++  _root_.closure_mut_arg_order.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++}
++
++/-- Trait implementation: [closure_mut_arg_order::scaled::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  _root_.closure_mut_arg_order.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :=
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  call_mut :=
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++}
++
++/-- Trait implementation: [closure_mut_arg_order::scaled::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::scaled::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 19:17-22:5 -/
++@[reducible]
++def
++  scaled.closure.Insts.CoreOpsFunctionFnPairMutU32SharedU32U32_specialized_1b57b25c37009051a1184d723a4cd435
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  _root_.closure_mut_arg_order.scaled.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :=
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++  call :=
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32SharedU32U32_specialized_1b57b25c37009051a1184d723a4cd435.call
++}
++
++/-- [closure_mut_arg_order::scaled]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 18:0-23:1
++    Visibility: public -/
++def scaled
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.closure_mut_arg_order.apply2
++    _root_.closure_mut_arg_order.scaled.closure.Insts.CoreOpsFunctionFnPairMutU32SharedU32U32_specialized_1b57b25c37009051a1184d723a4cd435
++    x k ()
++
++/-- [closure_mut_arg_order::apply_twice]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 25:0-29:1
++    Visibility: public -/
++def apply_twice
++  {T0 : Type}
++  (coreopsfunctionFnMutT0PairMut0U32Shared1U32U32_specialized_f6c258c007f6ef4b68b676eb0292141bInst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, x1, f1) ←
++    coreopsfunctionFnMutT0PairMut0U32Shared1U32U32_specialized_f6c258c007f6ef4b68b676eb0292141bInst.call_mut
++      f (x, k)
++  let (b, x2, _) ←
++    coreopsfunctionFnMutT0PairMut0U32Shared1U32U32_specialized_f6c258c007f6ef4b68b676eb0292141bInst.call_mut
++      f1 (x1, k)
++  let i ← lift (core.num.U32.wrapping_add a b)
++  _root_.Aeneas.Std.Result.ok (i, x2)
++
++/-- [closure_mut_arg_order::apply_twice::<0, 1, closure_mut_arg_order::accumulate::closure<2>>]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 25:0-29:1
++    Visibility: public -/
++def apply_twice01closure_specialized_a9257968ed368e829972ef19e19b0b01
++  (coreopsfunctionFnMutclosurePairMut0U32Shared1U32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530Inst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutclosurePairMut1T0T1T2_specialized_20a690bd1b1d11bbd8b1c4ef9f583530
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (f : _root_.closure_mut_arg_order.accumulate.closure) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.accumulate.closure)
++  := do
++  let (a, f1, call_mut_back, x1) ←
++    coreopsfunctionFnMutclosurePairMut0U32Shared1U32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530Inst.call_mut
++      f (x, k)
++  let (b, c, call_mut_back1, x2) ←
++    coreopsfunctionFnMutclosurePairMut0U32Shared1U32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530Inst.call_mut
++      f1 (x1, k)
++  let i ← lift (core.num.U32.wrapping_add a b)
++  let c1 := call_mut_back1 c
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i, x2, c2)
++
++/-- [closure_mut_arg_order::accumulate::{core::ops::function::FnMut::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}::call_mut]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 34:30-38:5 -/
++def
++  accumulate.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530.call_mut
++  (c : _root_.closure_mut_arg_order.accumulate.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.accumulate.closure ×
++    (_root_.closure_mut_arg_order.accumulate.closure →
++    _root_.closure_mut_arg_order.accumulate.closure) × _root_.Aeneas.Std.U32)
++  := do
++  let (x, k) := tupled_args
++  let i ← lift (core.num.U32.wrapping_add c k)
++  let x1 ← lift (core.num.U32.wrapping_add x i)
++  let back :=
++    (fun c1 => c1 : _root_.closure_mut_arg_order.accumulate.closure →
++      _root_.closure_mut_arg_order.accumulate.closure)
++  _root_.Aeneas.Std.Result.ok (x1, i, back, x1)
++
++/-- [closure_mut_arg_order::accumulate::{core::ops::function::FnOnce::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 34:30-38:5 -/
++def
++  accumulate.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_b648ecc9fc190b52d98d79de1383c29f.call_once
++  (c : _root_.closure_mut_arg_order.accumulate.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.accumulate.closure × _root_.Aeneas.Std.U32)
++  := do
++  let (i, c1, call_mut_back, i1) ←
++    _root_.closure_mut_arg_order.accumulate.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530.call_mut
++      c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i, c2, i1)
++
++/-- Trait implementation: [closure_mut_arg_order::accumulate::{core::ops::function::FnOnce::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 34:30-38:5 -/
++@[reducible]
++def
++  accumulate.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_b648ecc9fc190b52d98d79de1383c29f
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29f
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.accumulate.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_b648ecc9fc190b52d98d79de1383c29f.call_once
++}
++
++/-- Trait implementation: [closure_mut_arg_order::accumulate::{core::ops::function::FnMut::<closure_mut_arg_order::accumulate::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 34:30-38:5 -/
++@[reducible]
++def
++  accumulate.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutclosurePairMut1T0T1T2_specialized_20a690bd1b1d11bbd8b1c4ef9f583530
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceclosurePairMut1T0T1T2_specialized_b648ecc9fc190b52d98d79de1383c29fInst
++    :=
++    _root_.closure_mut_arg_order.accumulate.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_b648ecc9fc190b52d98d79de1383c29f
++  call_mut :=
++    _root_.closure_mut_arg_order.accumulate.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530.call_mut
++}
++
++/-- [closure_mut_arg_order::accumulate]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 32:0-40:1
++    Visibility: public -/
++def accumulate
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, x1, c) ←
++    _root_.closure_mut_arg_order.apply_twice01closure_specialized_a9257968ed368e829972ef19e19b0b01
++      _root_.closure_mut_arg_order.accumulate.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_20a690bd1b1d11bbd8b1c4ef9f583530
++      x k 0#u32
++  _root_.Aeneas.Std.Result.ok ((r, c), x1)
++
++/-- [closure_mut_arg_order::counted::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 45:22-49:5 -/
++@[reducible]
++def counted.closure := _root_.Aeneas.Std.U32
++
++/-- [closure_mut_arg_order::counted::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::counted::closure}::call_mut]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 45:22-49:5 -/
++def
++  counted.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++  (c : _root_.closure_mut_arg_order.counted.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.counted.closure)
++  := do
++  let (x, k) := tupled_args
++  let i ← lift (core.num.U32.wrapping_add c 1#u32)
++  let i1 ← lift (core.num.U32.wrapping_mul x k)
++  let x1 ← lift (core.num.U32.wrapping_add i1 i)
++  _root_.Aeneas.Std.Result.ok (x1, x1, i)
++
++/-- [closure_mut_arg_order::counted::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::counted::closure}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 45:22-49:5 -/
++def
++  counted.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++  (c : _root_.closure_mut_arg_order.counted.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i, i1, _) ←
++    _root_.closure_mut_arg_order.counted.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- Trait implementation: [closure_mut_arg_order::counted::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::counted::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 45:22-49:5 -/
++@[reducible]
++def
++  counted.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair
++  _root_.closure_mut_arg_order.counted.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.counted.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++}
++
++/-- Trait implementation: [closure_mut_arg_order::counted::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, u32, &'_ (u32), u32> for closure_mut_arg_order::counted::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 45:22-49:5 -/
++@[reducible]
++def
++  counted.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  _root_.closure_mut_arg_order.counted.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :=
++    _root_.closure_mut_arg_order.counted.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  call_mut :=
++    _root_.closure_mut_arg_order.counted.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++}
++
++/-- [closure_mut_arg_order::counted]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 43:0-50:1
++    Visibility: public -/
++def counted
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.closure_mut_arg_order.apply_twice
++    _root_.closure_mut_arg_order.counted.closure.Insts.CoreOpsFunctionFnMutPairMutU32SharedU32U32_specialized_f6c258c007f6ef4b68b676eb0292141b
++    x k 0#u32
++
++/-- [closure_mut_arg_order::apply_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 52:0-54:1
++    Visibility: public -/
++def apply_once
++  {T0 : Type}
++  (coreopsfunctionFnOnceT0PairMut0U32Shared1U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair T0
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  coreopsfunctionFnOnceT0PairMut0U32Shared1U32U32_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst.call_once
++    f (x, k)
++
++/-- [closure_mut_arg_order::apply_once::<0, 1, closure_mut_arg_order::once::closure<2>>]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 52:0-54:1
++    Visibility: public -/
++def apply_once01closure_specialized_750a3a5e3d81bd500037ac7b459ad175
++  (coreopsfunctionFnOnceclosurePairMut0U32Shared1U32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0Inst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_a6e53c592721fd8fb5c040e4f18f35a0
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32)
++  (f : _root_.closure_mut_arg_order.once.closure) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.once.closure)
++  := do
++  let (i, c, x1) ←
++    coreopsfunctionFnOnceclosurePairMut0U32Shared1U32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0Inst.call_once
++      f (x, k)
++  _root_.Aeneas.Std.Result.ok (i, x1, c)
++
++/-- [closure_mut_arg_order::once::{core::ops::function::FnOnce::<closure_mut_arg_order::once::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 58:29-62:5 -/
++def
++  once.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0.call_once
++  (c : _root_.closure_mut_arg_order.once.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.once.closure × _root_.Aeneas.Std.U32)
++  := do
++  let (x, k) := tupled_args
++  let i ← lift (core.num.U32.wrapping_add c k)
++  let x1 ← lift (core.num.U32.wrapping_add x i)
++  _root_.Aeneas.Std.Result.ok (x1, i, x1)
++
++/-- Trait implementation: [closure_mut_arg_order::once::{core::ops::function::FnOnce::<closure_mut_arg_order::once::closure<0>, (&1 mut (T0), T1), T2><0, '_, &'_ (u32), u32> for u32}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 58:29-62:5 -/
++@[reducible]
++def
++  once.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnOnceclosurePairMut1T0T1T2_specialized_a6e53c592721fd8fb5c040e4f18f35a0
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.once.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0.call_once
++}
++
++/-- [closure_mut_arg_order::once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 56:0-64:1
++    Visibility: public -/
++def once
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, x1, c) ←
++    _root_.closure_mut_arg_order.apply_once01closure_specialized_750a3a5e3d81bd500037ac7b459ad175
++      _root_.closure_mut_arg_order.once.closure.Insts.CoreOpsFunctionFnOncePairMutU32SharedU32U32_specialized_a6e53c592721fd8fb5c040e4f18f35a0
++      x k 5#u32
++  let i ← lift (core.num.U32.wrapping_add r c)
++  _root_.Aeneas.Std.Result.ok (i, x1)
++
++/-- [closure_mut_arg_order::bump_twice]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 66:0-70:1
++    Visibility: public -/
++def bump_twice
++  {T0 : Type}
++  (coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  T0 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (f : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (a, x1, f1) ←
++    coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
++      f x
++  let (b, x2, _) ←
++    coreopsfunctionFnMutT0TupleMut0U32U32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
++      f1 x1
++  let i ← lift (core.num.U32.wrapping_add a b)
++  _root_.Aeneas.Std.Result.ok (i, x2)
++
++/-- [closure_mut_arg_order::bump_twice::<0, closure_mut_arg_order::bumped::closure<1>>]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 66:0-70:1
++    Visibility: public -/
++def bump_twice0closure_specialized_9d60786b931dc55acf04be03e4ba8d04
++  (coreopsfunctionFnMutclosureTupleMut0U32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3Inst
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutclosureTupleMut1T0T1_specialized_521b9eb6e14a11b51faf161ac3451bf3
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (f : _root_.closure_mut_arg_order.bumped.closure) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.bumped.closure)
++  := do
++  let (a, f1, call_mut_back, x1) ←
++    coreopsfunctionFnMutclosureTupleMut0U32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3Inst.call_mut
++      f x
++  let (b, c, call_mut_back1, x2) ←
++    coreopsfunctionFnMutclosureTupleMut0U32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3Inst.call_mut
++      f1 x1
++  let i ← lift (core.num.U32.wrapping_add a b)
++  let c1 := call_mut_back1 c
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i, x2, c2)
++
++/-- [closure_mut_arg_order::bumped::{core::ops::function::FnMut::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1><0, '_, u32> for u32}::call_mut]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 74:26-78:5 -/
++def
++  bumped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3.call_mut
++  (c : _root_.closure_mut_arg_order.bumped.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.bumped.closure ×
++    (_root_.closure_mut_arg_order.bumped.closure →
++    _root_.closure_mut_arg_order.bumped.closure) × _root_.Aeneas.Std.U32)
++  := do
++  let i ← lift (core.num.U32.wrapping_mul c 3#u32)
++  let x ← lift (core.num.U32.wrapping_add tupled_args i)
++  let back :=
++    (fun c1 => c1 : _root_.closure_mut_arg_order.bumped.closure →
++      _root_.closure_mut_arg_order.bumped.closure)
++  _root_.Aeneas.Std.Result.ok (x, i, back, x)
++
++/-- [closure_mut_arg_order::bumped::{core::ops::function::FnOnce::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1><0, '_, u32> for u32}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 74:26-78:5 -/
++def
++  bumped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_90751a1eae03475db3869ed00f7f6ecc.call_once
++  (c : _root_.closure_mut_arg_order.bumped.closure) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.bumped.closure × _root_.Aeneas.Std.U32)
++  := do
++  let (i1, c1, call_mut_back, i2) ←
++    _root_.closure_mut_arg_order.bumped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2, i2)
++
++/-- Trait implementation: [closure_mut_arg_order::bumped::{core::ops::function::FnOnce::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1><0, '_, u32> for u32}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 74:26-78:5 -/
++@[reducible]
++def
++  bumped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_90751a1eae03475db3869ed00f7f6ecc
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6ecc
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.bumped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_90751a1eae03475db3869ed00f7f6ecc.call_once
++}
++
++/-- Trait implementation: [closure_mut_arg_order::bumped::{core::ops::function::FnMut::<closure_mut_arg_order::bumped::closure<0>, (&1 mut (T0)), T1><0, '_, u32> for u32}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 74:26-78:5 -/
++@[reducible]
++def
++  bumped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutclosureTupleMut1T0T1_specialized_521b9eb6e14a11b51faf161ac3451bf3
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  FnOnceclosureTupleMut1T0T1_specialized_90751a1eae03475db3869ed00f7f6eccInst
++    :=
++    _root_.closure_mut_arg_order.bumped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_90751a1eae03475db3869ed00f7f6ecc
++  call_mut :=
++    _root_.closure_mut_arg_order.bumped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3.call_mut
++}
++
++/-- [closure_mut_arg_order::bumped]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 72:0-80:1
++    Visibility: public -/
++def bumped
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, x1, c) ←
++    _root_.closure_mut_arg_order.bump_twice0closure_specialized_9d60786b931dc55acf04be03e4ba8d04
++      _root_.closure_mut_arg_order.bumped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_521b9eb6e14a11b51faf161ac3451bf3
++      x 1#u32
++  _root_.Aeneas.Std.Result.ok ((r, c), x1)
++
++/-- [closure_mut_arg_order::stepped::closure]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 85:18-89:5 -/
++@[reducible]
++def stepped.closure := _root_.Aeneas.Std.U32
++
++/-- [closure_mut_arg_order::stepped::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, u32> for closure_mut_arg_order::stepped::closure}::call_mut]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 85:18-89:5 -/
++def
++  stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++  (c : _root_.closure_mut_arg_order.stepped.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.closure_mut_arg_order.stepped.closure)
++  := do
++  let i ← lift (core.num.U32.wrapping_mul c c)
++  let x ← lift (core.num.U32.wrapping_add tupled_args i)
++  _root_.Aeneas.Std.Result.ok (x, x, i)
++
++/-- [closure_mut_arg_order::stepped::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for closure_mut_arg_order::stepped::closure}::call_once]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 85:18-89:5 -/
++def
++  stepped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++  (c : _root_.closure_mut_arg_order.stepped.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (i1, i2, _) ←
++    _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok (i1, i2)
++
++/-- Trait implementation: [closure_mut_arg_order::stepped::{core::ops::function::FnOnce::<T0, (&0 mut (T1)), T2><'_, u32, u32> for closure_mut_arg_order::stepped::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 85:18-89:5 -/
++@[reducible]
++def
++  stepped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArg
++  _root_.closure_mut_arg_order.stepped.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2.call_once
++}
++
++/-- Trait implementation: [closure_mut_arg_order::stepped::{core::ops::function::FnMut::<T0, (&0 mut (T1)), T2><'_, u32, u32> for closure_mut_arg_order::stepped::closure}]
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 85:18-89:5 -/
++@[reducible]
++def
++  stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
++  :
++  _root_.closure_mut_arg_order.core.ops.function.FnMutT0TupleMut0T1T2_specialized_943e173885df97b2ecc8767154e6953d
++  _root_.closure_mut_arg_order.stepped.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :=
++    _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32U32_specialized_c5f0f7ab03657a9084c6b05c241e7dc2
++  call_mut :=
++    _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d.call_mut
++}
++
++/-- [closure_mut_arg_order::stepped]:
++    Source: 'tests/src/closure-mut-arg-order.rs', lines 83:0-90:1
++    Visibility: public -/
++def stepped
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.closure_mut_arg_order.bump_twice
++    _root_.closure_mut_arg_order.stepped.closure.Insts.CoreOpsFunctionFnMutTupleMutU32U32_specialized_943e173885df97b2ecc8767154e6953d
++    x 2#u32
++
++end closure_mut_arg_order
+diff --git a/tests/lean/GenericIntoIteratorLoop.lean b/tests/lean/GenericIntoIteratorLoop.lean
+new file mode 100644
+index 0000000..4c4d9d3
+--- /dev/null
++++ b/tests/lean/GenericIntoIteratorLoop.lean
+@@ -0,0 +1 @@
++import GenericIntoIteratorLoop.Checks
+diff --git a/tests/lean/GenericIntoIteratorLoop/Checks.lean b/tests/lean/GenericIntoIteratorLoop/Checks.lean
+new file mode 100644
+index 0000000..993a297
+--- /dev/null
++++ b/tests/lean/GenericIntoIteratorLoop/Checks.lean
+@@ -0,0 +1,22 @@
++import GenericIntoIteratorLoop.GenericIntoIteratorLoop
++
++/-! Evaluate the model of `tests/src/generic-into-iterator-loop.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++namespace generic_into_iterator_loop.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nat (r : Result U32) : Option Nat :=
++  match r with | ok v => some v.val | _ => none
++def totals (r : Result (U32 × U32 × Bool)) : Option (Nat × Nat × Bool) :=
++  match r with | ok (count, total, empty) => some (count.val, total.val, empty) | _ => none
++#guard nat (owned_sum (vec [1, 2, 3])) == some 6
++#guard nat (owned_sum (vec [])) == some 0
++#guard nat (shared_sum (sl [4, 5])) == some 9
++#guard nat (shared_sum (sl [])) == some 0
++#guard totals (built_map_totals (sl [3, 1, 2, 3])) == some (3, 20, false)
++#guard totals (built_map_totals (sl [])) == some (0, 0, true)
++end generic_into_iterator_loop.checks
+diff --git a/tests/lean/GenericIntoIteratorLoop/GenericIntoIteratorLoop.lean b/tests/lean/GenericIntoIteratorLoop/GenericIntoIteratorLoop.lean
+new file mode 100644
+index 0000000..8f9b1db
+--- /dev/null
++++ b/tests/lean/GenericIntoIteratorLoop/GenericIntoIteratorLoop.lean
+@@ -0,0 +1,362 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [generic_into_iterator_loop]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace generic_into_iterator_loop
++
++/-- [generic_into_iterator_loop::sum]: loop body 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 15:4-17:5 -/
++@[rust_loop_body]
++def sum_loop.body
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (iter : Clause0_IntoIter)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst.iteratorInst.next
++      iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++  | some value =>
++    let total1 ← total + value
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, total1))
++
++/-- [generic_into_iterator_loop::sum]: loop 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 15:4-17:5 -/
++@[rust_loop]
++def sum_loop
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (iter : Clause0_IntoIter)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, total1) => _root_.generic_into_iterator_loop.sum_loop.body
++       coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst iter1 total1 :
++      (Clause0_IntoIter × _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, total)
++
++/-- [generic_into_iterator_loop::sum]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 13:0-19:1 -/
++def sum
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (values : I) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst.into_iter values
++  _root_.generic_into_iterator_loop.sum_loop
++    coreitertraitscollectIntoIteratorIU32Clause0_IntoIterInst model_state 0#u32
++
++/-- [generic_into_iterator_loop::sum_shared]: loop body 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 23:4-25:5 -/
++@[rust_loop_body]
++def sum_shared_loop.body
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorISharedU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (iter : Clause0_IntoIter)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    coreitertraitscollectIntoIteratorISharedU32Clause0_IntoIterInst.iteratorInst.next
++      iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++  | some value =>
++    let total1 ← total + value
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, total1))
++
++/-- [generic_into_iterator_loop::sum_shared]: loop 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 23:4-25:5 -/
++@[rust_loop]
++def sum_shared_loop
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorISharedU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (iter : Clause0_IntoIter)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, total1) =>
++       _root_.generic_into_iterator_loop.sum_shared_loop.body
++       coreitertraitscollectIntoIteratorISharedU32Clause0_IntoIterInst iter1
++       total1 : (Clause0_IntoIter × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter
++      × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, total)
++
++/-- [generic_into_iterator_loop::sum_shared]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 21:0-27:1 -/
++def sum_shared
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorISharedAU32Clause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  _root_.Aeneas.Std.U32 Clause0_IntoIter) (values : I) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    coreitertraitscollectIntoIteratorISharedAU32Clause0_IntoIterInst.into_iter
++      values
++  _root_.generic_into_iterator_loop.sum_shared_loop
++    coreitertraitscollectIntoIteratorISharedAU32Clause0_IntoIterInst
++    model_state 0#u32
++
++/-- [generic_into_iterator_loop::count_entries]: loop body 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 31:4-33:5 -/
++@[rust_loop_body]
++def count_entries_loop.body
++  {K : Type} {V : Type} {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedKSharedVClause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I (K × V)
++  Clause0_IntoIter) (iter : Clause0_IntoIter) (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    coreitertraitscollectIntoIteratorIPairSharedKSharedVClause0_IntoIterInst.iteratorInst.next
++      iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done count)
++  | some _ =>
++    let count1 ← count + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, count1))
++
++/-- [generic_into_iterator_loop::count_entries]: loop 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 31:4-33:5 -/
++@[rust_loop]
++def count_entries_loop
++  {K : Type} {V : Type} {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedKSharedVClause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I (K × V)
++  Clause0_IntoIter) (iter : Clause0_IntoIter) (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, count1) =>
++       _root_.generic_into_iterator_loop.count_entries_loop.body
++       coreitertraitscollectIntoIteratorIPairSharedKSharedVClause0_IntoIterInst
++       iter1 count1 : (Clause0_IntoIter × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter
++      × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, count)
++
++/-- [generic_into_iterator_loop::count_entries]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 29:0-35:1 -/
++def count_entries
++  {K : Type} {V : Type} {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedAKSharedAVClause0_IntoIterInst :
++  _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I (K × V)
++  Clause0_IntoIter) (entries : I) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    coreitertraitscollectIntoIteratorIPairSharedAKSharedAVClause0_IntoIterInst.into_iter
++      entries
++  _root_.generic_into_iterator_loop.count_entries_loop
++    coreitertraitscollectIntoIteratorIPairSharedAKSharedAVClause0_IntoIterInst
++    model_state 0#u32
++
++/-- [generic_into_iterator_loop::weighted_total]: loop body 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 39:4-41:5 -/
++@[rust_loop_body]
++def weighted_total_loop.body
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedU32SharedU32Clause0_IntoIterInst
++  : _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) Clause0_IntoIter)
++  (iter : Clause0_IntoIter) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    coreitertraitscollectIntoIteratorIPairSharedU32SharedU32Clause0_IntoIterInst.iteratorInst.next
++      iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done total)
++  | some p =>
++    let (key, value) := p
++    let i ← key * value
++    let total1 ← total + i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, total1))
++
++/-- [generic_into_iterator_loop::weighted_total]: loop 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 39:4-41:5 -/
++@[rust_loop]
++def weighted_total_loop
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedU32SharedU32Clause0_IntoIterInst
++  : _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) Clause0_IntoIter)
++  (iter : Clause0_IntoIter) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, total1) =>
++       _root_.generic_into_iterator_loop.weighted_total_loop.body
++       coreitertraitscollectIntoIteratorIPairSharedU32SharedU32Clause0_IntoIterInst
++       iter1 total1 : (Clause0_IntoIter × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause0_IntoIter
++      × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, total)
++
++/-- [generic_into_iterator_loop::weighted_total]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 37:0-43:1 -/
++def weighted_total
++  {I : Type} {Clause0_IntoIter : Type}
++  (coreitertraitscollectIntoIteratorIPairSharedAU32SharedAU32Clause0_IntoIterInst
++  : _root_.Aeneas.Std.core.iter.traits.collect.IntoIterator I
++  (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) Clause0_IntoIter)
++  (entries : I) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    coreitertraitscollectIntoIteratorIPairSharedAU32SharedAU32Clause0_IntoIterInst.into_iter
++      entries
++  _root_.generic_into_iterator_loop.weighted_total_loop
++    coreitertraitscollectIntoIteratorIPairSharedAU32SharedAU32Clause0_IntoIterInst
++    model_state 0#u32
++
++/-- [generic_into_iterator_loop::owned_sum]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 45:0-47:1
++    Visibility: public -/
++def owned_sum
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.generic_into_iterator_loop.sum
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++    _root_.Aeneas.Std.U32) values
++
++/-- [generic_into_iterator_loop::shared_sum]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 49:0-51:1
++    Visibility: public -/
++def shared_sum
++  (values : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.generic_into_iterator_loop.sum_shared
++    (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++    _root_.Aeneas.Std.U32) values
++
++/-- [generic_into_iterator_loop::map_totals]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 53:0-55:1
++    Visibility: public -/
++def map_totals
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let i ←
++    _root_.generic_into_iterator_loop.count_entries
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) map
++  let i1 ←
++    _root_.generic_into_iterator_loop.weighted_total
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) map
++  _root_.Aeneas.Std.Result.ok (i, i1)
++
++/-- [generic_into_iterator_loop::built_map_totals]: loop body 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 60:4-62:5
++    Visibility: public -/
++@[rust_loop_body]
++def built_map_totals_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done map)
++  | some key =>
++    let i ← key + 1#u32
++    let (_, map1) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++        core.cmp.OrdU32 map key i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, map1))
++
++/-- [generic_into_iterator_loop::built_map_totals]: loop 0:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 60:4-62:5
++    Visibility: public -/
++@[rust_loop]
++def built_map_totals_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, map1) =>
++       _root_.generic_into_iterator_loop.built_map_totals_loop.body iter1 map1
++      : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++    (iter, map)
++
++/-- [generic_into_iterator_loop::built_map_totals]:
++    Source: 'tests/src/generic-into-iterator-loop.rs', lines 58:0-65:1
++    Visibility: public -/
++def built_map_totals
++  (keys : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool)
++  := do
++  let map ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter keys
++  let map1 ←
++    _root_.generic_into_iterator_loop.built_map_totals_loop model_state map
++  let (count, total) ← _root_.generic_into_iterator_loop.map_totals map1
++  let b ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.is_empty map1
++  _root_.Aeneas.Std.Result.ok (count, total, b)
++
++end generic_into_iterator_loop
+diff --git a/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+index 185b5ff..8b3cd4e 100644
+--- a/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
++++ b/tests/lean/LoopJoinBorrows/LoopJoinBorrows.lean
+@@ -57,7 +57,7 @@ structure
+   (T0 : Type) (T1 : Type) (T2 : Type) where
+   FnOnceT0TupleMut0T1T2_specialized_c5f0f7ab03657a9084c6b05c241e7dc2Inst :
+     _root_.Aeneas.Std.core.ops.function.FnOnceMutArg T0 T1 T2
+-  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T0 × T1)
++  call_mut : T0 → T1 → _root_.Aeneas.Std.Result (T2 × T1 × T0)
+ 
+ /-- [loop_join_borrows::slice_of_refs]: loop body 0:
+     Source: 'tests/src/loop-join-borrows.rs', lines 18:4-23:5
+@@ -488,7 +488,7 @@ def apply_loop.body
+   := do
+   if i < n
+   then
+-    let (last1, f1, x1) ←
++    let (last1, x1, f1) ←
+       coreopsfunctionFnMutFTupleMutTU32_specialized_943e173885df97b2ecc8767154e6953dInst.call_mut
+         f x
+     let i1 ← i + 1#u32
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index e504d0a..ccaac09 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -18,12 +18,14 @@ package «tests» {}
+ @[default_target] lean_lib BaseTutorial
+ @[default_target] lean_lib Bitwise
+ @[default_target] lean_lib BlanketImpl
++@[default_target] lean_lib BoolOrder
+ @[default_target] lean_lib Builtin
+ @[default_target] lean_lib CharSwitch
+ @[default_target] lean_lib Issue804ClosureReturnRef
+ @[default_target] lean_lib Closures
+ @[default_target] lean_lib ClosureSharedContext
+ @[default_target] lean_lib ClosureMutContext
++@[default_target] lean_lib ClosureMutArgOrder
+ @[default_target] lean_lib ZipBorrowedAdapters
+ @[default_target] lean_lib NestedBorrowsFourLevels
+ @[default_target] lean_lib ConstShadow
+@@ -47,6 +49,7 @@ package «tests» {}
+ @[default_target] lean_lib Dyn
+ @[default_target] lean_lib DynamicSize
+ @[default_target] lean_lib FromTo
++@[default_target] lean_lib GenericIntoIteratorLoop
+ @[default_target] lean_lib Hashmap
+ @[default_target] lean_lib Into
+ @[default_target] lean_lib Iterators
+diff --git a/tests/src/bool-order.rs b/tests/src/bool-order.rs
+new file mode 100644
+index 0000000..90a97c1
+--- /dev/null
++++ b/tests/src/bool-order.rs
+@@ -0,0 +1,25 @@
++//@ [!lean] skip
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Ordered comparisons of `bool` are primitive MIR comparisons, with
++//! `false < true`: the symbolic interpreter types them as booleans and the
++//! translation extracts them to `Aeneas.Std.Bool.lt`/`le`/`gt`/`ge`.
++
++pub fn lt(a: bool, b: bool) -> bool {
++    a < b
++}
++
++pub fn order(a: bool, b: bool) -> (bool, bool, bool, bool) {
++    (a < b, a <= b, a > b, a >= b)
++}
++
++pub fn max_flag(flags: &[bool]) -> bool {
++    let mut max = false;
++    let mut i = 0;
++    while i < flags.len() {
++        if flags[i] > max {
++            max = flags[i];
++        }
++        i += 1;
++    }
++    max
++}
+diff --git a/tests/src/closure-mut-arg-order.rs b/tests/src/closure-mut-arg-order.rs
+new file mode 100644
+index 0000000..1ba804c
+--- /dev/null
++++ b/tests/src/closure-mut-arg-order.rs
+@@ -0,0 +1,143 @@
++//@ [!lean] skip
++//@ [lean] subdir=ClosureMutArgOrder
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Closures taking a mutable borrow. Charon's partial monomorphization
++//! specializes `FnMut<Self, (&'a mut T, U)>` into a trait with a region
++//! parameter `'a`, and lays out its `call_mut` method as `<'self, 'a, ..>`,
++//! while the closure's implementation of `call_mut` is laid out as usual,
++//! `<'a, .., 'self>`. The region order determines the order of the given back
++//! values: the trait method field and its implementations must agree on it
++//! (the closure state and the argument have the same type in `counted`, so a
++//! disagreement would silently swap them).
++
++pub fn apply2(x: &mut u32, k: &u32, f: impl Fn(&mut u32, &u32) -> u32) -> u32 {
++    f(x, k)
++}
++
++pub fn scaled(x: &mut u32, k: &u32) -> u32 {
++    apply2(x, k, |x, k| {
++        *x = x.wrapping_mul(*k);
++        *x
++    })
++}
++
++pub fn apply_twice(x: &mut u32, k: &u32, mut f: impl FnMut(&mut u32, &u32) -> u32) -> u32 {
++    let a = f(x, k);
++    let b = f(x, k);
++    a.wrapping_add(b)
++}
++
++/// The closure mutably borrows `total`.
++pub fn accumulate(x: &mut u32, k: &u32) -> (u32, u32) {
++    let mut total = 0u32;
++    let r = apply_twice(x, k, |x, k| {
++        total = total.wrapping_add(*k);
++        *x = x.wrapping_add(total);
++        *x
++    });
++    (r, total)
++}
++
++/// The closure owns its state, which the first call updates for the second.
++pub fn counted(x: &mut u32, k: &u32) -> u32 {
++    let mut n = 0u32;
++    apply_twice(x, k, move |x, k| {
++        n = n.wrapping_add(1);
++        *x = x.wrapping_mul(*k).wrapping_add(n);
++        *x
++    })
++}
++
++pub fn apply_once(x: &mut u32, k: &u32, f: impl FnOnce(&mut u32, &u32) -> u32) -> u32 {
++    f(x, k)
++}
++
++pub fn once(x: &mut u32, k: &u32) -> u32 {
++    let mut total = 5u32;
++    let r = apply_once(x, k, |x, k| {
++        total = total.wrapping_add(*k);
++        *x = x.wrapping_add(total);
++        *x
++    });
++    r.wrapping_add(total)
++}
++
++pub fn bump_twice(x: &mut u32, mut f: impl FnMut(&mut u32) -> u32) -> u32 {
++    let a = f(x);
++    let b = f(x);
++    a.wrapping_add(b)
++}
++
++pub fn bumped(x: &mut u32) -> (u32, u32) {
++    let mut step = 1u32;
++    let r = bump_twice(x, |x| {
++        step = step.wrapping_mul(3);
++        *x = x.wrapping_add(step);
++        *x
++    });
++    (r, step)
++}
++
++/// The closure owns its state and takes a single mutable borrow.
++pub fn stepped(x: &mut u32) -> u32 {
++    let mut step = 2u32;
++    bump_twice(x, move |x| {
++        step = step.wrapping_mul(step);
++        *x = x.wrapping_add(step);
++        *x
++    })
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn scaled_native() {
++        for (x, k, r) in [(3u32, 7u32, 21u32), (0, 5, 0), (u32::MAX, 2, u32::MAX - 1)] {
++            let mut x = x;
++            assert_eq!(scaled(&mut x, &k), r);
++            assert_eq!(x, r);
++        }
++    }
++
++    #[test]
++    fn accumulate_native() {
++        for (x, k, out, x_after) in [(1u32, 2u32, (10u32, 4u32), 7u32), (0, 0, (0, 0), 0)] {
++            let mut x = x;
++            assert_eq!(accumulate(&mut x, &k), out);
++            assert_eq!(x, x_after);
++        }
++    }
++
++    #[test]
++    fn counted_native() {
++        for (x, k, r, x_after) in [(2u32, 3u32, 30u32, 23u32), (5, 0, 3, 2)] {
++            let mut x = x;
++            assert_eq!(counted(&mut x, &k), r);
++            assert_eq!(x, x_after);
++        }
++    }
++
++    #[test]
++    fn once_native() {
++        let mut x = 1u32;
++        assert_eq!(once(&mut x, &2), 15);
++        assert_eq!(x, 8);
++    }
++
++    #[test]
++    fn bumped_native() {
++        let mut x = 10u32;
++        assert_eq!(bumped(&mut x), (35, 9));
++        assert_eq!(x, 22);
++    }
++
++    #[test]
++    fn stepped_native() {
++        let mut x = 1u32;
++        assert_eq!(stepped(&mut x), 5 + 21);
++        assert_eq!(x, 21);
++    }
++}
+diff --git a/tests/src/generic-into-iterator-loop.rs b/tests/src/generic-into-iterator-loop.rs
+new file mode 100644
+index 0000000..5adbe3a
+--- /dev/null
++++ b/tests/src/generic-into-iterator-loop.rs
+@@ -0,0 +1,80 @@
++//@ [!lean] skip
++//@ [lean] subdir=GenericIntoIteratorLoop
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops over a generic `I: IntoIterator`. With lifted associated types the
++//! loop only mentions the lifted `Clause0_IntoIter` and the clause
++//! `IntoIterator<I, Item, Clause0_IntoIter>`, not `I` (nor `K`, `V`): the loop
++//! functions must still bind every parameter their clauses refer to ("Could not
++//! find: type_var_id"). GenericIntoIteratorLoop/Checks.lean compares the model
++//! with the native results asserted in the native test module.
++use std::collections::BTreeMap;
++
++fn sum<I: IntoIterator<Item = u32>>(values: I) -> u32 {
++    let mut total = 0;
++    for value in values {
++        total += value;
++    }
++    total
++}
++
++fn sum_shared<'a, I: IntoIterator<Item = &'a u32>>(values: I) -> u32 {
++    let mut total = 0;
++    for value in values {
++        total += *value;
++    }
++    total
++}
++
++fn count_entries<'a, K: 'a, V: 'a, I: IntoIterator<Item = (&'a K, &'a V)>>(entries: I) -> u32 {
++    let mut count = 0;
++    for (_key, _value) in entries {
++        count += 1;
++    }
++    count
++}
++
++fn weighted_total<'a, I: IntoIterator<Item = (&'a u32, &'a u32)>>(entries: I) -> u32 {
++    let mut total = 0;
++    for (key, value) in entries {
++        total += *key * *value;
++    }
++    total
++}
++
++pub fn owned_sum(values: Vec<u32>) -> u32 {
++    sum(values)
++}
++
++pub fn shared_sum(values: &[u32]) -> u32 {
++    sum_shared(values)
++}
++
++pub fn map_totals(map: &BTreeMap<u32, u32>) -> (u32, u32) {
++    (count_entries(map), weighted_total(map))
++}
++
++/// The map outlives the shared borrows the generic loops consumed.
++pub fn built_map_totals(keys: &[u32]) -> (u32, u32, bool) {
++    let mut map = BTreeMap::new();
++    for key in keys {
++        map.insert(*key, *key + 1);
++    }
++    let (count, total) = map_totals(&map);
++    (count, total, map.is_empty())
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn generic_loops() {
++        assert_eq!(owned_sum(vec![1, 2, 3]), 6);
++        assert_eq!(owned_sum(vec![]), 0);
++        assert_eq!(shared_sum(&[4, 5]), 9);
++        assert_eq!(shared_sum(&[]), 0);
++        assert_eq!(built_map_totals(&[3, 1, 2, 3]), (3, 20, false));
++        assert_eq!(built_map_totals(&[]), (0, 0, true));
++    }
++}

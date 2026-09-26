@@ -1,0 +1,4198 @@
+# aeneas integration step 26 after cba11f3beb: commit 1768422aecd2d02ce6f7bf3bf05d6e445fe6f7e1
+# first parent eaf404e0504702036f1665796b410036b68f98bd, merged db1f47661f97cf21ce3c0d25bdf3e2fbaa574892
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/loop-exits'
+#
+# # Conflicts:
+# #	src/llbc/CollectionContracts.ml
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 921b4d1..54d6d67 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -389,8 +389,10 @@ type loop_continuation = {
+     the loop. This keeps return values and scoped locals on their original
+     paths, including when one serial loop is nested in another's continuation.
+ 
+-    A continuation which resumes an outer iteration, and a nonlocal continue,
+-    remain unsupported. Do not merge them with function-returning paths. *)
++    A loop whose returns share it with breaks resuming an outer iteration keeps
++    its local breaks: its returns become breaks of the nearest enclosing
++    returning loop, which the symbolic interpreter handles as a separate exit
++    of the inner loop, like continues and breaks to outer loops. *)
+ let update_loops (crate : crate) (f : fun_decl) : fun_decl =
+   let f0 = f in
+   let span = f.item_meta.span in
+@@ -489,18 +491,15 @@ let update_loops (crate : crate) (f : fun_decl) : fun_decl =
+         match st.kind with
+         | Return -> [ { st with kind = return_kind } ]
+         | Abort _ -> [ st ]
+-        | Continue i ->
+-            [%cassert] st.span (i = 0)
+-              "Continue to outer loops are not supported yet";
++        | Continue _ ->
++            (* A continue to an outer loop is a separate exit of the inner loops
++               (see [InterpLoops.eval_loop_symbolic]). *)
+             [ st ]
+         | Break i ->
+             let target = enclosing loops i in
+             if target.returns_to_function then
+               normalize target.outer_loops return_kind target.after_loop
+-            else (
+-              [%cassert] st.span (i = 0)
+-                "Breaks to non-returning outer loops are not supported yet";
+-              [ st ])
++            else [ st ]
+         | Switch switch ->
+             (* Only returning loops need an enclosing branch's continuation.
+                Keep other joins to avoid exponential duplication of independent
+@@ -533,19 +532,24 @@ let update_loops (crate : crate) (f : fun_decl) : fun_decl =
+             { st with kind = Switch switch }
+             :: (if distribute then [] else normalize loops return_kind after)
+         | Loop body ->
++            let has_function_exit = has_function_exit loops body in
+             let returns_to_function =
+-              has_function_exit loops body
++              has_function_exit
+               || has_break ~nonlocal:true body
+                  && completes_function loops after
+             in
++            (* The loop's own breaks resume an outer iteration while other paths
++               leave the function: keep the breaks, and leave the function
++               through the enclosing loop which completes it. *)
++            let mixed =
++              returns_to_function && has_break body
++              && not (completes_function loops after)
++            in
++            let returns_to_function = returns_to_function && not mixed in
+             let current =
+               { after_loop = after; outer_loops = loops; returns_to_function }
+             in
+             if returns_to_function then (
+-              [%cassert] st.span
+-                ((not (has_break body)) || completes_function loops after)
+-                "Early returns from a loop whose continuation resumes an outer \
+-                 iteration are not supported yet";
+               let body =
+                 {
+                   body with
+@@ -555,11 +559,22 @@ let update_loops (crate : crate) (f : fun_decl) : fun_decl =
+               in
+               [ { st with kind = Loop body }; mk_statement st.span return_kind ])
+             else
++              let body_return_kind =
++                if mixed then (
++                  match return_kind with
++                  | Break i -> Break (i + 1)
++                  | _ ->
++                      [%craise] st.span
++                        "A loop which resumes an outer iteration must be \
++                         nested in a loop")
++                else return_kind
++              in
+               let body =
+                 {
+                   body with
+                   statements =
+-                    normalize (current :: loops) return_kind body.statements;
++                    normalize (current :: loops) body_return_kind
++                      body.statements;
+                 }
+               in
+               { st with kind = Loop body } :: normalize loops return_kind after
+@@ -3512,6 +3527,107 @@ let reborrow_mutable_copies (_crate : crate) (f : fun_decl) : fun_decl =
+       }
+   | _ -> f
+ 
++(** A switch over a [char] has no symbolic integer expansion. Test its values
++    in order with [==] instead: the scrutinee is a copyable [char], and the
++    branches are left in place (a group of values sets a flag, so its branch is
++    not duplicated). *)
++let expand_char_switches (_crate : crate) (f : fun_decl) : fun_decl =
++  match f.body with
++  | StructuredBody body ->
++      let new_locals = ref [] in
++      let _, gen =
++        LocalId.mk_stateful_generator_starting_at_id
++          (LocalId.of_int (List.length body.locals.locals))
++      in
++      let bool_ty = TLiteral TBool in
++      let fresh span : place =
++        let local = { index = gen (); local_ty = bool_ty; name = None; span } in
++        new_locals := local :: !new_locals;
++        { kind = PlaceLocal local.index; ty = bool_ty }
++      in
++      let mk span kind : statement =
++        { span; statement_id = StatementId.zero; kind; comments_before = [] }
++      in
++      let block span statements : block = { span; statements } in
++      let bool_const b : operand =
++        Constant { kind = CLiteral (VBool b); ty = bool_ty }
++      in
++      let rewrite (st : statement) : statement list =
++        match st.kind with
++        | Switch (SwitchInt (op, TChar, targets, otherwise)) ->
++            let span = st.span in
++            let op =
++              match op with
++              | Move p -> Copy p
++              | _ -> op
++            in
++            (* [dest := op == value] *)
++            let test (dest : place) (value : Values.literal) : statement =
++              mk span
++                (Assign
++                   ( dest,
++                     BinaryOp
++                       ( Eq,
++                         op,
++                         Constant { kind = CLiteral value; ty = TLiteral TChar }
++                       ) ))
++            in
++            let rec branches targets : statement list =
++              match targets with
++              | [] -> otherwise.statements
++              | ([ value ], target) :: targets ->
++                  let flag = fresh span in
++                  [
++                    test flag value;
++                    mk span
++                      (Switch
++                         (If (Move flag, target, block span (branches targets))));
++                  ]
++              | (values, target) :: targets ->
++                  let flag = fresh span in
++                  let set_flag value =
++                    let equal = fresh span in
++                    [
++                      test equal value;
++                      mk span
++                        (Switch
++                           (If
++                              ( Move equal,
++                                block span
++                                  [ mk span (Assign (flag, Use (bool_const true))) ],
++                                block span [] )));
++                    ]
++                  in
++                  (mk span (Assign (flag, Use (bool_const false)))
++                  :: List.concat_map set_flag values)
++                  @ [
++                      mk span
++                        (Switch
++                           (If (Move flag, target, block span (branches targets))));
++                    ]
++            in
++            branches targets
++        | _ -> [ st ]
++      in
++      let b = map_statement rewrite body.body in
++      if !new_locals = [] then f
++      else
++        {
++          f with
++          body =
++            StructuredBody
++              {
++                body with
++                body = b;
++                locals =
++                  {
++                    body.locals with
++                    locals = body.locals.locals @ List.rev !new_locals;
++                  };
++              };
++        }
++  | _ -> f
++
+ let apply_passes (crate : crate) : crate =
+   (* Passes that apply to the whole crate *)
+   let crate = normalize_modeled_trait_specializations crate in
+@@ -3523,6 +3639,7 @@ let apply_passes (crate : crate) : crate =
+       ("fix_closure_lifetimes", fix_closure_lifetimes);
+       ("erase_body_regions", erase_body_regions);
+       ("remove_unreachable", remove_unreachable);
++      ("expand_char_switches", expand_char_switches);
+       ("update_loop", update_loops);
+       ("share_repeated_shared_indexing", share_repeated_shared_indexing);
+       ("remove_useless_joins", remove_useless_joins);
+diff --git a/src/Translate.ml b/src/Translate.ml
+index cdc9f23..63f3a8d 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -201,7 +201,7 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       mk_return = None;
+       mk_panic = None;
+       mk_continue = None;
+-      mk_break = None;
++      mk_break = [];
+       mk_join = Contexts.SymbolicExprId.Map.empty;
+       mut_borrow_to_consumed = BorrowId.Map.empty;
+       var_id_to_default = Pure.FVarId.Map.empty;
+diff --git a/src/extract/ExtractTypes.ml b/src/extract/ExtractTypes.ml
+index 24c77c3..28c1699 100644
+--- a/src/extract/ExtractTypes.ml
++++ b/src/extract/ExtractTypes.ml
+@@ -180,6 +180,22 @@ let extract_literal (span : Meta.span) (fmt : F.formatter) ~(is_pattern : bool)
+         | Coq | FStar | Lean -> if b then "true" else "false"
+       in
+       F.pp_print_string fmt b
++  | VChar c when backend () = Lean ->
++      (* Lean source is UTF-8: only print printable ASCII characters verbatim;
++         escape the others by code point. *)
++      let code = Uchar.to_int c in
++      if code >= 0x20 && code < 0x7f && code <> Char.code '\''
++         && code <> Char.code '\\'
++      then F.pp_print_string fmt ("'" ^ String.make 1 (Char.chr code) ^ "'")
++      else if code <= 0xffff then
++        F.pp_print_string fmt (Printf.sprintf "'\\u%04X'" code)
++      else (
++        [%cassert] span (not is_pattern)
++          "Characters outside the basic multilingual plane are unsupported in \
++           patterns";
++        if inside then F.pp_print_string fmt "(";
++        F.pp_print_string fmt ("_root_.Char.ofNat " ^ string_of_int code);
++        if inside then F.pp_print_string fmt ")")
+   | VChar c when Uchar.is_char c -> (
+       let c = Uchar.to_char c in
+       match backend () with
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index b3dcebe..0fdd00d 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -1031,6 +1031,14 @@ let eval_unary_op_symbolic (config : config) (span : Meta.span) (unop : unop)
+             (* If the following function succeeds, then it means the cast is well-formed
+            (otherwise it throws an exception) *)
+             let _ = cast_unsize_to_modified_fields span ctx ty0 ty1 in
++            (* The result is a fresh symbolic value: it would lose the borrows of
++               the unsized value, which must remain tracked by the region
++               abstractions owning them (this requires treating the cast like a
++               function call, with an abstraction per region). *)
++            [%cassert] span
++              (not (ty_has_borrows (Some span) ctx.type_ctx.type_infos v.ty))
++              "Unsizing casts of values containing borrows are not supported \
++               yet";
+             ty1
+         | Cast (CastRawPtr (_, tgt_ty)), _ -> tgt_ty
+         | _ ->
+@@ -1332,6 +1340,15 @@ let eval_rvalue_aggregate (config : config) (span : Meta.span)
+             [%sanity_check] span
+               (List.length type_decl.generics.regions
+               = List.length generics.regions);
++            (match type_decl.kind with
++            | Struct _ | Enum _ | Union _ -> ()
++            | _ ->
++                [%craise] span
++                  ("Cannot build a value of a type whose definition is not \
++                    available: "
++                  ^ Print.name_to_string
++                      (Print.Contexts.eval_ctx_to_fmt_env ctx)
++                      type_decl.item_meta.name));
+             let expected_field_types =
+               ctx_type_get_instantiated_field_etypes span ctx def_id
+                 opt_variant_id generics
+diff --git a/src/interp/InterpLoops.ml b/src/interp/InterpLoops.ml
+index 22f8894..b2c670f 100644
+--- a/src/interp/InterpLoops.ml
++++ b/src/interp/InterpLoops.ml
+@@ -126,17 +126,22 @@ let eval_loop_symbolic_apply_loop (config : config) (span : span)
+ 
+     Synthesize the body of the loop.
+ 
+-    Note that the information about the break context is optional: if not
+-    present, it means we didn't have to compute a join (there is a single break
+-    statement in the loop). In case no break information is provided as input,
+-    we output the (ordered) fresh abs ids and symbolic value ids that we find in
+-    the context at the break. *)
++    [exits] gives, for every exit of the loop (see
++    {!InterpLoopsFixedPoint.loop_exit_of_res}), the information about the break
++    context of this exit. It is optional: if not present, it means we didn't
++    have to compute a join (there is a single break statement for this exit in
++    the loop). In case no break information is provided as input, we output the
++    (ordered) fresh abs ids and symbolic value ids that we find in the context
++    at the break. *)
+ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+     (eval_loop_body : stl_cm_fun) (loop_id : LoopId.id) (fp_ctx : eval_ctx)
+     (fp_input_abs : AbsId.id list) (fp_input_svalues : SymbolicValueId.id list)
+     (fixed_aids : AbsId.Set.t) (fixed_dids : DummyVarId.Set.t)
+-    (break_info : (eval_ctx * AbsId.id list * SymbolicValueId.id list) option) :
+-    (eval_ctx * abs list * symbolic_value list) option * SA.expr =
++    (exits :
++      (statement_eval_res
++      * (eval_ctx * AbsId.id list * SymbolicValueId.id list) option)
++      list) : (eval_ctx * abs list * symbolic_value list) option list * SA.expr
++    =
+   [%ldebug "fp_ctx:\n" ^ eval_ctx_to_string fp_ctx];
+ 
+   (* Save a snapshot of the context as meta-information: it is useful to
+@@ -156,7 +161,7 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+     List.map (fun id -> SymbolicValueId.Map.find id map) values
+   in
+ 
+-  let ctx_info_at_break = ref None in
++  let ctx_info_at_break = List.map (fun _ -> ref None) exits in
+ 
+   (* Then, do a special treatment of the break and continue cases.
+      For now, we forbid having breaks in loops (and eliminate breaks
+@@ -168,7 +173,7 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+         (* We don't support early returns *)
+         [%craise] span "Unexpected return"
+     | Panic -> SA.Panic
+-    | Break i -> (
++    | Break _ | Continue _ when res <> Continue 0 -> (
+         [%ltrace
+           "about to match the fixed-point context with the context at a break:"
+           ^ "\n- fixed_aids: "
+@@ -178,8 +183,18 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+           ^ "\n\n-tgt ctx (ctx at break):\n"
+           ^ eval_ctx_to_string ~span:(Some span) ctx];
+ 
+-        (* We don't support nested loops for now *)
+-        [%cassert] span (i = 0) "Nested loops are not supported yet";
++        (* Lookup the exit *)
++        let exit =
++          [%unwrap_with_span] span (loop_exit_of_res res) "Unreachable"
++        in
++        let exit_index =
++          [%unwrap_with_span] span
++            (List.find_index (fun (exit', _) -> exit' = exit) exits)
++            "Unregistered loop exit"
++        in
++        let break_info = snd (List.nth exits exit_index) in
++        let ctx_info_at_break = List.nth ctx_info_at_break exit_index in
++
+ 
+         (* Case disjunction depending on whether we need to join or not *)
+         match break_info with
+@@ -260,7 +275,11 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+             in
+             cc
+               (SA.LoopBreak
+-                 (S.capture_context output_ctx, loop_id, break_values, break_abs))
++                 ( S.capture_context output_ctx,
++                   loop_id,
++                   exit_index,
++                   break_values,
++                   break_abs ))
+         | Some (break_ctx, break_input_abs, break_input_svalues) ->
+             (* Join with the break context *)
+             [%ltrace
+@@ -294,10 +313,13 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+             (* Create the symbolic expression *)
+             cc
+               (SA.LoopBreak
+-                 (S.capture_context tgt_ctx, loop_id, input_values, input_abs)))
+-    | Continue i ->
+-        (* We don't support nested loops for now *)
+-        [%cassert] span (i = 0) "Nested loops are not supported yet";
++                 ( S.capture_context tgt_ctx,
++                   loop_id,
++                   exit_index,
++                   input_values,
++                   input_abs )))
++    | Continue _ ->
++        [%sanity_check] span (res = Continue 0);
+         [%ltrace
+           "about to match the fixed-point context with the context at a \
+            continue:" ^ "\n- fixed_aids: "
+@@ -325,16 +347,21 @@ let eval_loop_symbolic_synthesize_loop_body (config : config) (span : span)
+     | Unit ->
+         (* For why we can't get [Unit], see the comments inside {!eval_loop_concrete}. *)
+         [%craise] span "Unreachable"
++    | Break _ -> [%internal_error] span
+   in
+ 
+   (* Apply and compose *)
+   let el = List.map eval_after_loop_iter ctx_resl in
+-  let break_info = !ctx_info_at_break in
+-  (break_info, cf_loop el)
++  (List.map (fun x -> !x) ctx_info_at_break, cf_loop el)
++
++(** Evaluate a loop in symbolic mode.
+ 
+-(** Evaluate a loop in symbolic mode *)
++    A loop can be left through its own [break], but also through a [break] or a
++    [continue] of an enclosing loop. Every such exit has its own (joined)
++    environment and continuation: we output one context per exit, and the
++    continuation receives one expression per exit, in the same order. *)
+ let eval_loop_symbolic (config : config) (span : span)
+-    (eval_loop_body : stl_cm_fun) : st_cm_fun =
++    (eval_loop_body : stl_cm_fun) : stl_cm_fun =
+  fun ctx ->
+   (* Debug *)
+   [%ltrace "Context:\n" ^ eval_ctx_to_string ~span:(Some span) ctx ^ "\n"];
+@@ -364,25 +391,34 @@ let eval_loop_symbolic (config : config) (span : span)
+     ^ "):\n- fp:\n"
+     ^ eval_ctx_to_string ~span:(Some span) fp_ctx];
+ 
+-  (* Compute the context at the breaks *)
++  (* Compute the contexts at the exits *)
+   let fixed_aids = InterpJoinCore.compute_fixed_abs_ids ctx fp_ctx in
+   let fixed_dids = ctx_get_dummy_var_ids ctx in
+-  let break_info =
+-    compute_loop_break_context config span loop_id eval_loop_body fp_ctx
++  let exits =
++    compute_loop_exit_contexts config span loop_id eval_loop_body fp_ctx
+       fixed_aids fixed_dids
+   in
++  if exits = [] then
++    [%craise] span
++      "(Infinite) loops which do not contain breaks are not supported yet";
+   (* Debug *)
+   [%ltrace
+     "- Initial context:\n"
+     ^ eval_ctx_to_string ~span:(Some span) ctx
+     ^ "\n\n- Fixed point:\n"
+     ^ eval_ctx_to_string ~span:(Some span) ~filter:false fp_ctx
+-    ^ "\n\n- break_ctx:\n"
+-    ^
+-    match break_info with
+-    | NoBreak -> "no break ctx"
+-    | Single -> "single break ctx"
+-    | Multiple (break_ctx, _) -> eval_ctx_to_string ~span:(Some span) break_ctx];
++    ^ "\n\n- exit ctxs:\n"
++    ^ String.concat "\n\n"
++        (List.map
++           (fun (exit, break_ctx) ->
++             show_statement_eval_res exit
++             ^ ":\n"
++             ^
++             match break_ctx with
++             | Single -> "single break ctx"
++             | Multiple (break_ctx, _) ->
++                 eval_ctx_to_string ~span:(Some span) break_ctx)
++           exits)];
+ 
+   (* Compute the loop input parameters *)
+   let fp_input_svalues =
+@@ -397,33 +433,36 @@ let eval_loop_symbolic (config : config) (span : span)
+     ^ String.concat ", "
+         (List.map (symbolic_value_to_string ctx) fp_input_svalues)];
+ 
+-  let break_info, break_abs_values =
+-    match break_info with
+-    | NoBreak ->
+-        [%craise] span
+-          "(Infinite) loops which do not contain breaks are not supported yet"
+-    | Single ->
+-        [%ltrace "Single break"];
+-        (None, None)
+-    | Multiple (break_ctx, break_abs) ->
+-        let break_input_abs_ids =
+-          List.map (fun (a : abs) -> a.abs_id) break_abs
+-        in
++  let exits =
++    List.map
++      (fun (exit, break_ctx) ->
++        match break_ctx with
++        | Single ->
++            [%ltrace "Single break"];
++            (exit, None, None)
++        | Multiple (break_ctx, break_abs) ->
++            let break_input_abs_ids =
++              List.map (fun (a : abs) -> a.abs_id) break_abs
++            in
+ 
+-        let break_input_svalues =
+-          compute_ctx_fresh_ordered_symbolic_values span
+-            ~only_modified_svalues:false ctx break_ctx
+-        in
+-        let break_input_svalue_ids =
+-          List.map (fun (sv : symbolic_value) -> sv.sv_id) break_input_svalues
+-        in
++            let break_input_svalues =
++              compute_ctx_fresh_ordered_symbolic_values span
++                ~only_modified_svalues:false ctx break_ctx
++            in
++            let break_input_svalue_ids =
++              List.map
++                (fun (sv : symbolic_value) -> sv.sv_id)
++                break_input_svalues
++            in
+ 
+-        [%ltrace
+-          "- break_input_svalues: "
+-          ^ String.concat ", "
+-              (List.map (symbolic_value_to_string ctx) break_input_svalues)];
+-        ( Some (break_ctx, break_input_abs_ids, break_input_svalue_ids),
+-          Some (break_abs, break_input_svalues) )
++            [%ltrace
++              "- break_input_svalues: "
++              ^ String.concat ", "
++                  (List.map (symbolic_value_to_string ctx) break_input_svalues)];
++            ( exit,
++              Some (break_ctx, break_input_abs_ids, break_input_svalue_ids),
++              Some (break_abs, break_input_svalues) ))
++      exits
+   in
+ 
+   (* "Call" the loop *)
+@@ -436,47 +475,62 @@ let eval_loop_symbolic (config : config) (span : span)
+   [%ltrace "matched the fixed-point context with the original context."];
+ 
+   (* Synthesize the loop body *)
+-  let break_info', loop_body =
++  let break_infos', loop_body =
+     let fixed_aids = InterpJoinCore.compute_fixed_abs_ids ctx fp_ctx in
+     let fixed_dids = ctx_get_dummy_var_ids ctx in
+     eval_loop_symbolic_synthesize_loop_body config span eval_loop_body loop_id
+       fp_ctx input_abs_ids_list fp_input_svalue_ids fixed_aids fixed_dids
+-      break_info
++      (List.map (fun (exit, break_info, _) -> (exit, break_info)) exits)
+   in
+ 
+-  let break_ctx, break_abs, break_input_svalues =
+-    match break_info with
+-    | Some (ctx, _, _) ->
+-        let abs, values = Option.get break_abs_values in
+-        (ctx, abs, values)
+-    | None -> (
+-        match break_info' with
+-        | Some (ctx, abs, values) -> (ctx, abs, values)
+-        | None -> [%internal_error] span)
++  let exits =
++    List.map2
++      (fun (exit, break_info, break_abs_values) break_info' ->
++        let break_ctx, break_abs, break_input_svalues =
++          match break_info with
++          | Some (ctx, _, _) ->
++              let abs, values = Option.get break_abs_values in
++              (ctx, abs, values)
++          | None -> (
++              match break_info' with
++              | Some (ctx, abs, values) -> (ctx, abs, values)
++              | None -> [%internal_error] span)
++        in
++        [%ltrace
++          "result (loop: "
++          ^ Errors.raw_span_to_string span
++          ^ ", exit: "
++          ^ show_statement_eval_res exit
++          ^ "):" ^ "\n- src context:\n"
++          ^ eval_ctx_to_string ~span:(Some span) ~filter:false ctx
++          ^ "\n- fixed point:\n"
++          ^ eval_ctx_to_string ~span:(Some span) ~filter:false fp_ctx
++          ^ "\n- fixed_sids: "
++          ^ SymbolicValueId.Set.show fixed_ids.sids
++          ^ "\n- fp_input_abs: "
++          ^ Print.list_to_string AbsId.to_string input_abs_ids_list
++          ^ "\n- fp_input_svalues: "
++          ^ Print.list_to_string (symbolic_value_to_string ctx) fp_input_svalues
++          ^ "\n\n- break ctx:\n"
++          ^ eval_ctx_to_string ~span:(Some span) ~filter:false break_ctx
++          ^ "\n\n- break_input_svalues: "
++          ^ Print.list_to_string
++              (symbolic_value_to_string ctx)
++              break_input_svalues
++          ^ "\n"];
++        (exit, break_ctx, break_abs, break_input_svalues))
++      exits break_infos'
+   in
+ 
+-  [%ltrace
+-    "result (loop: "
+-    ^ Errors.raw_span_to_string span
+-    ^ "):" ^ "\n- src context:\n"
+-    ^ eval_ctx_to_string ~span:(Some span) ~filter:false ctx
+-    ^ "\n- fixed point:\n"
+-    ^ eval_ctx_to_string ~span:(Some span) ~filter:false fp_ctx
+-    ^ "\n- fixed_sids: "
+-    ^ SymbolicValueId.Set.show fixed_ids.sids
+-    ^ "\n- fp_input_abs: "
+-    ^ Print.list_to_string AbsId.to_string input_abs_ids_list
+-    ^ "\n- fp_input_svalues: "
+-    ^ Print.list_to_string (symbolic_value_to_string ctx) fp_input_svalues
+-    ^ "\n\n- break ctx:\n"
+-    ^ eval_ctx_to_string ~span:(Some span) ~filter:false break_ctx
+-    ^ "\n\n- break_input_svalues: "
+-    ^ Print.list_to_string (symbolic_value_to_string ctx) break_input_svalues
+-    ^ "\n"];
+-
+   (* Put everything together *)
+   let entry_loop_ctx = S.capture_context entry_loop_ctx in
+-  let cc (next_expr : SA.expr) : SA.expr =
++  let cc (el : SA.expr list) : SA.expr =
++    let exits =
++      List.map2
++        (fun (_, _, exit_abs, exit_svalues) exit_expr : SA.loop_exit ->
++          { exit_svalues; exit_abs; exit_expr })
++        exits el
++    in
+     let loop_expr =
+       SymbolicAst.Loop
+         {
+@@ -485,17 +539,15 @@ let eval_loop_symbolic (config : config) (span : span)
+           input_abs = input_abs_list;
+           input_value_to_value = input_values;
+           input_abs_to_abs = input_abs;
+-          break_svalues = break_input_svalues;
+-          break_abs;
++          exits;
+           loop_expr = loop_body;
+-          next_expr;
+           span;
+           ctx = entry_loop_ctx;
+         }
+     in
+     cf_before_loop loop_expr
+   in
+-  ((break_ctx, Unit), cc)
++  (List.map (fun (exit, break_ctx, _, _) -> (break_ctx, exit)) exits, cc)
+ 
+ let eval_loop (config : config) (span : span) (eval_loop_body : stl_cm_fun) :
+     stl_cm_fun =
+@@ -532,12 +584,5 @@ let eval_loop (config : config) (span : span) (eval_loop_body : stl_cm_fun) :
+           (reborrow_ashared_loans_symbolic_borrows span None
+              ~with_abs_conts:true ctx)
+       in
+-      let (ctx, res), cc =
+-        comp cc (eval_loop_symbolic config span eval_loop_body ctx)
+-      in
+-      let cf (el : SymbolicAst.expr list) : SymbolicAst.expr =
+-        match el with
+-        | [ e ] -> cc e
+-        | _ -> [%internal_error] span
+-      in
+-      ([ (ctx, res) ], cf)
++      let ctx_resl, cf = eval_loop_symbolic config span eval_loop_body ctx in
++      (ctx_resl, cc_comp cc cf)
+diff --git a/src/interp/InterpLoopsFixedPoint.ml b/src/interp/InterpLoopsFixedPoint.ml
+index 649c2b0..7c3a201 100644
+--- a/src/interp/InterpLoopsFixedPoint.ml
++++ b/src/interp/InterpLoopsFixedPoint.ml
+@@ -171,10 +171,11 @@ let compute_loop_entry_fixed_point (config : config) (span : Meta.span)
+         | Unit ->
+             (* See the comment in {!eval_loop} *)
+             [%craise] span "Unreachable"
+-        | Continue i ->
+-            (* For now we don't support continues to outer loops *)
+-            [%cassert] span (i = 0) "Continues to outer loops not supported yet";
+-            Some ctx
++        | Continue 0 -> Some ctx
++        | Continue _ ->
++            (* A continue to an outer loop leaves this loop: see
++               {!compute_loop_exit_contexts} *)
++            None
+       in
+       let continue_ctxs = List.filter_map keep_continue_ctx ctx_resl in
+ 
+@@ -239,69 +240,40 @@ let compute_loop_entry_fixed_point (config : config) (span : Meta.span)
+   (fp, !fixed_ids)
+ 
+ type break_ctx =
+-  | NoBreak  (** The loop doesn't contain any break *)
+   | Single
+       (** There is a single break statement, so we don't join the break contexts
+       *)
+   | Multiple of (eval_ctx * abs list)  (** We joined multiple break contexts *)
+ 
+-let compute_loop_break_context (config : config) (span : Meta.span)
+-    (loop_id : LoopId.id) (eval_loop_body : stl_cm_fun) (fp_ctx : eval_ctx)
+-    (fixed_aids : AbsId.Set.t) (fixed_dids : DummyVarId.Set.t) : break_ctx =
+-  [%ltrace
+-    "Initial fixed-point context:\n"
+-    ^ eval_ctx_to_string ~span:(Some span) ~filter:false fp_ctx];
+-
+-  (* Update the fixed-point context to remove the continuation expressions from
+-     the abstractions introduced by the fixed-point *)
+-  let fp_ctx =
+-    let update (e : env_elem) : env_elem =
+-      match (e : env_elem) with
+-      | EAbs abs -> (
+-          match abs.kind with
+-          | Loop loop_id' ->
+-              if loop_id' = loop_id then
+-                EAbs { abs with cont = None; kind = Loop loop_id }
+-              else e
+-          | _ -> e)
+-      | EBinding _ | EFrame -> e
+-    in
+-    { fp_ctx with env = List.map update fp_ctx.env }
+-  in
+-
+-  (* Evaluate the loop body to register the different contexts upon reentry *)
+-  let ctx_resl, _ = eval_loop_body fp_ctx in
+-  (* Keep only the contexts which reached a `continue`. *)
+-  let keep_break_ctx (ctx, res) : eval_ctx option =
+-    [%ltrace "register_continue_ctx"];
+-    match res with
+-    | Return | Panic | Continue _ -> None
+-    | Unit ->
+-        (* See the comment in {!eval_loop} *)
+-        [%craise] span "Unreachable"
+-    | Break i ->
+-        (* We don't support breaks to outer loops *)
+-        (* For now we don't support continues to outer loops *)
+-        [%cassert] span (i = 0) "Continues to outer loops not supported yet";
+-        Some ctx
+-  in
+-  let break_ctxs = List.filter_map keep_break_ctx ctx_resl in
+-
++(** The result of leaving a loop, as seen by the code *around* the loop:
++    [Unit] for the loop's own [break], and a [Break] or [Continue] of an
++    enclosing loop (with the index relative to that enclosing loop) for the
++    nonlocal exits. Returns [None] for the results which don't leave the loop.
++*)
++let loop_exit_of_res (res : statement_eval_res) : statement_eval_res option =
++  match res with
++  | Break 0 -> Some Unit
++  | Break i -> Some (Break (i - 1))
++  | Continue 0 | Return | Panic | Unit -> None
++  | Continue i -> Some (Continue (i - 1))
++
++(** Join the contexts reaching the same exit of a loop *)
++let join_loop_exit_contexts (config : config) (span : Meta.span)
++    (loop_id : LoopId.id) (fixed_aids : AbsId.Set.t)
++    (fixed_dids : DummyVarId.Set.t) (break_ctxs : eval_ctx list) : break_ctx =
+   [%ltrace
+     "about to join the contexts at the breaks:\n"
+     ^ String.concat "\n\n"
+         (List.map
+            (fun ctx ->
+-             "- continue_ctx:\n"
++             "- break_ctx:\n"
+              ^ eval_ctx_to_string ~span:(Some span) ~filter:false ctx)
+            break_ctxs)
+     ^ "\n"];
+ 
+   (* Compute the join *)
+   match break_ctxs with
+-  | [] ->
+-      (* There is no break! *)
+-      NoBreak
++  | [] -> [%internal_error] span
+   | [ _ ] ->
+       (* Single break context *)
+       Single
+@@ -362,3 +334,62 @@ let compute_loop_break_context (config : config) (span : Meta.span)
+       let abs = List.rev (List.filter_map get_fresh_abs break_ctx.env) in
+ 
+       Multiple (break_ctx, abs)
++
++(** Compute the contexts at the exits of a loop, grouped by exit (see
++    {!loop_exit_of_res}). The loop's own [break] comes first, followed by the
++    nonlocal exits in the order in which they are first reached. *)
++let compute_loop_exit_contexts (config : config) (span : Meta.span)
++    (loop_id : LoopId.id) (eval_loop_body : stl_cm_fun) (fp_ctx : eval_ctx)
++    (fixed_aids : AbsId.Set.t) (fixed_dids : DummyVarId.Set.t) :
++    (statement_eval_res * break_ctx) list =
++  [%ltrace
++    "Initial fixed-point context:\n"
++    ^ eval_ctx_to_string ~span:(Some span) ~filter:false fp_ctx];
++
++  (* Update the fixed-point context to remove the continuation expressions from
++     the abstractions introduced by the fixed-point *)
++  let fp_ctx =
++    let update (e : env_elem) : env_elem =
++      match (e : env_elem) with
++      | EAbs abs -> (
++          match abs.kind with
++          | Loop loop_id' ->
++              if loop_id' = loop_id then
++                EAbs { abs with cont = None; kind = Loop loop_id }
++              else e
++          | _ -> e)
++      | EBinding _ | EFrame -> e
++    in
++    { fp_ctx with env = List.map update fp_ctx.env }
++  in
++
++  (* Evaluate the loop body to register the different contexts upon exit *)
++  let ctx_resl, _ = eval_loop_body fp_ctx in
++  let exits =
++    List.fold_left
++      (fun exits (ctx, res) ->
++        match res with
++        | Unit ->
++            (* See the comment in {!eval_loop} *)
++            [%craise] span "Unreachable"
++        | _ -> (
++            match loop_exit_of_res res with
++            | None -> exits
++            | Some exit -> (
++                match List.assoc_opt exit exits with
++                | None -> exits @ [ (exit, ref [ ctx ]) ]
++                | Some ctxs ->
++                    ctxs := !ctxs @ [ ctx ];
++                    exits)))
++      [] ctx_resl
++  in
++  let exits =
++    List.filter (fun (exit, _) -> exit = Unit) exits
++    @ List.filter (fun (exit, _) -> exit <> Unit) exits
++  in
++  List.map
++    (fun (exit, ctxs) ->
++      ( exit,
++        join_loop_exit_contexts config span loop_id fixed_aids fixed_dids !ctxs
++      ))
++    exits
+diff --git a/src/interp/InterpLoopsFixedPoint.mli b/src/interp/InterpLoopsFixedPoint.mli
+index 50bc09c..c2fefe1 100644
+--- a/src/interp/InterpLoopsFixedPoint.mli
++++ b/src/interp/InterpLoopsFixedPoint.mli
+@@ -28,13 +28,22 @@ val compute_loop_entry_fixed_point :
+   eval_ctx * ids_sets
+ 
+ type break_ctx =
+-  | NoBreak  (** The loop doesn't contain any break *)
+   | Single
+       (** There is a single break statement, so we don't join the break contexts
+       *)
+   | Multiple of (eval_ctx * abs list)  (** We joined multiple break contexts *)
+ 
+-val compute_loop_break_context :
++(** The result of leaving a loop, as seen by the code *around* the loop:
++    [Unit] for the loop's own [break], and a [Break] or [Continue] of an
++    enclosing loop (with the index relative to that enclosing loop) for the
++    nonlocal exits. Returns [None] for the results which don't leave the loop.
++*)
++val loop_exit_of_res : statement_eval_res -> statement_eval_res option
++
++(** Compute the contexts at the exits of a loop, grouped by exit (see
++    {!loop_exit_of_res}). The loop's own [break] comes first, followed by the
++    nonlocal exits in the order in which they are first reached. *)
++val compute_loop_exit_contexts :
+   config ->
+   Meta.span ->
+   LoopId.id ->
+@@ -42,4 +51,4 @@ val compute_loop_break_context :
+   eval_ctx ->
+   AbsId.Set.t ->
+   DummyVarId.Set.t ->
+-  break_ctx
++  (statement_eval_res * break_ctx) list
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 0abe881..f03896b 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -28,6 +28,7 @@ let into_iterator = prefix ^ "core.iter.traits.collect.IntoIterator"
+ let from_iterator = prefix ^ "core.iter.traits.collect.FromIterator"
+ let extend = prefix ^ "core.iter.traits.collect.Extend"
+ let step = prefix ^ "core.iter.range.Step"
++let double_ended = prefix ^ "core.iter.traits.double_ended.DoubleEndedIterator"
+ 
+ let check ~(evidence : crate) (crate : crate) : crate =
+   if Config.backend () <> Config.Lean then crate
+@@ -167,7 +168,31 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           List.mem name
+             (List.map (( ^ ) iterator)
+                [ "Mut"; "Map"; "Copied"; "Cloned"; "Enumerate";
+-                 "Filter"; "FilterMap" ]) -> check_base ()
++                 "Filter"; "FilterMap"; "Skip" ]) -> check_base ()
++      (* Chain::next exhausts a then b; size_hint is the saturating/checked sum
++         of both hints; fold/try_fold fold a then b (core chain.rs). Both
++         sides must therefore have the schedule of repeated next. *)
++      | Some name when name = iterator ^ "Chain" -> (
++          match List.filter (fun tr -> ref_name tr = Some iterator) args with
++          | [ a; b ] ->
++              check_iterator span seen a;
++              check_iterator span seen b
++          | _ -> reject span "missing or ambiguous Chain iterator evidence")
++      (* Rev::next is next_back, fold is rfold, size_hint the inner hint
++         (core rev.rs): the base must be a modeled double-ended iterator whose
++         forward iterator is itself admitted. *)
++      | Some name when name = iterator ^ "Rev" ->
++          let double_ended_ref = one span double_ended args in
++          let double_ended_impl, _, parents = resolve span double_ended_ref in
++          if Option.is_none (impl_name double_ended_impl) then
++            reject span "unmodeled DoubleEndedIterator under Rev";
++          check_iterator span seen (one span iterator parents)
++      (* FlatMap maps each outer item and exhausts its inner iterator in turn;
++         its size_hint only combines the outer and inner hints (core
++         flatten.rs, modeled in FlatMap.lean): check both iterators. *)
++      | Some name when name = iterator ^ "FlatMap" ->
++          check_iterator span seen (one span iterator args);
++          check_into span seen (one span into_iterator args)
+       | Some name when name = iterator ^ "Range" ->
+           let step_ref = one span step args in
+           let step_impl, _, _ = resolve span step_ref in
+@@ -184,14 +209,14 @@ let check ~(evidence : crate) (crate : crate) : crate =
+             ("unreviewed iterator hint or collector specialization in "
+             ^ Print.name_to_string (Print.crate_to_fmt_env evidence)
+                 impl.item_meta.name)
+-    in
+-    let check_into span tr =
++    and check_into span seen tr =
+       let tr = normalize span tr in
+       if generic_root tr then defer span (Into tr)
+       else
+         let _, _, parents = resolve span tr in
+-        check_iterator span [] (one span iterator parents)
++        check_iterator span seen (one span iterator parents)
+     in
++    let check_into span tr = check_into span [] tr in
+     let discharge span (callee : fun_decl) (generics : generic_args) =
+       match FunDeclId.Map.find_opt callee.def_id !obligations with
+       | None -> ()
+@@ -313,12 +338,15 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       | _ -> ()
+     in
+     (* Obligations only grow; rescan until every call has seen its callee's
+-       complete obligations. *)
++       complete obligations. A rejected collector makes its function body
++       untranslatable, exactly as an error in a body prepass does: it is
++       reported and only that body is dropped. *)
++    let failed = ref FunDeclId.Map.empty in
+     let rec scan () =
+       changed := false;
+       FunDeclId.Map.iter
+         (fun id (decl : fun_decl) ->
+-          if Option.is_none (fun_name decl) then
++          if Option.is_none (fun_name decl) && not (FunDeclId.Map.mem id !failed) then
+             match decl.body with
+             | StructuredBody body ->
+                 current := Some id;
+@@ -326,15 +354,38 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                   object
+                     inherit [_] iter_statement as super
+                     method! visit_fn_ptr span ptr = check_ptr span ptr
++
+                     method! visit_statement _ st =
+                       super#visit_statement st.span st
+                   end
+                 in
+-                visitor#visit_block decl.item_meta.span body.body;
++                (try visitor#visit_block decl.item_meta.span body.body
++                 with CFailure e -> failed := FunDeclId.Map.add id e !failed);
+                 current := None
+             | _ -> ())
+         crate.fun_decls;
+       if !changed then scan ()
+     in
+     scan ();
+-    crate
++    let fun_decls =
++      FunDeclId.Map.mapi
++        (fun id (decl : fun_decl) ->
++          match FunDeclId.Map.find_opt id !failed with
++          | None -> decl
++          | Some e ->
++              let name =
++                Print.name_to_string
++                  (Print.crate_to_fmt_env evidence)
++                  decl.item_meta.name
++              in
++              [%save_error] decl.item_meta.span
++                ("Ignoring the body of '" ^ name
++               ^ "' because of previous error");
++              let msg =
++                format_error_message_with_file_line e.file e.line e.span
++                  e.msg
++              in
++              { decl with body = ErrorBody { span = decl.item_meta.span; msg } })
++        crate.fun_decls
++    in
++    { crate with fun_decls }
+diff --git a/src/llbc/TypesUtils.ml b/src/llbc/TypesUtils.ml
+index e429467..297a214 100644
+--- a/src/llbc/TypesUtils.ml
++++ b/src/llbc/TypesUtils.ml
+@@ -285,7 +285,17 @@ let ty_has_mut_borrow_for_region_in_pred (infos : TypesAnalysis.type_infos)
+           match tref.id with
+           | TTuple | TBuiltin (TBox | TStr) -> ()
+           | TAdtId adt_id ->
+-              let info = TypeDeclId.Map.find adt_id infos in
++              let info =
++                match TypeDeclId.Map.find_opt adt_id infos with
++                | Some info -> info
++                | None ->
++                    (* The analysis of this type's declaration group failed
++                       (that error was reported): the regions of this type
++                       cannot be classified. *)
++                    [%craise_opt_span] None
++                      ("Missing borrow analysis for the type declaration "
++                      ^ TypeDeclId.to_string adt_id)
++              in
+               RegionId.iteri
+                 (fun adt_rid r ->
+                   if RegionId.Set.mem adt_rid info.mut_regions && pred r then
+diff --git a/src/symbolic/PrintSymbolicAst.ml b/src/symbolic/PrintSymbolicAst.ml
+index d4a1b59..de91bbc 100644
+--- a/src/symbolic/PrintSymbolicAst.ml
++++ b/src/symbolic/PrintSymbolicAst.ml
+@@ -123,9 +123,10 @@ let rec expr_to_string (env : fmt_env) (indent : string) (indent_incr : string)
+   | LoopContinue (ectx, loop_id, values, abs) ->
+       loop_continue_break_to_string env indent indent_incr ~is_continue:true
+         ectx loop_id values abs
+-  | LoopBreak (ectx, loop_id, values, abs) ->
++  | LoopBreak (ectx, loop_id, exit, values, abs) ->
++      let exit = if exit = 0 then None else Some exit in
+       loop_continue_break_to_string env indent indent_incr ~is_continue:false
+-        ectx loop_id values abs
++        ?exit ectx loop_id values abs
+   | Join (join_id, ectx, values, abs) ->
+       join_to_string env indent indent_incr join_id ectx values abs
+   | Let lete -> let_expr_to_string env indent indent_incr lete
+@@ -133,11 +134,17 @@ let rec expr_to_string (env : fmt_env) (indent : string) (indent_incr : string)
+   | Error (_, error) -> indent ^ "ERROR(" ^ error ^ ")"
+ 
+ and loop_continue_break_to_string (env : fmt_env) (indent : string)
+-    (indent_incr : string) ~(is_continue : bool) _ctx (loop_id : loop_id)
+-    (values : tvalue list) (abs : abs list) : string =
++    (indent_incr : string) ~(is_continue : bool) ?(exit : int option) _ctx
++    (loop_id : loop_id) (values : tvalue list) (abs : abs list) : string =
+   let indent1 = indent ^ indent_incr in
+   let indent2 = indent1 ^ indent_incr in
+-  let keyword = if is_continue then "@continue" else "@break" in
++  let keyword =
++    if is_continue then "@continue"
++    else
++      match exit with
++      | None -> "@break"
++      | Some exit -> "@exit(" ^ string_of_int exit ^ ")"
++  in
+   let loop_id = "loop_id@" ^ LoopId.to_string loop_id in
+   let values =
+     List.map
+@@ -223,7 +230,18 @@ and loop_to_string (env : fmt_env) (indent : string) (indent_incr : string)
+   let indent1 = indent ^ indent_incr in
+   let indent2 = indent1 ^ indent_incr in
+   let loop_id = LoopId.to_string loop.loop_id in
+-  let next_expr = expr_to_string env indent2 indent_incr loop.next_expr in
++  let exit_to_string i (exit : loop_exit) =
++    let exit_expr = expr_to_string env indent2 indent_incr exit.exit_expr in
++    indent1 ^ "exit " ^ string_of_int i ^ ": svalues= "
++    ^ Print.list_to_string ~sep:", "
++        (fun (v : symbolic_value) -> SymbolicValueId.to_string v.sv_id)
++        exit.exit_svalues
++    ^ "\n" ^ indent1 ^ "exit_abs= "
++    ^ Print.list_to_string ~sep:", "
++        (fun (a : abs) -> AbsId.to_string a.abs_id)
++        exit.exit_abs
++    ^ "\n" ^ indent1 ^ "exit_expr=\n" ^ exit_expr
++  in
+   let loop_expr = expr_to_string env indent2 indent_incr loop.loop_expr in
+   indent ^ "loop@" ^ loop_id ^ " {\n" ^ indent1 ^ "input_svalues= "
+   ^ Print.list_to_string ~sep:", "
+@@ -236,16 +254,9 @@ and loop_to_string (env : fmt_env) (indent : string) (indent_incr : string)
+         ^ Print.EvalCtx.abs_to_string ~span:None ~with_ended:false loop.ctx
+             indent2 indent_incr abs)
+       loop.input_abs
+-  ^ "\n" ^ indent1 ^ "break_svalues= "
+-  ^ Print.list_to_string ~sep:", "
+-      (fun (v : symbolic_value) -> SymbolicValueId.to_string v.sv_id)
+-      loop.break_svalues
+-  ^ "\n" ^ indent1 ^ "break_abs= "
+-  ^ Print.list_to_string ~sep:", "
+-      (fun (a : abs) -> AbsId.to_string a.abs_id)
+-      loop.break_abs
+-  ^ "\n" ^ indent1 ^ "loop_expr=\n" ^ loop_expr ^ "\n\n" ^ indent1
+-  ^ "next_expr=\n" ^ next_expr ^ "\n" ^ indent ^ "}"
++  ^ "\n" ^ indent1 ^ "loop_expr=\n" ^ loop_expr ^ "\n\n"
++  ^ String.concat "\n\n" (List.mapi exit_to_string loop.exits)
++  ^ "\n" ^ indent ^ "}"
+ 
+ and let_expr_to_string (env : fmt_env) (indent : string) (indent_incr : string)
+     (lete : let_expr) : string =
+diff --git a/src/symbolic/SymbolicAst.ml b/src/symbolic/SymbolicAst.ml
+index 02617e2..91d424b 100644
+--- a/src/symbolic/SymbolicAst.ml
++++ b/src/symbolic/SymbolicAst.ml
+@@ -226,7 +226,10 @@ type expr =
+           useful anymore? *)
+   | LoopContinue of
+       (Contexts.eval_ctx[@opaque]) * loop_id * tvalue list * abs list
+-  | LoopBreak of (Contexts.eval_ctx[@opaque]) * loop_id * tvalue list * abs list
++  | LoopBreak of
++      (Contexts.eval_ctx[@opaque]) * loop_id * int * tvalue list * abs list
++      (** Exit the loop through the exit with the given index (see
++          [loop.exits]). *)
+   | Loop of loop  (** Loop: call to a loop *)
+   | Let of let_expr  (** A shared continuation. See [let_expr]. *)
+   | Join of
+@@ -275,17 +278,26 @@ and loop = {
+           (i.e., the type of the loop) and doing this avoids a lookup. *)
+   input_value_to_value : tvalue symbolic_value_id_map;
+   input_abs_to_abs : abs abs_id_map;
+-  break_svalues : symbolic_value list;
+-      (** The symbolic values introduced in the break environment (those are
+-          output by the loop) *)
+-  break_abs : abs list;
+-      (** The abstractions introduced in the break environment (those are output
+-          by the loop) *)
++  exits : loop_exit list;
++      (** The ways control leaves the loop body, each with its own joined
++          environment and continuation. The first exit is the loop's own
++          [break], if the body contains one; the others are nonlocal exits
++          (a [break] or [continue] of an enclosing loop) whose continuation is
++          evaluated by that enclosing loop. *)
+   loop_expr : expr;  (** The symbolically executed loop body *)
+-  next_expr : expr;  (** The expression for *after* the loop call *)
+   span : Meta.span;  (** Information about the origin of the loop body *)
+ }
+ 
++and loop_exit = {
++  exit_svalues : symbolic_value list;
++      (** The symbolic values introduced in the environment of this exit (those
++          are output by the loop) *)
++  exit_abs : abs list;
++      (** The abstractions introduced in the environment of this exit (those
++          are output by the loop) *)
++  exit_expr : expr;  (** The expression evaluated after leaving the loop *)
++}
++
+ (** A shared continuation for branch states with the same control-flow
+     destination.
+ 
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index ce0feb8..1ddb53d 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -257,7 +257,9 @@ type bs_ctx = {
+ 
+           We initialize this at [None]. *)
+   mk_continue : (ty * (bs_ctx -> texpr -> texpr)) option;
+-  mk_break : (ty * (bs_ctx -> texpr -> texpr)) option;
++  mk_break : (ty * (bs_ctx -> texpr -> texpr)) list;
++      (** One break handler per exit of the innermost loop (see
++          [SymbolicAst.loop.exits]). *)
+   mk_join : (ty * (bs_ctx -> texpr -> texpr)) Contexts.SymbolicExprId.Map.t;
+       (** Scoped join continuations, including their payload types. Inner
+           bindings forward nonlocal joins through their tagged exit payloads. *)
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 6f37315..85b37e0 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -311,9 +311,9 @@ let rec translate_expr (e : S.expr) (ctx : bs_ctx) : texpr =
+   | LoopContinue (ectx, loop_id, input_values, input_abs) ->
+       translate_continue_break ctx ~continue:true ectx loop_id input_values
+         input_abs
+-  | LoopBreak (ectx, loop_id, input_values, input_abs) ->
+-      translate_continue_break ctx ~continue:false ectx loop_id input_values
+-        input_abs
++  | LoopBreak (ectx, loop_id, exit, input_values, input_abs) ->
++      translate_continue_break ctx ~continue:false ~exit ectx loop_id
++        input_values input_abs
+   | Let lete -> translate_let ctx lete
+   | Join (join_id, ectx, input_values, input_abs) ->
+       translate_join ctx join_id ectx input_values input_abs
+@@ -2387,21 +2387,60 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+     ^ "\n\n- loop translated inputs:\n"
+     ^ String.concat "\n\n" (List.map (texpr_to_string ctx) inputs)];
+ 
+-  (* Introduce the binders for the loop outputs *)
+-  let ctx, break_abs, break_values =
+-    bind_inputs ctx loop.break_abs loop.break_svalues
++  (* Introduce the binders for the outputs of a loop exit *)
++  let bind_exit ctx (exit : S.loop_exit) =
++    let ctx, exit_abs, exit_values =
++      bind_inputs ctx exit.exit_abs exit.exit_svalues
++    in
++    let outputs = exit_values @ exit_abs in
++    [%ldebug
++      "- loop exit output values:\n"
++      ^ String.concat "\n"
++          (List.map (symbolic_value_to_string ctx) exit.exit_svalues)
++      ^ "\n\n- loop exit output abstractions:\n"
++      ^ String.concat "\n\n" (List.map (abs_to_string ctx) exit.exit_abs)
++      ^ "\n\n- loop exit translated outputs:\n"
++      ^ String.concat "\n" (List.map (tpat_to_string ctx) outputs)];
++    (ctx, (exit, exit_values, outputs, mk_simpl_tuple_pat outputs))
+   in
+-  let outputs = break_values @ break_abs in
+-  let output = mk_simpl_tuple_pat outputs in
+-
+-  [%ldebug
+-    "- loop output values:\n"
+-    ^ String.concat "\n"
+-        (List.map (symbolic_value_to_string ctx) loop.break_svalues)
+-    ^ "\n\n- loop output abstractions:\n"
+-    ^ String.concat "\n\n" (List.map (abs_to_string ctx) loop.break_abs)
+-    ^ "\n\n- loop translated outputs:\n"
+-    ^ String.concat "\n" (List.map (tpat_to_string ctx) outputs)];
++  (* Different exits can output the same symbolic values: the bindings of an
++     exit are only valid in the expression which follows this exit (we bind
++     them again below, before translating the expression of each exit when
++     there are several). *)
++  let ctx, exits = List.fold_left_map bind_exit ctx loop.exits in
++  (* A loop with several exits outputs the payload of the exit it took,
++     injected in a (right-nested) sum type, and we dispatch on it afterwards. *)
++  let rec sum_ty (tys : ty list) : ty =
++    match tys with
++    | [] -> [%internal_error] ctx.span
++    | [ ty ] -> ty
++    | ty :: tys -> mk_sum_ty ty (sum_ty tys)
++  in
++  let exit_tys = List.map (fun (_, _, _, (pat : tpat)) -> pat.ty) exits in
++  let rec inject (i : int) (tys : ty list) (value : texpr) : texpr =
++    match tys with
++    | [] -> [%internal_error] ctx.span
++    | [ _ ] ->
++        [%sanity_check] ctx.span (i = 0);
++        value
++    | ty :: tys ->
++        if i = 0 then mk_sum_left_texpr ctx.span value (sum_ty tys)
++        else mk_sum_right_texpr ctx.span ty (inject (i - 1) tys value)
++  in
++  let rec inject_pattern (i : int) (tys : ty list) (pat : tpat) : tpat =
++    match tys with
++    | [] -> [%internal_error] ctx.span
++    | [ _ ] ->
++        [%sanity_check] ctx.span (i = 0);
++        pat
++    | _ :: rest ->
++        let variant, field =
++          if i = 0 then (sum_left_id, pat)
++          else (sum_right_id, inject_pattern (i - 1) rest pat)
++        in
++        mk_adt_pat (sum_ty tys) (Some variant) [ field ]
++  in
++  let break_ty = sum_ty exit_tys in
+ 
+   (* Translate the body *)
+   let loop_body =
+@@ -2413,7 +2452,6 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+     (* Update the [mk_panic], [mk_result], etc. functions *)
+     let continue_ty = List.map (fun (e : texpr) -> e.ty) inputs in
+     let continue_ty = mk_simpl_tuple_ty continue_ty in
+-    let break_ty = output.ty in
+     [%ldebug
+       "- continue_ty:\n"
+       ^ pure_ty_to_string ctx continue_ty
+@@ -2424,14 +2462,16 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+         error_failure_id
+     in
+     let mk_continue ctx output = mk_continue_texpr ctx.span output break_ty in
+-    let mk_break ctx output = mk_break_texpr ctx.span continue_ty output in
++    let mk_break i ctx output =
++      mk_break_texpr ctx.span continue_ty (inject i exit_tys output)
++    in
+     let ctx =
+       {
+         ctx with
+         mk_panic = Some mk_panic;
+         mk_return = None;
+         mk_continue = Some (continue_ty, mk_continue);
+-        mk_break = Some (break_ty, mk_break);
++        mk_break = List.mapi (fun i ty -> (ty, mk_break i)) exit_tys;
+       }
+     in
+ 
+@@ -2447,12 +2487,19 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+   in
+ 
+   (* Make the loop expression *)
++  let output_tys, num_output_values =
++    match exits with
++    | [ (_, exit_values, outputs, _) ] ->
++        ( List.map (fun (pat : tpat) -> pat.ty) outputs,
++          List.length exit_values )
++    | _ -> ([ break_ty ], 1)
++  in
+   let loop_e : loop =
+     {
+       loop_id;
+       span = loop.span;
+-      output_tys = List.map (fun (pat : tpat) -> pat.ty) outputs;
+-      num_output_values = List.length break_values;
++      output_tys;
++      num_output_values;
+       inputs = input_abs @ input_values;
+       num_input_conts = List.length input_abs;
+       loop_body;
+@@ -2461,20 +2508,43 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+   in
+   [%sanity_check] loop.span
+     (List.length loop_e.loop_body.inputs = List.length loop_e.inputs);
+-  let loop_ty = mk_result_ty output.ty in
++  let loop_ty = mk_result_ty break_ty in
+   let loop_e : texpr = { e = Loop loop_e; ty = loop_ty } in
+ 
+   [%ltrace
+     "- loop expression:\n" ^ texpr_to_string ctx loop_e ^ "\n\n- num inputs: "
+     ^ string_of_int (List.length inputs)];
+ 
+-  (* Translate the next expression *)
+-  let next_e = translate_expr loop.next_expr ctx in
+-
+-  (* Create the let-binding *)
+-  [%add_loc] mk_closed_checked_let ctx true output loop_e next_e
++  (* Translate the expressions which follow the exits *)
++  match exits with
++  | [ (exit, _, _, output) ] ->
++      let next_e = translate_expr exit.exit_expr ctx in
++      (* Create the let-binding *)
++      [%add_loc] mk_closed_checked_let ctx true output loop_e next_e
++  | _ ->
++      let ctx, result = fresh_var (Some "exit") break_ty ctx in
++      let _, branches =
++        List.fold_left_map
++          (fun ctx (i, (exit : S.loop_exit)) ->
++            let ctx, (_, _, _, output) = bind_exit ctx exit in
++            let branch = translate_expr exit.exit_expr ctx in
++            (ctx, close_branch ctx.span (inject_pattern i exit_tys output) branch))
++          ctx
++          (List.mapi (fun i exit -> (i, exit)) loop.exits)
++      in
++      let empty_ty =
++        match branches with
++        | branch :: _ -> branch.branch.ty
++        | [] -> [%internal_error] ctx.span
++      in
++      let next_e =
++        mk_switch ~empty_ty (mk_texpr_from_fvar result) (Match branches)
++      in
++      [%add_loc] mk_closed_checked_let ctx true
++        (mk_tpat_from_fvar None result)
++        loop_e next_e
+ 
+-and translate_continue_break (ctx : bs_ctx) ~(continue : bool)
++and translate_continue_break (ctx : bs_ctx) ~(continue : bool) ?(exit = 0)
+     (ectx : C.eval_ctx) (_loop_id : V.loop_id) (input_values : V.tvalue list)
+     (input_abs : V.abs list) : texpr =
+   [%ldebug
+@@ -2492,11 +2562,15 @@ and translate_continue_break (ctx : bs_ctx) ~(continue : bool)
+   (* Note that the order between the values and the continuations is not the same
+      depending on whether we reach a break or a continue *)
+   let outputs, mk =
+-    if continue then (conts @ values, ctx.mk_continue)
+-    else (values @ conts, ctx.mk_break)
++    if continue then (conts @ values, Option.get ctx.mk_continue)
++    else
++      ( values @ conts,
++        [%unwrap_with_span] ctx.span
++          (List.nth_opt ctx.mk_break exit)
++          "Missing loop exit" )
+   in
+   let output = mk_simpl_tuple_texpr ctx.span outputs in
+-  (snd (Option.get mk)) ctx output
++  (snd mk) ctx output
+ 
+ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+   let ctx = forget_scoped_owned_state ctx0 in
+@@ -2582,7 +2656,7 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+         ctx0 with
+         mk_return = None;
+         mk_continue = None;
+-        mk_break = None;
++        mk_break = [];
+         mk_join = S.SymbolicExprId.Map.singleton lete.join_id (output.ty, join);
+         mk_panic =
+           Some
+@@ -2669,13 +2743,15 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+     let exits =
+       List.filter_map
+         (fun x -> x)
+-        [
+-          Option.map (fun handler -> (`Continue, handler)) ctx0.mk_continue;
+-          Option.map (fun handler -> (`Break, handler)) ctx0.mk_break;
+-          Option.map
+-            (fun _ -> (`Return, (return_ty, return_output)))
+-            ctx0.mk_return;
+-        ]
++        [ Option.map (fun handler -> (`Continue, handler)) ctx0.mk_continue ]
++      @ List.mapi (fun i handler -> (`Break i, handler)) ctx0.mk_break
++      @ List.filter_map
++          (fun x -> x)
++          [
++            Option.map
++              (fun _ -> (`Return, (return_ty, return_output)))
++              ctx0.mk_return;
++          ]
+       @ List.map
+           (fun (id, handler) -> (`Join id, handler))
+           (S.SymbolicExprId.Map.bindings parent_joins)
+@@ -2736,7 +2812,8 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+         ctx0 with
+         mk_return;
+         mk_continue = wrap_handler `Continue ctx0.mk_continue;
+-        mk_break = wrap_handler `Break ctx0.mk_break;
++        mk_break =
++          List.mapi (fun i (ty, _) -> (ty, wrap (`Break i))) ctx0.mk_break;
+         mk_join =
+           S.SymbolicExprId.Map.add lete.join_id
+             (output.ty, wrap (`Join lete.join_id))
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 7ac6e27..8786200 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -915,7 +915,14 @@ let gtranslate_adt_fields ~(project_borrows : bool)
+   let span = ctx.span in
+   (* We do not do the same thing depending on whether we visit a tuple
+      or a "regular" ADT *)
+-  let adt_id, _ = TypesUtils.ty_as_adt av_ty in
++  let adt_id =
++    match av_ty with
++    | T.TAdt { id; _ } -> Some id
++    | T.TArray _ ->
++        (* The fields of an array value are its elements *)
++        None
++    | _ -> [%craise] span "Unreachable"
++  in
+   (* Check if the ADT contains borrows *)
+   let proj_kind = compute_proj_kind av in
+   [%ldebug
+@@ -942,8 +949,8 @@ let gtranslate_adt_fields ~(project_borrows : bool)
+         filter
+         &&
+         match adt_id with
+-        | TTuple | TBuiltin TBox -> true
+-        | TBuiltin _ | TAdtId _ -> (
++        | Some (TTuple | TBuiltin TBox) -> true
++        | Some (TBuiltin _ | TAdtId _) | None -> (
+             match proj_kind with
+             | UnknownProj | BorrowProj BShared | LoanProj BShared -> true
+             | _ -> false)
+@@ -962,7 +969,15 @@ let gtranslate_adt_fields ~(project_borrows : bool)
+                (Print.option_to_string (fun (_, x) -> output_to_string x))
+                info_fields)];
+       match adt_id with
+-      | TAdtId _ ->
++      | None ->
++          if filter_fields then (
++            [%sanity_check] span (List.for_all Option.is_none info_fields);
++            (ctx, None))
++          else
++            [%craise] span
++              "Arrays containing mutable borrows are not supported in region \
++               abstractions yet"
++      | Some (TAdtId _) ->
+           if filter_fields then (
+             [%sanity_check] span (List.for_all Option.is_none info_fields);
+             (ctx, None))
+@@ -973,19 +988,19 @@ let gtranslate_adt_fields ~(project_borrows : bool)
+             in
+             let pat = mk_adt fields in
+             (ctx, Some (infos, pat))
+-      | TBuiltin TBox -> begin
++      | Some (TBuiltin TBox) -> begin
+           (* The box type becomes the identity in the translation *)
+           match info_fields with
+           | [ None ] -> (ctx, None)
+           | [ Some (info, v) ] -> (ctx, Some ([ info ], v))
+           | _ -> [%craise] span "Unreachable"
+         end
+-      | TBuiltin TStr ->
++      | Some (TBuiltin TStr) ->
+           (* This case is unreachable:
+              - for strings: the [str] is not polymorphic.
+           *)
+           [%craise] span "Unreachable"
+-      | TTuple ->
++      | Some TTuple ->
+           (* If the filtering is activated, we ignore the fields which do not
+              consume values (i.e., which do not contain ended mutable borrows). *)
+           if filter then
+diff --git a/tests/lean/ArrayOfBorrowsLoop.lean b/tests/lean/ArrayOfBorrowsLoop.lean
+new file mode 100644
+index 0000000..612c39f
+--- /dev/null
++++ b/tests/lean/ArrayOfBorrowsLoop.lean
+@@ -0,0 +1 @@
++import ArrayOfBorrowsLoop.Checks
+diff --git a/tests/lean/ArrayOfBorrowsLoop/ArrayOfBorrowsLoop.lean b/tests/lean/ArrayOfBorrowsLoop/ArrayOfBorrowsLoop.lean
+new file mode 100644
+index 0000000..c82076f
+--- /dev/null
++++ b/tests/lean/ArrayOfBorrowsLoop/ArrayOfBorrowsLoop.lean
+@@ -0,0 +1,76 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [array_of_borrows_loop]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace array_of_borrows_loop
++
++/-- [array_of_borrows_loop::first_larger]: loop body 0:
++    Source: 'tests/src/array-of-borrows-loop.rs', lines 12:4-19:1
++    Visibility: public -/
++@[rust_loop_body]
++def first_larger_loop.body
++  (limit : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter _root_.Aeneas.Std.U32
++  3#usize) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.array.iter.IntoIter _root_.Aeneas.Std.U32 3#usize)
++    × _root_.Aeneas.Std.Usize) (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.array.iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done none)
++  | some v =>
++    if v > limit
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (some (v,
++        i)))
++    else
++      let i1 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, i1))
++
++/-- [array_of_borrows_loop::first_larger]: loop 0:
++    Source: 'tests/src/array-of-borrows-loop.rs', lines 12:4-19:1
++    Visibility: public -/
++@[rust_loop]
++def first_larger_loop
++  (iter : _root_.Aeneas.Std.core.array.iter.IntoIter _root_.Aeneas.Std.U32
++  3#usize) (limit : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize))
++  := do
++  loop
++    (fun (iter1, i1) => _root_.array_of_borrows_loop.first_larger_loop.body
++       limit iter1 i1 : ((_root_.Aeneas.Std.core.array.iter.IntoIter
++      _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.array.iter.IntoIter _root_.Aeneas.Std.U32
++      3#usize) × _root_.Aeneas.Std.Usize) (_root_.Option
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize))))
++    (iter, i)
++
++/-- [array_of_borrows_loop::first_larger]:
++    Source: 'tests/src/array-of-borrows-loop.rs', lines 10:0-19:1
++    Visibility: public -/
++def first_larger
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32)
++  (z : _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.array.iter.IntoIteratorArray.into_iter
++      (_root_.Aeneas.Std.Array.make 3#usize [ x, y, z ])
++  _root_.array_of_borrows_loop.first_larger_loop model_state limit 0#usize
++
++end array_of_borrows_loop
+diff --git a/tests/lean/ArrayOfBorrowsLoop/Checks.lean b/tests/lean/ArrayOfBorrowsLoop/Checks.lean
+new file mode 100644
+index 0000000..f04a747
+--- /dev/null
++++ b/tests/lean/ArrayOfBorrowsLoop/Checks.lean
+@@ -0,0 +1,20 @@
++import ArrayOfBorrowsLoop.ArrayOfBorrowsLoop
++
++/-! Evaluate the model of `tests/src/array-of-borrows-loop.rs` on the inputs
++    of its `native` test module and compare with the native results. -/
++
++namespace array_of_borrows_loop.checks
++open Aeneas Aeneas.Std Result
++
++def run (x y z limit : Nat) : Option (Option (Nat × Nat)) :=
++  match first_larger ⟨BitVec.ofNat _ x⟩ ⟨BitVec.ofNat _ y⟩ ⟨BitVec.ofNat _ z⟩
++      ⟨BitVec.ofNat _ limit⟩ with
++  | ok r => some (r.map (fun (v, i) => (v.val, i.val)))
++  | _ => none
++
++#guard run 1 5 9 4 == some (some (5, 1))
++#guard run 7 5 9 4 == some (some (7, 0))
++#guard run 1 2 9 4 == some (some (9, 2))
++#guard run 1 2 3 4 == some none
++
++end array_of_borrows_loop.checks
+diff --git a/tests/lean/CharSwitch.lean b/tests/lean/CharSwitch.lean
+new file mode 100644
+index 0000000..da619e6
+--- /dev/null
++++ b/tests/lean/CharSwitch.lean
+@@ -0,0 +1 @@
++import CharSwitch.Checks
+diff --git a/tests/lean/CharSwitch/CharSwitch.lean b/tests/lean/CharSwitch/CharSwitch.lean
+new file mode 100644
+index 0000000..bef9404
+--- /dev/null
++++ b/tests/lean/CharSwitch/CharSwitch.lean
+@@ -0,0 +1,133 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [char_switch]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace char_switch
++
++/-- [char_switch::classify]:
++    Source: 'tests/src/char-switch.rs', lines 10:0-19:1
++    Visibility: public -/
++def classify
++  (c : _root_.Char) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  if c = 'a'
++  then _root_.Aeneas.Std.Result.ok 1#u32
++  else
++    let b ←
++      if c = 'b'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok false
++    let b1 ←
++      if c = 'c'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b
++    let b2 ←
++      if c = '\u0027'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b1
++    if b2
++    then _root_.Aeneas.Std.Result.ok 2#u32
++    else
++      let b3 ←
++        if c = '\u005C'
++        then _root_.Aeneas.Std.Result.ok true
++        else _root_.Aeneas.Std.Result.ok false
++      let b4 ←
++        if c = '\u000A'
++        then _root_.Aeneas.Std.Result.ok true
++        else _root_.Aeneas.Std.Result.ok b3
++      if b4
++      then _root_.Aeneas.Std.Result.ok 5#u32
++      else
++        let b5 ←
++          if c = '\u00E9'
++          then _root_.Aeneas.Std.Result.ok true
++          else _root_.Aeneas.Std.Result.ok false
++        let b6 ←
++          if c = '\u20AC'
++          then _root_.Aeneas.Std.Result.ok true
++          else _root_.Aeneas.Std.Result.ok b5
++        if b6
++        then _root_.Aeneas.Std.Result.ok 6#u32
++        else
++          if c = (_root_.Char.ofNat 128512)
++          then _root_.Aeneas.Std.Result.ok 4#u32
++          else _root_.Aeneas.Std.Result.ok 3#u32
++
++/-- [char_switch::count_vowels]: loop body 0:
++    Source: 'tests/src/char-switch.rs', lines 23:4-29:5
++    Visibility: public -/
++@[rust_loop_body]
++def count_vowels_loop.body
++  (iter : _root_.Aeneas.Std.core.str.iter.Chars) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.str.iter.Chars × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.str.iter.IteratorChars.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some c =>
++    let b ←
++      if c = 'a'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok false
++    let b1 ←
++      if c = 'e'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b
++    let b2 ←
++      if c = 'i'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b1
++    let b3 ←
++      if c = 'o'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b2
++    let b4 ←
++      if c = 'u'
++      then _root_.Aeneas.Std.Result.ok true
++      else _root_.Aeneas.Std.Result.ok b3
++    let i ←
++      if b4
++      then n + 1#u32
++      else if c = 'y'
++           then n + 10#u32
++           else _root_.Aeneas.Std.Result.ok n
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, i))
++
++/-- [char_switch::count_vowels]: loop 0:
++    Source: 'tests/src/char-switch.rs', lines 23:4-29:5
++    Visibility: public -/
++@[rust_loop]
++def count_vowels_loop
++  (iter : _root_.Aeneas.Std.core.str.iter.Chars) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, n1) => _root_.char_switch.count_vowels_loop.body iter1 n1 :
++      (_root_.Aeneas.Std.core.str.iter.Chars × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.core.str.iter.Chars × _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.U32))
++    (iter, n)
++
++/-- [char_switch::count_vowels]:
++    Source: 'tests/src/char-switch.rs', lines 21:0-31:1
++    Visibility: public -/
++def count_vowels
++  (s : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let iter ← _root_.Aeneas.Std.core.str.Str.chars s
++  _root_.char_switch.count_vowels_loop iter 0#u32
++
++end char_switch
+diff --git a/tests/lean/CharSwitch/Checks.lean b/tests/lean/CharSwitch/Checks.lean
+new file mode 100644
+index 0000000..f6a67dc
+--- /dev/null
++++ b/tests/lean/CharSwitch/Checks.lean
+@@ -0,0 +1,33 @@
++import CharSwitch.CharSwitch
++
++/-! Evaluate the model of `tests/src/char-switch.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace char_switch.checks
++open Aeneas Aeneas.Std Result
++
++def okU32 : Result U32 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++def vowels (s : String) : Option Nat :=
++  match Str.ofString s with
++  | ok s => okU32 (count_vowels s)
++  | _ => none
++
++#guard okU32 (classify 'a') == some 1
++#guard okU32 (classify 'c') == some 2
++#guard okU32 (classify '\'') == some 2
++#guard okU32 (classify '\\') == some 5
++#guard okU32 (classify '\n') == some 5
++#guard okU32 (classify 'é') == some 6
++#guard okU32 (classify '€') == some 6
++#guard okU32 (classify '😀') == some 4
++#guard okU32 (classify 'z') == some 3
++
++#guard vowels "education" == some 5
++#guard vowels "rhythm" == some 10
++#guard vowels "" == some 0
++#guard vowels "été" == some 0
++
++end char_switch.checks
+diff --git a/tests/lean/CollectAdapters.lean b/tests/lean/CollectAdapters.lean
+new file mode 100644
+index 0000000..105e79a
+--- /dev/null
++++ b/tests/lean/CollectAdapters.lean
+@@ -0,0 +1 @@
++import CollectAdapters.Checks
+diff --git a/tests/lean/CollectAdapters/Checks.lean b/tests/lean/CollectAdapters/Checks.lean
+new file mode 100644
+index 0000000..ba8f5c6
+--- /dev/null
++++ b/tests/lean/CollectAdapters/Checks.lean
+@@ -0,0 +1,34 @@
++import CollectAdapters.CollectAdapters
++
++/-! Evaluate the model of `tests/src/collect-adapters.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_adapters.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (chained (u 7) (sl [1, 2])) == some [7, 10, 20]
++#guard nats (chained (u 0) (sl [])) == some [0]
++#guard nats (chained_slices (sl [1, 2]) (sl [3])) == some [1, 2, 3]
++#guard nats (chained_slices (sl []) (sl [])) == some []
++def rev (s : List (Nat × Bool)) (xs : List Nat) (h1 : s.length ≤ Usize.max := by scalar_tac)
++    (h2 : xs.length ≤ Usize.max := by scalar_tac) : Option (List (Nat × Bool)) :=
++  match reversed_into (vec (s.map (fun (a, b) => (u a, b)))) (sl xs) with
++  | ok v => some (v.val.map (fun (a, b) => (a.val, b)))
++  | _ => none
++#guard rev [(9, false)] [1, 2, 3] == some [(9, false), (3, false), (2, true), (1, false)]
++#guard rev [] [] == some []
++#guard nats (flat (vec [vec [u 1, u 2], vec [], vec [u 3]])) == some [2, 3, 4]
++#guard nats (flat (vec [])) == some []
++def cres (a b : List Nat) (h1 : a.length ≤ Usize.max := by scalar_tac)
++    (h2 : b.length ≤ Usize.max := by scalar_tac) : Option (Sum (List Nat) Nat) :=
++  match chain_result (sl a) (sl b) with
++  | ok (core.result.Result.Ok v) => some (.inl (v.val.map (·.val)))
++  | ok (core.result.Result.Err e) => some (.inr e.val)
++  | _ => none
++#guard cres [1, 2] [3] == some (.inl [1, 2, 3])
++#guard cres [1, 200] [300] == some (.inr 200)
++end collect_adapters.checks
+diff --git a/tests/lean/CollectAdapters/CollectAdapters.lean b/tests/lean/CollectAdapters/CollectAdapters.lean
+new file mode 100644
+index 0000000..4713482
+--- /dev/null
++++ b/tests/lean/CollectAdapters/CollectAdapters.lean
+@@ -0,0 +1,546 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_adapters]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_adapters
++
++/-- [collect_adapters::chained::closure]
++    Source: 'tests/src/collect-adapters.rs', lines 10:49-10:60 -/
++@[reducible]
++def chained.closure := _root_.Unit
++
++/-- [collect_adapters::chained::{core::ops::function::FnMut<(&'_ (u32)), u32> for collect_adapters::chained::closure}::call_mut]:
++    Source: 'tests/src/collect-adapters.rs', lines 10:49-10:60 -/
++def chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.collect_adapters.chained.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.collect_adapters.chained.closure)
++  := do
++  let i ← tupled_args * 10#u32
++  _root_.Aeneas.Std.Result.ok (i, c)
++
++/-- [collect_adapters::chained::{core::ops::function::FnOnce<(&'_ (u32)), u32> for collect_adapters::chained::closure}::call_once]:
++    Source: 'tests/src/collect-adapters.rs', lines 10:49-10:60 -/
++def chained.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.collect_adapters.chained.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [collect_adapters::chained::{core::ops::function::FnOnce<(&'_ (u32)), u32> for collect_adapters::chained::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 10:49-10:60 -/
++@[reducible]
++def chained.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_adapters.chained.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_adapters::chained::{core::ops::function::FnMut<(&'_ (u32)), u32> for collect_adapters::chained::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 10:49-10:60 -/
++@[reducible]
++def chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_adapters.chained.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_adapters::chained]:
++    Source: 'tests/src/collect-adapters.rs', lines 9:0-11:1
++    Visibility: public -/
++def chained
++  (first : _root_.Aeneas.Std.U32)
++  (rest : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let o ← _root_.Aeneas.Std.core.iter.sources.once.once first
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter rest
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      i ()
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.chain.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOnce
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32))
++      o model_state
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOnce
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_adapters.chained.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_adapters::chained_slices]:
++    Source: 'tests/src/collect-adapters.rs', lines 13:0-15:1
++    Visibility: public -/
++def chained_slices
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter b
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.chain.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) i i1
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_adapters::reversed_into::closure]
++    Source: 'tests/src/collect-adapters.rs', lines 18:37-18:58 -/
++@[reducible]
++def reversed_into.closure := _root_.Unit
++
++/-- [collect_adapters::reversed_into::{core::ops::function::FnMut<(&'_ (u32)), (u32, bool)> for collect_adapters::reversed_into::closure}::call_mut]:
++    Source: 'tests/src/collect-adapters.rs', lines 18:37-18:58 -/
++def
++  reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool.call_mut
++  (c : _root_.collect_adapters.reversed_into.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Bool) ×
++    _root_.collect_adapters.reversed_into.closure)
++  := do
++  let i ← tupled_args % 2#u32
++  _root_.Aeneas.Std.Result.ok ((tupled_args, i = 0#u32), c)
++
++/-- [collect_adapters::reversed_into::{core::ops::function::FnOnce<(&'_ (u32)), (u32, bool)> for collect_adapters::reversed_into::closure}::call_once]:
++    Source: 'tests/src/collect-adapters.rs', lines 18:37-18:58 -/
++def
++  reversed_into.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32PairU32Bool.call_once
++  (c : _root_.collect_adapters.reversed_into.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Bool)
++  := do
++  let (p, _) ←
++    _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok p
++
++/-- Trait implementation: [collect_adapters::reversed_into::{core::ops::function::FnOnce<(&'_ (u32)), (u32, bool)> for collect_adapters::reversed_into::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 18:37-18:58 -/
++@[reducible]
++def reversed_into.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32PairU32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_adapters.reversed_into.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.U32 × _root_.Bool) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32PairU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_adapters::reversed_into::{core::ops::function::FnMut<(&'_ (u32)), (u32, bool)> for collect_adapters::reversed_into::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 18:37-18:58 -/
++@[reducible]
++def reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_adapters.reversed_into.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.U32 × _root_.Bool) := {
++  FnOnceInst :=
++    _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32PairU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_adapters::reversed_into]:
++    Source: 'tests/src/collect-adapters.rs', lines 17:0-19:1
++    Visibility: public -/
++def reversed_into
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Bool)) (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Bool))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let r ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.rev.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRev
++      (_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool
++      r ()
++  let (_, model_state1, _) ←
++    _root_.Aeneas.Std.alloc.vec.ExtendVec.extend
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRev
++      (_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.reversed_into.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32PairU32Bool))
++      stack model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_adapters::flat::closure#1]
++    Source: 'tests/src/collect-adapters.rs', lines 22:55-22:64 -/
++@[reducible]
++def flat.closure_1 := _root_.Unit
++
++/-- [collect_adapters::flat::{core::ops::function::FnMut<(u32), u32> for collect_adapters::flat::closure#1}::call_mut]:
++    Source: 'tests/src/collect-adapters.rs', lines 22:55-22:64 -/
++def flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  (c : _root_.collect_adapters.flat.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.collect_adapters.flat.closure_1)
++  := do
++  let i ← tupled_args + 1#u32
++  _root_.Aeneas.Std.Result.ok (i, c)
++
++/-- [collect_adapters::flat::{core::ops::function::FnOnce<(u32), u32> for collect_adapters::flat::closure#1}::call_once]:
++    Source: 'tests/src/collect-adapters.rs', lines 22:55-22:64 -/
++def flat.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  (c : _root_.collect_adapters.flat.closure_1) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [collect_adapters::flat::{core::ops::function::FnOnce<(u32), u32> for collect_adapters::flat::closure#1}]
++    Source: 'tests/src/collect-adapters.rs', lines 22:55-22:64 -/
++@[reducible]
++def flat.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_adapters.flat.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_adapters::flat::{core::ops::function::FnMut<(u32), u32> for collect_adapters::flat::closure#1}]
++    Source: 'tests/src/collect-adapters.rs', lines 22:55-22:64 -/
++@[reducible]
++def flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_adapters.flat.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_adapters::flat::closure]
++    Source: 'tests/src/collect-adapters.rs', lines 22:32-22:49 -/
++@[reducible]
++def flat.closure := _root_.Unit
++
++/-- [collect_adapters::flat::{core::ops::function::FnMut<(alloc::vec::Vec<u32>), alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>> for collect_adapters::flat::closure}::call_mut]:
++    Source: 'tests/src/collect-adapters.rs', lines 22:32-22:49 -/
++def
++  flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global.call_mut
++  (c : _root_.collect_adapters.flat.closure)
++  (tupled_args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++    _root_.Aeneas.Std.U32) × _root_.collect_adapters.flat.closure)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter tupled_args
++  _root_.Aeneas.Std.Result.ok (model_state, c)
++
++/-- [collect_adapters::flat::{core::ops::function::FnOnce<(alloc::vec::Vec<u32>), alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>> for collect_adapters::flat::closure}::call_once]:
++    Source: 'tests/src/collect-adapters.rs', lines 22:32-22:49 -/
++def
++  flat.closure.Insts.CoreOpsFunctionFnOnceTupleVecU32IntoIterU32Global.call_once
++  (c : _root_.collect_adapters.flat.closure)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++    _root_.Aeneas.Std.U32)
++  := do
++  let (ii, _) ←
++    _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global.call_mut
++      c v
++  _root_.Aeneas.Std.Result.ok ii
++
++/-- Trait implementation: [collect_adapters::flat::{core::ops::function::FnOnce<(alloc::vec::Vec<u32>), alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>> for collect_adapters::flat::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 22:32-22:49 -/
++@[reducible]
++def flat.closure.Insts.CoreOpsFunctionFnOnceTupleVecU32IntoIterU32Global :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_adapters.flat.closure (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnOnceTupleVecU32IntoIterU32Global.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_adapters::flat::{core::ops::function::FnMut<(alloc::vec::Vec<u32>), alloc::vec::into_iter::IntoIter<u32, alloc::alloc::Global>> for collect_adapters::flat::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 22:32-22:49 -/
++@[reducible]
++def flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_adapters.flat.closure (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnOnceTupleVecU32IntoIterU32Global
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_adapters::flat]:
++    Source: 'tests/src/collect-adapters.rs', lines 21:0-23:1
++    Visibility: public -/
++def flat
++  (groups : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter groups
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global
++      model_state ()
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global)
++      _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32
++      model_state1 ()
++  let (model_state3, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.flat.closure.Insts.CoreOpsFunctionFnMutTupleVecU32IntoIterU32Global)
++      _root_.collect_adapters.flat.closure_1.Insts.CoreOpsFunctionFnMutTupleU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state2
++  _root_.Aeneas.Std.Result.ok model_state3
++
++/-- [collect_adapters::chain_result::closure]
++    Source: 'tests/src/collect-adapters.rs', lines 26:33-26:76 -/
++@[reducible]
++def chain_result.closure := _root_.Unit
++
++/-- [collect_adapters::chain_result::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for collect_adapters::chain_result::closure}::call_mut]:
++    Source: 'tests/src/collect-adapters.rs', lines 26:33-26:76 -/
++def
++  chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++  (c : _root_.collect_adapters.chain_result.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.collect_adapters.chain_result.closure)
++  := do
++  if tupled_args > 100#u32
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      tupled_args, c)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      tupled_args, c)
++
++/-- [collect_adapters::chain_result::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for collect_adapters::chain_result::closure}::call_once]:
++    Source: 'tests/src/collect-adapters.rs', lines 26:33-26:76 -/
++def
++  chain_result.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++  (c : _root_.collect_adapters.chain_result.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (r, _) ←
++    _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok r
++
++/-- Trait implementation: [collect_adapters::chain_result::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for collect_adapters::chain_result::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 26:33-26:76 -/
++@[reducible]
++def chain_result.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_adapters.chain_result.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_adapters::chain_result::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for collect_adapters::chain_result::closure}]
++    Source: 'tests/src/collect-adapters.rs', lines 26:33-26:76 -/
++@[reducible]
++def chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_adapters.chain_result.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_adapters::chain_result]:
++    Source: 'tests/src/collect-adapters.rs', lines 25:0-27:1
++    Visibility: public -/
++def chain_result
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter b
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.chain.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) i i1
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++      model_state ()
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.collect_adapters.chain_result.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorResult
++      _root_.Aeneas.Std.U32
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32)) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++end collect_adapters
+diff --git a/tests/lean/NestedLoopExits.lean b/tests/lean/NestedLoopExits.lean
+new file mode 100644
+index 0000000..04956ad
+--- /dev/null
++++ b/tests/lean/NestedLoopExits.lean
+@@ -0,0 +1 @@
++import NestedLoopExits.Checks
+diff --git a/tests/lean/NestedLoopExits/Checks.lean b/tests/lean/NestedLoopExits/Checks.lean
+new file mode 100644
+index 0000000..65b9279
+--- /dev/null
++++ b/tests/lean/NestedLoopExits/Checks.lean
+@@ -0,0 +1,61 @@
++import NestedLoopExits.NestedLoopExits
++
++/-! Evaluate the model of `tests/src/nested-loop-exits.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace nested_loop_exits.checks
++open Aeneas Aeneas.Std Result
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map (fun x => (⟨BitVec.ofNat _ x⟩ : U32)), by simpa using h⟩
++
++def u32 (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def okBool : Result Bool → Option Bool
++  | ok b => some b
++  | _ => none
++
++def okPair : Result (U32 × U32) → Option (Nat × Nat)
++  | ok (a, b) => some (a.val, b.val)
++  | _ => none
++
++def okU32 : Result U32 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++-- Inner loop in tail position, early returns from both loops, inner continue
++#guard okBool (scan (sl [5, 4]) (sl [3, 2])) == some true
++#guard okBool (scan (sl [5, 0]) (sl [3])) == some false
++#guard okBool (scan (sl [9]) (sl [4, 200])) == some false
++#guard okBool (scan (sl []) (sl [1])) == some true
++#guard okBool (scan (sl [1, 7]) (sl [7, 1])) == some true
++
++-- Early return from an inner loop whose normal exit resumes the outer loop
++#guard okBool (all_small (sl [1, 2, 3]) (u32 5)) == some true
++#guard okBool (all_small (sl [1, 9, 3]) (u32 5)) == some false
++#guard okBool (all_small (sl []) (u32 0)) == some true
++#guard okBool (all_small (sl [0, 0, 2]) (u32 0)) == some false
++
++-- Worklist loop: `let else` continues of the outer loop, inner continues,
++-- early returns
++#guard okBool (walk (sl [4, 2, 1, 1]) 0#usize) == some true
++#guard okBool (walk (sl [3, 60]) 0#usize) == some true
++#guard okBool (walk (sl [2, 51]) 0#usize) == some false
++#guard okBool (walk (sl [3]) 0#usize) == some false
++#guard okBool (walk (sl [0, 5]) 1#usize) == some true
++#guard okBool (walk (sl [4, 51, 1, 1]) 0#usize) == some true
++#guard okBool (walk (sl [7, 1, 1, 1, 1]) 0#usize) == some true
++
++-- Labeled continue and break of the outer loop
++#guard okPair (labeled (sl [1, 2, 3]) (sl [4, 2, 5])) == some (54, 10)
++#guard okPair (labeled (sl [1, 2]) (sl [3, 2000, 4])) == some (3, 0)
++#guard okPair (labeled (sl []) (sl [1])) == some (0, 0)
++#guard okPair (labeled (sl [2, 2]) (sl [2])) == some (0, 20)
++
++-- The innermost of three loops continues the outermost one
++#guard okU32 (deep (sl [5, 1]) (u32 3)) == some 111
++#guard okU32 (deep (sl []) (u32 3)) == some 0
++#guard okU32 (deep (sl [9]) (u32 3)) == some 10
++#guard okU32 (deep (sl [0, 0]) (u32 1)) == some 200
++
++end nested_loop_exits.checks
+diff --git a/tests/lean/NestedLoopExits/NestedLoopExits.lean b/tests/lean/NestedLoopExits/NestedLoopExits.lean
+new file mode 100644
+index 0000000..8b533ce
+--- /dev/null
++++ b/tests/lean/NestedLoopExits/NestedLoopExits.lean
+@@ -0,0 +1,1364 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_loop_exits]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_loop_exits
++
++/-- [nested_loop_exits::scan]: loop body 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 15:4-17:5
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done stack)
++  | some s =>
++    let stack1 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack s
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, stack1))
++
++/-- [nested_loop_exits::scan]: loop 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 15:4-17:5
++    Visibility: public -/
++@[rust_loop]
++def scan_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, stack1) => _root_.nested_loop_exits.scan_loop0.body iter1
++       stack1 : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (iter, stack)
++
++/-- [nested_loop_exits::scan]: loop body 2:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-35:9
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop1_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (kids, stack, v, model_state1, (), (), (), (), ())))
++  | some k =>
++    let joined ←
++      if k = v
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack, model_state1) :
++          _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++          × (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++          (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit)
++          (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit
++          × _root_.Unit × _root_.Unit) ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit
++          × _root_.Unit × _root_.Unit))))
++      else
++        if k > 100#u32
++        then
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++            (_root_.Sum.inr (kids, (), (), (), (), ()))) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit ×
++            _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit) ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        else
++          do
++          let (v1, i) ←
++            if k < v
++            then
++              do
++              let v2 ←
++                if k > 1#u32
++                then _root_.Aeneas.Std.alloc.vec.Vec.push stack k
++                else _root_.Aeneas.Std.Result.ok stack
++              _root_.Aeneas.Std.Result.ok (v2, model_state1)
++            else _root_.Aeneas.Std.Result.ok (stack, model_state1)
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (v1, i) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit ×
++            _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit) ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++    match joined with
++    | _root_.Sum.inl (v1, i) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (i, kids,
++        v1, v))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, (), (), ()))
++      =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit3,
++        exit, exit1, exit2))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++      exit3, (), (), (), (), ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (exit, exit1, exit2, exit3, (), (), (), (), ())))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit, (), (), (), (),
++      ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (exit, (), (), (), (), ())))
++
++/-- [nested_loop_exits::scan]: loop 2:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-35:9
++    Visibility: public -/
++@[rust_loop]
++def scan_loop1_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) (t : _root_.Unit) (t1 : _root_.Unit)
++  (t2 : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter1, kids1, stack1, v1) =>
++       _root_.nested_loop_exits.scan_loop1_loop0.body iter1 kids1 stack1 v1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))))
++    (iter, kids, stack, v)
++
++/-- [nested_loop_exits::scan]: loop body 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-38:1
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop1.body
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) _root_.Bool)
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++  | some v =>
++    let joined ←
++      if v = 1#u32
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++          (_root_.Sum.inr stack1)) : _root_.Sum _root_.Unit (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.Unit × _root_.Unit) (_root_.Sum (_root_.Bool ×
++          (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++          _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32))))
++      else
++        if v = 0#u32
++        then
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++            _root_.Unit (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit) (_root_.Sum
++            (_root_.Bool × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++        else
++          do
++          let (model_state, _) ←
++            _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter
++              kids
++          let exit ←
++            _root_.nested_loop_exits.scan_loop1_loop0 model_state kids stack1 v
++              () () ()
++          match exit with
++          | _root_.Sum.inl (_, stack2, _, _, _, _, _, _, _) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Sum.inr stack2)) : _root_.Sum _root_.Unit (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Unit × _root_.Unit) (_root_.Sum (_root_.Bool ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++              _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32))))
++          | _root_.Sum.inr (_, _, _, _, _, _) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++              _root_.Unit (_root_.Sum ((_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit) (_root_.Sum
++              (_root_.Bool × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++              × _root_.Unit × _root_.Unit × _root_.Unit)
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    let joined1 ←
++      match joined with
++      | _root_.Sum.inl () =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (false,
++          kids, (), (), ())) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit) (_root_.Bool ×
++          (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++          _root_.Unit × _root_.Unit)))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, (), ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++          exit1, (), ())) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit) (_root_.Bool ×
++          (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++          _root_.Unit × _root_.Unit)))
++      | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, (), (),
++        ()))) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
++          exit1, (), (), ())) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit) (_root_.Bool ×
++          (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++          _root_.Unit × _root_.Unit)))
++      | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr exit)) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          _root_.Unit × _root_.Unit) (_root_.Bool × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit ×
++          _root_.Unit)))
++    match joined1 with
++    | _root_.Sum.inl v1 =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (v1,
++        kids))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit1,
++        exit))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, _, (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [nested_loop_exits::scan]: loop 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-38:1
++    Visibility: public -/
++@[rust_loop]
++def scan_loop1
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun (stack1, kids1) => _root_.nested_loop_exits.scan_loop1.body stack1
++       kids1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) _root_.Bool))
++    (stack, kids)
++
++/-- [nested_loop_exits::scan]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 13:0-38:1
++    Visibility: public -/
++def scan
++  (stack0 : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter stack0
++  let stack ←
++    _root_.nested_loop_exits.scan_loop0 model_state
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++  _root_.nested_loop_exits.scan_loop1 stack kids
++
++/-- [nested_loop_exits::all_small]: loop body 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 46:8-55:1
++    Visibility: public -/
++@[rust_loop_body]
++def all_small_loop0_loop0.body
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.U32
++    (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++  := do
++  let i1 ← Slice.index_usize rows i
++  if j < i1
++  then
++    if j > limit
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (rows, limit, i1)))
++    else
++      let j1 ← j + 1#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont j1)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (rows, limit, i, j, i1)))
++
++/-- [nested_loop_exits::all_small]: loop 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 46:8-55:1
++    Visibility: public -/
++@[rust_loop]
++def all_small_loop0_loop0
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun j1 => _root_.nested_loop_exits.all_small_loop0_loop0.body rows limit i
++       j1 : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.U32 (_root_.Sum
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))))
++    j
++
++/-- [nested_loop_exits::all_small]: loop body 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 44:4-55:1
++    Visibility: public -/
++@[rust_loop_body]
++def all_small_loop0.body
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.Usize) _root_.Bool)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len rows
++  if i < i1
++  then
++    let exit ←
++      _root_.nested_loop_exits.all_small_loop0_loop0 rows limit i 0#u32
++    match exit with
++    | _root_.Sum.inl (rows1, limit1, i2, _, _) =>
++      let i3 ← i2 + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (rows1,
++        limit1, i3))
++    | _root_.Sum.inr (_, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done false)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++
++/-- [nested_loop_exits::all_small]: loop 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 44:4-55:1
++    Visibility: public -/
++@[rust_loop]
++def all_small_loop0
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun (rows1, limit1, i1) => _root_.nested_loop_exits.all_small_loop0.body
++       rows1 limit1 i1 : ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.Usize) _root_.Bool))
++    (rows, limit, i)
++
++/-- [nested_loop_exits::all_small]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 42:0-55:1
++    Visibility: public -/
++@[reducible]
++def all_small
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.nested_loop_exits.all_small_loop0 rows limit 0#usize
++
++/-- [nested_loop_exits::Role]
++    Source: 'tests/src/nested-loop-exits.rs', lines 57:0-61:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Role where
++| Runtime : Role
++| Bypass : Role
++| Syntax : Role
++
++/-- [nested_loop_exits::role]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 63:0-71:1 -/
++def role
++  (tag : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.nested_loop_exits.Role
++  := do
++  if tag = 3#u32
++  then
++    if i = 0#usize
++    then _root_.Aeneas.Std.Result.ok _root_.nested_loop_exits.Role.Bypass
++    else
++      let i1 ← tag % 2#u32
++      if i1 = 0#u32
++      then _root_.Aeneas.Std.Result.ok _root_.nested_loop_exits.Role.Runtime
++      else _root_.Aeneas.Std.Result.ok _root_.nested_loop_exits.Role.Syntax
++  else
++    let i1 ← tag % 2#u32
++    if i1 = 0#u32
++    then _root_.Aeneas.Std.Result.ok _root_.nested_loop_exits.Role.Runtime
++    else _root_.Aeneas.Std.Result.ok _root_.nested_loop_exits.Role.Syntax
++
++/-- [nested_loop_exits::walk]: loop body 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-104:9
++    Visibility: public -/
++@[rust_loop_body]
++def walk_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++  (tags : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++  _root_.Bool)) (v : _root_.Aeneas.Std.Usize) (tag : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize × _root_.Bool))
++    × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32) (_root_.Sum
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize × _root_.Bool))
++    × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++    _root_.Unit × _root_.Unit × _root_.Unit) ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.range.IteratorRange.next
++      _root_.Aeneas.Std.core.iter.range.StepUsize iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (tags, stack, v, tag, model_state1, (), (), ())))
++  | some i =>
++    let r ← _root_.nested_loop_exits.role tag i
++    let joined ←
++      match r with
++      | _root_.nested_loop_exits.Role.Runtime =>
++        do
++        let joined1 ←
++          if tag = 7#u32
++          then
++            if i = 1#usize
++            then
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Sum.inr (_root_.Sum.inr (stack, model_state1)))) :
++                _root_.Sum (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++                _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) × _root_.Unit) (_root_.Sum
++                ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)) × _root_.Aeneas.Std.Usize ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) × _root_.Unit × _root_.Unit ×
++                _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit
++                × _root_.Unit × _root_.Unit)
++                ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize))))))
++            else
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl model_state1 :
++                _root_.Sum (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++                _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) × _root_.Unit) (_root_.Sum
++                ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)) × _root_.Aeneas.Std.Usize ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize) × _root_.Unit × _root_.Unit ×
++                _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit
++                × _root_.Unit × _root_.Unit)
++                ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++                _root_.Aeneas.Std.Usize))))))
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl model_state1 :
++              _root_.Sum (_root_.Aeneas.Std.core.ops.range.Range
++              _root_.Aeneas.Std.Usize) (_root_.Sum ((_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++              _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++              × _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++              _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++              × _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++              _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++              (_root_.Aeneas.Std.core.ops.range.Range
++              _root_.Aeneas.Std.Usize))))))
++        match joined1 with
++        | _root_.Sum.inl iter1 =>
++          let i1 ← v + i
++          let i2 ← i1 + 1#usize
++          let stack1 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack (i2, true)
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack1, iter1) :
++            _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++            × (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++            × _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4,
++          ())) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++            exit1, exit2, exit3, exit4, ())) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++            _root_.Aeneas.Std.Usize)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++          exit3, exit4, (), (), ()))) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++            (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, (), (), ()))) :
++            _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++            × (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++            × _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit,
++          exit1, (), (), ())))) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++            (_root_.Sum.inr (exit, exit1, (), (), ()))) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++            _root_.Aeneas.Std.Usize)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit,
++          exit1)))) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (exit, exit1) :
++            _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++            × (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++            × _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++      | _root_.nested_loop_exits.Role.Bypass =>
++        do
++        let i1 ← v + 1#usize
++        let i2 := _root_.Aeneas.Std.Slice.len tags
++        if i1 >= i2
++        then
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++            (_root_.Sum.inr (tags, tag, (), (), ()))) : _root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++            _root_.Aeneas.Std.Usize)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++        else
++          let stack1 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack (i1, false)
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack1, model_state1) :
++            _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize))
++            (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++            _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++            × (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++            × _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            (_root_.Aeneas.Std.Usize × _root_.Bool)) ×
++            _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++            _root_.Unit × _root_.Unit × _root_.Unit)
++            ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++      | _root_.nested_loop_exits.Role.Syntax =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (stack, model_state1) :
++          _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize
++          × _root_.Bool)) × (_root_.Aeneas.Std.core.ops.range.Range
++          _root_.Aeneas.Std.Usize)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          (_root_.Aeneas.Std.Usize × _root_.Bool)) × _root_.Aeneas.Std.Usize
++          × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.ops.range.Range
++          _root_.Aeneas.Std.Usize) × _root_.Unit) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++          _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++          _root_.Unit × _root_.Unit × _root_.Unit) ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit ×
++          _root_.Unit × _root_.Unit))))
++    match joined with
++    | _root_.Sum.inl (v1, r1) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (r1,
++        tags, v1, v, tag))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit4,
++        exit, exit1, exit2, exit3))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++      exit3, exit4, (), (), ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, (), (), ())))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit, exit1, (), (),
++      ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (exit, exit1, (), (), ())))
++
++/-- [nested_loop_exits::walk]: loop 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-104:9
++    Visibility: public -/
++@[rust_loop]
++def walk_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++  (tags : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++  _root_.Bool)) (v : _root_.Aeneas.Std.Usize) (tag : _root_.Aeneas.Std.U32)
++  (t : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.Usize × _root_.Bool)) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.ops.range.Range
++    _root_.Aeneas.Std.Usize) × _root_.Unit × _root_.Unit × _root_.Unit)
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++    × _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter1, tags1, stack1, v1, tag1) =>
++       _root_.nested_loop_exits.walk_loop0_loop0.body iter1 tags1 stack1 v1
++       tag1 : ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++      _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++      _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)
++      (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++      _root_.Bool)) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize) ×
++      _root_.Unit × _root_.Unit × _root_.Unit) ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit ×
++      _root_.Unit × _root_.Unit))))
++    (iter, tags, stack, v, tag)
++
++/-- [nested_loop_exits::walk]: loop body 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-107:1
++    Visibility: public -/
++@[rust_loop_body]
++def walk_loop0.body
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++  _root_.Bool)) (tags : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize × _root_.Bool))
++    × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) _root_.Bool)
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++  | some p =>
++    let (v, runtime) := p
++    let i := _root_.Aeneas.Std.Slice.len tags
++    let joined ←
++      if v >= i
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl stack1 : _root_.Sum
++          (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++          _root_.Bool)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Bool ×
++          (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)))
++      else
++        do
++        let tag ← Slice.index_usize tags v
++        let o1 ← lift (U32.checked_sub tag 1#u32)
++        let joined1 ←
++          match o1 with
++          | none =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Sum.inr stack1)) : _root_.Sum _root_.Unit (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool))) (_root_.Sum (_root_.Bool ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool)))))
++          | some count =>
++            do
++            let joined2 ←
++              if runtime
++              then
++                if tag > 50#u32
++                then
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                    (_root_.Sum.inr ())) : _root_.Sum
++                    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize
++                    × _root_.Bool)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                    (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Sum
++                    (_root_.Bool × (_root_.Aeneas.Std.Slice
++                    _root_.Aeneas.Std.U32) × _root_.Unit) _root_.Unit)))
++                else
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl stack1 :
++                    _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++                    (_root_.Aeneas.Std.Usize × _root_.Bool)) (_root_.Sum
++                    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize
++                    × _root_.Bool))) (_root_.Sum (_root_.Bool ×
++                    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                    _root_.Unit) _root_.Unit)))
++              else
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl stack1 : _root_.Sum
++                  (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                  _root_.Bool)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Sum
++                  (_root_.Bool × (_root_.Aeneas.Std.Slice
++                  _root_.Aeneas.Std.U32) × _root_.Unit) _root_.Unit)))
++            match joined2 with
++            | _root_.Sum.inl stack2 =>
++              let i1 ← lift (UScalar.cast .Usize count)
++              let i2 ← i1 % 3#usize
++              let exit ←
++                _root_.nested_loop_exits.walk_loop0_loop0
++                  { start := 0#usize, «end» := i2 } tags stack2 v tag ()
++              match exit with
++              | _root_.Sum.inl (_, stack3, _, _, _, _, _, _) =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inr stack3)) : _root_.Sum _root_.Unit (_root_.Sum
++                  ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                  (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                  _root_.Bool))) (_root_.Sum (_root_.Bool ×
++                  (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                  _root_.Unit) (_root_.Aeneas.Std.alloc.vec.Vec
++                  (_root_.Aeneas.Std.Usize × _root_.Bool)))))
++              | _root_.Sum.inr (_, _, _, _, _) =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++                  _root_.Unit (_root_.Sum ((_root_.Aeneas.Std.Slice
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Sum
++                  (_root_.Bool × (_root_.Aeneas.Std.Slice
++                  _root_.Aeneas.Std.U32) × _root_.Unit)
++                  (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                  _root_.Bool)))))
++            | _root_.Sum.inr (_root_.Sum.inl (exit, exit1)) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++                (exit, exit1)) : _root_.Sum _root_.Unit (_root_.Sum
++                ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool))) (_root_.Sum (_root_.Bool ×
++                (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)))))
++            | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1,
++              ()))) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Sum.inl (exit, exit1, ()))) : _root_.Sum _root_.Unit
++                (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool))) (_root_.Sum (_root_.Bool ×
++                (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)
++                (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++                _root_.Bool)))))
++            | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr ())) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++                _root_.Unit (_root_.Sum ((_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Sum
++                (_root_.Bool × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++                × _root_.Unit) (_root_.Aeneas.Std.alloc.vec.Vec
++                (_root_.Aeneas.Std.Usize × _root_.Bool)))))
++        let joined2 ←
++          match joined1 with
++          | _root_.Sum.inl () =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (false,
++              tags, ())) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool))) (_root_.Bool × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inl (exit, exit1)) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++              exit1)) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool))) (_root_.Bool × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, ())))
++            =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
++              exit1, ())) : _root_.Sum (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool)) (_root_.Sum
++              ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool))) (_root_.Bool × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr exit)) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++              (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++              _root_.Bool)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              (_root_.Aeneas.Std.Usize × _root_.Bool))) (_root_.Bool ×
++              (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)))
++        match joined2 with
++        | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok joined2
++        | _root_.Sum.inr (_root_.Sum.inl (_, _)) =>
++          _root_.Aeneas.Std.Result.ok joined2
++        | _root_.Sum.inr (_root_.Sum.inr (_, _, ())) =>
++          _root_.Aeneas.Std.Result.ok joined2
++    match joined with
++    | _root_.Sum.inl v1 =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (v1,
++        tags))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit1,
++        exit))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, _, ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [nested_loop_exits::walk]: loop 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-107:1
++    Visibility: public -/
++@[rust_loop]
++def walk_loop0
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++  _root_.Bool)) (tags : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun (stack1, tags1) => _root_.nested_loop_exits.walk_loop0.body stack1
++       tags1 : ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++      _root_.Bool)) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++      _root_.Bool)) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++      _root_.Bool))
++    (stack, tags)
++
++/-- [nested_loop_exits::walk]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 75:0-107:1
++    Visibility: public -/
++def walk
++  (tags : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (root : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let s ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 1#usize [ (root, true) ] :
++      _root_.Aeneas.Std.Array (_root_.Aeneas.Std.Usize × _root_.Bool)
++      1#usize))
++  let stack := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  _root_.nested_loop_exits.walk_loop0 stack tags
++
++/-- [nested_loop_exits::labeled]: loop body 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-126:5
++    Visibility: public -/
++@[rust_loop_body]
++def labeled_loop0_loop0.body
++  (cols : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (skipped : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (r : _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (cols, sum, skipped, iter, r, model_state1, (), (), (),
++      ())))
++  | some c =>
++    if c = r
++    then
++      let skipped1 ← lift (core.num.U32.wrapping_add skipped 1#u32)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (_root_.Sum.inl (cols, sum, skipped1, iter, (), (), (),
++        ()))))
++    else
++      if c > 1000#u32
++      then
++        let i ← lift (core.num.U32.wrapping_mul skipped 10#u32)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inr (_root_.Sum.inr (sum, i, cols, (), (), (), ()))))
++      else
++        let i ← lift (core.num.U32.wrapping_mul r c)
++        let sum1 ← lift (core.num.U32.wrapping_add sum i)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, sum1))
++
++/-- [nested_loop_exits::labeled]: loop 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-126:5
++    Visibility: public -/
++@[rust_loop]
++def labeled_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (cols : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) (skipped : _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (r : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) (_root_.Sum ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit)))
++  := do
++  loop
++    (fun (iter2, sum1) => _root_.nested_loop_exits.labeled_loop0_loop0.body
++       cols skipped iter1 r iter2 sum1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Sum
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit)))))
++    (iter, sum)
++
++/-- [nested_loop_exits::labeled]: loop body 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-126:5
++    Visibility: public -/
++@[rust_loop_body]
++def labeled_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (cols : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) (skipped : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    let i ← lift (core.num.U32.wrapping_mul skipped 10#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum, i))
++  | some r =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter cols
++    let exit ←
++      _root_.nested_loop_exits.labeled_loop0_loop0 model_state2 cols sum
++        skipped model_state1 r
++    match exit with
++    | _root_.Sum.inl (cols1, sum1, skipped1, iter1, _, _, _, _, _, _) =>
++      let sum2 ← lift (core.num.U32.wrapping_add sum1 1#u32)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        cols1, sum2, skipped1))
++    | _root_.Sum.inr (_root_.Sum.inl (s, i, i1, i2, _, _, _, _)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (i2, s,
++        i, i1))
++    | _root_.Sum.inr (_root_.Sum.inr (i, i1, _, _, _, _, _)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, i1))
++
++/-- [nested_loop_exits::labeled]: loop 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-126:5
++    Visibility: public -/
++@[rust_loop]
++def labeled_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (cols : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) (skipped : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, cols1, sum1, skipped1) =>
++       _root_.nested_loop_exits.labeled_loop0.body iter1 cols1 sum1 skipped1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U32)))
++    (iter, cols, sum, skipped)
++
++/-- [nested_loop_exits::labeled]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 111:0-128:1
++    Visibility: public -/
++def labeled
++  (rows : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cols : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter rows
++  _root_.nested_loop_exits.labeled_loop0 model_state cols 0#u32 0#u32
++
++/-- [nested_loop_exits::deep]: loop body 2:
++    Source: 'tests/src/nested-loop-exits.rs', lines 135:8-149:9
++    Visibility: public -/
++@[rust_loop_body]
++def deep_loop0_loop0_loop0.body
++  (n : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++    × (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit)))
++  := do
++  if j = x
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (n, acc, i, x, i1, j, (), ())))
++  else
++    if j >= i1
++    then
++      let i2 ← i1 + 1#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (n, acc, i, x, i2, (), ())))
++    else
++      let acc1 ← lift (core.num.U32.wrapping_add acc 1#u32)
++      let j1 ← j + 1#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (acc1,
++        j1))
++
++/-- [nested_loop_exits::deep]: loop 2:
++    Source: 'tests/src/nested-loop-exits.rs', lines 135:8-149:9
++    Visibility: public -/
++@[rust_loop]
++def deep_loop0_loop0_loop0
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (acc1, j1) => _root_.nested_loop_exits.deep_loop0_loop0_loop0.body n i
++       x i1 acc1 j1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Sum
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++      × _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++      × _root_.Unit × _root_.Unit))))
++    (acc, j)
++
++/-- [nested_loop_exits::deep]: loop body 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-151:5
++    Visibility: public -/
++@[rust_loop_body]
++def deep_loop0_loop0.body
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit)))
++  := do
++  if i1 < n
++  then
++    let exit ←
++      _root_.nested_loop_exits.deep_loop0_loop0_loop0 n acc i x i1 0#u32
++    match exit with
++    | _root_.Sum.inl (n1, acc1, iter, _, _, _, _, _) =>
++      let acc2 ← lift (core.num.U32.wrapping_add acc1 100#u32)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (n1, acc2, iter, (), ())))
++    | _root_.Sum.inr (i2, i3, i4, i5, i6, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (i2, i3,
++        i4, i5, i6))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (n, acc, i, x, i1, (), ())))
++
++/-- [nested_loop_exits::deep]: loop 1:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-151:5
++    Visibility: public -/
++@[rust_loop]
++def deep_loop0_loop0
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++    × (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (n1, acc1, i2, x1, i3) =>
++       _root_.nested_loop_exits.deep_loop0_loop0.body n1 acc1 i2 x1 i3 :
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Sum
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Unit ×
++      _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Unit × _root_.Unit))))
++    (n, acc, i, x, i1)
++
++/-- [nested_loop_exits::deep]: loop body 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-151:5
++    Visibility: public -/
++@[rust_loop_body]
++def deep_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++  | some x =>
++    let exit ←
++      _root_.nested_loop_exits.deep_loop0_loop0 n acc model_state1 x 0#u32
++    match exit with
++    | _root_.Sum.inl (n1, acc1, iter1, _, _, _, _) =>
++      let acc2 ← lift (core.num.U32.wrapping_add acc1 7#u32)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        n1, acc2))
++    | _root_.Sum.inr (i, i1, i2, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (i2, i,
++        i1))
++
++/-- [nested_loop_exits::deep]: loop 0:
++    Source: 'tests/src/nested-loop-exits.rs', lines 1:0-151:5
++    Visibility: public -/
++@[rust_loop]
++def deep_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, n1, acc1) => _root_.nested_loop_exits.deep_loop0.body iter1 n1
++       acc1 : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, n, acc)
++
++/-- [nested_loop_exits::deep]:
++    Source: 'tests/src/nested-loop-exits.rs', lines 131:0-153:1
++    Visibility: public -/
++def deep
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter xs
++  _root_.nested_loop_exits.deep_loop0 model_state n 0#u32
++
++end nested_loop_exits
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ea78b41..316609e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -8,6 +8,7 @@ package «tests» {}
+ @[default_target] lean_lib Adt
+ @[default_target] lean_lib AdtBorrows
+ @[default_target] lean_lib AdtMutBorrowLoops
++@[default_target] lean_lib ArrayOfBorrowsLoop
+ @[default_target] lean_lib Arrays
+ @[default_target] lean_lib ArraysDefs
+ @[default_target] lean_lib ArraySliceIndex
+@@ -18,9 +19,11 @@ package «tests» {}
+ @[default_target] lean_lib Bitwise
+ @[default_target] lean_lib BlanketImpl
+ @[default_target] lean_lib Builtin
++@[default_target] lean_lib CharSwitch
+ @[default_target] lean_lib Issue804ClosureReturnRef
+ @[default_target] lean_lib Closures
+ @[default_target] lean_lib ConstShadow
++@[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib Constants
+ @[default_target] lean_lib ConstantsLean
+ @[default_target] lean_lib Curve25519
+@@ -62,6 +65,7 @@ package «tests» {}
+ @[default_target] lean_lib MutBorrowInSharedBorrow
+ @[default_target] lean_lib Names
+ @[default_target] lean_lib NestedBorrows
++@[default_target] lean_lib NestedLoopExits
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
+ @[default_target] lean_lib Order
+diff --git a/tests/src/array-of-borrows-loop.rs b/tests/src/array-of-borrows-loop.rs
+new file mode 100644
+index 0000000..c4c2153
+--- /dev/null
++++ b/tests/src/array-of-borrows-loop.rs
+@@ -0,0 +1,32 @@
++//@ [!lean] skip
++//@ [lean] subdir=ArrayOfBorrowsLoop
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop over an array of shared borrows, returning one of them early: the
++//! region abstraction of the array iterator holds an array value.
++//! `ArrayOfBorrowsLoop/Checks.lean` compares the model with the native
++//! results of the `native` test module below.
++
++pub fn first_larger<'a>(x: &'a u32, y: &'a u32, z: &'a u32, limit: u32) -> Option<(&'a u32, usize)> {
++    let mut i = 0usize;
++    for v in [x, y, z] {
++        if *v > limit {
++            return Some((v, i));
++        }
++        i += 1;
++    }
++    None
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn arrays() {
++        assert_eq!(first_larger(&1, &5, &9, 4), Some((&5, 1)));
++        assert_eq!(first_larger(&7, &5, &9, 4), Some((&7, 0)));
++        assert_eq!(first_larger(&1, &2, &9, 4), Some((&9, 2)));
++        assert_eq!(first_larger(&1, &2, &3, 4), None);
++    }
++}
+diff --git a/tests/src/char-switch.rs b/tests/src/char-switch.rs
+new file mode 100644
+index 0000000..815276a
+--- /dev/null
++++ b/tests/src/char-switch.rs
+@@ -0,0 +1,53 @@
++//@ [!lean] skip
++//@ [lean] subdir=CharSwitch
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Matches on `char`, including grouped values and characters which are not
++//! printable ASCII. `CharSwitch/Checks.lean` evaluates the model on the
++//! inputs of the `native` test module below and compares with the native
++//! results.
++
++pub fn classify(c: char) -> u32 {
++    match c {
++        'a' => 1,
++        'b' | 'c' | '\'' => 2,
++        '\\' | '\n' => 5,
++        'é' | '€' => 6,
++        '😀' => 4,
++        _ => 3,
++    }
++}
++
++pub fn count_vowels(s: &str) -> u32 {
++    let mut n = 0u32;
++    for c in s.chars() {
++        match c {
++            'a' | 'e' | 'i' | 'o' | 'u' => n += 1,
++            'y' => n += 10,
++            _ => {}
++        }
++    }
++    n
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn chars() {
++        assert_eq!(classify('a'), 1);
++        assert_eq!(classify('c'), 2);
++        assert_eq!(classify('\''), 2);
++        assert_eq!(classify('\\'), 5);
++        assert_eq!(classify('\n'), 5);
++        assert_eq!(classify('é'), 6);
++        assert_eq!(classify('€'), 6);
++        assert_eq!(classify('😀'), 4);
++        assert_eq!(classify('z'), 3);
++        assert_eq!(count_vowels("education"), 5);
++        assert_eq!(count_vowels("rhythm"), 10);
++        assert_eq!(count_vowels(""), 0);
++        assert_eq!(count_vowels("été"), 0);
++    }
++}
+diff --git a/tests/src/collect-adapters.rs b/tests/src/collect-adapters.rs
+new file mode 100644
+index 0000000..8b33afe
+--- /dev/null
++++ b/tests/src/collect-adapters.rs
+@@ -0,0 +1,47 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectAdapters
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::copied::Copied --include core::iter::adapters::rev::Rev
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Collectors over Chain, Rev and FlatMap (admitted by CollectionContracts).
++//! CollectAdapters/Checks.lean compares the model with the native results
++//! asserted in the native test module.
++
++pub fn chained(first: u32, rest: &[u32]) -> Vec<u32> {
++    std::iter::once(first).chain(rest.iter().map(|x| *x * 10)).collect()
++}
++
++pub fn chained_slices(a: &[u32], b: &[u32]) -> Vec<u32> {
++    a.iter().chain(b.iter()).copied().collect()
++}
++
++pub fn reversed_into(stack: &mut Vec<(u32, bool)>, xs: &[u32]) {
++    stack.extend(xs.iter().rev().map(|x| (*x, *x % 2 == 0)));
++}
++
++pub fn flat(groups: Vec<Vec<u32>>) -> Vec<u32> {
++    groups.into_iter().flat_map(|g| g.into_iter()).map(|x| x + 1).collect()
++}
++
++pub fn chain_result(a: &[u32], b: &[u32]) -> Result<Vec<u32>, u32> {
++    a.iter().chain(b.iter()).map(|x| if *x > 100 { Err(*x) } else { Ok(*x) }).collect()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn adapters() {
++        assert_eq!(chained(7, &[1, 2]), vec![7, 10, 20]);
++        assert_eq!(chained(0, &[]), vec![0]);
++        assert_eq!(chained_slices(&[1, 2], &[3]), vec![1, 2, 3]);
++        assert_eq!(chained_slices(&[], &[]), Vec::<u32>::new());
++        let mut s = vec![(9u32, false)];
++        reversed_into(&mut s, &[1, 2, 3]);
++        assert_eq!(s, vec![(9, false), (3, false), (2, true), (1, false)]);
++        assert_eq!(flat(vec![vec![1, 2], vec![], vec![3]]), vec![2, 3, 4]);
++        assert_eq!(flat(vec![]), Vec::<u32>::new());
++        assert_eq!(chain_result(&[1, 2], &[3]), Ok(vec![1, 2, 3]));
++        assert_eq!(chain_result(&[1, 200], &[300]), Err(200));
++    }
++}
+diff --git a/tests/src/nested-loop-exits.rs b/tests/src/nested-loop-exits.rs
+new file mode 100644
+index 0000000..a86502d
+--- /dev/null
++++ b/tests/src/nested-loop-exits.rs
+@@ -0,0 +1,190 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedLoopExits
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Inner loops which leave through an enclosing loop: `continue` and `break`
++//! to an outer loop, and early returns from an inner loop whose normal exit
++//! resumes the outer iteration. `NestedLoopExits/Checks.lean` evaluates the
++//! model on the inputs of the `native` test module below and compares with
++//! the native results.
++
++/// An inner `for` in tail position of a worklist loop, with early returns out
++/// of both loops, and an inner `continue`.
++pub fn scan(stack0: &[u32], kids: &[u32]) -> bool {
++    let mut stack: Vec<u32> = Vec::new();
++    for s in stack0 {
++        stack.push(*s);
++    }
++    while let Some(v) = stack.pop() {
++        if v == 1 {
++            continue;
++        }
++        if v == 0 {
++            return false;
++        }
++        for k in kids {
++            if *k == v {
++                continue;
++            }
++            if *k > 100 {
++                return false;
++            }
++            if *k < v && *k > 1 {
++                stack.push(*k);
++            }
++        }
++    }
++    true
++}
++
++/// An inner loop with an early return, whose normal exit resumes the outer
++/// loop.
++pub fn all_small(rows: &[u32], limit: u32) -> bool {
++    let mut i = 0usize;
++    while i < rows.len() {
++        let mut j = 0u32;
++        while j < rows[i] {
++            if j > limit {
++                return false;
++            }
++            j += 1;
++        }
++        i += 1;
++    }
++    true
++}
++
++pub enum Role {
++    Runtime,
++    Bypass,
++    Syntax,
++}
++
++fn role(tag: u32, i: usize) -> Role {
++    if tag == 3 && i == 0 {
++        Role::Bypass
++    } else if tag % 2 == 0 {
++        Role::Runtime
++    } else {
++        Role::Syntax
++    }
++}
++
++/// A worklist loop whose tail is an inner loop over children, with inner
++/// `continue`s, `let else` continues of the outer loop, and early returns.
++pub fn walk(tags: &[u32], root: usize) -> bool {
++    let mut stack = vec![(root, true)];
++    while let Some((v, runtime)) = stack.pop() {
++        if v >= tags.len() {
++            continue;
++        }
++        let tag = tags[v];
++        let Some(count) = tag.checked_sub(1) else {
++            continue;
++        };
++        if runtime && tag > 50 {
++            return false;
++        }
++        for i in 0..(count as usize % 3) {
++            match role(tag, i) {
++                Role::Runtime => {
++                    if tag == 7 && i == 1 {
++                        continue;
++                    }
++                    stack.push((v + i + 1, true));
++                }
++                Role::Bypass => {
++                    if v + 1 >= tags.len() {
++                        return false;
++                    }
++                    stack.push((v + 1, false));
++                }
++                Role::Syntax => {}
++            }
++        }
++    }
++    true
++}
++
++/// Labeled `continue` and `break` of the outer loop from an inner loop, with
++/// code after the inner loop and after the outer loop.
++pub fn labeled(rows: &[u32], cols: &[u32]) -> (u32, u32) {
++    let mut sum = 0u32;
++    let mut skipped = 0u32;
++    'rows: for r in rows {
++        for c in cols {
++            if *c == *r {
++                skipped = skipped.wrapping_add(1);
++                continue 'rows;
++            }
++            if *c > 1000 {
++                break 'rows;
++            }
++            sum = sum.wrapping_add(r.wrapping_mul(*c));
++        }
++        sum = sum.wrapping_add(1);
++    }
++    (sum, skipped.wrapping_mul(10))
++}
++
++/// Three nested loops: the innermost continues the outermost one.
++pub fn deep(xs: &[u32], n: u32) -> u32 {
++    let mut acc = 0u32;
++    'outer: for x in xs {
++        let mut i = 0u32;
++        while i < n {
++            let mut j = 0u32;
++            loop {
++                if j == *x {
++                    acc = acc.wrapping_add(100);
++                    continue 'outer;
++                }
++                if j >= i {
++                    break;
++                }
++                acc = acc.wrapping_add(1);
++                j += 1;
++            }
++            i += 1;
++        }
++        acc = acc.wrapping_add(7);
++    }
++    acc
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn nested_exits() {
++        assert!(scan(&[5, 4], &[3, 2]));
++        assert!(!scan(&[5, 0], &[3]));
++        assert!(!scan(&[9], &[4, 200]));
++        assert!(scan(&[], &[1]));
++        assert!(scan(&[1, 7], &[7, 1]));
++
++        assert!(all_small(&[1, 2, 3], 5));
++        assert!(!all_small(&[1, 9, 3], 5));
++        assert!(all_small(&[], 0));
++        assert!(!all_small(&[0, 0, 2], 0));
++
++        assert!(walk(&[4, 2, 1, 1], 0));
++        assert!(walk(&[3, 60], 0));
++        assert!(!walk(&[2, 51], 0));
++        assert!(!walk(&[3], 0));
++        assert!(walk(&[0, 5], 1));
++        assert!(walk(&[4, 51, 1, 1], 0));
++        assert!(walk(&[7, 1, 1, 1, 1], 0));
++
++        assert_eq!(labeled(&[1, 2, 3], &[4, 2, 5]), (54, 10));
++        assert_eq!(labeled(&[1, 2], &[3, 2000, 4]), (3, 0));
++        assert_eq!(labeled(&[], &[1]), (0, 0));
++        assert_eq!(labeled(&[2, 2], &[2]), (0, 20));
++
++        assert_eq!(deep(&[5, 1], 3), 111);
++        assert_eq!(deep(&[], 3), 0);
++        assert_eq!(deep(&[9], 3), 10);
++        assert_eq!(deep(&[0, 0], 1), 200);
++    }
++}

@@ -1,0 +1,1477 @@
+# aeneas integration step 27 after cba11f3beb: commit b0228cde12766e915d33331e701934b8096ba6a9
+# first parent 1768422aecd2d02ce6f7bf3bf05d6e445fe6f7e1, merged 539bc2c058dd7c024c4de325abc991bc8c329f24
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/debug-derive-lifetimes'
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 54d6d67..9bc8c2f 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -2835,6 +2835,108 @@ let resolve_default_only_dispatch (crate : crate) : crate =
+     in
+     visitor#visit_crate () crate
+ 
++(** Read the length of a matched slice directly.
++
++    The length check of a slice pattern on a place which is not a local (e.g.
++    [match c { A(x, [y]) => ... }]) creates a raw pointer to the matched slice
++    only to read its metadata:
++    {[
++      r := &raw const ( *p) with_metadata(m);
++      n := copy r.metadata;
++    ]}
++    The metadata of this pointer is [m]. When the raw pointer has no other use,
++    read [m] directly ([n := m]) and drop the raw pointer. *)
++let read_raw_pointer_metadata (_crate : crate) (f : fun_decl) : fun_decl =
++  match f.body with
++  | StructuredBody body ->
++      let counts = ref LocalId.Map.empty in
++      let occurrences =
++        object
++          inherit [_] iter_statement as super
++
++          (* Occurrences in places (not in storage markers) *)
++          method! visit_place env p =
++            match p.kind with
++            | PlaceLocal id ->
++                counts :=
++                  LocalId.Map.add id
++                    (1
++                    + Option.value (LocalId.Map.find_opt id !counts) ~default:0
++                    )
++                    !counts
++            | _ -> super#visit_place env p
++        end
++      in
++      occurrences#visit_block () body.body;
++      (* Only the definition and the metadata read *)
++      let single_use id = LocalId.Map.find_opt id !counts = Some 2 in
++      let visitor =
++        object
++          inherit [_] map_statement as super
++
++          method! visit_block env b =
++            let b = super#visit_block env b in
++            let rec go (sts : statement list) =
++              match sts with
++              | ({
++                   kind = Assign ({ kind = PlaceLocal r; _ }, RawPtr (_, _, m));
++                   _;
++                 } as st)
++                :: rest
++                when single_use r -> (
++                  let rec split lives = function
++                    | ({ kind = StorageLive id; _ } as live) :: rest
++                      when id <> r -> split (live :: lives) rest
++                    | next :: rest -> Some (List.rev lives, next, rest)
++                    | [] -> None
++                  in
++                  match split [] rest with
++                  | Some
++                      ( lives,
++                        ({
++                           kind =
++                             Assign
++                               ( dest,
++                                 Use
++                                   ( Copy
++                                       {
++                                         kind =
++                                           PlaceProjection
++                                             ( { kind = PlaceLocal r'; _ },
++                                               PtrMetadata );
++                                         _;
++                                       }
++                                   | Move
++                                       {
++                                         kind =
++                                           PlaceProjection
++                                             ( { kind = PlaceLocal r'; _ },
++                                               PtrMetadata );
++                                         _;
++                                       } ) );
++                           _;
++                         } as next),
++                        rest' )
++                    when r = r' ->
++                      lives
++                      @ {
++                          next with
++                          kind = Assign (dest, Use m);
++                          comments_before =
++                            st.comments_before @ next.comments_before;
++                        }
++                        :: go rest'
++                  | _ -> st :: go rest)
++              | st :: rest -> st :: go rest
++              | [] -> []
++            in
++            { b with statements = go b.statements }
++        end
++      in
++      let b = visitor#visit_block () body.body in
++      { f with body = StructuredBody { body with body = b } }
++  | _ -> f
++
+ (** Share repeated shared indexings of an unchanged place.
+ 
+     A slice pattern such as [[A(B(x)), C(y), rest @ ..]] tests the variant of
+@@ -3641,6 +3743,7 @@ let apply_passes (crate : crate) : crate =
+       ("remove_unreachable", remove_unreachable);
+       ("expand_char_switches", expand_char_switches);
+       ("update_loop", update_loops);
++      ("read_raw_pointer_metadata", read_raw_pointer_metadata);
+       ("share_repeated_shared_indexing", share_repeated_shared_indexing);
+       ("remove_useless_joins", remove_useless_joins);
+       ("recover_last_use_moves", recover_last_use_moves);
+diff --git a/src/interp/Interp.ml b/src/interp/Interp.ml
+index 9f2d618..55eaeef 100644
+--- a/src/interp/Interp.ml
++++ b/src/interp/Interp.ml
+@@ -557,7 +557,14 @@ let evaluate_function_symbolic (synthesize : bool) (decls_ctx : decls_ctx)
+             if !Config.borrow_check_globals then true
+             else not (Option.is_some fdef.is_global_initializer)
+           in
+-          pop_frame config span ~pop_locals ~pop_return_value:true ctx
++          let static_locals =
++            match fdef.body with
++            | StructuredBody body ->
++                InterpStatements.promoted_constant_locals body
++            | _ -> Expressions.LocalId.Set.empty
++          in
++          pop_frame config span ~static_locals ~pop_locals
++            ~pop_return_value:true ctx
+         in
+         let cc_pop = cc_comp cc_states cc_pop in
+         let ret_value = Option.get ret_value in
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index 0fdd00d..fa3d9f4 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -894,13 +894,22 @@ let eval_unary_op_symbolic (config : config) (span : Meta.span) (unop : unop)
+ 
+           (* Collect the shared borrows *)
+           let sborrows = ref [] in
++          (* Symbolic values containing (shared) borrows, e.g. a field
++             [Option<&'a T>] of a borrowed structure formatted with a derived
++             [Debug] *)
++          let ssymbolic = ref [] in
+           let collector =
+             object (self)
+               inherit [_] iter_tvalue as super
+               method! visit_tvalue _ v = super#visit_tvalue v.ty v
+ 
+-              method! visit_VSymbolic ty _ =
+-                [%cassert] span (ty_no_regions ty) "Unimplemented"
++              method! visit_VSymbolic ty sv =
++                if not (ty_no_regions ty) then (
++                  [%cassert] span
++                    (not (ty_has_mut_borrows ctx.type_ctx.type_infos sv.sv_ty))
++                    "Unimplemented: unsizing a value containing symbolic \
++                     mutable borrows to a dyn trait object";
++                  ssymbolic := sv :: !ssymbolic)
+ 
+               method! visit_VSharedBorrow ty bid _ =
+                 let inner_ty =
+@@ -937,7 +946,21 @@ let eval_unary_op_symbolic (config : config) (span : Meta.span) (unop : unop)
+             in
+             visitor#visit_ty () ty
+           in
++          (* The borrows inside the symbolic values: a projector links them to
++             the abstraction, as for the arguments of a function call *)
++          let all_regions_to_rid ty =
++            let visitor =
++              object
++                inherit [_] map_ty
++                method! visit_region _ _ = RVar (Free rid)
+ 
++                method! visit_TDynTrait _ pred =
++                  [%sanity_check] span Config.type_analysis_ignore_dyn;
++                  TDynTrait pred
++              end
++            in
++            visitor#visit_ty () ty
++          in
+           let borrows =
+             List.map
+               (fun (bid, ty) ->
+@@ -949,6 +972,22 @@ let eval_unary_op_symbolic (config : config) (span : Meta.span) (unop : unop)
+                  }
+                   : tavalue))
+               !sborrows
++            @ List.map
++                (fun (sv : symbolic_value) ->
++                  let proj_ty = all_regions_to_rid sv.sv_ty in
++                  ({
++                     value =
++                       ASymbolic
++                         ( PNone,
++                           AProjBorrows
++                             {
++                               proj = { sv_id = sv.sv_id; proj_ty };
++                               loans = [];
++                             } );
++                     ty = proj_ty;
++                   }
++                    : tavalue))
++                (List.rev !ssymbolic)
+           in
+           let lid = ctx.fresh_borrow_id () in
+           let loan : tavalue =
+diff --git a/src/interp/InterpJoin.ml b/src/interp/InterpJoin.ml
+index 93925dd..a54a7e1 100644
+--- a/src/interp/InterpJoin.ml
++++ b/src/interp/InterpJoin.ml
+@@ -1130,9 +1130,13 @@ let join_ctxs (span : Meta.span) (fresh_abs_kind : abs_kind)
+             ^ env_elem_to_string span ctx1 var1
+             ^ "\n"];
+ 
+-          (* Match the values *)
++          (* Match the values. A fixed dummy value which did not change (e.g.
++             the shared loan of static data, see
++             [push_value_to_dummy_shared_loan]) is kept as is: matching it would
++             refresh the shared borrow ids it contains, so that it would never
++             be equal to itself in the next iteration of a loop fixed point. *)
+           let b = b0 in
+-          let v = M.match_tvalues ctx0 ctx1 v0 v1 in
++          let v = if v0 = v1 then v0 else M.match_tvalues ctx0 ctx1 v0 v1 in
+           let var = EBinding (BDummy b, v) in
+           (* Continue *)
+           var :: join_prefixes env0' env1'
+diff --git a/src/interp/InterpStatements.ml b/src/interp/InterpStatements.ml
+index 163fd28..bdeea5f 100644
+--- a/src/interp/InterpStatements.ml
++++ b/src/interp/InterpStatements.ml
+@@ -331,7 +331,94 @@ let move_return_value (config : config) (span : Meta.span)
+     (Some v, ctx, cc)
+   else (None, ctx, fun e -> e)
+ 
+-let pop_frame (config : config) (span : Meta.span) ~(pop_locals : bool)
++(** The locals which hold promoted constants.
++
++    rustc promotes a reference to a constant expression, e.g. [&[]] or [&0], to
++    a ['static] reference, and Charon inlines the promoted body: a local is
++    assigned the constant once and only ever borrowed immutably. The borrows may
++    thus outlive the function (e.g. [fn f(..) -> &'a [T] { &[] }]): the loans of
++    such locals are not ended when the frame is popped, but kept in anonymous
++    values, like the loans of string literals.
++
++    A local qualifies if it is neither the return value nor an input, it is
++    assigned exactly once, as a whole, with a constant or an aggregate of
++    constants, and every other use of it is a shared borrow (or a storage
++    marker). As no loan of it can be ended by a write, keeping its loans alive
++    after the frame is popped only makes them outlive the function, which borrow
++    checking guarantees is only observable for promoted constants. *)
++let promoted_constant_locals (body : expr_body) : LocalId.Set.t =
++  let module M = LocalId.Map in
++  let assigned = ref M.empty in
++  let disqualified = ref LocalId.Set.empty in
++  let disqualify id = disqualified := LocalId.Set.add id !disqualified in
++  let rec root (p : place) =
++    match p.kind with
++    | PlaceLocal id -> Some id
++    | PlaceProjection (p, _) -> root p
++    | PlaceGlobal _ -> None
++  in
++  let disqualify_place p = Option.iter disqualify (root p) in
++  let is_constant = function
++    | Constant _ -> true
++    | _ -> false
++  in
++  let visitor =
++    object
++      inherit [_] iter_statement as super
++
++      method! visit_statement env st =
++        match st.kind with
++        | Assign ({ kind = PlaceLocal id; _ }, rv) -> (
++            assigned :=
++              M.update id
++                (fun n -> Some (1 + Option.value n ~default:0))
++                !assigned;
++            match rv with
++            | Use op when is_constant op -> ()
++            | Aggregate (_, ops) when List.for_all is_constant ops -> ()
++            | _ ->
++                disqualify id;
++                super#visit_statement env st)
++        | Assign (p, _) | SetDiscriminant (p, _) | Drop (p, _, _) ->
++            disqualify_place p;
++            super#visit_statement env st
++        | Call call ->
++            disqualify_place call.dest;
++            super#visit_statement env st
++        | _ -> super#visit_statement env st
++
++      method! visit_operand env op =
++        (match op with
++        | Move p | Copy p -> disqualify_place p
++        | Constant _ -> ());
++        super#visit_operand env op
++
++      method! visit_rvalue env rv =
++        match rv with
++        | RvRef (p, BShared, metadata) ->
++            (* The borrowed place itself is not read: only visit its
++               projections' operands (none) and the metadata *)
++            ignore p;
++            super#visit_operand env metadata
++        | RvRef (p, _, _) | RawPtr (p, _, _) ->
++            disqualify_place p;
++            super#visit_rvalue env rv
++        | _ -> super#visit_rvalue env rv
++    end
++  in
++  visitor#visit_block () body.body;
++  M.fold
++    (fun id n set ->
++      if
++        n = 1
++        && LocalId.to_int id > body.locals.arg_count
++        && not (LocalId.Set.mem id !disqualified)
++      then LocalId.Set.add id set
++      else set)
++    !assigned LocalId.Set.empty
++
++let pop_frame (config : config) (span : Meta.span)
++    ?(static_locals : LocalId.Set.t = LocalId.Set.empty) ~(pop_locals : bool)
+     ~(pop_return_value : bool) (ctx : eval_ctx) :
+     tvalue option * eval_ctx * (SymbolicAst.expr -> SymbolicAst.expr) =
+   (* Debug *)
+@@ -350,6 +437,10 @@ let pop_frame (config : config) (span : Meta.span) ~(pop_locals : bool)
+     | EFrame :: _ -> []
+   in
+   let locals : LocalId.id list = list_locals ctx.env in
++  (* The loans of promoted constants outlive the frame *)
++  let locals =
++    List.filter (fun id -> not (LocalId.Set.mem id static_locals)) locals
++  in
+   (* Debug *)
+   [%ltrace
+     "locals in which to drop the outer loans: ["
+@@ -738,32 +829,65 @@ let push_value_to_dummy_shared_loan span (ctx : eval_ctx) (v : tvalue) :
+   let ctx = ctx_push_dummy_var ctx dummy_id loan in
+   (ctx, borrow)
+ 
+-(** Helper: introduce a fresh symbolic value for a global *)
++(** The references of a global's type point to static data: they are shared
++    ['static] references. Mutable references and other regions are not
++    supported. *)
++let ty_only_static_shared_refs (ty : ty) : bool =
++  let ok = ref true in
++  let visitor =
++    object
++      inherit [_] iter_ty as super
++
++      method! visit_ty env ty =
++        match ty with
++        | TRef (RStatic, _, RShared) -> super#visit_ty env ty
++        | TRef _ -> ok := false
++        | _ -> super#visit_ty env ty
++
++      method! visit_region _ r = if r <> RStatic then ok := false
++    end
++  in
++  visitor#visit_ty () ty;
++  !ok
++
++(** Helper: introduce a fresh symbolic value for a global.
++
++    The type of a global may contain shared ['static] references (e.g.
++    [const OPS: &[&str]]): they are references to static data, which is never
++    modified nor deallocated. We keep their ['static] region in the type of the
++    symbolic value: when such a reference is expanded, its loan is kept in an
++    anonymous value, like the loans of string literals (see
++    [expand_symbolic_value_shared_borrow]). *)
+ let eval_global_as_fresh_symbolic_value (span : Meta.span)
+     (gref : global_decl_ref) (ctx : eval_ctx) :
+     eval_ctx * tvalue * (SA.expr -> SA.expr) =
+   let generics = gref.generics in
+   let global = ctx_lookup_global_decl span ctx gref.id in
+-  (* The global might itself be a (static) reference - TODO: generalize *)
++  (* Instantiate the type, keeping the 'static regions of the global's type *)
++  let instantiate () =
++    let generics = Subst.generic_args_erase_regions generics in
++    let subst =
++      [%add_loc] Subst.make_subst_from_generics (Some span) global.generics
++        generics Self
++    in
++    if ty_no_regions global.ty then
++      Subst.erase_regions_substitute_types subst global.ty
++    else (
++      [%cassert] span
++        (ty_only_static_shared_refs global.ty)
++        "Unimplemented: globals whose type contains references other than \
++         shared 'static references";
++      Charon.Substitute.ty_substitute subst global.ty)
++  in
+   match global.ty with
+   | TRef (RStatic, _, RShared) ->
+-      (* Instantiate the type  *)
+-      let generics = Subst.generic_args_erase_regions generics in
+-      let subst =
+-        [%add_loc] Subst.make_subst_from_generics (Some span) global.generics
+-          generics Self
+-      in
+-      let ty = Subst.erase_regions_substitute_types subst global.ty in
+-      (* Decompose *)
+       let inner_ty =
+-        match ty with
++        match instantiate () with
+         | TRef (RStatic, ty, RShared) -> ty
+         | _ -> [%internal_error] span
+       in
+-      [%cassert] span (ty_no_regions inner_ty) "Unimplemented";
+       (* We do like in [eval_global_ref]: we introduce a borrow whose corresponding
+          loan is in a dummy value, allowing the borrow to live as long as needed.
+-         TODO: introduce proper support for 'static
+       *)
+       let sval = mk_fresh_symbolic_value span ctx inner_ty in
+       let v = mk_tvalue_from_symbolic_value sval in
+@@ -771,14 +895,7 @@ let eval_global_as_fresh_symbolic_value (span : Meta.span)
+       let cc = S.synthesize_global_eval gref sval in
+       (ctx, borrow, cc)
+   | _ ->
+-      [%cassert] span (ty_no_regions global.ty) "Unimplemented";
+-      (* Instantiate the type  *)
+-      let generics = Subst.generic_args_erase_regions generics in
+-      let subst =
+-        [%add_loc] Subst.make_subst_from_generics (Some span) global.generics
+-          generics Self
+-      in
+-      let ty = Subst.erase_regions_substitute_types subst global.ty in
++      let ty = instantiate () in
+       let sval = mk_fresh_symbolic_value span ctx ty in
+       let cc = S.synthesize_global_eval gref sval in
+       (ctx, mk_tvalue_from_symbolic_value sval, cc)
+diff --git a/src/interp/InterpStatements.mli b/src/interp/InterpStatements.mli
+index 749d2a9..de9eaf1 100644
+--- a/src/interp/InterpStatements.mli
++++ b/src/interp/InterpStatements.mli
+@@ -18,11 +18,16 @@ open Cps
+ val pop_frame :
+   config ->
+   Meta.span ->
++  ?static_locals:Expressions.LocalId.Set.t ->
+   pop_locals:bool ->
+   pop_return_value:bool ->
+   eval_ctx ->
+   tvalue option * eval_ctx * (SymbolicAst.expr -> SymbolicAst.expr)
+ 
++(** The locals of a function body which hold promoted constants: their loans are
++    kept when the frame is popped (see [pop_frame]). *)
++val promoted_constant_locals : LlbcAst.expr_body -> Expressions.LocalId.Set.t
++
+ (** Helper.
+ 
+     Create a list of abstractions from a list of regions groups, and insert them
+diff --git a/src/interp/Invariants.ml b/src/interp/Invariants.ml
+index 0027154..ff8687f 100644
+--- a/src/interp/Invariants.ml
++++ b/src/interp/Invariants.ml
+@@ -897,6 +897,25 @@ let check_symbolic_values (span : Meta.span) (ctx : eval_ctx) : unit =
+   let update_info (sv_id : symbolic_value_id) (info : sv_info) =
+     infos := M.add sv_id info !infos
+   in
++  (* Symbolic values whose references all point to static data (the values of
++     globals, see [eval_global_as_fresh_symbolic_value]): the lender of their
++     borrows is the static storage, which is not represented. *)
++  let static_svs = ref SymbolicValueId.Set.empty in
++  let is_static_ty (ty : ty) : bool =
++    let has_region = ref false in
++    let only_static = ref true in
++    let visitor =
++      object
++        inherit [_] iter_ty
++
++        method! visit_region _ r =
++          has_region := true;
++          if r <> RStatic then only_static := false
++      end
++    in
++    visitor#visit_ty () ty;
++    !has_region && !only_static
++  in
+   let add_env_sv (sv_id : symbolic_value_id) : unit =
+     let info = lookup_info sv_id in
+     let info = { info with env_count = info.env_count + 1 } in
+@@ -937,7 +956,10 @@ let check_symbolic_values (span : Meta.span) (ctx : eval_ctx) : unit =
+           EvalueTbl.add visited_evalues value ();
+           super#visit_tevalue abs value)
+ 
+-      method! visit_VSymbolic _ sv = add_env_sv sv.sv_id
++      method! visit_VSymbolic _ sv =
++        if is_static_ty sv.sv_ty then
++          static_svs := SymbolicValueId.Set.add sv.sv_id !static_svs;
++        add_env_sv sv.sv_id
+ 
+       method! visit_abstract_shared_borrow abs asb =
+         let abs = Option.get abs in
+@@ -989,6 +1011,9 @@ let check_symbolic_values (span : Meta.span) (ctx : eval_ctx) : unit =
+       ^ SymbolicValueId.to_string id
+       ^ "):\n" ^ sv_info_to_string ctx info];
+     if info.aproj_borrows = [] && info.aproj_loans = [] then ()
++    else if info.aproj_loans = [] && SymbolicValueId.Set.mem id !static_svs then
++      (* Borrows of static data, lent by the static storage *)
++      ()
+     else (
+       (* The borrows of a symbolic value must come from somewhere: if we find a
+          symbolic values with live borrows (and particular a projection over the
+diff --git a/tests/lean/DebugLifetimes.lean b/tests/lean/DebugLifetimes.lean
+new file mode 100644
+index 0000000..ef2781c
+--- /dev/null
++++ b/tests/lean/DebugLifetimes.lean
+@@ -0,0 +1 @@
++import DebugLifetimes.Checks
+diff --git a/tests/lean/DebugLifetimes/Checks.lean b/tests/lean/DebugLifetimes/Checks.lean
+new file mode 100644
+index 0000000..4c23102
+--- /dev/null
++++ b/tests/lean/DebugLifetimes/Checks.lean
+@@ -0,0 +1,31 @@
++import DebugLifetimes.DebugLifetimes
++
++/-! Evaluate the model of the derived `fmt` methods of
++    `tests/src/debug-lifetimes.rs` and compare with the strings of its `native`
++    test module. -/
++
++namespace debug_lifetimes.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def out (r : Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)) :
++    Option String :=
++  match r with
++  | ok (.Ok (), f) => some f.output
++  | _ => none
++
++def src (a : Nat) (b : Option Nat) : Source := { literal := u a, numeric := b.map u }
++
++#guard out (Source.Insts.CoreFmtDebug.fmt (src 3 none) {}) ==
++  some "Source { literal: 3, numeric: None }"
++#guard out (Source.Insts.CoreFmtDebug.fmt (src 3 (some 5)) {}) ==
++  some "Source { literal: 3, numeric: Some(5) }"
++#guard out (Use.Insts.CoreFmtDebug.fmt (.Plain (toStr "x") (some (src 3 (some 5)))) {}) ==
++  some "Plain { binder: \"x\", source: Some(Source { literal: 3, numeric: Some(5) }) }"
++#guard out (Use.Insts.CoreFmtDebug.fmt (.Plain (toStr "y") none) {}) ==
++  some "Plain { binder: \"y\", source: None }"
++#guard out (Use.Insts.CoreFmtDebug.fmt (.Pair (u 5) true) {}) == some "Pair(5, true)"
++#guard out (Use.Insts.CoreFmtDebug.fmt .Other {}) == some "Other"
++
++end debug_lifetimes.checks
+diff --git a/tests/lean/DebugLifetimes/DebugLifetimes.lean b/tests/lean/DebugLifetimes/DebugLifetimes.lean
+new file mode 100644
+index 0000000..64a28c0
+--- /dev/null
++++ b/tests/lean/DebugLifetimes/DebugLifetimes.lean
+@@ -0,0 +1,164 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [debug_lifetimes]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace debug_lifetimes
++
++/-- [debug_lifetimes::Source]
++    Source: 'src/debug-lifetimes.rs', lines 11:0-14:1
++    Visibility: public -/
++structure Source where
++  literal : _root_.Aeneas.Std.U32
++  numeric : _root_.Option _root_.Aeneas.Std.U32
++
++/-- [debug_lifetimes::{core::fmt::Debug for debug_lifetimes::Source<'a>}::fmt]:
++    Source: 'src/debug-lifetimes.rs', lines 10:9-10:14
++    Visibility: public -/
++def Source.Insts.CoreFmtDebug.fmt
++  (self : _root_.debug_lifetimes.Source)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.literal
++  let dyn1 :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      (_root_.Aeneas.Std.core.fmt.DebugOption
++      (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32))) self.numeric
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++    (_root_.Aeneas.Std.toStr "Source") (_root_.Aeneas.Std.toStr "literal") dyn
++    (_root_.Aeneas.Std.toStr "numeric") dyn1
++
++/-- Trait implementation: [debug_lifetimes::{core::fmt::Debug for debug_lifetimes::Source<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 10:9-10:14 -/
++@[reducible]
++def Source.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.debug_lifetimes.Source := {
++  fmt := _root_.debug_lifetimes.Source.Insts.CoreFmtDebug.fmt
++}
++
++/-- [debug_lifetimes::{core::clone::Clone for debug_lifetimes::Source<'a>}::clone]:
++    Source: 'src/debug-lifetimes.rs', lines 10:16-10:21
++    Visibility: public -/
++def Source.Insts.CoreCloneClone.clone
++  (self : _root_.debug_lifetimes.Source) :
++  _root_.Aeneas.Std.Result _root_.debug_lifetimes.Source
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [debug_lifetimes::{core::clone::Clone for debug_lifetimes::Source<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 10:16-10:21 -/
++@[reducible]
++def Source.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.debug_lifetimes.Source := {
++  clone := _root_.debug_lifetimes.Source.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [debug_lifetimes::{core::marker::Copy for debug_lifetimes::Source<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 10:23-10:27 -/
++@[reducible]
++def Source.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.debug_lifetimes.Source := {
++  cloneInst := _root_.debug_lifetimes.Source.Insts.CoreCloneClone
++}
++
++/-- [debug_lifetimes::Use]
++    Source: 'src/debug-lifetimes.rs', lines 17:0-21:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Use where
++| Plain :
++  _root_.Aeneas.Std.Str →
++  _root_.Option _root_.debug_lifetimes.Source →
++  Use
++| Pair : _root_.Aeneas.Std.U32 → _root_.Bool → Use
++| Other : Use
++
++/-- [debug_lifetimes::{core::fmt::Debug for debug_lifetimes::Use<'a>}::fmt]:
++    Source: 'src/debug-lifetimes.rs', lines 16:9-16:14
++    Visibility: public -/
++def Use.Insts.CoreFmtDebug.fmt
++  (self : _root_.debug_lifetimes.Use)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.debug_lifetimes.Use.Plain __self_0 __self_1 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugStr) __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugOption
++        _root_.debug_lifetimes.Source.Insts.CoreFmtDebug)) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++      (_root_.Aeneas.Std.toStr "Plain") (_root_.Aeneas.Std.toStr "binder")
++      __self_01 (_root_.Aeneas.Std.toStr "source") __self_11
++  | _root_.debug_lifetimes.Use.Pair __self_0 __self_1 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugBool) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field2_finish f
++      (_root_.Aeneas.Std.toStr "Pair") __self_01 __self_11
++  | _root_.debug_lifetimes.Use.Other =>
++    _root_.Aeneas.Std.core.fmt.Formatter.write_str f (_root_.Aeneas.Std.toStr
++      "Other")
++
++/-- Trait implementation: [debug_lifetimes::{core::fmt::Debug for debug_lifetimes::Use<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 16:9-16:14 -/
++@[reducible]
++def Use.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.debug_lifetimes.Use := {
++  fmt := _root_.debug_lifetimes.Use.Insts.CoreFmtDebug.fmt
++}
++
++/-- [debug_lifetimes::{core::clone::Clone for debug_lifetimes::Use<'a>}::clone]:
++    Source: 'src/debug-lifetimes.rs', lines 16:16-16:21
++    Visibility: public -/
++def Use.Insts.CoreCloneClone.clone
++  (self : _root_.debug_lifetimes.Use) :
++  _root_.Aeneas.Std.Result _root_.debug_lifetimes.Use
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [debug_lifetimes::{core::clone::Clone for debug_lifetimes::Use<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 16:16-16:21 -/
++@[reducible]
++def Use.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.debug_lifetimes.Use := {
++  clone := _root_.debug_lifetimes.Use.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [debug_lifetimes::{core::marker::Copy for debug_lifetimes::Use<'a>}]
++    Source: 'src/debug-lifetimes.rs', lines 16:23-16:27 -/
++@[reducible]
++def Use.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.debug_lifetimes.Use := {
++  cloneInst := _root_.debug_lifetimes.Use.Insts.CoreCloneClone
++}
++
++/-- [debug_lifetimes::source]:
++    Source: 'src/debug-lifetimes.rs', lines 23:0-25:1
++    Visibility: public -/
++def source
++  (literal : _root_.Aeneas.Std.U32)
++  (numeric : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.debug_lifetimes.Source
++  := do
++  _root_.Aeneas.Std.Result.ok { literal, numeric }
++
++end debug_lifetimes
+diff --git a/tests/lean/SlicePatterns/Checks.lean b/tests/lean/SlicePatterns/Checks.lean
+index 93b3893..99d2408 100644
+--- a/tests/lean/SlicePatterns/Checks.lean
++++ b/tests/lean/SlicePatterns/Checks.lean
+@@ -38,6 +38,27 @@ def res (r : Result U32) : Option Nat :=
+ #guard res (first_child_tag (sl [tag 3, map 4])) == some 1
+ #guard res (first_child_tag (sl [nm 3, map 4, tag 9])) == some 0
+ 
++-- promoted constants and a slice pattern nested in an enumeration field
++def restLen (r : Result (Slice Expr)) : Option Nat :=
++  match r with
++  | ok s => some s.length
++  | _ => none
++
++def optNat (r : Result (Option U32)) : Option (Option Nat) :=
++  match r with
++  | ok o => some (o.map (·.val))
++  | _ => none
++
++#guard restLen (rest (sl [tag 1, map 0, tag 2, nm 5])) == some 2
++#guard restLen (rest (sl [tag 1])) == some 0
++#guard restLen (rest (sl [nm 1, map 0, tag 2])) == some 0
++#guard res (or_zero true (u 4)) == some 4
++#guard res (or_zero false (u 4)) == some 0
++#guard optNat (single_name (sl [tag 1, map 0, nm 8])) == some (some 8)
++#guard optNat (single_name (sl [tag 1, map 0, tag 8])) == some none
++#guard optNat (single_name (sl [tag 1, map 0, nm 8, nm 9])) == some none
++#guard optNat (single_name (sl [tag 1, map 0])) == some none
++
+ -- counts
+ #guard res (count_tags (sl [tag 1, map 0])) == some 0
+ #guard res (count_tags (sl [tag 1, map 0, tag 2, nm 5, tag 3])) == some 5
+diff --git a/tests/lean/SlicePatterns/SlicePatterns.lean b/tests/lean/SlicePatterns/SlicePatterns.lean
+index 72f91e5..7c75f87 100644
+--- a/tests/lean/SlicePatterns/SlicePatterns.lean
++++ b/tests/lean/SlicePatterns/SlicePatterns.lean
+@@ -202,8 +202,106 @@ def first_child_tag
+   | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok 0#u32
+   | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
+ 
++/-- [slice_patterns::rest]:
++    Source: 'src/slice-patterns.rs', lines 67:0-72:1
++    Visibility: public -/
++def rest
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.slice_patterns.Expr)
++  := do
++  let c ← _root_.slice_patterns.carrier elements
++  let joined ←
++    match c with
++    | _root_.slice_patterns.Carrier.Decoded _ _ children =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr children : _root_.Sum
++        _root_.slice_patterns.Carrier (_root_.Aeneas.Std.Slice
++        _root_.slice_patterns.Expr))
++    | _root_.slice_patterns.Carrier.Undecodable _ _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier (_root_.Aeneas.Std.Slice
++        _root_.slice_patterns.Expr))
++    | _root_.slice_patterns.Carrier.Malformed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier (_root_.Aeneas.Std.Slice
++        _root_.slice_patterns.Expr))
++  match joined with
++  | _root_.Sum.inl _ =>
++    _root_.Aeneas.Std.Result.ok (Array.to_slice
++      (Std.Array.empty _root_.slice_patterns.Expr))
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [slice_patterns::or_zero]:
++    Source: 'src/slice-patterns.rs', lines 75:0-81:1
++    Visibility: public -/
++def or_zero
++  (b : _root_.Bool) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  if b
++  then _root_.Aeneas.Std.Result.ok x
++  else _root_.Aeneas.Std.Result.ok 0#u32
++
++/-- [slice_patterns::single_name]:
++    Source: 'src/slice-patterns.rs', lines 85:0-90:1
++    Visibility: public -/
++def single_name
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let c ← _root_.slice_patterns.carrier elements
++  let joined ←
++    match c with
++    | _root_.slice_patterns.Carrier.Decoded _ _ s =>
++      let i := Slice.len s
++      if i = 1#usize
++      then
++        do
++        let e ← Slice.index_usize s 0#usize
++        let joined1 ←
++          match e with
++          | _root_.slice_patterns.Expr.Atom a _ =>
++            match a with
++            | _root_.slice_patterns.Atom.Tag _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr none)
++                : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Carrier (_root_.Option
++                _root_.Aeneas.Std.U32)))
++            | _root_.slice_patterns.Atom.Name n =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (some
++                n)) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Carrier (_root_.Option
++                _root_.Aeneas.Std.U32)))
++          | _root_.slice_patterns.Expr.Map _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum
++              _root_.slice_patterns.Carrier (_root_.Option
++              _root_.Aeneas.Std.U32)))
++          | _root_.slice_patterns.Expr.Pair _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum
++              _root_.slice_patterns.Carrier (_root_.Option
++              _root_.Aeneas.Std.U32)))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr none : _root_.Sum
++            _root_.slice_patterns.Carrier (_root_.Option
++            _root_.Aeneas.Std.U32))
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr none : _root_.Sum
++          _root_.slice_patterns.Carrier (_root_.Option _root_.Aeneas.Std.U32))
++    | _root_.slice_patterns.Carrier.Undecodable _ _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier (_root_.Option _root_.Aeneas.Std.U32))
++    | _root_.slice_patterns.Carrier.Malformed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier (_root_.Option _root_.Aeneas.Std.U32))
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok none
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
+ /-- [slice_patterns::count_tags]: loop body 0:
+-    Source: 'src/slice-patterns.rs', lines 71:12-76:13
++    Source: 'src/slice-patterns.rs', lines 98:12-103:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def count_tags_loop.body
+@@ -257,7 +355,7 @@ def count_tags_loop.body
+       children, count, i5, i, i1, i2, i3, i4))
+ 
+ /-- [slice_patterns::count_tags]: loop 0:
+-    Source: 'src/slice-patterns.rs', lines 71:12-76:13
++    Source: 'src/slice-patterns.rs', lines 98:12-103:13
+     Visibility: public -/
+ @[rust_loop]
+ def count_tags_loop
+@@ -287,7 +385,7 @@ def count_tags_loop
+     (count, i)
+ 
+ /-- [slice_patterns::count_tags]:
+-    Source: 'src/slice-patterns.rs', lines 66:0-81:1
++    Source: 'src/slice-patterns.rs', lines 93:0-108:1
+     Visibility: public -/
+ def count_tags
+   (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
+@@ -349,7 +447,7 @@ def count_tags
+   else _root_.Aeneas.Std.Result.ok 0#u32
+ 
+ /-- [slice_patterns::array_pattern]:
+-    Source: 'src/slice-patterns.rs', lines 84:0-90:1
++    Source: 'src/slice-patterns.rs', lines 111:0-117:1
+     Visibility: public -/
+ def array_pattern
+   (a : _root_.Aeneas.Std.Array _root_.slice_patterns.Expr 3#usize) :
+diff --git a/tests/lean/StaticRefs.lean b/tests/lean/StaticRefs.lean
+new file mode 100644
+index 0000000..e2c488c
+--- /dev/null
++++ b/tests/lean/StaticRefs.lean
+@@ -0,0 +1 @@
++import StaticRefs.Checks
+diff --git a/tests/lean/StaticRefs/Checks.lean b/tests/lean/StaticRefs/Checks.lean
+new file mode 100644
+index 0000000..363ed61
+--- /dev/null
++++ b/tests/lean/StaticRefs/Checks.lean
+@@ -0,0 +1,51 @@
++import StaticRefs.StaticRefs
++
++/-! Evaluate the model of `tests/src/static-refs.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace static_refs.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def us (xs : List Nat) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def strs (xs : List Str) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) :
++    Slice Str :=
++  ⟨xs, h⟩
++
++def res (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++def resB (r : Result Bool) : Option Bool :=
++  match r with
++  | ok b => some b
++  | _ => none
++
++def resR (r : Result (core.result.Result U32 U32)) : Option (Sum Nat Nat) :=
++  match r with
++  | ok (.Ok v) => some (.inl v.val)
++  | ok (.Err e) => some (.inr e.val)
++  | _ => none
++
++-- statics
++#guard resB (is_op (toStr "+")) == some true
++#guard resB (is_op (toStr "or")) == some true
++#guard resB (is_op (toStr "xor")) == some false
++#guard res second_limit == some 20
++#guard res pair_sum == some 15
++
++-- loops
++#guard resR (check_all (toStr "*") (us [1, 2, 3])) == some (.inl 6)
++#guard resR (check_all (toStr "*") (us [])) == some (.inl 0)
++#guard resR (check_all (toStr "and") (us [4, 11, 2])) == some (.inr 11)
++#guard resR (check_all (toStr "sqrt") (us [1])) == some (.inr 0)
++#guard res (count_small (us [0, 1, 3, 5, 2, 2, 11, 10])) == some 5
++#guard res (count_small (us [])) == some 0
++#guard res (count_ops (strs [toStr "+", toStr "x", toStr "*", toStr "and"])) == some 2
++#guard res (count_ops (strs [])) == some 0
++
++end static_refs.checks
+diff --git a/tests/lean/StaticRefs/StaticRefs.lean b/tests/lean/StaticRefs/StaticRefs.lean
+new file mode 100644
+index 0000000..b509d8f
+--- /dev/null
++++ b/tests/lean/StaticRefs/StaticRefs.lean
+@@ -0,0 +1,271 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [static_refs]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace static_refs
++
++/-- [static_refs::ARITH_OPS]
++    Source: 'src/static-refs.rs', lines 10:0-10:48
++    Visibility: public -/
++@[global_simps, irreducible]
++def ARITH_OPS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
++  Array.to_slice
++    (_root_.Aeneas.Std.Array.make 3#usize [
++      _root_.Aeneas.Std.toStr "+", _root_.Aeneas.Std.toStr "-",
++      _root_.Aeneas.Std.toStr "*"
++      ])
++
++/-- [static_refs::BOOL_OPS]
++    Source: 'src/static-refs.rs', lines 11:0-11:45
++    Visibility: public -/
++@[global_simps, irreducible]
++def BOOL_OPS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
++  Array.to_slice
++    (_root_.Aeneas.Std.Array.make 2#usize [
++      _root_.Aeneas.Std.toStr "and", _root_.Aeneas.Std.toStr "or"
++      ])
++
++/-- [static_refs::LIMITS]
++    Source: 'src/static-refs.rs', lines 12:0-12:42
++    Visibility: public -/
++@[global_simps, irreducible]
++def LIMITS : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize :=
++  _root_.Aeneas.Std.Array.make 2#usize [ 10#u32, 20#u32 ]
++
++/-- [static_refs::PAIR]
++    Source: 'src/static-refs.rs', lines 13:0-13:38
++    Visibility: public -/
++@[global_simps, irreducible]
++def PAIR : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) := (7#u32, 8#u32)
++
++/-- [static_refs::SMALL]
++    Source: 'src/static-refs.rs', lines 14:0-14:37
++    Visibility: public -/
++@[global_simps, irreducible]
++def SMALL : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 :=
++  Array.to_slice (_root_.Aeneas.Std.Array.make 3#usize [ 1#u32, 2#u32, 3#u32 ])
++
++/-- [static_refs::is_op]:
++    Source: 'src/static-refs.rs', lines 16:0-18:1
++    Visibility: public -/
++def is_op
++  (name1 : _root_.Aeneas.Std.Str) : _root_.Aeneas.Std.Result _root_.Bool := do
++  let b ←
++    _root_.Aeneas.Std.core.slice.Slice.contains
++      (_root_.Aeneas.Std.core.cmp.PartialEqShared
++      _root_.Aeneas.Std.core.cmp.PartialEqStr) _root_.static_refs.ARITH_OPS
++      name1
++  if b
++  then _root_.Aeneas.Std.Result.ok true
++  else
++    _root_.Aeneas.Std.core.slice.Slice.contains
++      (_root_.Aeneas.Std.core.cmp.PartialEqShared
++      _root_.Aeneas.Std.core.cmp.PartialEqStr) _root_.static_refs.BOOL_OPS
++      name1
++
++/-- [static_refs::second_limit]:
++    Source: 'src/static-refs.rs', lines 20:0-22:1
++    Visibility: public -/
++def second_limit : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  Array.index_usize _root_.static_refs.LIMITS 1#usize
++
++/-- [static_refs::pair_sum]:
++    Source: 'src/static-refs.rs', lines 24:0-26:1
++    Visibility: public -/
++def pair_sum : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  let (i, _) := _root_.static_refs.PAIR
++  let (_, i1) := _root_.static_refs.PAIR
++  i + i1
++
++/-- [static_refs::check_all]: loop body 0:
++    Source: 'src/static-refs.rs', lines 35:4-42:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_all_loop.body
++  (limit : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok sum))
++  | some a =>
++    if a > limit
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err a))
++    else
++      let sum1 ← sum + a
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, sum1))
++
++/-- [static_refs::check_all]: loop 0:
++    Source: 'src/static-refs.rs', lines 35:4-42:1
++    Visibility: public -/
++@[rust_loop]
++def check_all_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, sum1) => _root_.static_refs.check_all_loop.body limit iter1
++       sum1 : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)))
++    (iter, sum)
++
++/-- [static_refs::check_all]:
++    Source: 'src/static-refs.rs', lines 29:0-42:1
++    Visibility: public -/
++def check_all
++  (name1 : _root_.Aeneas.Std.Str)
++  (args : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let b ← _root_.static_refs.is_op name1
++  if b
++  then
++    let limit ← Array.index_usize _root_.static_refs.LIMITS 0#usize
++    let (model_state, _) ←
++      _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter args
++    _root_.static_refs.check_all_loop model_state limit 0#u32
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      0#u32)
++
++/-- [static_refs::LIMIT]
++    Source: 'src/static-refs.rs', lines 44:0-44:29
++    Visibility: public -/
++@[global_simps, irreducible] def LIMIT : _root_.Aeneas.Std.U32 := 10#u32
++
++/-- [static_refs::count_small]: loop body 0:
++    Source: 'src/static-refs.rs', lines 50:4-55:5
++    Visibility: public -/
++@[rust_loop_body]
++def count_small_loop.body
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len xs
++  if i < i1
++  then
++    let i2 ← Slice.index_usize xs i
++    let b ←
++      _root_.Aeneas.Std.core.slice.Slice.contains core.cmp.PartialEqU32
++        _root_.static_refs.SMALL i2
++    let n1 ←
++      if b
++      then n + 1#u32
++      else
++        if i2 > _root_.static_refs.LIMIT
++        then n + 1#u32
++        else _root_.Aeneas.Std.Result.ok n
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (n1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++
++/-- [static_refs::count_small]: loop 0:
++    Source: 'src/static-refs.rs', lines 50:4-55:5
++    Visibility: public -/
++@[rust_loop]
++def count_small_loop
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (n1, i1) => _root_.static_refs.count_small_loop.body xs n1 i1 :
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.U32))
++    (n, i)
++
++/-- [static_refs::count_small]:
++    Source: 'src/static-refs.rs', lines 47:0-57:1
++    Visibility: public -/
++@[reducible]
++def count_small
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.static_refs.count_small_loop xs 0#u32 0#usize
++
++/-- [static_refs::count_ops]: loop body 0:
++    Source: 'src/static-refs.rs', lines 62:4-66:5
++    Visibility: public -/
++@[rust_loop_body]
++def count_ops_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str) ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some name1 =>
++    let b ←
++      _root_.Aeneas.Std.core.slice.Slice.contains
++        (_root_.Aeneas.Std.core.cmp.PartialEqShared
++        _root_.Aeneas.Std.core.cmp.PartialEqStr) _root_.static_refs.ARITH_OPS
++        name1
++    let i ← if b
++              then n + 1#u32
++              else _root_.Aeneas.Std.Result.ok n
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, i))
++
++/-- [static_refs::count_ops]: loop 0:
++    Source: 'src/static-refs.rs', lines 62:4-66:5
++    Visibility: public -/
++@[rust_loop]
++def count_ops_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, n1) => _root_.static_refs.count_ops_loop.body iter1 n1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.Str) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.Str) × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, n)
++
++/-- [static_refs::count_ops]:
++    Source: 'src/static-refs.rs', lines 60:0-68:1
++    Visibility: public -/
++def count_ops
++  (names : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter names
++  _root_.static_refs.count_ops_loop model_state 0#u32
++
++end static_refs
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 316609e..ea9e87e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -28,6 +28,7 @@ package «tests» {}
+ @[default_target] lean_lib ConstantsLean
+ @[default_target] lean_lib Curve25519
+ @[default_target] lean_lib Default
++@[default_target] lean_lib DebugLifetimes
+ @[default_target] lean_lib DefaultedMethod
+ @[default_target] lean_lib Derive
+ @[default_target] lean_lib Demo
+@@ -79,6 +80,7 @@ package «tests» {}
+ @[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
+ @[default_target] lean_lib Static
++@[default_target] lean_lib StaticRefs
+ @[default_target] lean_lib StepBy
+ @[default_target] lean_lib StringChars
+ @[default_target] lean_lib SwitchTest
+diff --git a/tests/src/debug-lifetimes.rs b/tests/src/debug-lifetimes.rs
+new file mode 100644
+index 0000000..6e14313
+--- /dev/null
++++ b/tests/src/debug-lifetimes.rs
+@@ -0,0 +1,47 @@
++//@ [!lean] skip
++//@ [lean] subdir=DebugLifetimes
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Derived `Debug` for types holding references (the fields are unsized to
++//! `&dyn Debug` while they borrow from the formatted value), as in
++//! `chelis_deep::literal_source`. `DebugLifetimes/Checks.lean` evaluates the
++//! model of the `fmt` methods and compares with the `native` test module.
++
++#[derive(Debug, Clone, Copy)]
++pub struct Source<'a> {
++    literal: &'a u32,
++    numeric: Option<&'a u32>,
++}
++
++#[derive(Debug, Clone, Copy)]
++pub enum Use<'a> {
++    Plain { binder: &'a str, source: Option<Source<'a>> },
++    Pair(&'a u32, bool),
++    Other,
++}
++
++pub fn source<'a>(literal: &'a u32, numeric: Option<&'a u32>) -> Source<'a> {
++    Source { literal, numeric }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn debug() {
++        let (a, b) = (3u32, 5u32);
++        assert_eq!(format!("{:?}", source(&a, None)), "Source { literal: 3, numeric: None }");
++        assert_eq!(
++            format!("{:?}", source(&a, Some(&b))),
++            "Source { literal: 3, numeric: Some(5) }"
++        );
++        assert_eq!(
++            format!("{:?}", Use::Plain { binder: "x", source: Some(source(&a, Some(&b))) }),
++            "Plain { binder: \"x\", source: Some(Source { literal: 3, numeric: Some(5) }) }"
++        );
++        assert_eq!(format!("{:?}", Use::Plain { binder: "y", source: None }), "Plain { binder: \"y\", source: None }");
++        assert_eq!(format!("{:?}", Use::Pair(&b, true)), "Pair(5, true)");
++        assert_eq!(format!("{:?}", Use::Other), "Other");
++    }
++}
+diff --git a/tests/src/slice-patterns.rs b/tests/src/slice-patterns.rs
+index 767a4fd..7fa35ff 100644
+--- a/tests/src/slice-patterns.rs
++++ b/tests/src/slice-patterns.rs
+@@ -62,6 +62,33 @@ pub fn first_child_tag(elements: &[Expr]) -> u32 {
+     }
+ }
+ 
++/// The rest of a decoded view, or the empty slice: `&[]` is a promoted
++/// constant, whose reference outlives the function.
++pub fn rest(elements: &[Expr]) -> &[Expr] {
++    match carrier(elements) {
++        Carrier::Decoded(_, _, children) => children,
++        _ => &[],
++    }
++}
++
++/// A promoted scalar constant.
++pub fn or_zero(b: bool, x: &u32) -> &u32 {
++    if b {
++        x
++    } else {
++        &0
++    }
++}
++
++/// A slice pattern nested in an enumeration field (its length is read
++/// through a raw pointer to the field's slice).
++pub fn single_name(elements: &[Expr]) -> Option<&u32> {
++    match carrier(elements) {
++        Carrier::Decoded(_, _, [Expr::Atom(Atom::Name(n), _)]) => Some(n),
++        _ => None,
++    }
++}
++
+ /// A loop over the rest of the slice.
+ pub fn count_tags(elements: &[Expr]) -> u32 {
+     match elements {
+@@ -123,6 +150,19 @@ mod native {
+         assert_eq!(first_child_tag(&[name(3), map(4), tag(9)]), 0);
+     }
+ 
++    #[test]
++    fn promoted_and_nested() {
++        assert_eq!(rest(&[tag(1), map(0), tag(2), name(5)]).len(), 2);
++        assert_eq!(rest(&[tag(1)]).len(), 0);
++        assert_eq!(rest(&[name(1), map(0), tag(2)]).len(), 0);
++        assert_eq!(*or_zero(true, &4), 4);
++        assert_eq!(*or_zero(false, &4), 0);
++        assert_eq!(single_name(&[tag(1), map(0), name(8)]), Some(&8));
++        assert_eq!(single_name(&[tag(1), map(0), tag(8)]), None);
++        assert_eq!(single_name(&[tag(1), map(0), name(8), name(9)]), None);
++        assert_eq!(single_name(&[tag(1), map(0)]), None);
++    }
++
+     #[test]
+     fn counts() {
+         assert_eq!(count_tags(&[tag(1), map(0)]), 0);
+diff --git a/tests/src/static-refs.rs b/tests/src/static-refs.rs
+new file mode 100644
+index 0000000..d0d7236
+--- /dev/null
++++ b/tests/src/static-refs.rs
+@@ -0,0 +1,94 @@
++//@ [!lean] skip
++//@ [lean] subdir=StaticRefs
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Globals whose types contain shared `'static` references (constant
++//! references to static data), used before loops.
++//! `StaticRefs/Checks.lean` evaluates the model on the inputs of the `native`
++//! test module below and compares with the native results.
++
++pub const ARITH_OPS: &[&str] = &["+", "-", "*"];
++pub const BOOL_OPS: &[&str] = &["and", "or"];
++pub static LIMITS: [&u32; 2] = [&10, &20];
++pub const PAIR: (&u32, u32) = (&7, 8);
++pub const SMALL: &[u32] = &[1, 2, 3];
++
++pub fn is_op(name: &str) -> bool {
++    ARITH_OPS.contains(&name) || BOOL_OPS.contains(&name)
++}
++
++pub fn second_limit() -> u32 {
++    *LIMITS[1]
++}
++
++pub fn pair_sum() -> u32 {
++    *PAIR.0 + PAIR.1
++}
++
++/// A static access followed by a loop with early exits.
++pub fn check_all(name: &str, args: &[u32]) -> Result<u32, u32> {
++    if !is_op(name) {
++        return Err(0);
++    }
++    let limit = *LIMITS[0];
++    let mut sum = 0;
++    for a in args {
++        if *a > limit {
++            return Err(*a);
++        }
++        sum += *a;
++    }
++    Ok(sum)
++}
++
++pub static LIMIT: &u32 = &10;
++
++/// Static accesses in a loop.
++pub fn count_small(xs: &[u32]) -> u32 {
++    let mut n = 0;
++    let mut i = 0;
++    while i < xs.len() {
++        if SMALL.contains(&xs[i]) || xs[i] > *LIMIT {
++            n += 1;
++        }
++        i += 1;
++    }
++    n
++}
++
++/// Static string references compared in a loop.
++pub fn count_ops(names: &[&str]) -> u32 {
++    let mut n = 0;
++    for name in names {
++        if ARITH_OPS.contains(name) {
++            n += 1;
++        }
++    }
++    n
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn statics() {
++        assert!(is_op("+"));
++        assert!(is_op("or"));
++        assert!(!is_op("xor"));
++        assert_eq!(second_limit(), 20);
++        assert_eq!(pair_sum(), 15);
++    }
++
++    #[test]
++    fn loops() {
++        assert_eq!(check_all("*", &[1, 2, 3]), Ok(6));
++        assert_eq!(check_all("*", &[]), Ok(0));
++        assert_eq!(check_all("and", &[4, 11, 2]), Err(11));
++        assert_eq!(check_all("sqrt", &[1]), Err(0));
++        assert_eq!(count_small(&[0, 1, 3, 5, 2, 2, 11, 10]), 5);
++        assert_eq!(count_small(&[]), 0);
++        assert_eq!(count_ops(&["+", "x", "*", "and"]), 2);
++        assert_eq!(count_ops(&[]), 0);
++    }
++}

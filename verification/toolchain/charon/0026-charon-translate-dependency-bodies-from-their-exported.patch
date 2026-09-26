@@ -1,0 +1,1416 @@
+# charon integration step 26 after 546078ea5d: commit fd24718a125dcec228a9fabb6f53087cfa2fb2e9
+# first parent d0c1e0b0e83fd83d4b56945ea2fa8d4c20add4d3
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: translate dependency bodies from their exported promoted MIR
+#
+# Crate metadata only carries the runtime MIR of a dependency (optimized_mir, mir_for_ctfe),
+# after runtime lowering: ElaborateBoxDerefs turns `*b` on a Box into projections through
+# Unique/NonNull plus a null-pointer UB check, and drops are elaborated. Under --mir=promoted,
+# local bodies come from mir_promoted, so the same function translated from a dependency and
+# locally differed (e.g. chelis_deep's Expr::carrier failed in Aeneas only when translated from
+# chelis-effects).
+#
+# DependencyCallbacks now also captures the promoted MIR (body and promoted constants) of every
+# MIR-carrying definition when rustc computes it (a mir_promoted provider override; bodies no
+# analysis forced are built at export) and writes it beside the artifact as
+# <artifact>.charon-mir: version header, the crate hash (SVH) of the compilation, and entries
+# keyed by definition-path hash. The encoding reuses rustc's TyEncodable/TyDecodable with a codec
+# that maps DefIds by DefPathHash, crates by StableCrateId, allocations by content and spans by
+# (exported source file id, offset); span hygiene data is not kept, and cross-crate-cleared data
+# is cleared as in metadata MIR.
+#
+# At --mir=promoted, get_mir reads bodies and promoteds of external items from the table of the
+# exact artifact rustc loaded, for every crate that is not in the sysroot. A missing table, a
+# table with another version or crate hash, or a missing entry is a translation error, never a
+# fallback to the runtime MIR. Statics, whose initializer MIR the metadata does not carry, now
+# get their promoted body too. The standard library keeps its runtime MIR (the only MIR it
+# ships); constructors keep their shim; trivial constants keep their evaluated value. Other MIR
+# levels are unchanged.
+#
+# The UI harness compiles aux crates through charon-driver's dependency mode, as `charon cargo`
+# does. New test foreign-box-deref: a dependency's Box derefs, move out of a box, promoted
+# constant, static and const fn translate exactly like local copies of the same functions.
+
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index 7132aad..0ab9f68 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -222,17 +222,21 @@ impl Callbacks for RunCompilerNormallyCallbacks {
+     }
+ }
+ 
+-/// Compile a target dependency normally while retaining the closure lifetime
+-/// relations its borrow checker computes, so that dependents can translate its
+-/// closures from optimized MIR without inventing unconstrained regions.
++/// Compile a target dependency normally while retaining what dependents need to translate its
++/// bodies but rustc discards after analysing it: the closure lifetime relations its borrow checker
++/// computes, so that dependents translate its closures without inventing unconstrained regions,
++/// and its promoted MIR, so that `--mir=promoted` translates its bodies at the same level as
++/// local ones.
+ pub struct DependencyCallbacks;
+ 
+ impl Callbacks for DependencyCallbacks {
+     fn config(&mut self, config: &mut Config) {
+         setup_compiler(config, &Default::default(), false);
+         crate::closure_regions::clear();
++        crate::promoted_mir::clear();
+         config.override_queries = Some(|_sess, providers| {
+             crate::closure_regions::install(providers);
++            crate::promoted_mir::install(providers);
+         });
+         crate::closure_regions::disable_incremental_reuse(config);
+     }
+@@ -240,6 +244,7 @@ impl Callbacks for DependencyCallbacks {
+     fn after_analysis<'tcx>(&mut self, _: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+         // Every body has been borrow-checked; metadata has not been emitted yet.
+         crate::closure_regions::export_dependency_table(tcx);
++        crate::promoted_mir::export_dependency_table(tcx);
+         Compilation::Continue
+     }
+ }
+diff --git a/src/bin/charon-driver/main.rs b/src/bin/charon-driver/main.rs
+index 66c3f95..84317c1 100644
+--- a/src/bin/charon-driver/main.rs
++++ b/src/bin/charon-driver/main.rs
+@@ -37,6 +37,7 @@ extern crate rustc_interface;
+ extern crate rustc_lexer;
+ extern crate rustc_middle;
+ extern crate rustc_mir_build;
++extern crate rustc_serialize;
+ extern crate rustc_session;
+ extern crate rustc_span;
+ extern crate rustc_target;
+@@ -48,6 +49,7 @@ extern crate charon_lib;
+ 
+ mod driver;
+ mod closure_regions;
++mod promoted_mir;
+ #[macro_use]
+ pub mod hax;
+ mod translate;
+diff --git a/src/bin/charon-driver/promoted_mir.rs b/src/bin/charon-driver/promoted_mir.rs
+new file mode 100644
+index 0000000..c772c35
+--- /dev/null
++++ b/src/bin/charon-driver/promoted_mir.rs
+@@ -0,0 +1,601 @@
++//! Export the promoted MIR of dependency crates, so that their bodies are translated from the same
++//! MIR level as the bodies of the crate being translated.
++//!
++//! Crate metadata only carries the runtime MIR of a dependency (`optimized_mir`, `mir_for_ctfe`),
++//! after runtime lowering such as `ElaborateBoxDerefs` and the UB checks. `--mir=promoted` asks for
++//! the MIR the borrow checker sees, which rustc discards once it has analysed the crate.
++//!
++//! Dependencies compiled through the driver (see `DependencyCallbacks`) therefore capture the
++//! promoted MIR (body and promoted constants) of every definition that has MIR while rustc computes
++//! it, and write it beside the crate artifact, keyed by stable definition-path hash. The table
++//! records the crate hash (SVH) of the compilation that wrote it. Translating an external body at
++//! `--mir=promoted` reads the table belonging to the exact artifact rustc loaded; a missing,
++//! outdated or incomplete table is an error, never a fallback to the runtime MIR.
++//!
++//! The encoding reuses rustc's own `TyEncodable`/`TyDecodable` implementations, with a codec that
++//! maps session-local identifiers to stable ones like the incremental cache does: `DefId`s by
++//! `DefPathHash`, crates by `StableCrateId`, allocations by content, and spans by source file and
++//! offset. Spans keep their positions but not their hygiene (macro expansion) data, which MIR
++//! translation does not use. Cross-crate-cleared data (`ClearCrossCrate`) is cleared, as in the
++//! runtime MIR of crate metadata.
++use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
++use rustc_data_structures::steal::Steal;
++use rustc_hir::def::DefKind;
++use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LOCAL_CRATE, LocalDefId, StableCrateId};
++use rustc_index::IndexVec;
++use rustc_middle::mir::interpret::{AllocDecodingState, AllocId, specialized_encode_alloc_id};
++use rustc_middle::mir::{Body, Promoted};
++use rustc_middle::ty::codec::{TyDecoder, TyEncoder};
++use rustc_middle::ty::{self, Ty, TyCtxt};
++use rustc_serialize::opaque::{MAGIC_END_BYTES, MemDecoder};
++use rustc_serialize::{Decodable, Decoder, Encodable, Encoder, leb128};
++use rustc_span::def_id::DefPathHash;
++use rustc_span::hygiene::{ExpnId, SyntaxContext};
++use rustc_span::{
++    AttrId, BlobDecoder, BytePos, ByteSymbol, FileName, SourceFile, Span, SpanDecoder,
++    SpanEncoder, StableSourceFileId, Symbol,
++};
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, LazyLock, Mutex};
++
++/// The promoted MIR of one definition: its body and its promoted constants.
++pub type PromotedMir<'tcx> = (Body<'tcx>, IndexVec<Promoted, Body<'tcx>>);
++
++/// Extension of the table written beside a dependency artifact.
++const TABLE_EXTENSION: &str = "charon-mir";
++/// First bytes of a table. Bump the version whenever the encoding or the set of exported bodies
++/// changes, so that tables written by older drivers are rejected.
++const TABLE_HEADER: &[u8] = b"charon-promoted-mir v1\n";
++
++/// Encoded promoted MIR of the crate being compiled, captured when rustc computes it.
++static CAPTURED: LazyLock<Mutex<FxHashMap<LocalDefId, Vec<u8>>>> =
++    LazyLock::new(|| Mutex::new(FxHashMap::default()));
++
++pub fn clear() {
++    CAPTURED.lock().expect("promoted-MIR cache poisoned").clear();
++}
++
++type MirPromotedProvider = for<'tcx> fn(
++    TyCtxt<'tcx>,
++    LocalDefId,
++) -> (
++    &'tcx Steal<Body<'tcx>>,
++    &'tcx Steal<IndexVec<Promoted, Body<'tcx>>>,
++);
++static ORIGINAL_MIR_PROMOTED: Mutex<Option<MirPromotedProvider>> = Mutex::new(None);
++
++/// Capture the promoted MIR of every body as rustc computes it, before later passes steal it.
++/// Incremental reuse must be disabled (see `closure_regions::disable_incremental_reuse`): the
++/// provider must run for every body.
++pub fn install(providers: &mut rustc_middle::util::Providers) {
++    *ORIGINAL_MIR_PROMOTED.lock().expect("promoted-MIR cache poisoned") =
++        Some(providers.queries.mir_promoted);
++    providers.queries.mir_promoted = |tcx, def| {
++        let original = ORIGINAL_MIR_PROMOTED
++            .lock()
++            .expect("promoted-MIR cache poisoned")
++            .expect("missing mir_promoted provider");
++        let result = original(tcx, def);
++        let encoded = encode(tcx, &result.0.borrow(), &result.1.borrow());
++        CAPTURED
++            .lock()
++            .expect("promoted-MIR cache poisoned")
++            .insert(def, encoded);
++        result
++    };
++}
++
++/// Whether `mir_promoted` exists for this MIR-carrying definition. Constructors get their MIR
++/// from a shim, and trivial constants are evaluated without building MIR past `mir_built`; the
++/// runtime MIR of both is what `--mir=promoted` translates locally too.
++fn has_promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> bool {
++    !matches!(tcx.def_kind(def), DefKind::Ctor(..)) && !tcx.is_trivial_const(def)
++}
++
++fn artifact_table_path(artifact: &Path) -> PathBuf {
++    artifact.with_extension(TABLE_EXTENSION)
++}
++
++/// Write the promoted MIR of every body of this crate beside the artifact dependents load.
++/// Call after analysis, before metadata is emitted to pipelined dependents.
++pub fn export_dependency_table(tcx: TyCtxt<'_>) {
++    let artifact = match tcx
++        .output_filenames(())
++        .path(rustc_session::config::OutputType::Metadata)
++    {
++        rustc_session::config::OutFileName::Real(path) => path,
++        rustc_session::config::OutFileName::Stdout => {
++            panic!("cannot export promoted MIR for metadata written to stdout")
++        }
++    };
++    let mut entries = Vec::new();
++    for &def in tcx.mir_keys(()) {
++        if !has_promoted_mir(tcx, def) {
++            continue;
++        }
++        let captured = CAPTURED
++            .lock()
++            .expect("promoted-MIR cache poisoned")
++            .contains_key(&def);
++        if !captured {
++            // Bodies no analysis needed (e.g. unused consts) still have MIR in the metadata. Build
++            // their promoted MIR now; the provider captures it. If rustc had computed it before
++            // our provider was installed, it is stolen and cannot be exported.
++            let (body, _) = tcx.mir_promoted(def);
++            assert!(
++                !body.is_stolen()
++                    || CAPTURED
++                        .lock()
++                        .expect("promoted-MIR cache poisoned")
++                        .contains_key(&def),
++                "the promoted MIR of {def:?} was computed without the charon driver's provider; \
++                 cannot export it"
++            );
++        }
++        let encoded = CAPTURED
++            .lock()
++            .expect("promoted-MIR cache poisoned")
++            .remove(&def)
++            .unwrap_or_else(|| {
++                panic!("the promoted MIR of {def:?} was not captured; cannot export it")
++            });
++        entries.push((tcx.def_path_hash(def.to_def_id()).0.to_le_bytes(), encoded));
++    }
++    entries.sort_by(|a, b| a.0.cmp(&b.0));
++
++    let mut table = Vec::new();
++    table.extend_from_slice(TABLE_HEADER);
++    table.extend_from_slice(&tcx.crate_hash(LOCAL_CRATE).as_u128().to_le_bytes());
++    table.extend_from_slice(&(entries.len() as u64).to_le_bytes());
++    let mut offset = 0u64;
++    for (key, encoded) in &entries {
++        table.extend_from_slice(key);
++        table.extend_from_slice(&offset.to_le_bytes());
++        table.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
++        offset += encoded.len() as u64;
++    }
++    for (_, encoded) in &entries {
++        table.extend_from_slice(encoded);
++    }
++    let path = artifact_table_path(&artifact);
++    std::fs::write(&path, table).unwrap_or_else(|error| {
++        panic!("cannot write promoted-MIR table {}: {error}", path.display())
++    });
++}
++
++/// The table of one external crate.
++struct ExternalTable {
++    path: PathBuf,
++    data: Vec<u8>,
++    /// Definition-path hash to byte range in `data`.
++    index: FxHashMap<[u8; 16], (usize, usize)>,
++}
++
++static EXTERNAL: LazyLock<Mutex<FxHashMap<CrateNum, Arc<ExternalTable>>>> =
++    LazyLock::new(|| Mutex::new(FxHashMap::default()));
++
++fn read_table(tcx: TyCtxt<'_>, krate: CrateNum) -> Result<ExternalTable, String> {
++    let crate_name = tcx.crate_name(krate);
++    let source = tcx.used_crate_source(krate);
++    let artifact = source
++        .rlib
++        .as_ref()
++        .or(source.rmeta.as_ref())
++        .ok_or_else(|| format!("no artifact recorded for crate `{crate_name}`"))?;
++    let path = artifact_table_path(artifact);
++    let data = std::fs::read(&path).map_err(|error| {
++        format!(
++            "missing promoted-MIR table {} of crate `{crate_name}`: {error}; \
++             rebuild the dependency with charon",
++            path.display()
++        )
++    })?;
++    let stale = || {
++        format!(
++            "promoted-MIR table {} was not written for the `{crate_name}` artifact rustc \
++             loaded (or by this charon driver version); rebuild the dependency with charon \
++             (e.g. `cargo clean` its target)",
++            path.display()
++        )
++    };
++    let malformed = || format!("malformed promoted-MIR table {}", path.display());
++    let rest = data.strip_prefix(TABLE_HEADER).ok_or_else(stale)?;
++    let read_u64 = |bytes: &[u8], at: usize| -> Result<u64, String> {
++        Ok(u64::from_le_bytes(
++            bytes
++                .get(at..at + 8)
++                .ok_or_else(malformed)?
++                .try_into()
++                .unwrap(),
++        ))
++    };
++    let svh = u128::from_le_bytes(rest.get(..16).ok_or_else(malformed)?.try_into().unwrap());
++    if svh != tcx.crate_hash(krate).as_u128() {
++        return Err(stale());
++    }
++    let count = read_u64(rest, 16)? as usize;
++    let entries_start = 24;
++    let entry_size = 32;
++    let blobs_start = TABLE_HEADER.len()
++        + entries_start
++        + count.checked_mul(entry_size).ok_or_else(malformed)?;
++    let mut index = FxHashMap::default();
++    for i in 0..count {
++        let at = entries_start + i * entry_size;
++        let key: [u8; 16] = rest.get(at..at + 16).ok_or_else(malformed)?.try_into().unwrap();
++        let offset = read_u64(rest, at + 16)? as usize;
++        let len = read_u64(rest, at + 24)? as usize;
++        let start = blobs_start.checked_add(offset).ok_or_else(malformed)?;
++        let end = start.checked_add(len).ok_or_else(malformed)?;
++        if end > data.len() || index.insert(key, (start, end)).is_some() {
++            return Err(malformed());
++        }
++    }
++    Ok(ExternalTable { path, data, index })
++}
++
++fn external_table(tcx: TyCtxt<'_>, krate: CrateNum) -> Result<Arc<ExternalTable>, String> {
++    if let Some(table) = EXTERNAL.lock().expect("promoted-MIR cache poisoned").get(&krate) {
++        return Ok(table.clone());
++    }
++    let table = Arc::new(read_table(tcx, krate)?);
++    EXTERNAL
++        .lock()
++        .expect("promoted-MIR cache poisoned")
++        .insert(krate, table.clone());
++    Ok(table)
++}
++
++/// Whether the crate is part of the standard library, which is not compiled by the driver: its
++/// only encoded MIR is the runtime MIR.
++pub fn is_sysroot_crate(tcx: TyCtxt<'_>, krate: CrateNum) -> bool {
++    let source = tcx.used_crate_source(krate);
++    let artifacts = [&source.rlib, &source.rmeta, &source.dylib];
++    let sysroots = tcx.sess.opts.sysroot.all_paths().collect::<Vec<_>>();
++    artifacts.into_iter().flatten().any(|artifact| {
++        sysroots.iter().any(|sysroot| {
++            artifact.starts_with(sysroot)
++                || std::fs::canonicalize(sysroot)
++                    .is_ok_and(|sysroot| artifact.starts_with(sysroot))
++        })
++    })
++}
++
++/// The promoted MIR exported when the external crate defining `def_id` was compiled.
++pub fn lookup_external<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Result<PromotedMir<'tcx>, String> {
++    assert!(!def_id.is_local());
++    let table = external_table(tcx, def_id.krate)?;
++    let key = tcx.def_path_hash(def_id).0.to_le_bytes();
++    let &(start, end) = table.index.get(&key).ok_or_else(|| {
++        format!(
++            "external body {def_id:?} has no exported promoted MIR in {}; \
++             its crate must be compiled by the charon driver",
++            table.path.display()
++        )
++    })?;
++    decode(tcx, &table.data[start..end])
++        .map_err(|error| format!("{error} (promoted MIR of {def_id:?} in {})", table.path.display()))
++}
++
++// Encoding.
++
++const SPAN_DUMMY: u8 = 0;
++const SPAN_FILE: u8 = 1;
++
++struct MirEncoder<'tcx> {
++    tcx: TyCtxt<'tcx>,
++    buf: Vec<u8>,
++    type_shorthands: FxHashMap<Ty<'tcx>, usize>,
++    predicate_shorthands: FxHashMap<ty::PredicateKind<'tcx>, usize>,
++    allocs: FxIndexSet<AllocId>,
++    files: FxHashMap<*const SourceFile, (StableCrateId, StableSourceFileId)>,
++}
++
++fn encode<'tcx>(
++    tcx: TyCtxt<'tcx>,
++    body: &Body<'tcx>,
++    promoted: &IndexVec<Promoted, Body<'tcx>>,
++) -> Vec<u8> {
++    let mut e = MirEncoder {
++        tcx,
++        buf: Vec::new(),
++        type_shorthands: Default::default(),
++        predicate_shorthands: Default::default(),
++        allocs: Default::default(),
++        files: Default::default(),
++    };
++    body.encode(&mut e);
++    promoted.encode(&mut e);
++    // The allocations the bodies refer to, which may refer to further allocations.
++    let mut offsets: Vec<u64> = Vec::new();
++    while offsets.len() < e.allocs.len() {
++        let alloc_id = e.allocs[offsets.len()];
++        offsets.push(e.buf.len() as u64);
++        specialized_encode_alloc_id(&mut e, tcx, alloc_id);
++    }
++    let offsets_pos = e.buf.len() as u64;
++    offsets.encode(&mut e);
++    e.buf.extend_from_slice(&offsets_pos.to_le_bytes());
++    e.buf.extend_from_slice(MAGIC_END_BYTES);
++    e.buf
++}
++
++impl<'tcx> MirEncoder<'tcx> {
++    /// The identity of a source file as dependents see it: crate metadata exports local files
++    /// with an id that incorporates the exporting crate (see `encode_source_map` in
++    /// `rustc_metadata`); imported files already carry it.
++    fn file_id(&mut self, file: &Arc<SourceFile>) -> (StableCrateId, StableSourceFileId) {
++        let tcx = self.tcx;
++        *self.files.entry(Arc::as_ptr(file)).or_insert_with(|| {
++            let krate = tcx.stable_crate_id(file.cnum);
++            if file.cnum == LOCAL_CRATE {
++                let mut name = file.name.clone();
++                if let FileName::Real(real) = &mut name {
++                    real.update_for_crate_metadata();
++                }
++                (krate, StableSourceFileId::from_filename_for_export(&name, krate))
++            } else {
++                (krate, file.stable_id)
++            }
++        })
++    }
++}
++
++macro_rules! emit_leb128 {
++    ($($name:ident($ty:ty) => $write:ident;)*) => {
++        $(
++            #[inline]
++            fn $name(&mut self, value: $ty) {
++                let mut out = [0u8; leb128::max_leb128_len::<$ty>()];
++                let len = leb128::$write(&mut out, value);
++                self.buf.extend_from_slice(&out[..len]);
++            }
++        )*
++    };
++}
++
++impl Encoder for MirEncoder<'_> {
++    emit_leb128! {
++        emit_usize(usize) => write_usize_leb128;
++        emit_u128(u128) => write_u128_leb128;
++        emit_u64(u64) => write_u64_leb128;
++        emit_u32(u32) => write_u32_leb128;
++        emit_isize(isize) => write_isize_leb128;
++        emit_i128(i128) => write_i128_leb128;
++        emit_i64(i64) => write_i64_leb128;
++        emit_i32(i32) => write_i32_leb128;
++    }
++
++    fn emit_u16(&mut self, value: u16) {
++        self.buf.extend_from_slice(&value.to_le_bytes());
++    }
++
++    fn emit_u8(&mut self, value: u8) {
++        self.buf.push(value);
++    }
++
++    fn emit_i16(&mut self, value: i16) {
++        self.buf.extend_from_slice(&value.to_le_bytes());
++    }
++
++    fn emit_raw_bytes(&mut self, bytes: &[u8]) {
++        self.buf.extend_from_slice(bytes);
++    }
++}
++
++impl SpanEncoder for MirEncoder<'_> {
++    fn encode_span(&mut self, span: Span) {
++        let data = span.data_untracked();
++        if data.is_dummy() {
++            return self.emit_u8(SPAN_DUMMY);
++        }
++        let file = self.tcx.sess.source_map().lookup_source_file(data.lo);
++        let (krate, file_id) = self.file_id(&file);
++        self.emit_u8(SPAN_FILE);
++        krate.encode(self);
++        file_id.encode(self);
++        self.emit_u32(data.lo.0 - file.start_pos.0);
++        self.emit_u32(data.hi.0 - data.lo.0);
++    }
++
++    fn encode_symbol(&mut self, sym: Symbol) {
++        self.emit_str(sym.as_str());
++    }
++
++    fn encode_byte_symbol(&mut self, byte_sym: ByteSymbol) {
++        self.emit_byte_str(byte_sym.as_byte_str());
++    }
++
++    fn encode_expn_id(&mut self, _expn_id: ExpnId) {
++        panic!("promoted-MIR tables do not encode macro expansions")
++    }
++
++    fn encode_syntax_context(&mut self, _syntax_context: SyntaxContext) {
++        // Spans are encoded without their hygiene data; see the module documentation.
++    }
++
++    fn encode_crate_num(&mut self, crate_num: CrateNum) {
++        self.tcx.stable_crate_id(crate_num).encode(self);
++    }
++
++    fn encode_def_index(&mut self, _def_index: DefIndex) {
++        panic!("encoding a `DefIndex` without its crate")
++    }
++
++    fn encode_def_id(&mut self, def_id: DefId) {
++        self.tcx.def_path_hash(def_id).encode(self);
++    }
++}
++
++impl<'tcx> TyEncoder<'tcx> for MirEncoder<'tcx> {
++    const CLEAR_CROSS_CRATE: bool = true;
++
++    fn position(&self) -> usize {
++        self.buf.len()
++    }
++
++    fn type_shorthands(&mut self) -> &mut FxHashMap<Ty<'tcx>, usize> {
++        &mut self.type_shorthands
++    }
++
++    fn predicate_shorthands(&mut self) -> &mut FxHashMap<ty::PredicateKind<'tcx>, usize> {
++        &mut self.predicate_shorthands
++    }
++
++    fn encode_alloc_id(&mut self, alloc_id: &AllocId) {
++        let (index, _) = self.allocs.insert_full(*alloc_id);
++        self.emit_u32(index as u32);
++    }
++}
++
++// Decoding.
++
++struct MirDecoder<'a, 'tcx> {
++    tcx: TyCtxt<'tcx>,
++    opaque: MemDecoder<'a>,
++    allocs: &'a AllocDecodingState,
++    type_cache: FxHashMap<usize, Ty<'tcx>>,
++    files: FxHashMap<(StableCrateId, StableSourceFileId), Arc<SourceFile>>,
++}
++
++fn decode<'tcx>(tcx: TyCtxt<'tcx>, data: &[u8]) -> Result<PromotedMir<'tcx>, String> {
++    let malformed = || "malformed promoted-MIR entry".to_string();
++    let payload = data.strip_suffix(MAGIC_END_BYTES).ok_or_else(malformed)?;
++    let footer = payload.len().checked_sub(8).ok_or_else(malformed)?;
++    let offsets_pos = u64::from_le_bytes(payload[footer..].try_into().unwrap()) as usize;
++    if offsets_pos > footer {
++        return Err(malformed());
++    }
++    let mut opaque = MemDecoder::new(data, offsets_pos).map_err(|()| malformed())?;
++    let offsets = Vec::<u64>::decode(&mut opaque);
++    let allocs = AllocDecodingState::new(offsets);
++    let mut d = MirDecoder {
++        tcx,
++        opaque: MemDecoder::new(data, 0).map_err(|()| malformed())?,
++        allocs: &allocs,
++        type_cache: Default::default(),
++        files: Default::default(),
++    };
++    let body = Body::decode(&mut d);
++    let promoted = IndexVec::<Promoted, Body<'tcx>>::decode(&mut d);
++    Ok((body, promoted))
++}
++
++impl<'a, 'tcx> MirDecoder<'a, 'tcx> {
++    fn source_file(&mut self, krate: StableCrateId, file: StableSourceFileId) -> Arc<SourceFile> {
++        let tcx = self.tcx;
++        self.files
++            .entry((krate, file))
++            .or_insert_with(|| {
++                let cnum = tcx.stable_crate_id_to_crate_num(krate);
++                if cnum != LOCAL_CRATE {
++                    // Make sure the source files of that crate are in the source map.
++                    tcx.import_source_files(cnum);
++                }
++                tcx.sess
++                    .source_map()
++                    .source_file_by_stable_id(file)
++                    .unwrap_or_else(|| {
++                        panic!(
++                            "source file {file:?} of crate `{}` is not in the source map",
++                            tcx.crate_name(cnum)
++                        )
++                    })
++            })
++            .clone()
++    }
++}
++
++rustc_middle::implement_ty_decoder!(MirDecoder<'a, 'tcx>);
++
++impl<'tcx> TyDecoder<'tcx> for MirDecoder<'_, 'tcx> {
++    const CLEAR_CROSS_CRATE: bool = true;
++
++    fn interner(&self) -> TyCtxt<'tcx> {
++        self.tcx
++    }
++
++    fn cached_ty_for_shorthand<F>(&mut self, shorthand: usize, or_insert_with: F) -> Ty<'tcx>
++    where
++        F: FnOnce(&mut Self) -> Ty<'tcx>,
++    {
++        if let Some(&ty) = self.type_cache.get(&shorthand) {
++            return ty;
++        }
++        let ty = or_insert_with(self);
++        self.type_cache.insert(shorthand, ty);
++        ty
++    }
++
++    fn with_position<F, R>(&mut self, pos: usize, f: F) -> R
++    where
++        F: FnOnce(&mut Self) -> R,
++    {
++        let new_opaque = self.opaque.split_at(pos);
++        let old_opaque = std::mem::replace(&mut self.opaque, new_opaque);
++        let result = f(self);
++        self.opaque = old_opaque;
++        result
++    }
++
++    fn decode_alloc_id(&mut self) -> AllocId {
++        let session = self.allocs.new_decoding_session();
++        session.decode_alloc_id(self)
++    }
++}
++
++impl SpanDecoder for MirDecoder<'_, '_> {
++    fn decode_span(&mut self) -> Span {
++        match self.read_u8() {
++            SPAN_DUMMY => rustc_span::DUMMY_SP,
++            SPAN_FILE => {
++                let krate = StableCrateId::decode(self);
++                let file_id = StableSourceFileId::decode(self);
++                let lo = self.read_u32();
++                let len = self.read_u32();
++                let file = self.source_file(krate, file_id);
++                let lo = BytePos(file.start_pos.0 + lo);
++                Span::with_root_ctxt(lo, BytePos(lo.0 + len))
++            }
++            tag => panic!("malformed promoted-MIR span tag {tag}"),
++        }
++    }
++
++    fn decode_expn_id(&mut self) -> ExpnId {
++        panic!("promoted-MIR tables do not encode macro expansions")
++    }
++
++    fn decode_syntax_context(&mut self) -> SyntaxContext {
++        SyntaxContext::root()
++    }
++
++    fn decode_crate_num(&mut self) -> CrateNum {
++        let stable_id = StableCrateId::decode(self);
++        self.tcx.stable_crate_id_to_crate_num(stable_id)
++    }
++
++    fn decode_def_id(&mut self) -> DefId {
++        let hash = DefPathHash::decode(self);
++        self.tcx
++            .def_path_hash_to_def_id(hash)
++            .unwrap_or_else(|| panic!("unknown definition path hash {hash:?} in promoted MIR"))
++    }
++
++    fn decode_attr_id(&mut self) -> AttrId {
++        panic!("promoted-MIR tables do not encode attributes")
++    }
++}
++
++impl BlobDecoder for MirDecoder<'_, '_> {
++    fn decode_symbol(&mut self) -> Symbol {
++        Symbol::intern(self.read_str())
++    }
++
++    fn decode_byte_symbol(&mut self) -> ByteSymbol {
++        ByteSymbol::intern(self.read_byte_str())
++    }
++
++    fn decode_def_index(&mut self) -> DefIndex {
++        panic!("decoding a `DefIndex` without its crate")
++    }
++}
+diff --git a/src/bin/charon-driver/translate/get_mir.rs b/src/bin/charon-driver/translate/get_mir.rs
+index bcc3464..154192e 100644
+--- a/src/bin/charon-driver/translate/get_mir.rs
++++ b/src/bin/charon-driver/translate/get_mir.rs
+@@ -20,7 +20,7 @@ impl<'tcx> ItemTransCtx<'tcx, '_> {
+     ) -> Result<Option<mir::Body<'tcx>>, Error> {
+         // Stopgap measure because there are still many panics in charon and hax.
+         let mut this = panic::AssertUnwindSafe(&mut *self);
+-        let res = panic::catch_unwind(move || this.get_mir_inner(item_ref));
++        let res = panic::catch_unwind(move || this.get_mir_inner(item_ref, span));
+         match res {
+             Ok(Ok(body)) => Ok(body),
+             // Translation error
+@@ -31,11 +31,19 @@ impl<'tcx> ItemTransCtx<'tcx, '_> {
+         }
+     }
+ 
+-    fn get_mir_inner(&mut self, item_ref: &hax::ItemRef) -> Result<Option<mir::Body<'tcx>>, Error> {
++    fn get_mir_inner(
++        &mut self,
++        item_ref: &hax::ItemRef,
++        span: Span,
++    ) -> Result<Option<mir::Body<'tcx>>, Error> {
+         let tcx = self.t_ctx.tcx;
+         let mir_level = self.t_ctx.options.mir_level;
+         let def_id = &item_ref.def_id;
+-        Ok(match get_mir_for_def_id_and_level(tcx, def_id, mir_level) {
++        let body = match get_mir_for_def_id_and_level(tcx, def_id, mir_level) {
++            Ok(body) => body,
++            Err(msg) => raise_error!(self, span, "{msg}"),
++        };
++        Ok(match body {
+             Some(body) => {
+                 let s = self.hax_state_with_id();
+                 Some(if self.monomorphize() {
+@@ -58,7 +66,15 @@ fn get_mir_for_def_id_and_level<'tcx>(
+     tcx: ty::TyCtxt<'tcx>,
+     def_id: &hax::DefId,
+     level: MirLevel,
+-) -> Option<mir::Body<'tcx>> {
++) -> Result<Option<mir::Body<'tcx>>, String> {
++    // Dependencies compiled by the driver export their promoted MIR (see `promoted_mir`), so that
++    // their bodies are translated at the same level as local ones. The standard library only
++    // provides its runtime MIR.
++    let exported_promoted = |rust_def_id: rustc_hir::def_id::DefId| {
++        level == MirLevel::Promoted
++            && !rust_def_id.is_local()
++            && !crate::promoted_mir::is_sysroot_crate(tcx, rust_def_id.krate)
++    };
+     match def_id.base {
+         hax::DefIdBase::Real(rust_def_id) => {
+             if let Some(local_def_id) = rust_def_id.as_local() {
+@@ -66,19 +82,19 @@ fn get_mir_for_def_id_and_level<'tcx>(
+                     MirLevel::Built => {
+                         let body = tcx.mir_built(local_def_id);
+                         if !body.is_stolen() {
+-                            return Some(body.borrow().clone());
++                            return Ok(Some(body.borrow().clone()));
+                         }
+                     }
+                     MirLevel::Promoted => {
+                         let (body, _) = tcx.mir_promoted(local_def_id);
+                         if !body.is_stolen() {
+-                            return Some(body.borrow().clone());
++                            return Ok(Some(body.borrow().clone()));
+                         }
+                     }
+                     MirLevel::Elaborated => {
+                         let body = tcx.mir_drops_elaborated_and_const_checked(local_def_id);
+                         if !body.is_stolen() {
+-                            return Some(body.borrow().clone());
++                            return Ok(Some(body.borrow().clone()));
+                         }
+                     }
+                     MirLevel::Optimized => {}
+@@ -86,8 +102,9 @@ fn get_mir_for_def_id_and_level<'tcx>(
+                 // We fall back to optimized MIR if the requested body was stolen.
+             }
+ 
+-            // There are only two MIRs we can fetch for non-local bodies: CTFE mir for globals and const
+-            // fns, and optimized MIR for functions.
++            // Crate metadata provides two MIRs for non-local bodies: CTFE mir for globals and const
++            // fns, and optimized MIR for functions. Which bodies have one also determines which
++            // bodies the promoted-MIR table of a dependency compiled by the driver provides.
+             //
+             // We pass `-Zalways-encode-mir` so that we get MIR for all the dependencies we compiled
+             // ourselves. This doesn't apply to the stdlib; there we only get MIR for const items and
+@@ -100,20 +117,50 @@ fn get_mir_for_def_id_and_level<'tcx>(
+                     | hax::DefKind::InlineConst
+             );
+             let mir_available = tcx.is_mir_available(rust_def_id);
++            if exported_promoted(rust_def_id)
++                && !matches!(def_id.kind, hax::DefKind::Ctor(..))
++            {
++                // Every body that has MIR in the metadata (see below) has its promoted MIR in the
++                // table, and so do statics, whose initializers the metadata only carries evaluated.
++                // Constructors are shims, the same at every level.
++                let has_body = mir_available
++                    || (is_global && !tcx.is_trivial_const(rust_def_id))
++                    || tcx.is_const_fn(rust_def_id)
++                    || (matches!(
++                        tcx.def_kind(rust_def_id),
++                        rustc_hir::def::DefKind::Static { nested: false, .. }
++                    ) && !tcx.is_foreign_item(rust_def_id));
++                if !has_body {
++                    trace!("mir not available for {:?}", rust_def_id);
++                    return Ok(None);
++                }
++                let (body, _) = crate::promoted_mir::lookup_external(tcx, rust_def_id)?;
++                return Ok(Some(body));
++            }
+ 
+             if mir_available && !is_global {
+-                Some(tcx.optimized_mir(rust_def_id).clone())
++                Ok(Some(tcx.optimized_mir(rust_def_id).clone()))
+             } else if (is_global && !tcx.is_trivial_const(rust_def_id))
+                 || tcx.is_const_fn(rust_def_id)
+             {
+-                Some(tcx.mir_for_ctfe(rust_def_id).clone())
++                Ok(Some(tcx.mir_for_ctfe(rust_def_id).clone()))
+             } else {
+                 trace!("mir not available for {:?}", rust_def_id);
+-                None
++                Ok(None)
+             }
+         }
+         hax::DefIdBase::Promoted(rust_def_id, promoted_id) => {
+-            Some(hax::get_promoted_mir(tcx, rust_def_id, promoted_id))
++            if exported_promoted(rust_def_id) {
++                let (_, promoted) = crate::promoted_mir::lookup_external(tcx, rust_def_id)?;
++                return promoted
++                    .into_iter_enumerated()
++                    .find(|(id, _)| *id == promoted_id)
++                    .map(|(_, body)| Some(body))
++                    .ok_or_else(|| {
++                        format!("the exported promoted MIR of {rust_def_id:?} lacks {promoted_id:?}")
++                    });
++            }
++            Ok(Some(hax::get_promoted_mir(tcx, rust_def_id, promoted_id)))
+         }
+         _ => unreachable!(),
+     }
+diff --git a/src/options.rs b/src/options.rs
+index f92dd37..186131a 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -51,8 +51,8 @@ pub struct CliOpts {
+     #[clap(long)]
+     #[serde(default)]
+     pub skip_borrowck: bool,
+-    /// The MIR stage to extract. This is only relevant for the current crate; for dpendencies only
+-    /// MIR optimized is available.
++    /// The MIR stage to extract. For dependencies, `promoted` is available when charon compiled
++    /// them; otherwise (e.g. the standard library), and at other stages, only MIR optimized is.
+     #[arg(long)]
+     pub mir: Option<MirLevel>,
+     /// Extra flags to pass to rustc.
+@@ -289,8 +289,8 @@ pub struct CliOpts {
+     pub preset: Option<Preset>,
+ }
+ 
+-/// The MIR stage to use. This is only relevant for the current crate: for dependencies, only mir
+-/// optimized is available (or mir elaborated for consts).
++/// The MIR stage to use. For dependencies, promoted MIR is available when charon compiled them;
++/// otherwise, and at other stages, only mir optimized is (or mir elaborated for consts).
+ #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize, Deserialize)]
+ pub enum MirLevel {
+     /// The MIR just after MIR lowering.
+diff --git a/tests/help-output.txt b/tests/help-output.txt
+index 445c52f..081d81d 100644
+--- a/tests/help-output.txt
++++ b/tests/help-output.txt
+@@ -21,7 +21,7 @@ Options:
+           If activated, this skips borrow-checking of the crate
+ 
+       --mir <MIR>
+-          The MIR stage to extract. This is only relevant for the current crate; for dpendencies only MIR optimized is available
++          The MIR stage to extract. For dependencies, `promoted` is available when charon compiled them; otherwise (e.g. the standard library), and at other stages, only MIR optimized is
+ 
+           Possible values:
+           - built:      The MIR just after MIR lowering
+diff --git a/tests/ui.rs b/tests/ui.rs
+index b7b6a56..37b736a 100644
+--- a/tests/ui.rs
++++ b/tests/ui.rs
+@@ -175,10 +175,17 @@ fn perform_test(test_case: &Case) -> anyhow::Result<()> {
+             (crate_name, path, rlib_path)
+         })
+         .collect();
++    // Compile dependencies as `charon cargo` does: through the driver, which compiles a target
++    // crate that is not the primary package normally while exporting what dependents need to
++    // translate its bodies (e.g. its promoted MIR).
++    let host = rustc_version::version_meta()?.host;
+     for (crate_name, rs_path, rlib_path) in deps.iter() {
+-        Command::new("rustc")
++        Command::cargo_bin("charon-driver")?
++            .env("CHARON_USING_CARGO", "1")
++            .env_remove("CARGO_PRIMARY_PACKAGE")
++            .arg("rustc")
++            .arg(format!("--target={host}"))
+             .arg("--crate-type=rlib")
+-            .arg("-Zalways-encode-mir")
+             .arg(format!("--crate-name={crate_name}"))
+             .arg("-o")
+             .arg(rlib_path)
+diff --git a/tests/ui/.gitignore b/tests/ui/.gitignore
+index e9e98e1..8f02de5 100644
+--- a/tests/ui/.gitignore
++++ b/tests/ui/.gitignore
+@@ -1 +1,3 @@
+ *.rlib
++*.charon-closures
++*.charon-mir
+diff --git a/tests/ui/foreign-box-deref-aux.rs b/tests/ui/foreign-box-deref-aux.rs
+new file mode 100644
+index 0000000..8634ebe
+--- /dev/null
++++ b/tests/ui/foreign-box-deref-aux.rs
+@@ -0,0 +1,34 @@
++//@ skip
++pub struct Node {
++    pub tag: u32,
++    pub children: Vec<Node>,
++}
++
++impl Node {
++    pub fn tag(&self) -> u32 {
++        self.tag
++    }
++}
++
++pub fn carrier(node: &Box<Node>) -> u32 {
++    node.tag()
++}
++
++pub fn take(node: Box<Node>) -> u32 {
++    let node = *node;
++    node.tag
++}
++
++pub fn set(node: &mut Box<Node>, tag: u32) {
++    node.tag = tag;
++}
++
++pub fn promoted() -> &'static [u32] {
++    &[1, 2, 3]
++}
++
++pub static NAME: &str = "node";
++
++pub const fn double(x: u32) -> u32 {
++    x * 2
++}
+diff --git a/tests/ui/foreign-box-deref.out b/tests/ui/foreign-box-deref.out
+new file mode 100644
+index 0000000..ccca909
+--- /dev/null
++++ b/tests/ui/foreign-box-deref.out
+@@ -0,0 +1,416 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::marker::Destruct
++#[lang_item("destruct")]
++pub trait Destruct<Self>
++{
++    fn drop_in_place = core::marker::Destruct::drop_in_place<Self>
++    non-dyn-compatible
++}
++
++unsafe fn core::marker::Destruct::drop_in_place<Self>(_1: *mut Self)
++= <opaque>
++
++// Full name: core::str::{Str}::len
++#[lang_item("str_len")]
++pub fn len<'_0>(_1: &'_0 Str) -> usize
++= <opaque>
++
++// Full name: alloc::alloc::Global
++#[lang_item("global_alloc_ty")]
++pub struct Global {}
++
++// Full name: alloc::boxed::Box::{impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}::drop_in_place
++unsafe fn {impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}::drop_in_place<T, A>(_1: *mut alloc::boxed::Box<T>[@TraitClause0, @TraitClause1])
++where
++    [@TraitClause0]: MetaSized<T>,
++    [@TraitClause1]: Sized<A>,
++= <opaque>
++
++// Full name: alloc::boxed::Box::{impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}
++impl<T, A> Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]
++where
++    [@TraitClause0]: MetaSized<T>,
++    [@TraitClause1]: Sized<A>,
++{
++    fn drop_in_place = {impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}::drop_in_place<T, A>[@TraitClause0, @TraitClause1]
++    non-dyn-compatible
++}
++
++// Full name: alloc::vec::Vec
++#[lang_item("Vec")]
++pub opaque type Vec<T>
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Sized<type_error("removed allocator parameter")>,
++
++// Full name: alloc::vec::Vec::{impl Destruct for Vec<T>[@TraitClause0, @TraitClause1]}::drop_in_place
++unsafe fn {impl Destruct for Vec<T>[@TraitClause0, @TraitClause1]}::drop_in_place<T, A>(_1: *mut Vec<T>[@TraitClause0, @TraitClause1])
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Sized<A>,
++= <opaque>
++
++// Full name: alloc::vec::Vec::{impl Destruct for Vec<T>[@TraitClause0, @TraitClause1]}
++impl<T, A> Destruct for Vec<T>[@TraitClause0, @TraitClause1]
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Sized<A>,
++{
++    fn drop_in_place = {impl Destruct for Vec<T>[@TraitClause0, @TraitClause1]}::drop_in_place<T, A>[@TraitClause0, @TraitClause1]
++    non-dyn-compatible
++}
++
++// Full name: foreign_box_deref_aux::Node
++pub struct Node {
++  tag: u32,
++  children: Vec<Node>[{built_in impl Sized for Node}, {built_in impl Sized for Global}],
++}
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: foreign_box_deref_aux::Node::{impl Destruct for Node}::drop_in_place
++unsafe fn {impl Destruct for Node}::drop_in_place(_1: *mut Node)
++{
++    let _0: (); // return
++    let _1: *mut Node; // arg #1
++    let _2: &'1 mut Node; // anonymous local
++
++    storage_live(_2)
++    _0 = ()
++    _2 = &mut (*_1)
++    drop[{impl Destruct for Vec<T>[@TraitClause0, @TraitClause1]}<Node, Global>[{built_in impl Sized for Node}, {built_in impl Sized for Global}]] ((*_2)).children
++    return
++}
++
++// Full name: foreign_box_deref_aux::Node::{impl Destruct for Node}
++impl Destruct for Node {
++    fn drop_in_place = {impl Destruct for Node}::drop_in_place
++    non-dyn-compatible
++}
++
++// Full name: foreign_box_deref_aux::{Node}::tag
++pub fn tag<'_0>(self_1: &'_0 Node) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'1 Node; // arg #1
++
++    _0 = copy ((*self_1)).tag
++    return
++}
++
++pub fn foreign_box_deref_aux::carrier<'_0>(node_1: &'_0 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]) -> u32
++{
++    let _0: u32; // return
++    let node_1: &'1 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let _2: &'3 Node; // anonymous local
++
++    storage_live(_2)
++    _2 = &(*(*node_1))
++    _0 = tag<'5>(move _2)
++    storage_dead(_2)
++    return
++}
++
++pub fn foreign_box_deref_aux::take(node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]) -> u32
++{
++    let _0: u32; // return
++    let node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let node_2: Node; // local
++
++    storage_live(node_2)
++    node_2 = move (*node_1)
++    _0 = copy (node_2).tag
++    conditional_drop[{impl Destruct for Node}] node_2
++    storage_dead(node_2)
++    conditional_drop[{impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}<Node, Global>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]] node_1
++    return
++}
++
++pub fn foreign_box_deref_aux::set<'_0>(node_1: &'_0 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}], tag_2: u32)
++{
++    let _0: (); // return
++    let node_1: &'1 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let tag_2: u32; // arg #2
++    let _3: u32; // anonymous local
++
++    _0 = ()
++    storage_live(_3)
++    _3 = copy tag_2
++    ((*(*node_1))).tag = move _3
++    storage_dead(_3)
++    _0 = ()
++    return
++}
++
++pub fn foreign_box_deref_aux::promoted() -> &'static [u32]
++{
++    let _0: &'1 [u32]; // return
++    let _1: &'3 [u32; 3 : usize]; // anonymous local
++    let _2: &'4 [u32; 3 : usize]; // anonymous local
++    let _3: &'5 [u32; 3 : usize]; // anonymous local
++    let _4: &'8 [u32; 3 : usize]; // anonymous local
++    let _5: [u32; 3 : usize]; // anonymous local
++
++    storage_live(_4)
++    storage_live(_5)
++    _5 = [const 1 : u32, const 2 : u32, const 3 : u32]
++    _4 = &_5
++    storage_live(_3)
++    storage_live(_1)
++    storage_live(_2)
++    _3 = move _4
++    _2 = &(*_3)
++    _1 = &(*_2)
++    _0 = @ArrayToSliceShared<'_, u32, 3 : usize>(move _1)
++    storage_dead(_1)
++    storage_dead(_2)
++    return
++}
++
++pub fn foreign_box_deref_aux::NAME() -> &'static Str
++{
++    let _0: &'1 Str; // return
++
++    _0 = const "node"
++    return
++}
++
++pub static foreign_box_deref_aux::NAME: &'static Str = foreign_box_deref_aux::NAME()
++
++pub fn foreign_box_deref_aux::double(x_1: u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: u32; // arg #1
++    let _2: u32; // anonymous local
++    let _3: u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_2)
++    _2 = copy x_1
++    _3 = copy _2 panic.* const 2 : u32
++    _0 = move _3
++    storage_dead(_2)
++    return
++}
++
++pub fn test_crate::carrier<'_0>(node_1: &'_0 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]) -> u32
++{
++    let _0: u32; // return
++    let node_1: &'1 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let _2: &'3 Node; // anonymous local
++
++    storage_live(_2)
++    _2 = &(*(*node_1))
++    _0 = tag<'5>(move _2)
++    storage_dead(_2)
++    return
++}
++
++pub fn test_crate::take(node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]) -> u32
++{
++    let _0: u32; // return
++    let node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let node_2: Node; // local
++
++    storage_live(node_2)
++    node_2 = move (*node_1)
++    _0 = copy (node_2).tag
++    conditional_drop[{impl Destruct for Node}] node_2
++    storage_dead(node_2)
++    conditional_drop[{impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}<Node, Global>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]] node_1
++    return
++}
++
++pub fn test_crate::set<'_0>(node_1: &'_0 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}], tag_2: u32)
++{
++    let _0: (); // return
++    let node_1: &'1 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let tag_2: u32; // arg #2
++    let _3: u32; // anonymous local
++
++    _0 = ()
++    storage_live(_3)
++    _3 = copy tag_2
++    ((*(*node_1))).tag = move _3
++    storage_dead(_3)
++    _0 = ()
++    return
++}
++
++pub fn test_crate::promoted() -> &'static [u32]
++{
++    let _0: &'1 [u32]; // return
++    let _1: &'3 [u32; 3 : usize]; // anonymous local
++    let _2: &'4 [u32; 3 : usize]; // anonymous local
++    let _3: &'5 [u32; 3 : usize]; // anonymous local
++    let _4: &'8 [u32; 3 : usize]; // anonymous local
++    let _5: [u32; 3 : usize]; // anonymous local
++
++    storage_live(_4)
++    storage_live(_5)
++    _5 = [const 1 : u32, const 2 : u32, const 3 : u32]
++    _4 = &_5
++    storage_live(_3)
++    storage_live(_1)
++    storage_live(_2)
++    _3 = move _4
++    _2 = &(*_3)
++    _1 = &(*_2)
++    _0 = @ArrayToSliceShared<'_, u32, 3 : usize>(move _1)
++    storage_dead(_1)
++    storage_dead(_2)
++    return
++}
++
++pub fn test_crate::NAME() -> &'static Str
++{
++    let _0: &'1 Str; // return
++
++    _0 = const "node"
++    return
++}
++
++pub static test_crate::NAME: &'static Str = test_crate::NAME()
++
++pub fn test_crate::double(x_1: u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: u32; // arg #1
++    let _2: u32; // anonymous local
++    let _3: u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_2)
++    _2 = copy x_1
++    _3 = copy _2 panic.* const 2 : u32
++    _0 = move _3
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::use_foreign
++pub fn use_foreign(node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]) -> u32
++{
++    let _0: u32; // return
++    let node_1: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // arg #1
++    let _2: (); // anonymous local
++    let _3: &'1 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // anonymous local
++    let _4: &'2 mut alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // anonymous local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: u32; // anonymous local
++    let _8: u32; // anonymous local
++    let _9: &'4 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // anonymous local
++    let _10: &'5 alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // anonymous local
++    let _11: u32; // anonymous local
++    let _12: &'7 [u32]; // anonymous local
++    let _13: usize; // anonymous local
++    let _14: u32; // anonymous local
++    let _15: u32; // anonymous local
++    let _16: usize; // anonymous local
++    let _17: &'9 Str; // anonymous local
++    let _18: &'12 &'13 Str; // anonymous local
++    let _19: u32; // anonymous local
++    let _20: u32; // anonymous local
++    let _21: alloc::boxed::Box<Node>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]; // anonymous local
++    let _22: u32; // anonymous local
++    let _23: &'18 &'19 Str; // anonymous local
++    let _24: &'_ [u32]; // anonymous local
++    let _25: &'_ u32; // anonymous local
++
++    storage_live(_14)
++    storage_live(_19)
++    storage_live(_22)
++    storage_live(_2)
++    storage_live(_3)
++    storage_live(_4)
++    _4 = &mut node_1
++    _3 = &two-phase-mut (*_4)
++    storage_live(_5)
++    _5 = foreign_box_deref_aux::double(const 1 : u32)
++    _2 = foreign_box_deref_aux::set<'15>(move _3, move _5)
++    storage_dead(_5)
++    storage_dead(_3)
++    storage_dead(_4)
++    storage_dead(_2)
++    storage_live(_6)
++    storage_live(_7)
++    storage_live(_8)
++    storage_live(_9)
++    storage_live(_10)
++    _10 = &node_1
++    _9 = &(*_10)
++    _8 = foreign_box_deref_aux::carrier<'17>(move _9)
++    storage_dead(_9)
++    storage_live(_11)
++    storage_live(_12)
++    _12 = foreign_box_deref_aux::promoted()
++    storage_live(_13)
++    _13 = const 0 : usize
++    storage_live(_24)
++    _24 = &(*_12) with_metadata(copy _12.metadata)
++    storage_live(_25)
++    _25 = @SliceIndexShared<'_, u32>(move _24, copy _13)
++    _11 = copy (*_25)
++    _14 = copy _8 panic.+ copy _11
++    _7 = move _14
++    storage_dead(_11)
++    storage_dead(_8)
++    storage_live(_15)
++    storage_live(_16)
++    storage_live(_17)
++    storage_live(_18)
++    storage_live(_23)
++    _23 = &foreign_box_deref_aux::NAME
++    _18 = move _23
++    _17 = &(*(*_18)) with_metadata(copy (*_18).metadata)
++    _16 = len<'23>(move _17)
++    storage_dead(_17)
++    _15 = cast<usize, u32>(move _16)
++    storage_dead(_16)
++    _19 = copy _7 panic.+ copy _15
++    _6 = move _19
++    storage_dead(_15)
++    storage_dead(_7)
++    storage_live(_20)
++    storage_live(_21)
++    _21 = move node_1
++    _20 = foreign_box_deref_aux::take(move _21)
++    storage_dead(_21)
++    _22 = copy _6 panic.+ copy _20
++    _0 = move _22
++    storage_dead(_20)
++    storage_dead(_6)
++    storage_dead(_18)
++    storage_dead(_13)
++    storage_dead(_12)
++    storage_dead(_10)
++    conditional_drop[{impl Destruct for alloc::boxed::Box<T>[@TraitClause0, @TraitClause1]}<Node, Global>[{built_in impl MetaSized for Node}, {built_in impl Sized for Global}]] node_1
++    return
++}
++
++
++
+diff --git a/tests/ui/foreign-box-deref.rs b/tests/ui/foreign-box-deref.rs
+new file mode 100644
+index 0000000..e03a5fc
+--- /dev/null
++++ b/tests/ui/foreign-box-deref.rs
+@@ -0,0 +1,37 @@
++//@ charon-args=--include=foreign_box_deref_aux
++//@ aux-crate=foreign-box-deref-aux.rs
++//! Bodies of a dependency are translated from the same (promoted) MIR as local bodies: `*b` on a
++//! `Box` stays a builtin deref instead of the runtime MIR's pointer-field projections and null
++//! checks. The local copies below must translate exactly like the dependency's functions.
++use foreign_box_deref_aux::Node;
++
++pub fn carrier(node: &Box<Node>) -> u32 {
++    node.tag()
++}
++
++pub fn take(node: Box<Node>) -> u32 {
++    let node = *node;
++    node.tag
++}
++
++pub fn set(node: &mut Box<Node>, tag: u32) {
++    node.tag = tag;
++}
++
++pub fn promoted() -> &'static [u32] {
++    &[1, 2, 3]
++}
++
++pub static NAME: &str = "node";
++
++pub const fn double(x: u32) -> u32 {
++    x * 2
++}
++
++pub fn use_foreign(mut node: Box<Node>) -> u32 {
++    foreign_box_deref_aux::set(&mut node, foreign_box_deref_aux::double(1));
++    foreign_box_deref_aux::carrier(&node)
++        + foreign_box_deref_aux::promoted()[0]
++        + foreign_box_deref_aux::NAME.len() as u32
++        + foreign_box_deref_aux::take(node)
++}

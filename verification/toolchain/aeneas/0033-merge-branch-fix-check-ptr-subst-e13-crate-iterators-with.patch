@@ -1,0 +1,1043 @@
+# aeneas integration step 33 after cba11f3beb: commit 1449a69615e6f683caa1ea6fabf3bfa5a6bfddeb
+# first parent 13bb8cae3e8b15bced23a2401cf75a9c7f780107, merged 0b2da951225aac25b04ae1e280a62c96f0e0543f
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/check-ptr-subst' (E13 + crate iterators with only next)
+
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index f03896b..491ff4c 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -8,10 +8,11 @@
+     a trait clause. Its admission is deferred: the dictionary, expressed in the
+     function's own generics, becomes an obligation of the function, and every
+     call instantiates it and checks the instance (or defers it further to the
+-    caller's clauses). Only reviewed iterators ever discharge an obligation, so
+-    the next-driven models are used exactly where every native consumer path
+-    (next, fold, for_each, try_fold, size_hint) agrees with them: see
+-    [LawfulIterator] in the Lean library. *)
++    caller's clauses). Only reviewed iterators, and crate iterators that define
++    nothing but next, ever discharge an obligation, so the next-driven models
++    are used exactly where every native consumer path (next, fold, for_each,
++    try_fold, size_hint) agrees with them: see [LawfulIterator] in the Lean
++    library. *)
+ 
+ open Types
+ open Expressions
+@@ -69,6 +70,17 @@ let check ~(evidence : crate) (crate : crate) : crate =
+        ^ "next-driven production loop, or provide a reviewed collector model "
+        ^ "with the required capacity and specialization semantics.")
+     in
++    (* Each substitution below instantiates a declaration's own parameters with
++       the arguments of one reference to it. A variable that those parameters do
++       not bind makes the dictionary ill-scoped: report it rather than check or
++       discharge an obligation against a guessed instance. *)
++    let instantiate span what f =
++      try f ()
++      with Not_found | Invalid_argument _ ->
++        [%craise] span
++          ("Collection contract check: the instantiation of " ^ what
++         ^ " refers to generic variables that its arguments do not bind")
++    in
+     (* Recover native dispatch identity, not the borrowed-state ABI. Structured
+        specializations still retain their real methods and giveback signatures.
+        Apply the same binder substitution as normalize_modeled_trait_specializations. *)
+@@ -84,8 +96,9 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           | None -> reject span "missing native collection specialization identity"
+           | Some original ->
+               let generics =
+-                Substitute.apply_args_to_binder reference.generics
+-                  Substitute.generic_args_substitute shape
++                instantiate span "a native collection specialization" (fun () ->
++                    Substitute.apply_args_to_binder reference.generics
++                      Substitute.generic_args_substitute shape)
+               in
+               native_impl span { id = original.def_id; generics })
+       | _ -> reference
+@@ -118,13 +131,15 @@ let check ~(evidence : crate) (crate : crate) : crate =
+           let reference = native_impl span reference in
+           let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
+           let generics = reference.generics in
+-          let subst =
+-            [%add_loc] Substitute.make_subst_from_generics (Some span)
+-              impl.generics generics (TraitImpl reference)
+-          in
+           let parents =
+-            List.map (Substitute.trait_ref_substitute subst)
+-              impl.implied_trait_refs
++            instantiate span "a collection implementation's parent clauses"
++              (fun () ->
++                let subst =
++                  [%add_loc] Substitute.make_subst_from_generics (Some span)
++                    impl.generics generics (TraitImpl reference)
++                in
++                List.map (Substitute.trait_ref_substitute subst)
++                  impl.implied_trait_refs)
+           in
+           (impl, generics.trait_refs, parents)
+       | _ -> reject span "unresolved generic or projected collection dictionary"
+@@ -149,6 +164,47 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       | [ tr ] -> tr
+       | _ -> reject span ("missing or ambiguous " ^ name ^ " evidence")
+     in
++    (* A crate's own iterator, translated from its Rust impl. Standard-library
++       iterators are admitted by reviewed name only: their private
++       specialization markers (OneShot, InPlaceIterable, NonDrop, ...) are not
++       visible in their methods. *)
++    let crate_iterator (impl : trait_impl) =
++      impl.item_meta.opacity = Transparent
++      &&
++      match impl.item_meta.name with
++      | PeIdent (krate, _) :: _ -> not (List.mem krate [ "core"; "alloc"; "std" ])
++      | _ -> false
++    in
++    (* Charon keeps every method that a Transparent impl defines (it marks them
++       used), and only copies of the trait's defaults otherwise. Admit the impl
++       only if every method other than next is such a copy. *)
++    let check_default_consumers span (impl : trait_impl) =
++      let impl_text =
++        Print.name_to_string (Print.crate_to_fmt_env evidence) impl.item_meta.name
++      in
++      if not (List.mem_assoc "next" impl.methods) then
++        reject span ("missing next of the crate iterator " ^ impl_text);
++      List.iter
++        (fun (name, (method_ref : fun_decl_ref binder)) ->
++          match
++            FunDeclId.Map.find_opt method_ref.binder_value.id evidence.fun_decls
++          with
++          | None ->
++              reject span
++                ("untranslated method " ^ name ^ " of the crate iterator " ^ impl_text)
++          | Some decl when name = "next" -> (
++              match decl.body with
++              | StructuredBody _ -> ()
++              | _ -> reject span ("opaque next of the crate iterator " ^ impl_text))
++          | Some { src = TraitImplItem (_, _, _, true); _ } -> ()
++          | Some _ ->
++              reject span
++                ("the crate iterator " ^ impl_text ^ " overrides Iterator::" ^ name
++               ^ "; only an iterator whose methods other than next are the \
++                  trait's defaults has the native collection schedule of \
++                  repeated next with the total (0, None) size_hint"))
++        impl.methods
++    in
+     let rec check_iterator span seen (tr : trait_ref) =
+       let tr = normalize span tr in
+       if generic_root tr then defer span (Iter tr) else
+@@ -201,9 +257,20 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                   [ Some (prefix ^ "core.iter.range.StepUsize");
+                     Some (prefix ^ "core.iter.range.StepI32") ])
+           then reject span "custom range Step callbacks"
+-      (* Restricted Charon roots need not retain a custom iterator's unsafe
+-         specialization markers. Even an inherited size_hint is therefore
+-         insufficient evidence for its native collector consumer. *)
++      (* A crate iterator that only defines next (check_default_consumers): every
++         native consumer (fold, try_fold, for_each, nth, and the Vec/BTree
++         collectors' next loop) is repeated next, and size_hint is the total,
++         pure (0, None), which only sizes capacity. The specializations a
++         collector could select instead need unsafe impls whose contracts
++         (0, None) breaks: TrustedLen and TrustedRandomAccess require an exact
++         hint (TrustedLen allows None only past usize::MAX items, where the
++         native collector and the model both fail), and TrustedRandomAccess
++         dispatch calls __iterator_get_unchecked, which would be an override.
++         FusedIterator only changes Fuse after exhaustion, which no admitted
++         consumer polls. Any other crate iterator, including one whose
++         size_hint is overridden (its lawfulness is not checked here), is
++         rejected. *)
++      | None when crate_iterator impl -> check_default_consumers span impl
+       | _ ->
+           reject span
+             ("unreviewed iterator hint or collector specialization in "
+@@ -221,14 +288,22 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       match FunDeclId.Map.find_opt callee.def_id !obligations with
+       | None -> ()
+       | Some required ->
+-          let subst =
+-            [%add_loc] Substitute.make_subst_from_generics (Some span)
+-              callee.generics generics Self
++          let required =
++            instantiate span "a deferred collection obligation" (fun () ->
++                let subst =
++                  [%add_loc] Substitute.make_subst_from_generics (Some span)
++                    callee.generics generics Self
++                in
++                List.map
++                  (function
++                    | Iter tr -> Iter (Substitute.trait_ref_substitute subst tr)
++                    | Into tr -> Into (Substitute.trait_ref_substitute subst tr))
++                  required)
+           in
+           List.iter
+             (function
+-              | Iter tr -> check_iterator span [] (Substitute.trait_ref_substitute subst tr)
+-              | Into tr -> check_into span (Substitute.trait_ref_substitute subst tr))
++              | Iter tr -> check_iterator span [] tr
++              | Into tr -> check_into span tr)
+             required
+     in
+     let modeled_collectors =
+@@ -283,19 +358,26 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               let impl = TraitImplId.Map.find reference.id evidence.trait_impls in
+               match List.assoc_opt name impl.methods with
+               | Some binder -> (
++                  (* The binder's free variables are the implementation's
++                     parameters and its bound ones the method's. Instantiate the
++                     implementation under the binder first, then the method, as
++                     Charon's skip_trait_refs_when_known does: the method
++                     arguments are caller terms, whose free variables are the
++                     caller's own and must not be substituted a second time. *)
+                   let method_ref =
+-                    Substitute.apply_args_to_binder ptr.generics
+-                      Substitute.st_substitute_visitor#visit_fun_decl_ref binder
+-                  in
+-                  let subst =
+-                    [%add_loc] Substitute.make_subst_from_generics (Some span)
+-                      impl.generics reference.generics (TraitImpl reference)
+-                  in
+-                  let generics =
+-                    Substitute.generic_args_substitute subst method_ref.generics
++                    instantiate span "a collection method call" (fun () ->
++                        let subst =
++                          [%add_loc] Substitute.make_subst_from_generics
++                            (Some span) impl.generics reference.generics
++                            (TraitImpl reference)
++                        in
++                        let visitor = Substitute.st_substitute_visitor in
++                        visitor#visit_binder visitor#visit_fun_decl_ref subst binder
++                        |> Substitute.apply_args_to_binder ptr.generics
++                             visitor#visit_fun_decl_ref)
+                   in
+                   match FunDeclId.Map.find_opt method_ref.id evidence.fun_decls with
+-                  | Some callee -> discharge span callee generics
++                  | Some callee -> discharge span callee method_ref.generics
+                   | None -> ())
+               | None -> ())
+           | _ -> ())
+diff --git a/tests/lean/CollectGenericClosure.lean b/tests/lean/CollectGenericClosure.lean
+new file mode 100644
+index 0000000..3597239
+--- /dev/null
++++ b/tests/lean/CollectGenericClosure.lean
+@@ -0,0 +1 @@
++import CollectGenericClosure.Checks
+diff --git a/tests/lean/CollectGenericClosure/Checks.lean b/tests/lean/CollectGenericClosure/Checks.lean
+new file mode 100644
+index 0000000..c812f38
+--- /dev/null
++++ b/tests/lean/CollectGenericClosure/Checks.lean
+@@ -0,0 +1,15 @@
++import CollectGenericClosure.CollectGenericClosure
++
++/-! Evaluate the model of `tests/src/collect-generic-closure.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++namespace collect_generic_closure.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (doubled_above_fixed (sl [1, 5, 3, 7]) (u 3)) == some [10, 14]
++#guard nats (doubled_above_fixed (sl [1, 2]) (u 9)) == some []
++#guard nats (doubled_above_fixed (sl []) (u 0)) == some []
++end collect_generic_closure.checks
+diff --git a/tests/lean/CollectGenericClosure/CollectGenericClosure.lean b/tests/lean/CollectGenericClosure/CollectGenericClosure.lean
+new file mode 100644
+index 0000000..7a5bba9
+--- /dev/null
++++ b/tests/lean/CollectGenericClosure/CollectGenericClosure.lean
+@@ -0,0 +1,158 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_generic_closure]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_generic_closure
++
++/-- Trait declaration: [collect_generic_closure::Threshold]
++    Source: 'tests/src/collect-generic-closure.rs', lines 15:0-17:1
++    Visibility: public -/
++structure Threshold (Self : Type) where
++  limit : Self → _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++
++/-- [collect_generic_closure::Fixed]
++    Source: 'tests/src/collect-generic-closure.rs', lines 19:0-19:26
++    Visibility: public -/
++@[reducible]
++def Fixed := _root_.Aeneas.Std.U32
++
++/-- [collect_generic_closure::{collect_generic_closure::Threshold for collect_generic_closure::Fixed}::limit]:
++    Source: 'tests/src/collect-generic-closure.rs', lines 22:4-24:5
++    Visibility: public -/
++def Fixed.Insts.Collect_generic_closureThreshold.limit
++  (self : _root_.collect_generic_closure.Fixed) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [collect_generic_closure::{collect_generic_closure::Threshold for collect_generic_closure::Fixed}]
++    Source: 'tests/src/collect-generic-closure.rs', lines 21:0-25:1 -/
++@[reducible]
++def Fixed.Insts.Collect_generic_closureThreshold :
++  _root_.collect_generic_closure.Threshold _root_.collect_generic_closure.Fixed
++  := {
++  limit :=
++    _root_.collect_generic_closure.Fixed.Insts.Collect_generic_closureThreshold.limit
++}
++
++/-- [collect_generic_closure::doubled_above::closure]
++    Source: 'tests/src/collect-generic-closure.rs', lines 29:20-29:80 -/
++@[reducible]
++def doubled_above.closure {T : Type} (ThresholdInst :
++  _root_.collect_generic_closure.Threshold T) :=
++  T
++
++/-- [collect_generic_closure::doubled_above::{core::ops::function::FnMut<(&'_ (u32)), core::option::Option<u32>> for collect_generic_closure::doubled_above::closure<0, T>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/collect-generic-closure.rs', lines 29:20-29:80 -/
++def
++  doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++  {T : Type} (ThresholdInst : _root_.collect_generic_closure.Threshold T)
++  (c : _root_.collect_generic_closure.doubled_above.closure ThresholdInst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.collect_generic_closure.doubled_above.closure ThresholdInst))
++  := do
++  let i ← ThresholdInst.limit c
++  if tupled_args > i
++  then let i1 ← tupled_args * 2#u32
++       _root_.Aeneas.Std.Result.ok (some i1, c)
++  else _root_.Aeneas.Std.Result.ok (none, c)
++
++/-- [collect_generic_closure::doubled_above::{core::ops::function::FnOnce<(&'_ (u32)), core::option::Option<u32>> for collect_generic_closure::doubled_above::closure<0, T>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/collect-generic-closure.rs', lines 29:20-29:80 -/
++def
++  doubled_above.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32.call_once
++  {T : Type} (ThresholdInst : _root_.collect_generic_closure.Threshold T)
++  (c : _root_.collect_generic_closure.doubled_above.closure ThresholdInst)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (o, _) ←
++    _root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++      ThresholdInst c i
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [collect_generic_closure::doubled_above::{core::ops::function::FnOnce<(&'_ (u32)), core::option::Option<u32>> for collect_generic_closure::doubled_above::closure<0, T>[TraitClause@0]}]
++    Source: 'tests/src/collect-generic-closure.rs', lines 29:20-29:80 -/
++@[reducible]
++def doubled_above.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32 {T
++  : Type} (ThresholdInst : _root_.collect_generic_closure.Threshold T) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.collect_generic_closure.doubled_above.closure ThresholdInst)
++  _root_.Aeneas.Std.U32 (_root_.Option _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32.call_once
++          ThresholdInst arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_generic_closure::doubled_above::{core::ops::function::FnMut<(&'_ (u32)), core::option::Option<u32>> for collect_generic_closure::doubled_above::closure<0, T>[TraitClause@0]}]
++    Source: 'tests/src/collect-generic-closure.rs', lines 29:20-29:80 -/
++@[reducible]
++def doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32 {T
++  : Type} (ThresholdInst : _root_.collect_generic_closure.Threshold T) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.collect_generic_closure.doubled_above.closure ThresholdInst)
++  _root_.Aeneas.Std.U32 (_root_.Option _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32
++    ThresholdInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++          ThresholdInst arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_generic_closure::doubled_above]:
++    Source: 'tests/src/collect-generic-closure.rs', lines 27:0-31:1
++    Visibility: public -/
++def doubled_above
++  {T : Type} (ThresholdInst : _root_.collect_generic_closure.Threshold T)
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) (threshold : T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let model_state ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32).filter_map
++      (_root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32
++      ThresholdInst) i threshold
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilterMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.collect_generic_closure.doubled_above.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32
++      ThresholdInst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_generic_closure::doubled_above_fixed]:
++    Source: 'tests/src/collect-generic-closure.rs', lines 33:0-35:1
++    Visibility: public -/
++def doubled_above_fixed
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.collect_generic_closure.doubled_above
++    _root_.collect_generic_closure.Fixed.Insts.Collect_generic_closureThreshold
++    xs limit
++
++end collect_generic_closure
+diff --git a/tests/lean/CollectUserIterator.lean b/tests/lean/CollectUserIterator.lean
+new file mode 100644
+index 0000000..78cec41
+--- /dev/null
++++ b/tests/lean/CollectUserIterator.lean
+@@ -0,0 +1 @@
++import CollectUserIterator.Checks
+diff --git a/tests/lean/CollectUserIterator/Checks.lean b/tests/lean/CollectUserIterator/Checks.lean
+new file mode 100644
+index 0000000..5531638
+--- /dev/null
++++ b/tests/lean/CollectUserIterator/Checks.lean
+@@ -0,0 +1,23 @@
++import CollectUserIterator.CollectUserIterator
++
++/-! Evaluate the model of `tests/src/collect-user-iterator.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++namespace collect_user_iterator.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def sl {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice α := ⟨xs, h⟩
++def block (targets : List Nat) (fixed : Bool) (h : targets.length ≤ Usize.max := by scalar_tac) :
++    Block := ⟨⟨targets.map u, by simpa using h⟩, fixed⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++#guard nats (successors_of (block [4, 5, 6] true)) == some [4, 5]
++#guard nats (successors_of (block [4, 5, 6] false)) == some [4, 5, 6]
++#guard nats (successors_of (block [] true)) == some []
++#guard nats (all_successors (sl [block [1, 2, 3] true, block [] false, block [7, 8] false]))
++  == some [1, 2, 7, 8]
++#guard nats (all_successors (sl [])) == some []
++def arms : Slice (alloc.vec.Vec U32) := sl [vec [u 10, u 11], vec [], vec [u 12]]
++#guard nats (successor_arms (block [2, 0, 1] false) arms) == some [12, 10, 11]
++#guard nats (successor_arms (block [1, 2, 0] true) arms) == some [12]
++end collect_user_iterator.checks
+diff --git a/tests/lean/CollectUserIterator/CollectUserIterator.lean b/tests/lean/CollectUserIterator/CollectUserIterator.lean
+new file mode 100644
+index 0000000..dadfe6d
+--- /dev/null
++++ b/tests/lean/CollectUserIterator/CollectUserIterator.lean
+@@ -0,0 +1,378 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_user_iterator]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_user_iterator
++
++/-- [collect_user_iterator::Successors]
++    Source: 'tests/src/collect-user-iterator.rs', lines 14:0-17:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Successors (E : Type) (A : Type) where
++| Fixed : _root_.Option E → _root_.Option E → Successors E A
++| Arms : A → Successors E A
++
++/-- [collect_user_iterator::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator::Successors<E, A>}::next]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 22:4-30:5
++    Visibility: public -/
++def Successors.Insts.CoreIterTraitsIteratorIterator.next
++  {E : Type} {A : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E)
++  (self : _root_.collect_user_iterator.Successors E A) :
++  _root_.Aeneas.Std.Result ((_root_.Option E) ×
++    (_root_.collect_user_iterator.Successors E A))
++  := do
++  match self with
++  | _root_.collect_user_iterator.Successors.Fixed first second =>
++    let (o, o1) := _root_.Aeneas.Std.core.option.Option.take first
++    match o with
++    | none =>
++      let (o2, o3) := _root_.Aeneas.Std.core.option.Option.take second
++      _root_.Aeneas.Std.Result.ok (o2,
++        _root_.collect_user_iterator.Successors.Fixed o1 o3)
++    | some _ =>
++      _root_.Aeneas.Std.Result.ok (o,
++        _root_.collect_user_iterator.Successors.Fixed o1 second)
++  | _root_.collect_user_iterator.Successors.Arms arms =>
++    let (model_state, model_state1) ←
++      coreitertraitsiteratorIteratorInst.next arms
++    _root_.Aeneas.Std.Result.ok (model_state,
++      _root_.collect_user_iterator.Successors.Arms model_state1)
++
++/-- Trait implementation: [collect_user_iterator::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator::Successors<E, A>}]
++    Source: 'tests/src/collect-user-iterator.rs', lines 19:0-31:1 -/
++@[reducible]
++def Successors.Insts.CoreIterTraitsIteratorIterator {E : Type} {A : Type}
++  (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator A E) :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.collect_user_iterator.Successors E A) E := {
++  next :=
++    fun arg =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator.next
++          coreitertraitsiteratorIteratorInst arg
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_user_iterator::Block]
++    Source: 'tests/src/collect-user-iterator.rs', lines 33:0-36:1
++    Visibility: public -/
++structure Block where
++  targets : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  fixed : _root_.Bool
++
++/-- [collect_user_iterator::{collect_user_iterator::Block}::successors]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 39:4-45:5
++    Visibility: public -/
++def Block.successors
++  (self : _root_.collect_user_iterator.Block) :
++  _root_.Aeneas.Std.Result (_root_.collect_user_iterator.Successors
++    _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32))
++  := do
++  if self.fixed
++  then
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref self.targets
++    let o ← _root_.Aeneas.Std.core.slice.Slice.first s
++    let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref self.targets
++    let o1 ←
++      _root_.Aeneas.Std.core.slice.Slice.get
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) s1 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.collect_user_iterator.Successors.Fixed
++      o o1)
++  else
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref self.targets
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    _root_.Aeneas.Std.Result.ok (_root_.collect_user_iterator.Successors.Arms
++      i)
++
++/-- [collect_user_iterator::successors_of]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 48:0-50:1
++    Visibility: public -/
++def successors_of
++  (block : _root_.collect_user_iterator.Block) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let s ← _root_.collect_user_iterator.Block.successors block
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) s
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [collect_user_iterator::all_successors::closure]
++    Source: 'tests/src/collect-user-iterator.rs', lines 53:27-53:53 -/
++@[reducible]
++def all_successors.closure := _root_.Unit
++
++/-- [collect_user_iterator::all_successors::{core::ops::function::FnMut<(&'_ (collect_user_iterator::Block)), collect_user_iterator::Successors<&'_ (u32), core::slice::iter::Iter<'_, u32>>> for collect_user_iterator::all_successors::closure}::call_mut]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 53:27-53:53 -/
++def
++  all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32.call_mut
++  (c : _root_.collect_user_iterator.all_successors.closure)
++  (tupled_args : _root_.collect_user_iterator.Block) :
++  _root_.Aeneas.Std.Result ((_root_.collect_user_iterator.Successors
++    _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32)) ×
++    _root_.collect_user_iterator.all_successors.closure)
++  := do
++  let s ← _root_.collect_user_iterator.Block.successors tupled_args
++  _root_.Aeneas.Std.Result.ok (s, c)
++
++/-- [collect_user_iterator::all_successors::{core::ops::function::FnOnce<(&'_ (collect_user_iterator::Block)), collect_user_iterator::Successors<&'_ (u32), core::slice::iter::Iter<'_, u32>>> for collect_user_iterator::all_successors::closure}::call_once]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 53:27-53:53 -/
++def
++  all_successors.closure.Insts.CoreOpsFunctionFnOnceTupleSharedBlockSuccessorsSharedU32IterU32.call_once
++  (c : _root_.collect_user_iterator.all_successors.closure)
++  (b : _root_.collect_user_iterator.Block) :
++  _root_.Aeneas.Std.Result (_root_.collect_user_iterator.Successors
++    _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32))
++  := do
++  let (s, _) ←
++    _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32.call_mut
++      c b
++  _root_.Aeneas.Std.Result.ok s
++
++/-- Trait implementation: [collect_user_iterator::all_successors::{core::ops::function::FnOnce<(&'_ (collect_user_iterator::Block)), collect_user_iterator::Successors<&'_ (u32), core::slice::iter::Iter<'_, u32>>> for collect_user_iterator::all_successors::closure}]
++    Source: 'tests/src/collect-user-iterator.rs', lines 53:27-53:53 -/
++@[reducible]
++def
++  all_successors.closure.Insts.CoreOpsFunctionFnOnceTupleSharedBlockSuccessorsSharedU32IterU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_user_iterator.all_successors.closure
++  _root_.collect_user_iterator.Block (_root_.collect_user_iterator.Successors
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.Aeneas.Std.U32)) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnOnceTupleSharedBlockSuccessorsSharedU32IterU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_user_iterator::all_successors::{core::ops::function::FnMut<(&'_ (collect_user_iterator::Block)), collect_user_iterator::Successors<&'_ (u32), core::slice::iter::Iter<'_, u32>>> for collect_user_iterator::all_successors::closure}]
++    Source: 'tests/src/collect-user-iterator.rs', lines 53:27-53:53 -/
++@[reducible]
++def
++  all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_user_iterator.all_successors.closure
++  _root_.collect_user_iterator.Block (_root_.collect_user_iterator.Successors
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.Aeneas.Std.U32)) := {
++  FnOnceInst :=
++    _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnOnceTupleSharedBlockSuccessorsSharedU32IterU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_user_iterator::all_successors]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 52:0-54:1
++    Visibility: public -/
++def all_successors
++  (blocks : _root_.Aeneas.Std.Slice _root_.collect_user_iterator.Block) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter blocks
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.collect_user_iterator.Block)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)))
++      _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32
++      i ()
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.collect_user_iterator.Block)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)))
++      _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32)
++      core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.collect_user_iterator.Block)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)))
++      _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32)
++      model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.collect_user_iterator.Block)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)))
++      _root_.collect_user_iterator.all_successors.closure.Insts.CoreOpsFunctionFnMutTupleSharedBlockSuccessorsSharedU32IterU32)
++      core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_user_iterator::successor_arms::closure]
++    Source: 'tests/src/collect-user-iterator.rs', lines 57:32-57:64 -/
++@[reducible]
++def successor_arms.closure :=
++  _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)
++
++/-- [collect_user_iterator::successor_arms::{core::ops::function::FnMut<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator::successor_arms::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 57:32-57:64 -/
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++  (c : _root_.collect_user_iterator.successor_arms.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) ×
++    _root_.collect_user_iterator.successor_arms.closure)
++  := do
++  let i ← lift (UScalar.cast .Usize tupled_args)
++  let v ← Slice.index_usize c i
++  _root_.Aeneas.Std.Result.ok (v, c)
++
++/-- [collect_user_iterator::successor_arms::{core::ops::function::FnOnce<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator::successor_arms::closure<0>}::call_once]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 57:32-57:64 -/
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32.call_once
++  (c : _root_.collect_user_iterator.successor_arms.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (v, _) ←
++    _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok v
++
++/-- Trait implementation: [collect_user_iterator::successor_arms::{core::ops::function::FnOnce<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator::successor_arms::closure<0>}]
++    Source: 'tests/src/collect-user-iterator.rs', lines 57:32-57:64 -/
++@[reducible]
++def
++  successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_user_iterator.successor_arms.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_user_iterator::successor_arms::{core::ops::function::FnMut<(&'_ (u32)), &'_ (alloc::vec::Vec<u32>)> for collect_user_iterator::successor_arms::closure<0>}]
++    Source: 'tests/src/collect-user-iterator.rs', lines 57:32-57:64 -/
++@[reducible]
++def successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_user_iterator.successor_arms.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32SharedVecU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_user_iterator::successor_arms]:
++    Source: 'tests/src/collect-user-iterator.rs', lines 56:0-58:1
++    Visibility: public -/
++def successor_arms
++  (block : _root_.collect_user_iterator.Block)
++  (arms : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let s ← _root_.collect_user_iterator.Block.successors block
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32
++      s arms
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.collect_user_iterator.Successors.Insts.CoreIterTraitsIteratorIterator
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      _root_.collect_user_iterator.successor_arms.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32SharedVecU32)
++      core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state1
++
++end collect_user_iterator
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index d086150..2307f7a 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -24,6 +24,8 @@ package «tests» {}
+ @[default_target] lean_lib Closures
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
++@[default_target] lean_lib CollectGenericClosure
++@[default_target] lean_lib CollectUserIterator
+ @[default_target] lean_lib Constants
+ @[default_target] lean_lib ConstantsLean
+ @[default_target] lean_lib Curve25519
+diff --git a/tests/src/collect-generic-closure.rs b/tests/src/collect-generic-closure.rs
+new file mode 100644
+index 0000000..7726121
+--- /dev/null
++++ b/tests/src/collect-generic-closure.rs
+@@ -0,0 +1,47 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectGenericClosure
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::filter_map::FilterMap
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A generic function collects through a closure that captures a value of its
++//! own type parameter. The `filter_map` call names the slice iterator's
++//! implementation, which binds no trait clauses, while its method arguments (the
++//! closure type) carry the caller's `T: Threshold` clause. CollectionContracts
++//! must instantiate the implementation before the method: substituting the
++//! implementation's parameters into the method arguments looked the caller's
++//! clause up among the implementation's (Not_found).
++//! CollectGenericClosure/Checks.lean compares the model with the native results
++//! asserted in the native test module.
++
++pub trait Threshold {
++    fn limit(&self) -> u32;
++}
++
++pub struct Fixed(pub u32);
++
++impl Threshold for Fixed {
++    fn limit(&self) -> u32 {
++        self.0
++    }
++}
++
++pub fn doubled_above<T: Threshold>(xs: &[u32], threshold: &T) -> Vec<u32> {
++    xs.iter()
++        .filter_map(|x| if *x > threshold.limit() { Some(*x * 2) } else { None })
++        .collect()
++}
++
++pub fn doubled_above_fixed(xs: &[u32], limit: u32) -> Vec<u32> {
++    doubled_above(xs, &Fixed(limit))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn generic_closure_collect() {
++        assert_eq!(doubled_above_fixed(&[1, 5, 3, 7], 3), vec![10, 14]);
++        assert_eq!(doubled_above_fixed(&[1, 2], 9), Vec::<u32>::new());
++        assert_eq!(doubled_above_fixed(&[], 0), Vec::<u32>::new());
++    }
++}
+diff --git a/tests/src/collect-user-iterator-hint.lean.out b/tests/src/collect-user-iterator-hint.lean.out
+new file mode 100644
+index 0000000..c4fe137
+--- /dev/null
++++ b/tests/src/collect-user-iterator-hint.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/collect_user_iterator_hint.llbc
++[[91mError[39m] E_UNSUPPORTED_COLLECTION: the crate iterator collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown} overrides Iterator::size_hint; only an iterator whose methods other than next are the trait's defaults has the native collection schedule of repeated next with the total (0, None) size_hint. The value-only Vec/BTree collection model cannot preserve native size_hint/consumer dispatch for this dictionary. Use an explicit next-driven production loop, or provide a reviewed collector model with the required capacity and specialization semantics.
++Source: 'tests/src/collect-user-iterator-hint.rs', lines 32:4-32:46
++Compiler source: llbc/CollectionContracts.ml, line 66
++
+diff --git a/tests/src/collect-user-iterator-hint.rs b/tests/src/collect-user-iterator-hint.rs
+new file mode 100644
+index 0000000..18753de
+--- /dev/null
++++ b/tests/src/collect-user-iterator-hint.rs
+@@ -0,0 +1,45 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A crate-local iterator that overrides `size_hint`, here with an inexact
++//! upper bound. The native collectors call it at capacity and specialization
++//! points, and CollectionContracts does not check its lawfulness, so it
++//! rejects the collection (E_UNSUPPORTED_COLLECTION) rather than admit the
++//! next-driven model.
++
++pub struct Countdown(pub u32);
++
++impl Iterator for Countdown {
++    type Item = u32;
++
++    fn next(&mut self) -> Option<u32> {
++        if self.0 == 0 {
++            None
++        } else {
++            self.0 -= 1;
++            Some(self.0)
++        }
++    }
++
++    /// Claims at most one remaining item.
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        (0, Some(1))
++    }
++}
++
++pub fn countdowns(n: u32) -> Vec<u32> {
++    Countdown(n).flat_map(Countdown).collect()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn inexact_hint() {
++        assert_eq!(Countdown(3).size_hint(), (0, Some(1)));
++        assert_eq!(Countdown(3).count(), 3);
++        assert_eq!(countdowns(3), vec![1, 0, 0]);
++    }
++}
+diff --git a/tests/src/collect-user-iterator.rs b/tests/src/collect-user-iterator.rs
+new file mode 100644
+index 0000000..cbd37f6
+--- /dev/null
++++ b/tests/src/collect-user-iterator.rs
+@@ -0,0 +1,82 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectUserIterator
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::copied::Copied
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Collectors over a crate-local iterator that only defines `next`. Every
++//! other method, `size_hint` included, is the trait default, so every native
++//! consumer path is repeated `next` and `size_hint` is the total, pure
++//! `(0, None)`: CollectionContracts admits it directly, as the inner iterator
++//! of `flat_map`, and as its outer iterator.
++//! CollectUserIterator/Checks.lean compares the model with the native results
++//! asserted in the native test module.
++
++/// The successors of a block: at most two fixed targets, or every arm.
++pub enum Successors<E, A> {
++    Fixed { first: Option<E>, second: Option<E> },
++    Arms(A),
++}
++
++impl<E, A: Iterator<Item = E>> Iterator for Successors<E, A> {
++    type Item = E;
++
++    fn next(&mut self) -> Option<E> {
++        match self {
++            Successors::Fixed { first, second } => match first.take() {
++                Some(target) => Some(target),
++                None => second.take(),
++            },
++            Successors::Arms(arms) => arms.next(),
++        }
++    }
++}
++
++pub struct Block {
++    pub targets: Vec<u32>,
++    pub fixed: bool,
++}
++
++impl Block {
++    pub fn successors(&self) -> Successors<&u32, std::slice::Iter<'_, u32>> {
++        if self.fixed {
++            Successors::Fixed { first: self.targets.first(), second: self.targets.get(1) }
++        } else {
++            Successors::Arms(self.targets.iter())
++        }
++    }
++}
++
++pub fn successors_of(block: &Block) -> Vec<u32> {
++    block.successors().copied().collect()
++}
++
++pub fn all_successors(blocks: &[Block]) -> Vec<u32> {
++    blocks.iter().flat_map(|block| block.successors()).copied().collect()
++}
++
++pub fn successor_arms(block: &Block, arms: &[Vec<u32>]) -> Vec<u32> {
++    block.successors().flat_map(|target| &arms[*target as usize]).copied().collect()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn block(targets: &[u32], fixed: bool) -> Block {
++        Block { targets: targets.to_vec(), fixed }
++    }
++
++    #[test]
++    fn user_iterator_collect() {
++        assert_eq!(successors_of(&block(&[4, 5, 6], true)), vec![4, 5]);
++        assert_eq!(successors_of(&block(&[4, 5, 6], false)), vec![4, 5, 6]);
++        assert_eq!(successors_of(&block(&[], true)), Vec::<u32>::new());
++        assert_eq!(
++            all_successors(&[block(&[1, 2, 3], true), block(&[], false), block(&[7, 8], false)]),
++            vec![1, 2, 7, 8]
++        );
++        assert_eq!(all_successors(&[]), Vec::<u32>::new());
++        let arms = vec![vec![10, 11], vec![], vec![12]];
++        assert_eq!(successor_arms(&block(&[2, 0, 1], false), &arms), vec![12, 10, 11]);
++        assert_eq!(successor_arms(&block(&[1, 2, 0], true), &arms), vec![12]);
++    }
++}

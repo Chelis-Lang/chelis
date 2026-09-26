@@ -1,0 +1,38 @@
+# charon integration step 27 after 546078ea5d: commit 45354ddd6390a7860cf100493cefb10e3505c74f
+# first parent fd24718a125dcec228a9fabb6f53087cfa2fb2e9
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: regenerate the --mir documentation
+#
+# Generated from the charon/src/options.rs doc comments of the previous commit: dependencies
+# compiled by charon provide promoted MIR.
+
+diff --git a/charon-ml/src/generated/Generated_FullAst.ml b/charon-ml/src/generated/Generated_FullAst.ml
+index 6c66666..34e78e1 100644
+--- a/charon-ml/src/generated/Generated_FullAst.ml
++++ b/charon-ml/src/generated/Generated_FullAst.ml
+@@ -74,8 +74,9 @@ and cli_options = {
+   skip_borrowck : bool;
+       (** If activated, this skips borrow-checking of the crate. *)
+   mir : mir_level option;
+-      (** The MIR stage to extract. This is only relevant for the current crate;
+-          for dpendencies only MIR optimized is available. *)
++      (** The MIR stage to extract. For dependencies, [promoted] is available
++          when charon compiled them; otherwise (e.g. the standard library), and
++          at other stages, only MIR optimized is. *)
+   rustc_args : string list;  (** Extra flags to pass to rustc. *)
+   targets : string list;
+       (** A list of target architectures to translate for. Charon will run the
+@@ -237,9 +238,9 @@ and 'a0 g_declaration_group =
+   | NonRecGroup of 'a0  (** A non-recursive declaration *)
+   | RecGroup of 'a0 list  (** A (group of mutually) recursive declaration(s) *)
+ 
+-(** The MIR stage to use. This is only relevant for the current crate: for
+-    dependencies, only mir optimized is available (or mir elaborated for
+-    consts). *)
++(** The MIR stage to use. For dependencies, promoted MIR is available when
++    charon compiled them; otherwise, and at other stages, only mir optimized is
++    (or mir elaborated for consts). *)
+ and mir_level =
+   | Built  (** The MIR just after MIR lowering. *)
+   | Promoted

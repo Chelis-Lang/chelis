@@ -1,0 +1,252 @@
+# charon integration step 35 after 546078ea5d: commit 5bb203828ea85c38ca598124abaabb68d5cec4b1
+# first parent a112a3e826edf400722d95d92436629cd56a2ad3
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: crate_of_file decodes an llbc file without its whole JSON tree
+#
+# Yojson.Basic.from_file builds the tree of the whole file, which takes about 7 times the file size
+# (chelis-deep: 1.4 GB for 186 MB) while the decoded crate takes 1 GB less. crate_of_file reads the
+# file with Yojson's lexer: the top-level objects field by field, and the lists of `translated`
+# (files, name tables, item tables) one element at a time, with the same element decoders as
+# crate_of_json, in serialization order. It fails like crate_of_json on anything else (wrong field
+# order, unknown or missing field, trailing data).
+#
+# The deserialization test checks that both decoders give the same crate on every ui llbc.
+
+diff --git a/charon-ml/src/OfJson.ml b/charon-ml/src/OfJson.ml
+index 68f5e31..9dac7d9 100644
+--- a/charon-ml/src/OfJson.ml
++++ b/charon-ml/src/OfJson.ml
+@@ -18,6 +18,30 @@ include Generated_OfJson
+ 
+ let option_list_of_json of_json = list_of_json (option_of_json of_json)
+ 
++let check_charon_version (charon_version : string) : (unit, string) result =
++  if String.equal charon_version CharonVersion.supported_charon_version then
++    Ok ()
++  else
++    Error
++      ("Incompatible version of charon: this program supports llbc emitted by \
++        charon v" ^ CharonVersion.supported_charon_version
++     ^ " but attempted to read a file emitted by charon v" ^ charon_version
++     ^ ".")
++
++let crate_of_translated_crate (crate : translated_crate) : crate =
++  {
++    name = crate.crate_name;
++    options = crate.options;
++    target_information = crate.target_information;
++    declarations = Option.value ~default:[] crate.ordered_decls;
++    type_decls = TypeDeclId.map_of_indexed_list crate.type_decls;
++    fun_decls = FunDeclId.map_of_indexed_list crate.fun_decls;
++    global_decls = GlobalDeclId.map_of_indexed_list crate.global_decls;
++    trait_decls = TraitDeclId.map_of_indexed_list crate.trait_decls;
++    trait_impls = TraitImplId.map_of_indexed_list crate.trait_impls;
++    unit_metadata = Option.get crate.unit_metadata;
++  }
++
+ let crate_of_json (js : json) : (crate, string) result =
+   match js with
+   | `Assoc [ ("charon_version", charon_version); ("translated", translated) ]
+@@ -25,35 +49,145 @@ let crate_of_json (js : json) : (crate, string) result =
+     ->
+       (* Ensure the version is the one we support. *)
+       let* charon_version = string_of_json () charon_version in
+-      if
+-        not (String.equal charon_version CharonVersion.supported_charon_version)
+-      then
+-        Error
+-          ("Incompatible version of charon: this program supports llbc emitted \
+-            by charon v" ^ CharonVersion.supported_charon_version
+-         ^ " but attempted to read a file emitted by charon v" ^ charon_version
+-         ^ ".")
+-      else
+-        let ctx = fresh_of_json_ctx () in
+-        let* crate = translated_crate_of_json ctx translated in
+-        let type_decls = TypeDeclId.map_of_indexed_list crate.type_decls in
+-        let fun_decls = FunDeclId.map_of_indexed_list crate.fun_decls in
+-        let global_decls =
+-          GlobalDeclId.map_of_indexed_list crate.global_decls
+-        in
+-        let trait_decls = TraitDeclId.map_of_indexed_list crate.trait_decls in
+-        let trait_impls = TraitImplId.map_of_indexed_list crate.trait_impls in
+-        Ok
+-          {
+-            name = crate.crate_name;
+-            options = crate.options;
+-            target_information = crate.target_information;
+-            declarations = Option.value ~default:[] crate.ordered_decls;
+-            type_decls;
+-            fun_decls;
+-            global_decls;
+-            trait_decls;
+-            trait_impls;
+-            unit_metadata = Option.get crate.unit_metadata;
+-          }
++      let* () = check_charon_version charon_version in
++      let ctx = fresh_of_json_ctx () in
++      let* crate = translated_crate_of_json ctx translated in
++      Ok (crate_of_translated_crate crate)
+   | _ -> combine_error_msgs js __FUNCTION__ (Error "")
++
++exception Decoding_error of string
++
++(** Like [crate_of_json] on the contents of [file], but without the JSON tree of
++    the whole file, which takes several times the memory of the decoded crate:
++    the top-level objects are read field by field with Yojson's lexer, and the
++    elements of the lists of [translated] (files, name tables, item tables) are
++    decoded one at a time. Fields must come in the order in which Charon writes
++    them, which [translated_crate_of_json] also requires (deduplicated values
++    are decoded in serialization order). *)
++let crate_of_file (file : string) : (crate, string) result =
++  let ic = open_in_bin file in
++  Fun.protect ~finally:(fun () -> close_in_noerr ic) @@ fun () ->
++  let lb = Lexing.from_channel ic in
++  let ls = Yojson.Basic.init_lexer ~fname:file () in
++  let fail msg = raise (Decoding_error msg) in
++  let decoded = function
++    | Ok x -> x
++    | Error msg -> fail msg
++  in
++  let ctx = fresh_of_json_ctx () in
++  (* The value at the current position. *)
++  let value of_json () = decoded (of_json ctx (Yojson.Basic.read_json ls lb)) in
++  (* The list at the current position, decoded element by element. *)
++  let elements of_json () =
++    List.rev
++      (Yojson.Basic.read_sequence
++         (fun acc ls lb -> decoded (of_json ctx (Yojson.Basic.read_json ls lb)) :: acc)
++         [] ls lb)
++  in
++  (* An object whose fields are read in order with [field], then [end_object]. *)
++  let start_object () =
++    Yojson.Basic.read_space ls lb;
++    Yojson.Basic.read_lcurl ls lb;
++    ref true
++  in
++  (* Read the key of the next field, which must be [name], then decode its
++     value with [decode]; [None] if the object ends instead. *)
++  let next_field first name decode =
++    Yojson.Basic.read_space ls lb;
++    match
++      if !first then Yojson.Basic.read_object_end lb
++      else Yojson.Basic.read_object_sep ls lb
++    with
++    | exception Yojson.End_of_object -> None
++    | () ->
++        first := false;
++        Yojson.Basic.read_space ls lb;
++        let key = Yojson.Basic.read_ident ls lb in
++        if key <> name then
++          fail ("expected field \"" ^ name ^ "\" but found \"" ^ key ^ "\"");
++        Yojson.Basic.read_space ls lb;
++        Yojson.Basic.read_colon ls lb;
++        Yojson.Basic.read_space ls lb;
++        Some (decode ())
++  in
++  let field first name decode =
++    match next_field first name decode with
++    | Some x -> x
++    | None -> fail ("missing field \"" ^ name ^ "\"")
++  in
++  let end_object first =
++    Yojson.Basic.read_space ls lb;
++    match Yojson.Basic.read_object_sep ls lb with
++    | exception Yojson.End_of_object -> ()
++    | () -> fail "unexpected field"
++  in
++  let translated () : translated_crate =
++    let f = start_object () in
++    let crate_name = field f "crate_name" (value string_of_json) in
++    let options = field f "options" (value cli_options_of_json) in
++    let target_information =
++      field f "target_information"
++        (elements (key_value_pair_of_json string_of_json target_info_of_json))
++    in
++    let files = field f "files" (elements file_of_json) in
++    let item_names =
++      field f "item_names"
++        (elements (key_value_pair_of_json item_id_of_json name_of_json))
++    in
++    let short_names =
++      field f "short_names"
++        (elements (key_value_pair_of_json item_id_of_json name_of_json))
++    in
++    let type_decls =
++      field f "type_decls" (elements (option_of_json type_decl_of_json))
++    in
++    let fun_decls =
++      field f "fun_decls" (elements (option_of_json fun_decl_of_json))
++    in
++    let global_decls =
++      field f "global_decls" (elements (option_of_json global_decl_of_json))
++    in
++    let trait_decls =
++      field f "trait_decls" (elements (option_of_json trait_decl_of_json))
++    in
++    let trait_impls =
++      field f "trait_impls" (elements (option_of_json trait_impl_of_json))
++    in
++    let unit_metadata =
++      field f "unit_metadata" (value (option_of_json global_decl_ref_of_json))
++    in
++    let ordered_decls =
++      field f "ordered_decls"
++        (value (option_of_json (list_of_json declaration_group_of_json)))
++    in
++    end_object f;
++    {
++      crate_name;
++      options;
++      target_information;
++      files;
++      item_names;
++      short_names;
++      type_decls;
++      fun_decls;
++      global_decls;
++      trait_decls;
++      trait_impls;
++      unit_metadata;
++      ordered_decls;
++    }
++  in
++  try
++    let f = start_object () in
++    let charon_version = field f "charon_version" (value string_of_json) in
++    decoded (check_charon_version charon_version);
++    let crate = field f "translated" translated in
++    (* [has_errors], which [crate_of_json] ignores too. *)
++    (match next_field f "has_errors" (fun () -> Yojson.Basic.skip_json ls lb) with
++    | Some () -> end_object f
++    | None -> ());
++    Yojson.Basic.read_space ls lb;
++    if not (Yojson.Basic.read_eof lb) then fail "junk after the crate";
++    Ok (crate_of_translated_crate crate)
++  with
++  | Decoding_error msg | Yojson.Json_error msg -> Error msg
+diff --git a/charon-ml/tests/Test_Deserialize.ml b/charon-ml/tests/Test_Deserialize.ml
+index a0af1c3..9cccf1d 100644
+--- a/charon-ml/tests/Test_Deserialize.ml
++++ b/charon-ml/tests/Test_Deserialize.ml
+@@ -54,6 +54,20 @@ let run_tests (folder : string) : unit =
+             exit 1
+         | Ok m ->
+             log#linfo (lazy ("Deserialized: " ^ file));
++            (* The streaming decoder gives the same crate. *)
++            (match OfJson.crate_of_file file with
++            | Error s ->
++                log#error "Error when deserializing file %s by streaming: %s\n"
++                  file s;
++                exit 1
++            | Ok streamed ->
++                if compare streamed m <> 0 then begin
++                  log#error
++                    "Streaming and tree deserialization of %s give different \
++                     crates\n"
++                    file;
++                  exit 1
++                end);
+             (* Test discriminant/tag roundtrip *)
+             let print_ctx = PrintUtils.of_crate m in
+             let print_var_id_opt = function

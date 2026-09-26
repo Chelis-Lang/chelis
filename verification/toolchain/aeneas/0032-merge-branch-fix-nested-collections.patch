@@ -1,0 +1,3020 @@
+# aeneas integration step 32 after cba11f3beb: commit 13bb8cae3e8b15bced23a2401cf75a9c7f780107
+# first parent 1c15d39db1bcf0fea7371d882020c4336c03bb5b, merged 28bf9b40096633ddac9030bc41e1448230b14800
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-collections'
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 57985ea..38d3c6f 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -14,6 +14,7 @@ import Aeneas.Std.Half
+ import Aeneas.Std.IteratorAdapters
+ import Aeneas.Std.IteratorCombinators
+ import Aeneas.Std.IteratorSources
++import Aeneas.Std.Nested
+ import Aeneas.Std.Primitives
+ import Aeneas.Std.PrimitivesLemmas
+ import Aeneas.Std.RawPtr
+diff --git a/backends/lean/Aeneas/Std/Nested.lean b/backends/lean/Aeneas/Std/Nested.lean
+new file mode 100644
+index 0000000..29accb0
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/Nested.lean
+@@ -0,0 +1,313 @@
++/- Carriers for collections nested in recursive types -/
++import Aeneas.Std.Vec
++import Aeneas.Std.Array.Array
++
++/-!
++# Nested collection carriers
++
++`alloc.vec.Vec`, `Slice` and `Array` are subtypes of `List` whose invariant
++mentions the element type (`{ l : List α // l.length ≤ Usize.max }`). Lean's
++nested-inductive elaboration rejects such types as containers of the types
++being declared, so a Rust type which is recursive through `Vec<Self>`,
++`Box<[Self]>` or `[Self; N]` cannot be translated to an inductive using those
++types directly.
++
++The carriers below have the same values, but store the elements in a
++length-indexed list, so their invariant only mentions the length index. The
++extraction uses them in the fields of recursive types (and only there), and
++inserts the conversions below wherever a value enters or leaves such a field.
++The conversions are mutually inverse, and the `@[simp]` lemmas erase them.
++-/
++
++namespace Aeneas.Std
++
++/-- A list indexed by its length. -/
++inductive LenList (α : Type u) : Nat → Type u where
++  | nil : LenList α 0
++  | cons {n : Nat} (hd : α) (tl : LenList α n) : LenList α (n + 1)
++
++namespace LenList
++
++variable {α : Type u} {β : Type v} {γ : Type w}
++
++/-- Convert a list of known length. -/
++def ofList : (l : List α) → (n : Nat) → l.length = n → LenList α n
++  | [], 0, _ => .nil
++  | x :: xs, n + 1, h => .cons x (ofList xs n (by simpa using h))
++  | [], _ + 1, h => absurd h (by simp)
++  | _ :: _, 0, h => absurd h (by simp)
++
++def toList : {n : Nat} → LenList α n → List α
++  | _, .nil => []
++  | _, .cons x xs => x :: toList xs
++
++def map (f : α → β) : {n : Nat} → LenList α n → LenList β n
++  | _, .nil => .nil
++  | _, .cons x xs => .cons (f x) (map f xs)
++
++@[simp] theorem toList_nil : (nil : LenList α 0).toList = [] := rfl
++
++@[simp] theorem toList_cons {n : Nat} (x : α) (xs : LenList α n) :
++    (cons x xs).toList = x :: xs.toList := rfl
++
++@[simp] theorem length_toList {n : Nat} (x : LenList α n) : x.toList.length = n := by
++  induction x <;> simp [*]
++
++@[simp] theorem toList_ofList (l : List α) (n : Nat) (h : l.length = n) :
++    (ofList l n h).toList = l := by
++  induction l generalizing n with
++  | nil =>
++    cases n with
++    | zero => rfl
++    | succ n => simp at h
++  | cons x xs ih =>
++    cases n with
++    | zero => simp at h
++    | succ n => simp [ofList, ih]
++
++theorem eq_of_toList_eq {n : Nat} {x y : LenList α n} (h : x.toList = y.toList) : x = y := by
++  induction x with
++  | nil => cases y; rfl
++  | cons a xs ih =>
++    cases y with
++    | cons b ys =>
++      simp only [toList_cons, List.cons.injEq] at h
++      rw [h.1, ih h.2]
++
++theorem toList_inj {n : Nat} {x y : LenList α n} : x.toList = y.toList ↔ x = y :=
++  ⟨eq_of_toList_eq, fun h => h ▸ rfl⟩
++
++@[simp] theorem ofList_toList {n : Nat} (x : LenList α n) (h : x.toList.length = n) :
++    ofList x.toList n h = x :=
++  eq_of_toList_eq (by simp)
++
++@[simp] theorem toList_map (f : α → β) {n : Nat} (x : LenList α n) :
++    (x.map f).toList = x.toList.map f := by
++  induction x <;> simp [map, *]
++
++@[simp] theorem map_id {n : Nat} (x : LenList α n) : x.map id = x :=
++  eq_of_toList_eq (by simp)
++
++@[simp] theorem map_map (f : α → β) (g : β → γ) {n : Nat} (x : LenList α n) :
++    (x.map f).map g = x.map (g ∘ f) :=
++  eq_of_toList_eq (by simp)
++
++end LenList
++
++/-! ## Vectors -/
++
++/-- Carrier for `alloc.vec.Vec α` in the fields of recursive types. -/
++structure NestedVec (α : Type u) where
++  len : Nat
++  elems : LenList α len
++  len_le : len ≤ Usize.max
++
++namespace NestedVec
++
++variable {α : Type u} {β : Type v} {γ : Type w}
++
++theorem ext_toList {x y : NestedVec α} (h : x.elems.toList = y.elems.toList) : x = y := by
++  cases x with
++  | mk n xs hx =>
++    cases y with
++    | mk m ys hy =>
++      have hnm : n = m := by
++        rw [← LenList.length_toList xs, ← LenList.length_toList ys]
++        exact congrArg List.length h
++      subst hnm
++      cases LenList.eq_of_toList_eq h
++      rfl
++
++def toVec (x : NestedVec α) : alloc.vec.Vec α :=
++  ⟨x.elems.toList, by simpa using x.len_le⟩
++
++/-- Map the elements (used to convert the elements of nested carriers). -/
++def map (f : α → β) (x : NestedVec α) : NestedVec β :=
++  ⟨x.len, x.elems.map f, x.len_le⟩
++
++@[simp] theorem toVec_val (x : NestedVec α) : x.toVec.val = x.elems.toList := rfl
++
++@[simp] theorem toVec_length (x : NestedVec α) : x.toVec.length = x.len := by
++  simp [toVec]
++
++@[simp] theorem map_elems_toList (f : α → β) (x : NestedVec α) :
++    (x.map f).elems.toList = x.elems.toList.map f := by
++  simp [map]
++
++@[simp] theorem map_id (x : NestedVec α) : x.map id = x :=
++  ext_toList (by simp)
++
++@[simp] theorem map_map (f : α → β) (g : β → γ) (x : NestedVec α) :
++    (x.map f).map g = x.map (g ∘ f) :=
++  ext_toList (by simp)
++
++end NestedVec
++
++namespace alloc.vec.Vec
++
++variable {α : Type u}
++
++def toNested (v : alloc.vec.Vec α) : NestedVec α :=
++  ⟨v.val.length, LenList.ofList v.val v.val.length rfl, v.property⟩
++
++@[simp] theorem toNested_elems_toList (v : alloc.vec.Vec α) :
++    v.toNested.elems.toList = v.val :=
++  LenList.toList_ofList _ _ _
++
++@[simp] theorem toNested_len (v : alloc.vec.Vec α) : v.toNested.len = v.length := rfl
++
++@[simp] theorem toVec_toNested (v : alloc.vec.Vec α) : v.toNested.toVec = v :=
++  Subtype.ext (toNested_elems_toList v)
++
++end alloc.vec.Vec
++
++@[simp] theorem NestedVec.toNested_toVec {α : Type u} (x : NestedVec α) :
++    x.toVec.toNested = x :=
++  NestedVec.ext_toList (LenList.toList_ofList _ _ _)
++
++theorem NestedVec.toVec_injective {α : Type u} : Function.Injective (@NestedVec.toVec α) :=
++  fun x y h => by rw [← NestedVec.toNested_toVec x, h, NestedVec.toNested_toVec]
++
++theorem alloc.vec.Vec.toNested_injective {α : Type u} :
++    Function.Injective (@alloc.vec.Vec.toNested α) :=
++  fun x y h => by rw [← alloc.vec.Vec.toVec_toNested x, h, alloc.vec.Vec.toVec_toNested]
++
++/-! ## Slices -/
++
++/-- Carrier for `Slice α` (e.g. `Box<[T]>`) in the fields of recursive types. -/
++structure NestedSlice (α : Type u) where
++  len : Nat
++  elems : LenList α len
++  len_le : len ≤ Usize.max
++
++namespace NestedSlice
++
++variable {α : Type u} {β : Type v} {γ : Type w}
++
++theorem ext_toList {x y : NestedSlice α} (h : x.elems.toList = y.elems.toList) : x = y := by
++  cases x with
++  | mk n xs hx =>
++    cases y with
++    | mk m ys hy =>
++      have hnm : n = m := by
++        rw [← LenList.length_toList xs, ← LenList.length_toList ys]
++        exact congrArg List.length h
++      subst hnm
++      cases LenList.eq_of_toList_eq h
++      rfl
++
++def toSlice (x : NestedSlice α) : Slice α :=
++  ⟨x.elems.toList, by simpa using x.len_le⟩
++
++def map (f : α → β) (x : NestedSlice α) : NestedSlice β :=
++  ⟨x.len, x.elems.map f, x.len_le⟩
++
++@[simp] theorem toSlice_val (x : NestedSlice α) : x.toSlice.val = x.elems.toList := rfl
++
++@[simp] theorem toSlice_length (x : NestedSlice α) : x.toSlice.length = x.len := by
++  simp [toSlice]
++
++@[simp] theorem map_elems_toList (f : α → β) (x : NestedSlice α) :
++    (x.map f).elems.toList = x.elems.toList.map f := by
++  simp [map]
++
++@[simp] theorem map_id (x : NestedSlice α) : x.map id = x :=
++  ext_toList (by simp)
++
++@[simp] theorem map_map (f : α → β) (g : β → γ) (x : NestedSlice α) :
++    (x.map f).map g = x.map (g ∘ f) :=
++  ext_toList (by simp)
++
++end NestedSlice
++
++namespace Slice
++
++variable {α : Type u}
++
++def toNested (s : Slice α) : NestedSlice α :=
++  ⟨s.val.length, LenList.ofList s.val s.val.length rfl, s.property⟩
++
++@[simp] theorem toNested_elems_toList (s : Slice α) : s.toNested.elems.toList = s.val :=
++  LenList.toList_ofList _ _ _
++
++@[simp] theorem toNested_len (s : Slice α) : s.toNested.len = s.length := rfl
++
++@[simp] theorem toSlice_toNested (s : Slice α) : s.toNested.toSlice = s :=
++  Subtype.ext (toNested_elems_toList s)
++
++end Slice
++
++@[simp] theorem NestedSlice.toNested_toSlice {α : Type u} (x : NestedSlice α) :
++    x.toSlice.toNested = x :=
++  NestedSlice.ext_toList (LenList.toList_ofList _ _ _)
++
++theorem NestedSlice.toSlice_injective {α : Type u} :
++    Function.Injective (@NestedSlice.toSlice α) :=
++  fun x y h => by rw [← NestedSlice.toNested_toSlice x, h, NestedSlice.toNested_toSlice]
++
++theorem Slice.toNested_injective {α : Type u} : Function.Injective (@Slice.toNested α) :=
++  fun x y h => by rw [← Slice.toSlice_toNested x, h, Slice.toSlice_toNested]
++
++/-! ## Arrays -/
++
++/-- Carrier for `Array α n` in the fields of recursive types. The length is
++    the index `n.val`, so no further invariant is needed. -/
++structure NestedArray (α : Type u) (n : Usize) where
++  elems : LenList α n.val
++
++namespace NestedArray
++
++variable {α : Type u} {β : Type v} {γ : Type w} {n : Usize}
++
++theorem ext_toList {x y : NestedArray α n} (h : x.elems.toList = y.elems.toList) : x = y := by
++  cases x; cases y; cases LenList.eq_of_toList_eq h; rfl
++
++def toArray (x : NestedArray α n) : Array α n :=
++  ⟨x.elems.toList, by simp⟩
++
++def map (f : α → β) (x : NestedArray α n) : NestedArray β n :=
++  ⟨x.elems.map f⟩
++
++@[simp] theorem toArray_val (x : NestedArray α n) : x.toArray.val = x.elems.toList := rfl
++
++@[simp] theorem map_elems_toList (f : α → β) (x : NestedArray α n) :
++    (x.map f).elems.toList = x.elems.toList.map f := by
++  simp [map]
++
++@[simp] theorem map_id (x : NestedArray α n) : x.map id = x :=
++  ext_toList (by simp)
++
++@[simp] theorem map_map (f : α → β) (g : β → γ) (x : NestedArray α n) :
++    (x.map f).map g = x.map (g ∘ f) :=
++  ext_toList (by simp)
++
++end NestedArray
++
++namespace Array
++
++variable {α : Type u} {n : Usize}
++
++def toNested (a : Array α n) : NestedArray α n :=
++  ⟨LenList.ofList a.val n.val a.property⟩
++
++@[simp] theorem toNested_elems_toList (a : Array α n) : a.toNested.elems.toList = a.val :=
++  LenList.toList_ofList _ _ _
++
++@[simp] theorem toArray_toNested (a : Array α n) : a.toNested.toArray = a :=
++  Subtype.ext (toNested_elems_toList a)
++
++end Array
++
++@[simp] theorem NestedArray.toNested_toArray {α : Type u} {n : Usize} (x : NestedArray α n) :
++    x.toArray.toNested = x :=
++  NestedArray.ext_toList (LenList.toList_ofList _ _ _)
++
++theorem NestedArray.toArray_injective {α : Type u} {n : Usize} :
++    Function.Injective (@NestedArray.toArray α n) :=
++  fun x y h => by rw [← NestedArray.toNested_toArray x, h, NestedArray.toNested_toArray]
++
++theorem Array.toNested_injective {α : Type u} {n : Usize} :
++    Function.Injective (@Array.toNested α n) :=
++  fun x y h => by rw [← Array.toArray_toNested x, h, Array.toArray_toNested]
++
++end Aeneas.Std
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 63f3a8d..4bb3f10 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -576,6 +576,13 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+   let trait_decls, trait_impls =
+     Micro.apply_external_trait_fields trait_decls trait_impls pure_translations
+   in
++  (* Use carriers for the collections nested in recursive types: Lean rejects
++     [Vec], slices and arrays there (their invariant depends on the elements) *)
++  let type_decls, pure_translations =
++    if Config.backend () = Lean then
++      PureNestedCollections.apply trans_ctx type_decls pure_translations
++    else (type_decls, pure_translations)
++  in
+ 
+   (* Return *)
+   ( trans_ctx,
+diff --git a/src/dune b/src/dune
+index 9d688d8..cb6bc38 100644
+--- a/src/dune
++++ b/src/dune
+@@ -95,6 +95,7 @@
+   PureMicroPassesGeneral
+   PureMicroPassesLoops
+   PureMicroPassesPrettyNames
++  PureNestedCollections
+   PureTypeCheck
+   PureUtils
+   RegionsHierarchy
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index 95f3198..326c70e 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -1055,7 +1055,7 @@ and extract_function_call (span : Meta.span) (ctx : extraction_ctx)
+                 explicit_types = [ Implicit; Implicit ];
+                 explicit_const_generics = [];
+               }
+-        | Pure (ModelStateMerge _) ->
++        | Pure (ModelStateMerge _ | ToNested _ | OfNested _ | NestedMap _) ->
+             Some
+               {
+                 explicit_types = List.map (fun _ -> Implicit) generics.types;
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index 03f485c..bf7400a 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -1146,6 +1146,7 @@ let keywords () =
+           "axioms";
+           "begin";
+           "break";
++          "builtin_initialize";
+           "by";
+           "BuiltinFn";
+           "BuiltinFnMut";
+@@ -1153,26 +1154,32 @@ let keywords () =
+           "calc";
+           "catch";
+           "class";
++          "coinductive";
+           "const";
+           "constant";
+           "constants";
+           "continue";
++          "declare_syntax_cat";
+           "decreasing_by";
+           "def";
+           "definition";
+           "deriving";
+           "do";
++          "elab";
++          "elab_rules";
+           "else";
+           "end";
+           "example";
+           "exists";
+           "export";
+           "extends";
++          "finally";
+           "for";
+           "forall";
+           "from";
+           "full";
+           "fun";
++          "generalizing";
+           "have";
+           "hiding";
+           "if";
+@@ -1183,6 +1190,7 @@ let keywords () =
+           "infix";
+           "infixl";
+           "infixr";
++          "initialize";
+           "instance";
+           "lemma";
+           "let";
+@@ -1191,11 +1199,15 @@ let keywords () =
+           "macro_rules";
+           "match";
+           "matches";
++          "meta";
+           "mut";
+           "mutual";
+           "name";
+           "namespace";
++          "nofun";
++          "nomatch";
+           "noncomputable";
++          "nonrec";
+           "notation";
+           "omit";
+           "opaque";
+@@ -1211,6 +1223,7 @@ let keywords () =
+           "prelude";
+           "private";
+           "protected";
++          "public";
+           "raw";
+           "record";
+           "reduce";
+@@ -1218,11 +1231,18 @@ let keywords () =
+           "replacing";
+           "reserve";
+           "run_cmd";
++          "run_elab";
++          "scoped";
++          "seal";
+           "section";
+           "set_option";
++          "show";
++          "show_term";
+           "simp";
++          "sorry";
+           "Std.Array.empty";
+           "structure";
++          "suffices";
+           "syntax";
+           "termination_by";
+           "then";
+@@ -1230,10 +1250,12 @@ let keywords () =
+           "theory";
+           "to";
+           "toStr";
++          "try";
+           "universe";
+           "universes";
+           "unless";
+           "unsafe";
++          "unseal";
+           "using";
+           "using_well_founded";
+           "variable";
+@@ -1283,6 +1305,9 @@ let builtin_adts () : (builtin_ty * string) list =
+         (TStr, "_root_.Aeneas.Std.Str");
+         (TRawPtr Mut, "_root_.Aeneas.Std.MutRawPtr");
+         (TRawPtr Const, "_root_.Aeneas.Std.ConstRawPtr");
++        (TNested NestedVec, "_root_.Aeneas.Std.NestedVec");
++        (TNested NestedSlice, "_root_.Aeneas.Std.NestedSlice");
++        (TNested NestedArray, "_root_.Aeneas.Std.NestedArray");
+       ]
+   | Coq | FStar | HOL4 ->
+       [
+@@ -1421,6 +1446,15 @@ let builtin_pure_functions () : (pure_builtin_fun_id * string) list =
+         (UpdateAtIndex Array, "Array.update");
+         (ToResult, "lift");
+         (ResultUnwrapMut, "core.result.Result.unwrap.mut");
++        (ToNested NestedVec, "_root_.Aeneas.Std.alloc.vec.Vec.toNested");
++        (ToNested NestedSlice, "_root_.Aeneas.Std.Slice.toNested");
++        (ToNested NestedArray, "_root_.Aeneas.Std.Array.toNested");
++        (OfNested NestedVec, "_root_.Aeneas.Std.NestedVec.toVec");
++        (OfNested NestedSlice, "_root_.Aeneas.Std.NestedSlice.toSlice");
++        (OfNested NestedArray, "_root_.Aeneas.Std.NestedArray.toArray");
++        (NestedMap NestedVec, "_root_.Aeneas.Std.NestedVec.map");
++        (NestedMap NestedSlice, "_root_.Aeneas.Std.NestedSlice.map");
++        (NestedMap NestedArray, "_root_.Aeneas.Std.NestedArray.map");
+       ]
+   | HOL4 ->
+       (* We don't provide [FuelDecrease] and [FuelEqZero] on purpose *)
+@@ -2186,6 +2220,9 @@ let ctx_compute_var_basename (span : Meta.span) (ctx : extraction_ctx)
+           | TBuiltin TSlice -> "s"
+           | TBuiltin TStr -> "s"
+           | TBuiltin (TRawPtr _) -> "p"
++          | TBuiltin (TNested NestedVec) -> "v"
++          | TBuiltin (TNested NestedSlice) -> "s"
++          | TBuiltin (TNested NestedArray) -> "a"
+           | TAdtId adt_id ->
+               let def =
+                 TypeDeclId.Map.find adt_id ctx.trans_ctx.type_ctx.type_decls
+diff --git a/src/extract/ExtractTypes.ml b/src/extract/ExtractTypes.ml
+index 28c1699..da15df5 100644
+--- a/src/extract/ExtractTypes.ml
++++ b/src/extract/ExtractTypes.ml
+@@ -2222,7 +2222,9 @@ let extract_type_decl_record_field_projectors_simp_lemmas (ctx : extraction_ctx)
+           extract_generic_params span ctx fmt TypeDeclId.Set.empty ~as_implicits
+             Item decl.generics None type_params cg_params trait_clauses;
+ 
+-          (* Print the input parameters (the fields) *)
++          (* Print the input parameters (the fields). We return the names of
++             the bound variables: they may differ from the field names (the
++             variable names are made unique in the context). *)
+           let print_field (ctx : extraction_ctx) (field_id : FieldId.id)
+               (f : field) : extraction_ctx * string =
+             let id = FVarId.of_int (FieldId.to_int field_id) in
+@@ -2239,9 +2241,9 @@ let extract_type_decl_record_field_projectors_simp_lemmas (ctx : extraction_ctx)
+             extract_ty span ctx fmt TypeDeclId.Set.empty ~inside:false
+               f.field_ty;
+             F.pp_print_string fmt ")";
+-            (ctx, field_name)
++            (ctx, vname)
+           in
+-          let _, field_names =
++          let _, var_names =
+             List.fold_left_map
+               (fun ctx (id, f) -> print_field ctx id f)
+               ctx
+@@ -2258,15 +2260,15 @@ let extract_type_decl_record_field_projectors_simp_lemmas (ctx : extraction_ctx)
+           F.pp_print_string fmt "(";
+           F.pp_print_string fmt cons_name;
+           List.iter
+-            (fun f ->
++            (fun v ->
+               F.pp_print_space fmt ();
+-              F.pp_print_string fmt f)
+-            field_names;
++              F.pp_print_string fmt v)
++            var_names;
+           F.pp_print_string fmt (")." ^ field_name);
+           F.pp_print_space fmt ();
+           F.pp_print_string fmt "=";
+           F.pp_print_space fmt ();
+-          F.pp_print_string fmt (FieldId.nth field_names field_id);
++          F.pp_print_string fmt (FieldId.nth var_names field_id);
+           (* Close the box for the theorem content *)
+           F.pp_close_box fmt ();
+ 
+diff --git a/src/pure/PrintPure.ml b/src/pure/PrintPure.ml
+index 2afa88f..f7e9566 100644
+--- a/src/pure/PrintPure.ml
++++ b/src/pure/PrintPure.ml
+@@ -268,6 +268,12 @@ let literal_to_string (lit : literal) : string =
+   | VPureNat x -> Z.to_string x ^ "#ℕ"
+   | VPureInt x -> Z.to_string x ^ "#ℤ"
+ 
++let nested_collection_to_string (c : nested_collection) : string =
++  match c with
++  | NestedVec -> "NestedVec"
++  | NestedSlice -> "NestedSlice"
++  | NestedArray -> "NestedArray"
++
+ let builtin_ty_to_string (aty : builtin_ty) : string =
+   match aty with
+   | TResult -> "Result"
+@@ -280,6 +286,7 @@ let builtin_ty_to_string (aty : builtin_ty) : string =
+   | TStr -> "Str"
+   | TRawPtr Mut -> "MutRawPtr"
+   | TRawPtr Const -> "ConstRawPtr"
++  | TNested c -> nested_collection_to_string c
+ 
+ let type_id_to_string (env : fmt_env) (id : type_id) : string =
+   match id with
+@@ -504,7 +511,7 @@ let adt_variant_to_string ?(span = None) (env : fmt_env) (adt_id : type_id)
+   | TBuiltin aty -> (
+       (* Builtin type *)
+       match aty with
+-      | TArray | TSlice | TStr | TRawPtr _ ->
++      | TArray | TSlice | TStr | TRawPtr _ | TNested _ ->
+           (* Those types are opaque: we can't get there *)
+           [%craise_opt_span] span "Unreachable"
+       | TResult ->
+@@ -557,7 +564,7 @@ let adt_field_to_string ?(span = None) (env : fmt_env) (adt_id : type_id)
+   | TBuiltin aty -> (
+       (* Builtin type *)
+       match aty with
+-      | TFuel | TArray | TSlice | TStr ->
++      | TFuel | TArray | TSlice | TStr | TNested _ ->
+           (* Opaque types: we can't get there *)
+           [%craise_opt_span] span "Unreachable"
+       | TResult | TError | TSum | TLoopResult | TRawPtr _ ->
+@@ -699,7 +706,7 @@ and adt_pat_to_string_core (span : Meta.span option) (env : fmt_env)
+             else
+               [%craise_opt_span] span
+                 "Unreachable: improper variant id for fuel type"
+-        | TArray | TSlice | TStr ->
++        | TArray | TSlice | TStr | TNested _ ->
+             [%cassert_opt_span] span (variant_id = None) "Ill-formed value";
+             let fields =
+               List.mapi (fun i v -> string_of_int i ^ " -> " ^ v) fields
+@@ -863,6 +870,9 @@ let pure_builtin_fun_id_to_string (fid : pure_builtin_fun_id) : string =
+   | SliceLen -> "@sliceLen"
+   | ModelStateMerge name -> "@modelStateMerge(" ^ name ^ ")"
+   | ResultUnwrapMut -> "@resultUnwrapMut"
++  | ToNested c -> "@toNested(" ^ nested_collection_to_string c ^ ")"
++  | OfNested c -> "@ofNested(" ^ nested_collection_to_string c ^ ")"
++  | NestedMap c -> "@nestedMap(" ^ nested_collection_to_string c ^ ")"
+ 
+ let regular_fun_id_to_string (env : fmt_env) (fun_id : fun_id) : string =
+   match fun_id with
+diff --git a/src/pure/Pure.ml b/src/pure/Pure.ml
+index befc88c..f35f517 100644
+--- a/src/pure/Pure.ml
++++ b/src/pure/Pure.ml
+@@ -63,6 +63,12 @@ type db_scope_id = int [@@deriving show, ord]
+ type bvar_id = BVarId.id [@@deriving show, ord]
+ type fvar_id = FVarId.id [@@deriving show, ord]
+ 
++(** The collections which get a dedicated carrier type when they are nested in
++    a recursive type (see {!PureNestedCollections}): [Vec], slices and arrays.
++*)
++type nested_collection = NestedVec | NestedSlice | NestedArray
++[@@deriving show, ord]
++
+ (** The builtin types for the pure AST.
+ 
+     In comparison with LLBC:
+@@ -91,6 +97,11 @@ type builtin_ty =
+           declarations for the slices). For now, we use a dedicated type to
+           "mark" the raw pointers, and make sure that those functions are
+           actually not used in the translation. *)
++  | TNested of nested_collection
++      (** The carrier of a collection nested in a recursive type. It has the
++          same generics as the collection ([NestedArray] also takes the length
++          as a const generic). Only introduced for the Lean backend, see
++          {!PureNestedCollections}. *)
+ [@@deriving show, ord]
+ 
+ type array_or_slice = Array | Slice [@@deriving show, ord]
+@@ -137,6 +148,12 @@ type pure_builtin_fun_id =
+       (** Temporary fix: the
+           [core::result::{core::result::Result<@T, @E>}::unwrap] instantiated
+           with mutable borrows - TODO: remove *)
++  | ToNested of nested_collection
++      (** Convert a collection to its nested carrier (see [TNested]) *)
++  | OfNested of nested_collection
++      (** Convert a nested carrier back to the collection (see [TNested]) *)
++  | NestedMap of nested_collection
++      (** Map a function over the elements of a nested carrier *)
+ [@@deriving show, ord]
+ 
+ (* Builtin declarations coming from external libraries.
+diff --git a/src/pure/PureMicroPassesAnnots.ml b/src/pure/PureMicroPassesAnnots.ml
+index 4674ed2..045b520 100644
+--- a/src/pure/PureMicroPassesAnnots.ml
++++ b/src/pure/PureMicroPassesAnnots.ml
+@@ -205,7 +205,9 @@ let add_type_annotations_to_fun_decl (trans_ctx : trans_ctx)
+           | Fail | Assert | FuelDecrease | FuelEqZero ->
+               (f.ty, mk_known (), false)
+           | ModelStateMerge _ -> (f.ty, mk_known (), false)
+-          | UpdateAtIndex _ | SliceLen -> (known_f_ty, known_args_tys, false)
++          | UpdateAtIndex _ | SliceLen | ToNested _ | OfNested _ | NestedMap _
++            ->
++              (known_f_ty, known_args_tys, false)
+           | ResultUnwrapMut -> (hole, mk_holes (), false)
+         end
+       | FromLlbc (fid, lp_id) -> begin
+diff --git a/src/pure/PureMicroPassesGeneral.ml b/src/pure/PureMicroPassesGeneral.ml
+index f905d6c..7ca43cc 100644
+--- a/src/pure/PureMicroPassesGeneral.ml
++++ b/src/pure/PureMicroPassesGeneral.ml
+@@ -2443,7 +2443,11 @@ let simplify_array_slice_update_visitor (ctx : ctx) (def : fun_decl) =
+             generics = index_generics;
+           }
+       in
+-      let qualif = { e = qualif; ty = mk_arrows [ a.ty; i.ty; v.ty ] e2.ty } in
++      (* [update] returns the updated array/slice (not the type of the
++         continuation, which differs when the call is let-bound) *)
++      let qualif =
++        { e = qualif; ty = mk_arrows [ a.ty; i.ty; v.ty ] (mk_result_ty a.ty) }
++      in
+       [%add_loc] mk_apps span qualif [ a; i; v ]
+     in
+ 
+diff --git a/src/pure/PureNestedCollections.ml b/src/pure/PureNestedCollections.ml
+new file mode 100644
+index 0000000..09c875a
+--- /dev/null
++++ b/src/pure/PureNestedCollections.ml
+@@ -0,0 +1,673 @@
++(** Carriers for the collections nested in recursive types (Lean backend).
++
++    In the Lean library, [Vec], [Slice] and [Array] are subtypes of [List] whose
++    invariant mentions the element type. Lean's nested-inductive elaboration
++    rejects them as containers of the types being declared, so a Rust type
++    which is recursive through, e.g., [Vec<Self>] can not be translated
++    directly. The Lean library provides carriers ([NestedVec], [NestedSlice],
++    [NestedArray]) which have the same values but whose invariant only
++    mentions a length index, together with mutually inverse conversions.
++
++    This pass:
++    - replaces the nested collections by their carriers in the fields of the
++      type declarations (see {!compute_nested_decls} for the exact rule);
++    - inserts the conversions wherever a value crosses such a field: in
++      constructor applications (constructors used as function values are
++      eta-expanded), field projections, structure updates and patterns (we
++      bind the carrier then convert it with a let-binding).
++
++    Everything else (function signatures, local variables) keeps the original
++    collection types. *)
++
++open Pure
++open PureUtils
++open TranslateCore
++
++(** The local logger *)
++let log = Logging.pure_micro_passes_log
++
++(** {1 Type declarations} *)
++
++(** The collections which have a carrier *)
++type collection = { kind : nested_collection; elem : ty; generics : generic_args }
++
++(** Library types whose Lean model has an invariant which depends on its type
++    parameters (they wrap a [Vec], [Slice] or [Array], or a proof about their
++    parameter), and which thus can not contain the types being declared in a
++    recursive group. They have no carrier: we report an error if a recursive
++    group is nested through them. *)
++let non_nestable_builtin_types =
++  [
++    "alloc::vec::into_iter::IntoIter";
++    "core::array::iter::IntoIter";
++    "core::slice::iter::Iter";
++    "core::slice::iter::IterMut";
++    "core::slice::iter::Windows";
++    "core::slice::iter::Chunks";
++    "core::slice::iter::ChunksExact";
++    "core::num::nonzero::NonZero";
++  ]
++
++let builtin_rust_name (d : type_decl) : string option =
++  Option.map
++    (fun (info : builtin_type_info) ->
++      NameMatcher.pattern_to_string { tgt = TkPattern } info.rust_name)
++    d.builtin_info
++
++type decls_info = {
++  type_decls : type_decl TypeDeclId.Map.t;  (** The original declarations *)
++  vec_ids : TypeDeclId.Set.t;  (** The ids of [alloc::vec::Vec] *)
++  recursive_ids : TypeDeclId.Set.t;  (** The recursive declarations *)
++}
++
++let as_collection (info : decls_info) (ty : ty) : collection option =
++  match ty with
++  | TAdt (TAdtId id, generics) when TypeDeclId.Set.mem id info.vec_ids -> (
++      match generics.types with
++      | [ elem ] -> Some { kind = NestedVec; elem; generics }
++      | _ -> None)
++  | TAdt (TBuiltin TSlice, ({ types = [ elem ]; _ } as generics)) ->
++      Some { kind = NestedSlice; elem; generics }
++  | TAdt (TBuiltin TArray, ({ types = [ elem ]; _ } as generics)) ->
++      Some { kind = NestedArray; elem; generics }
++  | _ -> None
++
++let as_carrier (ty : ty) : collection option =
++  match ty with
++  | TAdt (TBuiltin (TNested kind), ({ types = [ elem ]; _ } as generics)) ->
++      Some { kind; elem; generics }
++  | _ -> None
++
++let collection_ty (info : decls_info) (c : collection) : ty =
++  match c.kind with
++  | NestedVec ->
++      let id = TypeDeclId.Set.choose info.vec_ids in
++      TAdt (TAdtId id, c.generics)
++  | NestedSlice -> TAdt (TBuiltin TSlice, c.generics)
++  | NestedArray -> TAdt (TBuiltin TArray, c.generics)
++
++let carrier_ty (c : collection) : ty = TAdt (TBuiltin (TNested c.kind), c.generics)
++
++let rec ty_exists (p : ty -> bool) (ty : ty) : bool =
++  p ty
++  ||
++  match ty with
++  | TAdt (_, generics) -> List.exists (ty_exists p) generics.types
++  | TArrow (a, b) -> ty_exists p a || ty_exists p b
++  | _ -> false
++
++let type_var_id (v : type_var_id de_bruijn_var) : type_var_id =
++  match v with
++  | Free id -> id
++  | Bound (_, id) -> id
++
++(** Is [ty] in the scope of the recursive group [group] (for a declaration
++    whose type parameters [params] may be instantiated with types of a
++    recursive group, see {!compute_nested_decls})? *)
++let mentions (group : TypeDeclId.Set.t) (params : TypeVarId.Set.t) (ty : ty) :
++    bool =
++  ty_exists
++    (function
++      | TAdt (TAdtId id, _) -> TypeDeclId.Set.mem id group
++      | TVar v -> TypeVarId.Set.mem (type_var_id v) params
++      | _ -> false)
++    ty
++
++(** Replace, in the type of a field, the collections applied to types which
++    mention the group (or the nesting parameters) by their carriers. *)
++let rec nest_ty (span : Meta.span) (info : decls_info)
++    (mentions : ty -> bool) (ty : ty) : ty =
++  let nest = nest_ty span info mentions in
++  match ty with
++  | TAdt (id, generics) -> (
++      let generics' = { generics with types = List.map nest generics.types } in
++      match as_collection info ty with
++      | Some c when mentions c.elem -> carrier_ty { c with generics = generics' }
++      | _ ->
++          (match id with
++          | TAdtId id -> (
++              match TypeDeclId.Map.find_opt id info.type_decls with
++              | Some d -> (
++                  match builtin_rust_name d with
++                  | Some name
++                    when List.mem name non_nestable_builtin_types
++                         && List.exists mentions generics.types ->
++                      [%craise] span
++                        ("The type '" ^ name
++                       ^ "' can not contain a type of the recursive group in \
++                          which it is used: its Lean model has an invariant \
++                          which depends on its type parameters, and it has no \
++                          nested carrier")
++                  | _ -> ())
++              | None -> ())
++          | _ -> ());
++          TAdt (id, generics'))
++  | TArrow (a, b) -> TArrow (nest a, nest b)
++  | _ -> ty
++
++(** The fields of a declaration, per variant *)
++let decl_fields (d : type_decl) : (VariantId.id option * field list) list =
++  match d.kind with
++  | Struct fields -> [ (None, fields) ]
++  | Enum variants ->
++      List.mapi
++        (fun i (v : variant) -> (Some (VariantId.of_int i), v.fields))
++        variants
++  | Opaque -> []
++
++let is_transparent_local (d : type_decl) : bool =
++  d.builtin_info = None && d.kind <> Opaque
++
++(** Compute the declarations whose fields need carriers, and update them.
++
++    Carriers are used exactly in the following positions of the fields of a
++    (non-builtin) declaration [d] of recursive group [G] (the group computed
++    by Charon; [G = {d}] if [d] is not recursive): a collection
++    ([alloc::vec::Vec], a slice or an array) applied to an element type which
++    mentions a declaration of [G], or a *nesting parameter* of [d].
++
++    The nesting parameters are the least fixed point of: the [i]-th type
++    parameter of a non-builtin declaration [g] is a nesting parameter if some
++    declaration [d] not in the group of [g] uses [g] in a field, with an [i]-th
++    type argument which mentions the group of [d] or a nesting parameter of
++    [d]. Lean elaborates such a use as a nested occurrence in which the
++    parameter is instantiated with the types being declared, so the
++    collections of this parameter in [g] need carriers as well (for all the
++    instantiations of [g], as the Lean definition of [g] is unique).
++
++    Returns the updated declarations. *)
++let compute_nested_decls (trans_ctx : trans_ctx) (info : decls_info) :
++    type_decl TypeDeclId.Map.t =
++  let group_of (id : TypeDeclId.id) : TypeDeclId.Set.t =
++    match TypeDeclId.Map.find_opt id trans_ctx.type_ctx.type_decls_groups with
++    | Some (RecGroup ids) -> TypeDeclId.Set.of_list ids
++    | Some (NonRecGroup _) | None -> TypeDeclId.Set.singleton id
++  in
++  let decls =
++    List.filter is_transparent_local (TypeDeclId.Map.values info.type_decls)
++  in
++  (* Compute the nesting parameters (fixed point) *)
++  let params = ref TypeDeclId.Map.empty in
++  let get_params id =
++    Option.value ~default:TypeVarId.Set.empty
++      (TypeDeclId.Map.find_opt id !params)
++  in
++  let changed = ref true in
++  while !changed do
++    changed := false;
++    List.iter
++      (fun (d : type_decl) ->
++        let group = group_of d.def_id in
++        let mentions = mentions group (get_params d.def_id) in
++        let visit (ty : ty) : bool =
++          (match ty with
++          | TAdt (TAdtId gid, generics) when not (TypeDeclId.Set.mem gid group)
++            -> (
++              match TypeDeclId.Map.find_opt gid info.type_decls with
++              | Some g when is_transparent_local g ->
++                  let gparams = get_params gid in
++                  let gparams' =
++                    List.fold_left2
++                      (fun set (p : type_param) arg ->
++                        if mentions arg then TypeVarId.Set.add p.index set
++                        else set)
++                      gparams g.generics.types generics.types
++                  in
++                  if not (TypeVarId.Set.equal gparams gparams') then (
++                    params := TypeDeclId.Map.add gid gparams' !params;
++                    changed := true)
++              | _ -> ())
++          | _ -> ());
++          false
++        in
++        List.iter
++          (fun (_, fields) ->
++            List.iter
++              (fun (f : field) -> ignore (ty_exists visit f.field_ty))
++              fields)
++          (decl_fields d))
++      decls
++  done;
++  (* Update the declarations *)
++  List.fold_left
++    (fun map (d : type_decl) ->
++      let span = d.item_meta.span in
++      let mentions = mentions (group_of d.def_id) (get_params d.def_id) in
++      let update_fields =
++        List.map (fun (f : field) ->
++            { f with field_ty = nest_ty span info mentions f.field_ty })
++      in
++      let kind =
++        match d.kind with
++        | Struct fields -> Struct (update_fields fields)
++        | Enum variants ->
++            Enum
++              (List.map
++                 (fun (v : variant) -> { v with fields = update_fields v.fields })
++                 variants)
++        | Opaque -> Opaque
++      in
++      if kind = d.kind then map
++      else TypeDeclId.Map.add d.def_id { d with kind } map)
++    TypeDeclId.Map.empty decls
++
++(** {1 Expressions} *)
++
++type ctx = {
++  span : Meta.span;
++  info : decls_info;
++  new_decls : type_decl TypeDeclId.Map.t;
++      (** The updated declarations (only those which changed) *)
++  fresh_fvar_id : unit -> fvar_id;
++}
++
++(** Original and updated types of the fields of a variant, if the variant has
++    updated fields *)
++let changed_fields (ctx : ctx) (adt_id : type_id)
++    (variant_id : VariantId.id option) (generics : generic_args) :
++    (ty * ty) list option =
++  match adt_id with
++  | TAdtId id -> (
++      match TypeDeclId.Map.find_opt id ctx.new_decls with
++      | None -> None
++      | Some new_decl ->
++          let old_decl = TypeDeclId.Map.find id ctx.info.type_decls in
++          let olds =
++            type_decl_get_instantiated_fields_types old_decl variant_id generics
++          in
++          let news =
++            type_decl_get_instantiated_fields_types new_decl variant_id generics
++          in
++          if olds = news then None else Some (List.combine olds news))
++  | _ -> None
++
++let lookup_decl (ctx : ctx) (id : TypeDeclId.id) : type_decl =
++  match TypeDeclId.Map.find_opt id ctx.new_decls with
++  | Some d -> d
++  | None -> TypeDeclId.Map.find id ctx.info.type_decls
++
++let mk_fresh (ctx : ctx) (basename : string option) (ty : ty) : fvar =
++  mk_fresh_fvar ctx.fresh_fvar_id ~basename ty
++
++let mk_pure_fun (fid : pure_builtin_fun_id) (generics : generic_args) (ty : ty)
++    : texpr =
++  { e = Qualif { id = FunOrOp (Fun (Pure fid)); generics }; ty }
++
++(** Convert an expression of type [e.ty] to type [ty], where [ty] is [e.ty] in
++    which some collections have been replaced by their carriers, or the
++    reverse. *)
++let rec convert (ctx : ctx) (ty : ty) (e : texpr) : texpr =
++  let span = ctx.span in
++  if e.ty = ty then e
++  else
++    match (as_collection ctx.info e.ty, as_carrier ty) with
++    | Some src, Some tgt ->
++        (* Collection to carrier: convert, then map the elements *)
++        let e =
++          [%add_loc] mk_app span
++            (mk_pure_fun (ToNested src.kind) src.generics
++               (mk_arrow e.ty (carrier_ty src)))
++            e
++        in
++        map_carrier ctx src tgt.elem e
++    | _ -> (
++        match (as_carrier e.ty, as_collection ctx.info ty) with
++        | Some src, Some tgt ->
++            (* Carrier to collection: map the elements, then convert *)
++            let e = map_carrier ctx src tgt.elem e in
++            let src = { src with elem = tgt.elem; generics = tgt.generics } in
++            [%add_loc] mk_app span
++              (mk_pure_fun (OfNested src.kind) src.generics
++                 (mk_arrow e.ty (collection_ty ctx.info src)))
++              e
++        | _ -> convert_adt ctx ty e)
++
++(** Map the elements of a carrier *)
++and map_carrier (ctx : ctx) (c : collection) (elem : ty) (e : texpr) : texpr =
++  if c.elem = elem then e
++  else
++    let span = ctx.span in
++    let x = mk_fresh ctx (Some "x") c.elem in
++    let f =
++      mk_opened_lambda span (mk_tpat_from_fvar None x)
++        (convert ctx elem (mk_texpr_from_fvar x))
++    in
++    let tgt = { c with elem; generics = { c.generics with types = [ elem ] } } in
++    let generics = { c.generics with types = [ c.elem; elem ] } in
++    let map =
++      mk_pure_fun (NestedMap c.kind) generics
++        (mk_arrows [ f.ty; e.ty ] (carrier_ty tgt))
++    in
++    [%add_loc] mk_apps span map [ f; e ]
++
++(** Convert a value of an ADT (or tuple) whose type arguments contain
++    collections which need to be converted, by rebuilding it *)
++and convert_adt (ctx : ctx) (ty : ty) (e : texpr) : texpr =
++  let span = ctx.span in
++  let unsupported () =
++    [%craise] span
++      ("Unsupported conversion of a collection nested in a recursive type: \
++        can not convert a value of type '"
++      ^ show_ty e.ty ^ "' to type '" ^ show_ty ty ^ "'")
++  in
++  match (e.ty, ty) with
++  | TAdt (src_id, src_generics), TAdt (tgt_id, tgt_generics)
++    when src_id = tgt_id -> (
++      let rebuild (variant_id : VariantId.id option) : tpat * texpr =
++        let src_tys, tgt_tys =
++          match src_id with
++          | TTuple -> (src_generics.types, tgt_generics.types)
++          | TAdtId id ->
++              let d = lookup_decl ctx id in
++              ( type_decl_get_instantiated_fields_types d variant_id
++                  src_generics,
++                type_decl_get_instantiated_fields_types d variant_id
++                  tgt_generics )
++          | TBuiltin _ -> unsupported ()
++        in
++        let vars = List.map (mk_fresh ctx None) src_tys in
++        let pat =
++          mk_adt_pat e.ty variant_id (List.map (mk_tpat_from_fvar None) vars)
++        in
++        let fields =
++          List.map2
++            (fun v ty -> convert ctx ty (mk_texpr_from_fvar v))
++            vars tgt_tys
++        in
++        (pat, mk_adt_texpr span ty variant_id fields)
++      in
++      match src_id with
++      | TTuple ->
++          let pat, value = rebuild None in
++          mk_opened_let false pat e value
++      | TAdtId id -> (
++          let d = lookup_decl ctx id in
++          (* We would need a recursive function to convert a value of a
++             recursive type *)
++          if TypeDeclId.Set.mem id ctx.info.recursive_ids then unsupported ();
++          match d.kind with
++          | Struct _ ->
++              let pat, value = rebuild None in
++              mk_opened_let false pat e value
++          | Enum variants ->
++              let branches =
++                List.mapi
++                  (fun i _ ->
++                    let pat, branch = rebuild (Some (VariantId.of_int i)) in
++                    mk_opened_branch pat branch)
++                  variants
++              in
++              mk_switch ~empty_ty:ty e (Match branches)
++          | Opaque -> unsupported ())
++      | TBuiltin _ -> unsupported ())
++  | _ -> unsupported ()
++
++(** Is a pattern irrefutable? *)
++let rec is_irrefutable (ctx : ctx) (p : tpat) : bool =
++  match p.pat with
++  | PIgnored | POpen _ | PBound _ -> true
++  | PConstant _ -> false
++  | PAdt { variant_id = None; fields } -> List.for_all (is_irrefutable ctx) fields
++  | PAdt { variant_id = Some _; _ } -> false
++
++(** Update a pattern: the sub-patterns in the updated fields now match the
++    carriers. Returns the updated pattern and the let-bindings which introduce
++    the original variables. *)
++let rec update_pat (ctx : ctx) (p : tpat) : tpat * (tpat * texpr) list =
++  match p.pat with
++  | PAdt { variant_id; fields } -> (
++      let adt_id, generics = ty_as_adt ctx.span p.ty in
++      let fields_bindings =
++        match changed_fields ctx adt_id variant_id generics with
++        | None -> List.map (update_pat ctx) fields
++        | Some tys ->
++            List.map2
++              (fun (field : tpat) (old_ty, new_ty) ->
++                if old_ty = new_ty then update_pat ctx field
++                else
++                  match field.pat with
++                  | PIgnored -> ({ field with ty = new_ty }, [])
++                  | POpen (v, mp) ->
++                      let v' = mk_fresh ctx v.basename new_ty in
++                      ( { pat = POpen (v', mp); ty = new_ty },
++                        [ (field, convert ctx old_ty (mk_texpr_from_fvar v')) ] )
++                  | _ ->
++                      if not (is_irrefutable ctx field) then
++                        [%craise] ctx.span
++                          "Unsupported refutable pattern on a collection \
++                           nested in a recursive type";
++                      let field, bindings = update_pat ctx field in
++                      let v' = mk_fresh ctx None new_ty in
++                      ( mk_tpat_from_fvar None v',
++                        (field, convert ctx old_ty (mk_texpr_from_fvar v'))
++                        :: bindings ))
++              fields tys
++      in
++      let fields, bindings = List.split fields_bindings in
++      ({ p with pat = PAdt { variant_id; fields } }, List.concat bindings))
++  | _ -> (p, [])
++
++let bind (bindings : (tpat * texpr) list) (e : texpr) : texpr =
++  mk_opened_lets false bindings e
++
++let rec update_texpr (ctx : ctx) (e : texpr) : texpr =
++  let span = ctx.span in
++  let update = update_texpr ctx in
++  match e.e with
++  | FVar _ | BVar _ | CVar _ | Const _ | EError _ -> e
++  | Qualif qualif -> update_qualif_app ctx e qualif []
++  | App _ -> (
++      let f, args = destruct_apps e in
++      let args = List.map update args in
++      match f.e with
++      | Qualif qualif -> update_qualif_app ctx f qualif args
++      | _ -> [%add_loc] mk_apps span (update f) args)
++  | Lambda (pat, body) ->
++      let pat, bindings = update_pat ctx pat in
++      { e with e = Lambda (pat, bind bindings (update body)) }
++  | Let (monadic, pat, re, next) ->
++      let re = update re in
++      let pat, bindings = update_pat ctx pat in
++      { e with e = Let (monadic, pat, re, bind bindings (update next)) }
++  | Switch (scrut, If (e_then, e_else)) ->
++      { e with e = Switch (update scrut, If (update e_then, update e_else)) }
++  | Switch (scrut, Match branches) ->
++      let branches =
++        List.map
++          (fun (br : match_branch) ->
++            let pat, bindings = update_pat ctx br.pat in
++            { pat; branch = bind bindings (update br.branch) })
++          branches
++      in
++      { e with e = Switch (update scrut, Match branches) }
++  | Loop loop ->
++      let inputs, bindings =
++        List.split (List.map (update_pat ctx) loop.loop_body.inputs)
++      in
++      let loop_body =
++        {
++          inputs;
++          loop_body =
++            bind (List.concat bindings) (update loop.loop_body.loop_body);
++        }
++      in
++      { e with e = Loop { loop with inputs = List.map update loop.inputs; loop_body } }
++  | StructUpdate supd ->
++      let init = Option.map update supd.init in
++      let adt_id, generics = ty_as_adt span e.ty in
++      let tys = changed_fields ctx adt_id None generics in
++      let updates =
++        List.map
++          (fun (fid, fe) ->
++            let fe = update fe in
++            match tys with
++            | None -> (fid, fe)
++            | Some tys ->
++                let _, new_ty = FieldId.nth tys fid in
++                (fid, convert ctx new_ty fe))
++          supd.updates
++      in
++      { e with e = StructUpdate { supd with init; updates } }
++  | Meta (m, inner) -> { e with e = Meta (m, update inner) }
++
++(** Update a (partial) application of a qualifier, whose arguments were already
++    updated *)
++and update_qualif_app (ctx : ctx) (f : texpr) (qualif : qualif)
++    (args : texpr list) : texpr =
++  let span = ctx.span in
++  let default () = [%add_loc] mk_apps span f args in
++  match qualif.id with
++  | AdtCons { adt_id; variant_id } -> (
++      match changed_fields ctx adt_id variant_id qualif.generics with
++      | None -> default ()
++      | Some tys ->
++          let old_tys, new_tys = List.split tys in
++          let adt_ty = TAdt (adt_id, qualif.generics) in
++          (* Eta-expand the missing arguments *)
++          let missing =
++            List.map (mk_fresh ctx None)
++              (Collections.List.drop (List.length args) old_tys)
++          in
++          let args = args @ List.map mk_texpr_from_fvar missing in
++          let f = { f with ty = mk_arrows new_tys adt_ty } in
++          let args = List.map2 (convert ctx) new_tys args in
++          mk_opened_lambdas span
++            (List.map (mk_tpat_from_fvar None) missing)
++            ([%add_loc] mk_apps span f args))
++  | Proj { adt_id; field_id } -> (
++      match changed_fields ctx adt_id None qualif.generics with
++      | None -> default ()
++      | Some tys ->
++          let old_ty, new_ty = FieldId.nth tys field_id in
++          if old_ty = new_ty then default ()
++          else
++            let adt_ty = TAdt (adt_id, qualif.generics) in
++            let f = { f with ty = mk_arrow adt_ty new_ty } in
++            let project (x : texpr) : texpr =
++              convert ctx old_ty ([%add_loc] mk_app span f x)
++            in
++            match args with
++            | x :: args -> [%add_loc] mk_apps span (project x) args
++            | [] ->
++                let x = mk_fresh ctx None adt_ty in
++                mk_opened_lambda span (mk_tpat_from_fvar None x)
++                  (project (mk_texpr_from_fvar x)))
++  | _ -> default ()
++
++(** {1 Type checking} *)
++
++(** Type-check an opened function body (the free variables are all bound in
++    the body) *)
++let type_check_fun_body (trans_ctx : trans_ctx)
++    (type_decls : type_decl TypeDeclId.Map.t) (span : Meta.span)
++    (sg : fun_sig) (body : fun_body) : unit =
++  let fenv = ref FVarId.Map.empty in
++  let visitor =
++    object
++      inherit [_] iter_expr
++
++      method! visit_POpen _ (v : fvar) _ =
++        fenv := FVarId.Map.add v.id v.ty !fenv
++    end
++  in
++  List.iter (visitor#visit_tpat ()) body.inputs;
++  visitor#visit_texpr () body.body;
++  let const_generics =
++    ConstGenericVarId.Map.of_list
++      (List.map
++         (fun (cg : const_generic_param) -> (cg.index, TLiteral cg.ty))
++         sg.generics.const_generics)
++  in
++  let ctx : PureTypeCheck.tc_ctx =
++    {
++      type_decls;
++      global_decls = trans_ctx.crate.global_decls;
++      const_generics;
++      decls_ctx = trans_ctx;
++      fenv = !fenv;
++      benv = [];
++      pbenv = None;
++      bvar_counter = BVarId.zero;
++    }
++  in
++  PureTypeCheck.check_texpr span ctx body.body
++
++(** {1 Entry point} *)
++
++(** Apply the pass to all the declarations. Only for the Lean backend. *)
++let apply (trans_ctx : trans_ctx) (type_decls : type_decl list)
++    (funs : pure_fun_translation list) :
++    type_decl list * pure_fun_translation list =
++  let type_decls_map =
++    TypeDeclId.Map.of_list
++      (List.map (fun (d : type_decl) -> (d.def_id, d)) type_decls)
++  in
++  let vec_ids =
++    TypeDeclId.Set.of_list
++      (List.filter_map
++         (fun (d : type_decl) ->
++           if builtin_rust_name d = Some "alloc::vec::Vec" then Some d.def_id
++           else None)
++         type_decls)
++  in
++  let recursive_ids =
++    TypeDeclId.Set.of_list
++      (List.filter_map
++         (fun (id, (g : Charon.GAst.type_declaration_group)) ->
++           match g with
++           | RecGroup _ -> Some id
++           | NonRecGroup _ -> None)
++         (TypeDeclId.Map.bindings trans_ctx.type_ctx.type_decls_groups))
++  in
++  let info = { type_decls = type_decls_map; vec_ids; recursive_ids } in
++  let new_decls = compute_nested_decls trans_ctx info in
++  if TypeDeclId.Map.is_empty new_decls then (type_decls, funs)
++  else
++    let all_decls =
++      TypeDeclId.Map.union (fun _ d _ -> Some d) new_decls type_decls_map
++    in
++    let update_fun (f : fun_decl) : fun_decl =
++      match f.body with
++      | None -> f
++      | Some body ->
++          let span = f.item_meta.span in
++          let _, fresh_fvar_id = FVarId.fresh_stateful_generator () in
++          let _, opened = open_all_fun_body fresh_fvar_id span body in
++          let ctx = { span; info; new_decls; fresh_fvar_id } in
++          let inputs, bindings =
++            List.split (List.map (update_pat ctx) opened.inputs)
++          in
++          let updated =
++            {
++              inputs;
++              body = bind (List.concat bindings) (update_texpr ctx opened.body);
++            }
++          in
++          if updated = opened then f
++          else (
++            [%ltrace
++              "Updated nested collections in: " ^ f.name ^ "\n"
++              ^ PrintPure.fun_body_to_string
++                  (trans_ctx_to_pure_fmt_env trans_ctx)
++                  updated];
++            if !Config.sanity_checks then
++              type_check_fun_body trans_ctx all_decls span f.signature updated;
++            { f with body = Some (close_all_fun_body span updated) })
++    in
++    let funs =
++      List.map
++        (fun (t : pure_fun_translation) ->
++          {
++            f = update_fun t.f;
++            loops = List.map update_fun t.loops;
++            bodies = List.map update_fun t.bodies;
++          })
++        funs
++    in
++    let type_decls =
++      List.map
++        (fun (d : type_decl) ->
++          Option.value ~default:d (TypeDeclId.Map.find_opt d.def_id new_decls))
++        type_decls
++    in
++    (type_decls, funs)
+diff --git a/src/pure/PureTypeCheck.ml b/src/pure/PureTypeCheck.ml
+index 3b445d2..ec18943 100644
+--- a/src/pure/PureTypeCheck.ml
++++ b/src/pure/PureTypeCheck.ml
+@@ -66,7 +66,7 @@ let get_adt_field_types (span : Meta.span)
+           if variant_id = fuel_zero_id then []
+           else if variant_id = fuel_succ_id then [ mk_fuel_ty ]
+           else [%craise] span "Unreachable: improper variant id for fuel type"
+-      | TArray | TSlice | TStr | TRawPtr _ ->
++      | TArray | TSlice | TStr | TRawPtr _ | TNested _ ->
+           (* Array: when not symbolic values (for instance, because of aggregates),
+              the array expressions are introduced as struct updates *)
+           [%craise] span "Attempting to access the fields of an opaque type")
+diff --git a/tests/lean/NestedCollections.lean b/tests/lean/NestedCollections.lean
+new file mode 100644
+index 0000000..59b2f6c
+--- /dev/null
++++ b/tests/lean/NestedCollections.lean
+@@ -0,0 +1 @@
++import NestedCollections.Checks
+diff --git a/tests/lean/NestedCollections/Checks.lean b/tests/lean/NestedCollections/Checks.lean
+new file mode 100644
+index 0000000..ca249b4
+--- /dev/null
++++ b/tests/lean/NestedCollections/Checks.lean
+@@ -0,0 +1,44 @@
++import NestedCollections.NestedCollections
++
++/-! Evaluate the model of `tests/src/nested-collections.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace nested_collections.checks
++open Aeneas Aeneas.Std Result
++
++def okU32 : Result U32 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++def okI64 : Result I64 → Option Int
++  | ok a => some a.val
++  | _ => none
++
++#guard okU32 (tree_scenario 2#u32 3#u32) == some 11346
++#guard okU32 (tree_scenario 0#u32 0#u32) == some 11296
++#guard okU32 (tree_pop_scenario 4#u32) == some 5060
++#guard okU32 (tree_pop_scenario 0#u32) == some 1060
++
++#guard okI64 (expr_scenario 3#u32) == some 135
++#guard okI64 (expr_scenario 4#u32) == some 35
++
++#guard okU32 (doc_scenario 5#u32) == some 2206
++#guard okU32 (doc_scenario 0#u32) == some 2156
++
++/-! The conversions between the collections and their carriers are erased by
++    `simp`. -/
++example (v : alloc.vec.Vec Tree) : width (Tree.Node v.toNested) = ok (alloc.vec.Vec.len v) := by
++  simp [width]
++
++/-! The nested carriers and conversions add no axioms. -/
++
++/-- info: 'nested_collections.tree_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms tree_scenario
++
++/-- info: 'nested_collections.expr_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms expr_scenario
++
++/-- info: 'nested_collections.doc_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms doc_scenario
++
++end nested_collections.checks
+diff --git a/tests/lean/NestedCollections/NestedCollections.lean b/tests/lean/NestedCollections/NestedCollections.lean
+new file mode 100644
+index 0000000..b850839
+--- /dev/null
++++ b/tests/lean/NestedCollections/NestedCollections.lean
+@@ -0,0 +1,1129 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_collections]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_collections
++
++/-- [nested_collections::Tree]
++    Source: 'tests/src/nested-collections.rs', lines 17:0-25:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Tree where
++| Leaf : _root_.Aeneas.Std.U32 → Tree
++| Node : _root_.Aeneas.Std.NestedVec Tree → Tree
++| Named : _root_.Aeneas.Std.NestedVec (_root_.String × Tree) → Tree
++| Boxed : _root_.Aeneas.Std.NestedSlice Tree → Tree
++| Pair : _root_.Aeneas.Std.NestedArray Tree 2#usize → Tree
++| Opt : _root_.Option Tree → Tree
++| Grid :
++  _root_.Aeneas.Std.NestedVec (_root_.Aeneas.Std.NestedVec Tree) →
++  Tree
++
++/-- [nested_collections::leaf]:
++    Source: 'tests/src/nested-collections.rs', lines 27:0-29:1
++    Visibility: public -/
++def leaf
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Leaf n)
++
++/-- [nested_collections::node]:
++    Source: 'tests/src/nested-collections.rs', lines 31:0-33:1
++    Visibility: public -/
++def node
++  (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Node
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested children))
++
++/-- [nested_collections::node2]:
++    Source: 'tests/src/nested-collections.rs', lines 35:0-40:1
++    Visibility: public -/
++def node2
++  (a : _root_.nested_collections.Tree) (b : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let children ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Tree) a
++  let children1 ← _root_.Aeneas.Std.alloc.vec.Vec.push children b
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Node
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested children1))
++
++/-- [nested_collections::named]:
++    Source: 'tests/src/nested-collections.rs', lines 42:0-46:1
++    Visibility: public -/
++def named
++  (name1 : _root_.String) (t : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let entries ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.String × _root_.nested_collections.Tree)) (name1, t)
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Named
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested entries))
++
++/-- [nested_collections::boxed]:
++    Source: 'tests/src/nested-collections.rs', lines 48:0-50:1
++    Visibility: public -/
++def boxed
++  (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let s ← _root_.Aeneas.Std.alloc.vec.Vec.into_boxed_slice children
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Boxed
++    (_root_.Aeneas.Std.Slice.toNested s))
++
++/-- [nested_collections::pair]:
++    Source: 'tests/src/nested-collections.rs', lines 52:0-54:1
++    Visibility: public -/
++def pair
++  (a : _root_.nested_collections.Tree) (b : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Pair
++    (_root_.Aeneas.Std.Array.toNested
++    (_root_.Aeneas.Std.Array.make 2#usize [ a, b ])))
++
++/-- [nested_collections::opt]:
++    Source: 'tests/src/nested-collections.rs', lines 56:0-61:1
++    Visibility: public -/
++def opt
++  (t : _root_.Option _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  match t with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Opt none)
++  | some _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Opt t)
++
++/-- [nested_collections::grid]:
++    Source: 'tests/src/nested-collections.rs', lines 63:0-67:1
++    Visibility: public -/
++def grid
++  (row : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let rows ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree)) row
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Grid
++    (_root_.Aeneas.Std.NestedVec.map
++    (fun x => _root_.Aeneas.Std.alloc.vec.Vec.toNested x)
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested rows)))
++
++mutual
++
++/-- [nested_collections::sum_slice]: loop 0:
++    Source: 'tests/src/nested-collections.rs', lines 72:4-75:5
++    Visibility: public -/
++@[rust_loop]
++def sum_slice_loop
++  (ts : _root_.Aeneas.Std.Slice _root_.nested_collections.Tree)
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => sum_slice_loop.body ts s1 i1 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum_slice]: loop body 0:
++    Source: 'tests/src/nested-collections.rs', lines 72:4-75:5
++    Visibility: public -/
++@[rust_loop_body]
++def sum_slice_loop.body
++  (ts : _root_.Aeneas.Std.Slice _root_.nested_collections.Tree)
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len ts
++  if i < i1
++  then
++    let t ← Slice.index_usize ts i
++    let i2 ← sum t
++    let s1 ← lift (core.num.U32.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum_slice]:
++    Source: 'tests/src/nested-collections.rs', lines 69:0-77:1
++    Visibility: public -/
++@[reducible]
++def sum_slice
++  (ts : _root_.Aeneas.Std.Slice _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  sum_slice_loop ts 0#u32 0#usize
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum]: loop 0:
++    Source: 'tests/src/nested-collections.rs', lines 85:12-87:13
++    Visibility: public -/
++@[rust_loop]
++def sum_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.String ×
++  _root_.nested_collections.Tree)) (s : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, s1) => sum_loop0.body iter1 s1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.String ×
++      _root_.nested_collections.Tree)) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.String ×
++      _root_.nested_collections.Tree)) × _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.U32))
++    (iter, s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum]: loop 1:
++    Source: 'tests/src/nested-collections.rs', lines 97:12-100:13
++    Visibility: public -/
++@[rust_loop]
++def sum_loop1
++  (rows : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections.Tree)) (s : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => sum_loop1.body rows s1 i1 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum]: loop body 0:
++    Source: 'tests/src/nested-collections.rs', lines 85:12-87:13
++    Visibility: public -/
++@[rust_loop_body]
++def sum_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.String ×
++  _root_.nested_collections.Tree)) (s : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.String ×
++    _root_.nested_collections.Tree)) × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++  | some p =>
++    let (_, t) := p
++    let i ← sum t
++    let s1 ← lift (core.num.U32.wrapping_add s i)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, s1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum]: loop body 1:
++    Source: 'tests/src/nested-collections.rs', lines 97:12-100:13
++    Visibility: public -/
++@[rust_loop_body]
++def sum_loop1.body
++  (rows : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections.Tree)) (s : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len rows
++  if i < i1
++  then
++    let v ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree)) rows
++        i
++    let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref v
++    let i2 ← sum_slice s1
++    let s2 ← lift (core.num.U32.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s2, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::sum]:
++    Source: 'tests/src/nested-collections.rs', lines 79:0-104:1
++    Visibility: public -/
++def sum
++  (t : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match t with
++  | _root_.nested_collections.Tree.Leaf n => _root_.Aeneas.Std.Result.ok n
++  | _root_.nested_collections.Tree.Node children =>
++    let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref children1
++    sum_slice s
++  | _root_.nested_collections.Tree.Named entries =>
++    let entries1 := _root_.Aeneas.Std.NestedVec.toVec entries
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref entries1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    sum_loop0 iter 0#u32
++  | _root_.nested_collections.Tree.Boxed children =>
++    let children1 := _root_.Aeneas.Std.NestedSlice.toSlice children
++    sum_slice children1
++  | _root_.nested_collections.Tree.Pair ts =>
++    let ts1 := _root_.Aeneas.Std.NestedArray.toArray ts
++    let t1 ← Array.index_usize ts1 0#usize
++    let i ← sum t1
++    let t2 ← Array.index_usize ts1 1#usize
++    let i1 ← sum t2
++    _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i i1)
++  | _root_.nested_collections.Tree.Opt o =>
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 0#u32
++    | some t1 => sum t1
++  | _root_.nested_collections.Tree.Grid rows =>
++    let rows1 :=
++      _root_.Aeneas.Std.NestedVec.toVec (_root_.Aeneas.Std.NestedVec.map
++        (fun x => _root_.Aeneas.Std.NestedVec.toVec x) rows)
++    sum_loop1 rows1 0#u32 0#usize
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_collections::width]:
++    Source: 'tests/src/nested-collections.rs', lines 107:0-123:1
++    Visibility: public -/
++def width
++  (t : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  match t with
++  | _root_.nested_collections.Tree.Leaf _ =>
++    _root_.Aeneas.Std.Result.ok 0#usize
++  | _root_.nested_collections.Tree.Node children =>
++    let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len children1)
++  | _root_.nested_collections.Tree.Named entries =>
++    let entries1 := _root_.Aeneas.Std.NestedVec.toVec entries
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len entries1)
++  | _root_.nested_collections.Tree.Boxed children =>
++    let children1 := _root_.Aeneas.Std.NestedSlice.toSlice children
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Slice.len children1)
++  | _root_.nested_collections.Tree.Pair _ =>
++    _root_.Aeneas.Std.Result.ok 2#usize
++  | _root_.nested_collections.Tree.Opt o =>
++    let b := _root_.Aeneas.Std.core.option.Option.is_some o
++    if b
++    then _root_.Aeneas.Std.Result.ok 1#usize
++    else _root_.Aeneas.Std.Result.ok 0#usize
++  | _root_.nested_collections.Tree.Grid rows =>
++    let rows1 :=
++      _root_.Aeneas.Std.NestedVec.toVec (_root_.Aeneas.Std.NestedVec.map
++        (fun x => _root_.Aeneas.Std.NestedVec.toVec x) rows)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len rows1)
++
++/-- [nested_collections::push_child]:
++    Source: 'tests/src/nested-collections.rs', lines 125:0-133:1
++    Visibility: public -/
++def push_child
++  (t : _root_.nested_collections.Tree) (c : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.nested_collections.Tree)
++  := do
++  let joined ←
++    match t with
++    | _root_.nested_collections.Tree.Leaf _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Node children =>
++      do
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      let children2 ← _root_.Aeneas.Std.alloc.vec.Vec.push children1 c
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (true,
++        _root_.nested_collections.Tree.Node
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested children2)) : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Named _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Boxed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Pair _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Opt _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Grid _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree (_root_.Bool ×
++        _root_.nested_collections.Tree))
++  match joined with
++  | _root_.Sum.inl t1 => _root_.Aeneas.Std.Result.ok (false, t1)
++  | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
++
++/-- [nested_collections::pop_child]:
++    Source: 'tests/src/nested-collections.rs', lines 135:0-140:1
++    Visibility: public -/
++def pop_child
++  (t : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.nested_collections.Tree) ×
++    _root_.nested_collections.Tree)
++  := do
++  let joined ←
++    match t with
++    | _root_.nested_collections.Tree.Leaf _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Node children =>
++      do
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      let (o, v) ← _root_.Aeneas.Std.alloc.vec.Vec.pop children1
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (o,
++        _root_.nested_collections.Tree.Node
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested v)) : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Named _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Boxed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Pair _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Opt _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++    | _root_.nested_collections.Tree.Grid _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree ((_root_.Option
++        _root_.nested_collections.Tree) × _root_.nested_collections.Tree))
++  match joined with
++  | _root_.Sum.inl t1 => _root_.Aeneas.Std.Result.ok (none, t1)
++  | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
++
++/-- [nested_collections::set_leaf]:
++    Source: 'tests/src/nested-collections.rs', lines 142:0-148:1
++    Visibility: public -/
++def set_leaf
++  (t : _root_.nested_collections.Tree) (i : _root_.Aeneas.Std.Usize)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let joined ←
++    match t with
++    | _root_.nested_collections.Tree.Leaf _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Node children =>
++      do
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      let (_, index_mut_back) ←
++        _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++          _root_.nested_collections.Tree) children1 i
++      let v := index_mut_back (_root_.nested_collections.Tree.Leaf n)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_collections.Tree.Node
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested v)) : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Named _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Boxed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Pair ts =>
++      do
++      let ts1 := _root_.Aeneas.Std.NestedArray.toArray ts
++      massert (i < 2#usize)
++      let (t1, index_mut_back) ← Array.index_mut_usize ts1 i
++      let ts2 := index_mut_back t1
++      let a ← Array.update ts2 i (_root_.nested_collections.Tree.Leaf n)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_collections.Tree.Pair (_root_.Aeneas.Std.Array.toNested
++        a)) : _root_.Sum _root_.nested_collections.Tree
++        _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Opt _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Grid _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++  match joined with
++  | _root_.Sum.inl t1 => _root_.Aeneas.Std.Result.ok t1
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++mutual
++
++/-- [nested_collections::bump]: loop 0:
++    Source: 'tests/src/nested-collections.rs', lines 156:12-159:13
++    Visibility: public -/
++@[rust_loop]
++def bump_loop
++  (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree)
++  (i : _root_.Aeneas.Std.Usize) (t : _root_.Unit) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections.Tree) × _root_.Aeneas.Std.Usize × _root_.Unit
++    × _root_.Unit)
++  := do
++  loop
++    (fun (children1, i1) => bump_loop.body children1 i1 :
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections.Tree) × _root_.Aeneas.Std.Usize)
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) ×
++      _root_.Aeneas.Std.Usize × _root_.Unit × _root_.Unit)))
++    (children, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::bump]: loop body 0:
++    Source: 'tests/src/nested-collections.rs', lines 156:12-159:13
++    Visibility: public -/
++@[rust_loop_body]
++def bump_loop.body
++  (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) ×
++    _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections.Tree) × _root_.Aeneas.Std.Usize × _root_.Unit
++    × _root_.Unit))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len children
++  if i < i1
++  then
++    let (t, index_mut_back) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.nested_collections.Tree) children i
++    let t1 ← bump t
++    let i2 ← i + 1#usize
++    let children1 := index_mut_back t1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (children1,
++      i2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (children,
++      i, (), ()))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::bump]:
++    Source: 'tests/src/nested-collections.rs', lines 151:0-167:1
++    Visibility: public -/
++def bump
++  (t : _root_.nested_collections.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Tree
++  := do
++  let joined ←
++    match t with
++    | _root_.nested_collections.Tree.Leaf n =>
++      do
++      let n1 ← lift (core.num.U32.wrapping_add n 1#u32)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_collections.Tree.Leaf n1) : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Node children =>
++      do
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      let (children2, _, _, _) ← bump_loop children1 0#usize ()
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_collections.Tree.Node
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested children2)) : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Named _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Boxed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Pair ts =>
++      do
++      let ts1 := _root_.Aeneas.Std.NestedArray.toArray ts
++      let (t1, index_mut_back) ← Array.index_mut_usize ts1 0#usize
++      let t2 ← bump t1
++      let ts2 := index_mut_back t2
++      let (t3, index_mut_back1) ← Array.index_mut_usize ts2 1#usize
++      let t4 ← bump t3
++      let a := index_mut_back1 t4
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_collections.Tree.Pair (_root_.Aeneas.Std.Array.toNested
++        a)) : _root_.Sum _root_.nested_collections.Tree
++        _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Opt _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++    | _root_.nested_collections.Tree.Grid _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.nested_collections.Tree _root_.nested_collections.Tree)
++  match joined with
++  | _root_.Sum.inl t1 => _root_.Aeneas.Std.Result.ok t1
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++mutual
++
++/-- [nested_collections::Expr]
++    Source: 'tests/src/nested-collections.rs', lines 170:0-174:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Int : _root_.Aeneas.Std.I64 → Expr
++| List : _root_.Aeneas.Std.NestedVec Expr → Metadata → Expr
++| Call : _root_.String → _root_.Aeneas.Std.NestedVec Expr → Expr
++
++/-- [nested_collections::Metadata]
++    Source: 'tests/src/nested-collections.rs', lines 176:0-179:1
++    Visibility: public -/
++inductive Metadata where
++| mk : _root_.Option Storage → _root_.Aeneas.Std.U32 → Metadata
++
++/-- [nested_collections::Storage]
++    Source: 'tests/src/nested-collections.rs', lines 181:0-183:1
++    Visibility: public -/
++inductive Storage where
++| mk :
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++    Expr →
++  Storage
++
++end
++
++def Metadata.storage (x : _root_.nested_collections.Metadata) :=
++  match x with | _root_.nested_collections.Metadata.mk x1 _ => x1
++
++def Metadata.line (x : _root_.nested_collections.Metadata) :=
++  match x with | _root_.nested_collections.Metadata.mk _ x1 => x1
++
++@[simp]
++theorem Metadata.storage._simpLemma_ (storage : _root_.Option
++  _root_.nested_collections.Storage) (line1 : _root_.Aeneas.Std.U32) :
++  (_root_.nested_collections.Metadata.mk storage line1).storage = storage :=
++  by rfl
++
++@[simp]
++theorem Metadata.line._simpLemma_ (storage : _root_.Option
++  _root_.nested_collections.Storage) (line1 : _root_.Aeneas.Std.U32) :
++  (_root_.nested_collections.Metadata.mk storage line1).line = line1 := by rfl
++
++def Storage.entries (x : _root_.nested_collections.Storage) :=
++  match x with | _root_.nested_collections.Storage.mk x1 => x1
++
++@[simp]
++theorem Storage.entries._simpLemma_ (entries :
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.nested_collections.Expr) :
++  (_root_.nested_collections.Storage.mk entries).entries = entries := by rfl
++
++/-- [nested_collections::plain]:
++    Source: 'tests/src/nested-collections.rs', lines 185:0-190:1
++    Visibility: public -/
++def plain
++  (line1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Metadata
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Metadata.mk none
++    line1)
++
++/-- [nested_collections::with_entry]:
++    Source: 'tests/src/nested-collections.rs', lines 192:0-199:1
++    Visibility: public -/
++def with_entry
++  (key : _root_.Aeneas.Std.U32) (e : _root_.nested_collections.Expr)
++  (line1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Metadata
++  := do
++  let entries ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.nested_collections.Expr
++  let (_, entries1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 entries key e
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Metadata.mk (some
++    (_root_.nested_collections.Storage.mk entries1)) line1)
++
++/-- [nested_collections::line]:
++    Source: 'tests/src/nested-collections.rs', lines 203:0-205:1
++    Visibility: public -/
++def line
++  (meta1 : _root_.nested_collections.Metadata) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok meta1.line
++
++/-- [nested_collections::list]:
++    Source: 'tests/src/nested-collections.rs', lines 207:0-209:1
++    Visibility: public -/
++def list
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Expr)
++  (meta1 : _root_.nested_collections.Metadata) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Expr
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Expr.List
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested items) meta1)
++
++/-- [nested_collections::call]:
++    Source: 'tests/src/nested-collections.rs', lines 211:0-213:1
++    Visibility: public -/
++def call
++  (name1 : _root_.String)
++  (args : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Expr) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Expr
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Expr.Call name1
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested args))
++
++mutual
++
++/-- [nested_collections::eval]: loop 0:
++    Source: 'tests/src/nested-collections.rs', lines 221:12-224:13
++    Visibility: public -/
++@[rust_loop]
++def eval_loop
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Expr)
++  (key : _root_.Aeneas.Std.U32) (s : _root_.Aeneas.Std.I64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.I64
++  := do
++  loop
++    (fun (s1, i1) => eval_loop.body items key s1 i1 : (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.I64))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::eval]: loop body 0:
++    Source: 'tests/src/nested-collections.rs', lines 221:12-224:13
++    Visibility: public -/
++@[rust_loop_body]
++def eval_loop.body
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Expr)
++  (key : _root_.Aeneas.Std.U32) (s : _root_.Aeneas.Std.I64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.I64)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len items
++  if i < i1
++  then
++    let e ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.nested_collections.Expr) items i
++    let i2 ← eval e key
++    let s1 ← lift (core.num.I64.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::eval]:
++    Source: 'tests/src/nested-collections.rs', lines 215:0-235:1
++    Visibility: public -/
++def eval
++  (e : _root_.nested_collections.Expr) (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.I64
++  := do
++  match e with
++  | _root_.nested_collections.Expr.Int n => _root_.Aeneas.Std.Result.ok n
++  | _root_.nested_collections.Expr.List items meta1 =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let i ← _root_.nested_collections.line meta1
++    let s ← lift (UScalar.hcast .I64 i)
++    let n ← eval_loop items1 key s 0#usize
++    match meta1.storage with
++    | none => _root_.Aeneas.Std.Result.ok n
++    | some storage =>
++      let o ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get
++          (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++          core.cmp.OrdU32 core.cmp.OrdU32 storage.entries key
++      match o with
++      | none => _root_.Aeneas.Std.Result.ok n
++      | some x =>
++        let i1 ← eval x key
++        _root_.Aeneas.Std.Result.ok (core.num.I64.wrapping_add n i1)
++  | _root_.nested_collections.Expr.Call _ args =>
++    let args1 := _root_.Aeneas.Std.NestedVec.toVec args
++    let i := _root_.Aeneas.Std.alloc.vec.Vec.len args1
++    _root_.Aeneas.Std.Result.ok (UScalar.hcast .I64 i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_collections::append]:
++    Source: 'tests/src/nested-collections.rs', lines 237:0-243:1
++    Visibility: public -/
++def append
++  (e : _root_.nested_collections.Expr) (x : _root_.nested_collections.Expr) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Expr
++  := do
++  match e with
++  | _root_.nested_collections.Expr.Int _ => _root_.Aeneas.Std.Result.ok e
++  | _root_.nested_collections.Expr.List items m =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let items2 ← _root_.Aeneas.Std.alloc.vec.Vec.push items1 x
++    _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Expr.List
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested items2) m)
++  | _root_.nested_collections.Expr.Call s args =>
++    let args1 := _root_.Aeneas.Std.NestedVec.toVec args
++    let args2 ← _root_.Aeneas.Std.alloc.vec.Vec.push args1 x
++    _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Expr.Call s
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested args2))
++
++/-- [nested_collections::Wrapper]
++    Source: 'tests/src/nested-collections.rs', lines 247:0-250:1
++    Visibility: public -/
++structure Wrapper (T : Type) where
++  items : _root_.Aeneas.Std.NestedVec T
++  tag : _root_.Aeneas.Std.U32
++
++/-- [nested_collections::Doc]
++    Source: 'tests/src/nested-collections.rs', lines 252:0-255:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Doc where
++| Text : _root_.Aeneas.Std.U32 → Doc
++| Block : _root_.nested_collections.Wrapper Doc → Doc
++
++/-- [nested_collections::text]:
++    Source: 'tests/src/nested-collections.rs', lines 257:0-259:1
++    Visibility: public -/
++def text
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Doc
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Doc.Text n)
++
++/-- [nested_collections::block]:
++    Source: 'tests/src/nested-collections.rs', lines 261:0-266:1
++    Visibility: public -/
++def block
++  (tag : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Doc
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Doc.Block
++    {
++      items :=
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++          (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.nested_collections.Doc)),
++      tag
++    })
++
++/-- [nested_collections::add]:
++    Source: 'tests/src/nested-collections.rs', lines 268:0-277:1
++    Visibility: public -/
++def add
++  (d : _root_.nested_collections.Doc) (child : _root_.nested_collections.Doc) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.nested_collections.Doc)
++  := do
++  match d with
++  | _root_.nested_collections.Doc.Text _ =>
++    _root_.Aeneas.Std.Result.ok (false, d)
++  | _root_.nested_collections.Doc.Block w =>
++    let v ←
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.NestedVec.toVec
++        w.items) child
++    let i ← lift (core.num.U32.wrapping_add w.tag 1#u32)
++    _root_.Aeneas.Std.Result.ok (true, _root_.nested_collections.Doc.Block
++      { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested v), tag := i })
++
++/-- [nested_collections::take_last]:
++    Source: 'tests/src/nested-collections.rs', lines 279:0-284:1
++    Visibility: public -/
++def take_last
++  (d : _root_.nested_collections.Doc) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.nested_collections.Doc) ×
++    _root_.nested_collections.Doc)
++  := do
++  match d with
++  | _root_.nested_collections.Doc.Text _ =>
++    _root_.Aeneas.Std.Result.ok (none, d)
++  | _root_.nested_collections.Doc.Block w =>
++    let (o, v) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.pop (_root_.Aeneas.Std.NestedVec.toVec
++        w.items)
++    _root_.Aeneas.Std.Result.ok (o, _root_.nested_collections.Doc.Block
++      { w with items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested v) })
++
++mutual
++
++/-- [nested_collections::doc_size]: loop 0:
++    Source: 'tests/src/nested-collections.rs', lines 292:12-295:13
++    Visibility: public -/
++@[rust_loop]
++def doc_size_loop
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Doc)
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => doc_size_loop.body v s1 i1 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::doc_size]: loop body 0:
++    Source: 'tests/src/nested-collections.rs', lines 292:12-295:13
++    Visibility: public -/
++@[rust_loop_body]
++def doc_size_loop.body
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Doc)
++  (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len v
++  if i < i1
++  then
++    let d ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.nested_collections.Doc) v i
++    let i2 ← doc_size d
++    let s1 ← lift (core.num.U32.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections::doc_size]:
++    Source: 'tests/src/nested-collections.rs', lines 286:0-299:1
++    Visibility: public -/
++def doc_size
++  (d : _root_.nested_collections.Doc) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match d with
++  | _root_.nested_collections.Doc.Text n => _root_.Aeneas.Std.Result.ok n
++  | _root_.nested_collections.Doc.Block w =>
++    doc_size_loop (_root_.Aeneas.Std.NestedVec.toVec w.items) w.tag 0#usize
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_collections::wrap_nums]:
++    Source: 'tests/src/nested-collections.rs', lines 302:0-304:1
++    Visibility: public -/
++def wrap_nums
++  (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (tag : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.nested_collections.Wrapper
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.Aeneas.Std.Result.ok
++    { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested items), tag }
++
++/-- [nested_collections::wrapper_len]:
++    Source: 'tests/src/nested-collections.rs', lines 306:0-308:1
++    Visibility: public -/
++def wrapper_len
++  {T : Type} (w : _root_.nested_collections.Wrapper T) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len
++    (_root_.Aeneas.Std.NestedVec.toVec w.items))
++
++/-- [nested_collections::retag]:
++    Source: 'tests/src/nested-collections.rs', lines 310:0-312:1
++    Visibility: public -/
++def retag
++  {T : Type} (w : _root_.nested_collections.Wrapper T)
++  (tag : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.nested_collections.Wrapper T)
++  := do
++  _root_.Aeneas.Std.Result.ok { w with tag }
++
++/-- [nested_collections::wrapper_first]:
++    Source: 'tests/src/nested-collections.rs', lines 314:0-320:1
++    Visibility: public -/
++def wrapper_first
++  (w : _root_.nested_collections.Wrapper _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i :=
++    _root_.Aeneas.Std.alloc.vec.Vec.len (_root_.Aeneas.Std.NestedVec.toVec
++      w.items)
++  if i > 0#usize
++  then
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.NestedVec.toVec w.items)
++      0#usize
++  else _root_.Aeneas.Std.Result.ok w.tag
++
++/-- [nested_collections::tree_scenario]:
++    Source: 'tests/src/nested-collections.rs', lines 323:0-338:1
++    Visibility: public -/
++def tree_scenario
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let t ← _root_.nested_collections.leaf a
++  let t1 ← _root_.nested_collections.leaf b
++  let t2 ← _root_.nested_collections.leaf 1#u32
++  let t3 ← _root_.nested_collections.pair t1 t2
++  let t4 ← _root_.nested_collections.node2 t t3
++  let s ←
++    _root_.Aeneas.Std.alloc.string.FromStrString.from_ (_root_.Aeneas.Std.toStr
++      "x")
++  let t5 ← _root_.nested_collections.leaf 10#u32
++  let t6 ← _root_.nested_collections.named s t5
++  let (_, t7) ← _root_.nested_collections.push_child t4 t6
++  let t8 ← _root_.nested_collections.leaf 100#u32
++  let bs ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Tree) t8
++  let t9 ← _root_.nested_collections.boxed bs
++  let (_, t10) ← _root_.nested_collections.push_child t7 t9
++  let t11 ← _root_.nested_collections.leaf 1000#u32
++  let t12 ← _root_.nested_collections.opt (some t11)
++  let (_, t13) ← _root_.nested_collections.push_child t10 t12
++  let t14 ← _root_.nested_collections.leaf 7#u32
++  let row ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Tree) t14
++  let t15 ← _root_.nested_collections.leaf 8#u32
++  let row1 ← _root_.Aeneas.Std.alloc.vec.Vec.push row t15
++  let t16 ← _root_.nested_collections.grid row1
++  let (_, t17) ← _root_.nested_collections.push_child t13 t16
++  let t18 ← _root_.nested_collections.bump t17
++  let i ← _root_.nested_collections.width t18
++  let w ← lift (UScalar.cast .U32 i)
++  let s1 ← _root_.nested_collections.sum t18
++  let i1 ← lift (core.num.U32.wrapping_mul s1 10#u32)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 w)
++
++/-- [nested_collections::tree_pop_scenario]:
++    Source: 'tests/src/nested-collections.rs', lines 340:0-353:1
++    Visibility: public -/
++def tree_pop_scenario
++  (a : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let t ← _root_.nested_collections.leaf a
++  let children ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Tree) t
++  let i ← a + 1#u32
++  let t1 ← _root_.nested_collections.leaf i
++  let children1 ← _root_.Aeneas.Std.alloc.vec.Vec.push children t1
++  let t2 ← _root_.nested_collections.node children1
++  let t3 ← _root_.nested_collections.set_leaf t2 0#usize 5#u32
++  let (o, t4) ← _root_.nested_collections.pop_child t3
++  let popped ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 0#u32
++    | some c => _root_.nested_collections.sum c
++  let t5 ← _root_.nested_collections.leaf 1#u32
++  let t6 ← _root_.nested_collections.leaf 2#u32
++  let p ← _root_.nested_collections.pair t5 t6
++  let p1 ← _root_.nested_collections.set_leaf p 1#usize 9#u32
++  let i1 ← popped * 1000#u32
++  let i2 ← _root_.nested_collections.sum t4
++  let i3 ← i2 * 10#u32
++  let i4 ← i1 + i3
++  let i5 ← _root_.nested_collections.sum p1
++  i4 + i5
++
++/-- [nested_collections::expr_scenario]:
++    Source: 'tests/src/nested-collections.rs', lines 355:0-366:1
++    Visibility: public -/
++def expr_scenario
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.I64
++  := do
++  let args ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Expr) (_root_.nested_collections.Expr.Int
++      1#i64)
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Expr) (_root_.nested_collections.Expr.Int
++      5#i64)
++  let s ←
++    _root_.Aeneas.Std.alloc.string.FromStrString.from_ (_root_.Aeneas.Std.toStr
++      "f")
++  let e ← _root_.nested_collections.call s args
++  let items1 ← _root_.Aeneas.Std.alloc.vec.Vec.push items e
++  let m ←
++    _root_.nested_collections.with_entry 3#u32
++      (_root_.nested_collections.Expr.Int 100#i64) 7#u32
++  let e1 ← _root_.nested_collections.list items1 m
++  let e2 ←
++    _root_.nested_collections.append e1 (_root_.nested_collections.Expr.Int
++      20#i64)
++  let m1 ← _root_.nested_collections.plain 2#u32
++  let inner ←
++    _root_.nested_collections.list (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_collections.Expr) m1
++  let e3 ← _root_.nested_collections.append e2 inner
++  _root_.nested_collections.eval e3 key
++
++/-- [nested_collections::doc_scenario]:
++    Source: 'tests/src/nested-collections.rs', lines 368:0-385:1
++    Visibility: public -/
++def doc_scenario
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let d ← _root_.nested_collections.block 1#u32
++  let d1 ← _root_.nested_collections.text n
++  let (_, d2) ← _root_.nested_collections.add d d1
++  let inner ← _root_.nested_collections.block 10#u32
++  let d3 ← _root_.nested_collections.text 100#u32
++  let (_, inner1) ← _root_.nested_collections.add inner d3
++  let (_, d4) ← _root_.nested_collections.add d2 inner1
++  let d5 ← _root_.nested_collections.text 1000#u32
++  let (_, d6) ← _root_.nested_collections.add d4 d5
++  let (o, d7) ← _root_.nested_collections.take_last d6
++  let last ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 0#u32
++    | some x => _root_.nested_collections.doc_size x
++  let w ←
++    _root_.nested_collections.wrap_nums (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 4#u32
++  let w1 ← _root_.nested_collections.retag w 6#u32
++  let i ← _root_.nested_collections.doc_size d7
++  let i1 ← lift (core.num.U32.wrapping_mul i 10#u32)
++  let i2 ← lift (core.num.U32.wrapping_add i1 last)
++  let i3 ← _root_.nested_collections.wrapper_first w1
++  let i4 ← lift (core.num.U32.wrapping_add i2 i3)
++  let i5 ← _root_.nested_collections.wrapper_len w1
++  let i6 ← lift (UScalar.cast .U32 i5)
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i4 i6)
++
++end nested_collections
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index e9bc8ed..d086150 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -67,6 +67,7 @@ package «tests» {}
+ @[default_target] lean_lib MutBorrowInSharedBorrow
+ @[default_target] lean_lib Names
+ @[default_target] lean_lib NestedBorrows
++@[default_target] lean_lib NestedCollections
+ @[default_target] lean_lib NestedLoopExits
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
+diff --git a/tests/src/nested-collections.rs b/tests/src/nested-collections.rs
+new file mode 100644
+index 0000000..4546dd9
+--- /dev/null
++++ b/tests/src/nested-collections.rs
+@@ -0,0 +1,410 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedCollections
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Types which are recursive through collections. Lean rejects `Vec<Self>`,
++//! `Box<[Self]>` and `[Box<Self>; N]` in an inductive (their invariant mentions the
++//! elements), so the Lean backend stores those fields in nested carriers and
++//! converts at every use of the fields. Also covered: `Vec<(String, Self)>`,
++//! `Vec<Vec<Self>>`, `Option<Box<Self>>`, a mutual group through `BTreeMap`
++//! and `Option`, and a generic wrapper whose `Vec<T>` field is instantiated
++//! with a type of a recursive group.
++//! `NestedCollections/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++use std::collections::BTreeMap;
++
++pub enum Tree {
++    Leaf(u32),
++    Node(Vec<Tree>),
++    Named(Vec<(String, Tree)>),
++    Boxed(Box<[Tree]>),
++    Pair([Box<Tree>; 2]),
++    Opt(Option<Box<Tree>>),
++    Grid(Vec<Vec<Tree>>),
++}
++
++pub fn leaf(n: u32) -> Tree {
++    Tree::Leaf(n)
++}
++
++pub fn node(children: Vec<Tree>) -> Tree {
++    Tree::Node(children)
++}
++
++pub fn node2(a: Tree, b: Tree) -> Tree {
++    let mut children = Vec::new();
++    children.push(a);
++    children.push(b);
++    Tree::Node(children)
++}
++
++pub fn named(name: String, t: Tree) -> Tree {
++    let mut entries = Vec::new();
++    entries.push((name, t));
++    Tree::Named(entries)
++}
++
++pub fn boxed(children: Vec<Tree>) -> Tree {
++    Tree::Boxed(children.into_boxed_slice())
++}
++
++pub fn pair(a: Tree, b: Tree) -> Tree {
++    Tree::Pair([Box::new(a), Box::new(b)])
++}
++
++pub fn opt(t: Option<Tree>) -> Tree {
++    match t {
++        Some(t) => Tree::Opt(Some(Box::new(t))),
++        None => Tree::Opt(None),
++    }
++}
++
++pub fn grid(row: Vec<Tree>) -> Tree {
++    let mut rows = Vec::new();
++    rows.push(row);
++    Tree::Grid(rows)
++}
++
++pub fn sum_slice(ts: &[Tree]) -> u32 {
++    let mut s = 0u32;
++    let mut i = 0;
++    while i < ts.len() {
++        s = s.wrapping_add(sum(&ts[i]));
++        i += 1;
++    }
++    s
++}
++
++pub fn sum(t: &Tree) -> u32 {
++    match t {
++        Tree::Leaf(n) => *n,
++        Tree::Node(children) => sum_slice(children),
++        Tree::Named(entries) => {
++            let mut s = 0u32;
++            for (_, t) in entries.iter() {
++                s = s.wrapping_add(sum(t));
++            }
++            s
++        }
++        Tree::Boxed(children) => sum_slice(children),
++        Tree::Pair(ts) => sum(&ts[0]).wrapping_add(sum(&ts[1])),
++        Tree::Opt(Some(t)) => sum(t),
++        Tree::Opt(None) => 0,
++        Tree::Grid(rows) => {
++            let mut s = 0u32;
++            let mut i = 0;
++            while i < rows.len() {
++                s = s.wrapping_add(sum_slice(&rows[i]));
++                i += 1;
++            }
++            s
++        }
++    }
++}
++
++/// Number of direct children
++pub fn width(t: &Tree) -> usize {
++    match t {
++        Tree::Node(children) => children.len(),
++        Tree::Named(entries) => entries.len(),
++        Tree::Boxed(children) => children.len(),
++        Tree::Pair(_) => 2,
++        Tree::Opt(o) => {
++            if o.is_some() {
++                1
++            } else {
++                0
++            }
++        }
++        Tree::Grid(rows) => rows.len(),
++        Tree::Leaf(_) => 0,
++    }
++}
++
++pub fn push_child(t: &mut Tree, c: Tree) -> bool {
++    match t {
++        Tree::Node(children) => {
++            children.push(c);
++            true
++        }
++        _ => false,
++    }
++}
++
++pub fn pop_child(t: &mut Tree) -> Option<Tree> {
++    match t {
++        Tree::Node(children) => children.pop(),
++        _ => None,
++    }
++}
++
++pub fn set_leaf(t: &mut Tree, i: usize, n: u32) {
++    match t {
++        Tree::Node(children) => children[i] = Tree::Leaf(n),
++        Tree::Pair(ts) => ts[i] = Box::new(Tree::Leaf(n)),
++        _ => {}
++    }
++}
++
++/// Recursive update through the collections
++pub fn bump(t: &mut Tree) {
++    match t {
++        Tree::Leaf(n) => *n = n.wrapping_add(1),
++        Tree::Node(children) => {
++            let mut i = 0;
++            while i < children.len() {
++                bump(&mut children[i]);
++                i += 1;
++            }
++        }
++        Tree::Pair(ts) => {
++            bump(&mut ts[0]);
++            bump(&mut ts[1]);
++        }
++        _ => {}
++    }
++}
++
++/// Mutual group through `Vec`, `Option` and `BTreeMap`
++pub enum Expr {
++    Int(i64),
++    List(Vec<Expr>, Metadata),
++    Call(String, Vec<Expr>),
++}
++
++pub struct Metadata {
++    pub storage: Option<Storage>,
++    pub line: u32,
++}
++
++pub struct Storage {
++    pub entries: BTreeMap<u32, Expr>,
++}
++
++pub fn plain(line: u32) -> Metadata {
++    Metadata {
++        storage: None,
++        line,
++    }
++}
++
++pub fn with_entry(key: u32, e: Expr, line: u32) -> Metadata {
++    let mut entries = BTreeMap::new();
++    entries.insert(key, e);
++    Metadata {
++        storage: Some(Storage { entries }),
++        line,
++    }
++}
++
++/// Same name as a field of the recursive structure `Metadata`: the binders of
++/// the projector simp lemmas are renamed, the lemma bodies must follow
++pub fn line(meta: &Metadata) -> u32 {
++    meta.line
++}
++
++pub fn list(items: Vec<Expr>, meta: Metadata) -> Expr {
++    Expr::List(items, meta)
++}
++
++pub fn call(name: String, args: Vec<Expr>) -> Expr {
++    Expr::Call(name, args)
++}
++
++pub fn eval(e: &Expr, key: u32) -> i64 {
++    match e {
++        Expr::Int(n) => *n,
++        Expr::List(items, meta) => {
++            let mut s = line(meta) as i64;
++            let mut i = 0;
++            while i < items.len() {
++                s = s.wrapping_add(eval(&items[i], key));
++                i += 1;
++            }
++            match &meta.storage {
++                Some(storage) => match storage.entries.get(&key) {
++                    Some(x) => s.wrapping_add(eval(x, key)),
++                    None => s,
++                },
++                None => s,
++            }
++        }
++        Expr::Call(_, args) => args.len() as i64,
++    }
++}
++
++pub fn append(e: &mut Expr, x: Expr) {
++    match e {
++        Expr::List(items, _) => items.push(x),
++        Expr::Call(_, args) => args.push(x),
++        Expr::Int(_) => {}
++    }
++}
++
++/// A generic wrapper whose field is nested in a recursive group through its
++/// type parameter
++pub struct Wrapper<T> {
++    pub items: Vec<T>,
++    pub tag: u32,
++}
++
++pub enum Doc {
++    Text(u32),
++    Block(Wrapper<Doc>),
++}
++
++pub fn text(n: u32) -> Doc {
++    Doc::Text(n)
++}
++
++pub fn block(tag: u32) -> Doc {
++    Doc::Block(Wrapper {
++        items: Vec::new(),
++        tag,
++    })
++}
++
++pub fn add(d: &mut Doc, child: Doc) -> bool {
++    match d {
++        Doc::Block(w) => {
++            w.items.push(child);
++            w.tag = w.tag.wrapping_add(1);
++            true
++        }
++        Doc::Text(_) => false,
++    }
++}
++
++pub fn take_last(d: &mut Doc) -> Option<Doc> {
++    match d {
++        Doc::Block(w) => w.items.pop(),
++        Doc::Text(_) => None,
++    }
++}
++
++pub fn doc_size(d: &Doc) -> u32 {
++    match d {
++        Doc::Text(n) => *n,
++        Doc::Block(w) => {
++            let mut s = w.tag;
++            let mut i = 0;
++            while i < w.items.len() {
++                s = s.wrapping_add(doc_size(&w.items[i]));
++                i += 1;
++            }
++            s
++        }
++    }
++}
++
++/// The wrapper is also used with types which are not recursive
++pub fn wrap_nums(items: Vec<u32>, tag: u32) -> Wrapper<u32> {
++    Wrapper { items, tag }
++}
++
++pub fn wrapper_len<T>(w: &Wrapper<T>) -> usize {
++    w.items.len()
++}
++
++pub fn retag<T>(w: Wrapper<T>, tag: u32) -> Wrapper<T> {
++    Wrapper { tag, ..w }
++}
++
++pub fn wrapper_first(w: &Wrapper<u32>) -> u32 {
++    if w.items.len() > 0 {
++        w.items[0]
++    } else {
++        w.tag
++    }
++}
++
++/// End-to-end scenarios
++pub fn tree_scenario(a: u32, b: u32) -> u32 {
++    let mut t = node2(leaf(a), pair(leaf(b), leaf(1)));
++    push_child(&mut t, named(String::from("x"), leaf(10)));
++    let mut bs = Vec::new();
++    bs.push(leaf(100));
++    push_child(&mut t, boxed(bs));
++    push_child(&mut t, opt(Some(leaf(1000))));
++    let mut row = Vec::new();
++    row.push(leaf(7));
++    row.push(leaf(8));
++    push_child(&mut t, grid(row));
++    bump(&mut t);
++    let w = width(&t) as u32;
++    let s = sum(&t);
++    s.wrapping_mul(10).wrapping_add(w)
++}
++
++pub fn tree_pop_scenario(a: u32) -> u32 {
++    let mut children = Vec::new();
++    children.push(leaf(a));
++    children.push(leaf(a + 1));
++    let mut t = node(children);
++    set_leaf(&mut t, 0, 5);
++    let popped = match pop_child(&mut t) {
++        Some(c) => sum(&c),
++        None => 0,
++    };
++    let mut p = pair(leaf(1), leaf(2));
++    set_leaf(&mut p, 1, 9);
++    popped * 1000 + sum(&t) * 10 + sum(&p)
++}
++
++pub fn expr_scenario(key: u32) -> i64 {
++    let mut args = Vec::new();
++    args.push(Expr::Int(1));
++    let mut items = Vec::new();
++    items.push(Expr::Int(5));
++    items.push(call(String::from("f"), args));
++    let mut e = list(items, with_entry(3, Expr::Int(100), 7));
++    append(&mut e, Expr::Int(20));
++    let inner = list(Vec::new(), plain(2));
++    append(&mut e, inner);
++    eval(&e, key)
++}
++
++pub fn doc_scenario(n: u32) -> u32 {
++    let mut d = block(1);
++    add(&mut d, text(n));
++    let mut inner = block(10);
++    add(&mut inner, text(100));
++    add(&mut d, inner);
++    add(&mut d, text(1000));
++    let last = match take_last(&mut d) {
++        Some(x) => doc_size(&x),
++        None => 0,
++    };
++    let w = retag(wrap_nums(Vec::new(), 4), 6);
++    doc_size(&d)
++        .wrapping_mul(10)
++        .wrapping_add(last)
++        .wrapping_add(wrapper_first(&w))
++        .wrapping_add(wrapper_len(&w) as u32)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn trees() {
++        assert_eq!(tree_scenario(2, 3), 11346);
++        assert_eq!(tree_scenario(0, 0), 11296);
++        assert_eq!(tree_pop_scenario(4), 5060);
++        assert_eq!(tree_pop_scenario(0), 1060);
++    }
++
++    #[test]
++    fn exprs() {
++        assert_eq!(expr_scenario(3), 135);
++        assert_eq!(expr_scenario(4), 35);
++    }
++
++    #[test]
++    fn docs() {
++        assert_eq!(doc_scenario(5), 2206);
++        assert_eq!(doc_scenario(0), 2156);
++    }
++}

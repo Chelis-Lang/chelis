@@ -1,0 +1,1518 @@
+# charon integration step 11 after 546078ea5d: commit 483e3b816d7d6a325010fd9a6cb91b8afa847d58
+# first parent 6d289adf02f3a015d32cab05113b3cd9cb0f334c
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: identify closure capture regions by tag instead of position
+
+diff --git a/src/bin/charon-driver/closure_regions.rs b/src/bin/charon-driver/closure_regions.rs
+index 54913b0..f7dd243 100644
+--- a/src/bin/charon-driver/closure_regions.rs
++++ b/src/bin/charon-driver/closure_regions.rs
+@@ -50,6 +50,43 @@ pub fn lookup(def_id: LocalDefId) -> Option<ClosureRegionRelations> {
+     RELATIONS.lock().expect("closure-region cache poisoned").get(&def_id).cloned()
+ }
+ 
++/// The canonical traversal of a closure's capture region occurrences: rustc's `fold_regions` over
++/// the upvar types, which visits every free region in order. The borrowck collector (`capture`),
++/// hax's `ClosureArgs` (both local and dependency relations) and the capture tags all index
++/// occurrences by their position in this traversal, so an index names the same occurrence
++/// everywhere. `f` receives each occurrence with its index and returns its replacement.
++pub fn fold_capture_regions<'tcx>(
++    tcx: TyCtxt<'tcx>,
++    upvar_tys: &'tcx ty::List<ty::Ty<'tcx>>,
++    mut f: impl FnMut(usize, ty::Region<'tcx>) -> ty::Region<'tcx>,
++) -> &'tcx ty::List<ty::Ty<'tcx>> {
++    let mut index = 0;
++    ty::fold_regions(tcx, upvar_tys, |r, _| {
++        let r = f(index, r);
++        index += 1;
++        r
++    })
++}
++
++/// A region standing for the erased capture occurrence `index` of closure `closure`, in the
++/// captured types of the closure's definition. Charon's translation of those types can reorder,
++/// duplicate or drop occurrences (e.g. a captured closure's signature has no counterpart in its
++/// closure ADT), so it identifies each occurrence by this tag instead of by position. Upvar types
++/// only contain erased or static regions, so a late-bound parameter of the closure itself cannot
++/// be confused with a real region.
++pub fn capture_region_tag<'tcx>(tcx: TyCtxt<'tcx>, closure: DefId, index: usize) -> ty::Region<'tcx> {
++    let index = u32::try_from(index).expect("too many closure capture regions");
++    ty::Region::new_late_param(tcx, closure, ty::LateParamRegionKind::Anon(index))
++}
++
++pub fn is_capture_region_tag(r: ty::Region<'_>, closure: DefId, index: usize) -> bool {
++    matches!(
++        r.kind(),
++        ty::ReLateParam(ty::LateParamRegion { scope, kind: ty::LateParamRegionKind::Anon(i) })
++            if scope == closure && i as usize == index
++    )
++}
++
+ /// Extension of the relation table written beside a dependency artifact.
+ const TABLE_EXTENSION: &str = "charon-closures";
+ /// First line of a table. Bump the version whenever the meaning of the relation indices or the
+@@ -250,7 +287,7 @@ pub fn capture<'tcx>(tcx: TyCtxt<'tcx>, root: LocalDefId) {
+         };
+         ty::fold_regions(tcx, args.sig(), &mut collect);
+         let signature_regions = regions.len();
+-        ty::fold_regions(tcx, args.upvar_tys(), |r, _| {
++        fold_capture_regions(tcx, args.upvar_tys(), |_, r| {
+             let vid = match r.kind() {
+                 ty::ReVar(vid) => vid,
+                 ty::ReStatic => ty::RegionVid::from_usize(0),
+diff --git a/src/bin/charon-driver/hax/types/ty.rs b/src/bin/charon-driver/hax/types/ty.rs
+index a491f40..0a54e0d 100644
+--- a/src/bin/charon-driver/hax/types/ty.rs
++++ b/src/bin/charon-driver/hax/types/ty.rs
+@@ -1436,8 +1436,9 @@ pub enum AliasRelationDirection {
+ #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+ pub enum ClosureRegion {
+     Signature(Region),
++    /// For a closure definition, an erased capture occurrence is represented by its capture tag
++    /// (see `closure_regions::capture_region_tag`).
+     Capture(Region),
+-    ErasedCapture(usize),
+ }
+ 
+ /// Reflects [`ty::ClosureArgs`]
+@@ -1450,29 +1451,14 @@ pub struct ClosureArgs {
+     pub kind: ClosureKind,
+     /// The signature of the function that the closure implements, e.g. `fn(A, B, C) -> D`.
+     pub fn_sig: PolyFnSig,
+-    /// The set of captured variables. Together they form the state of the closure.
++    /// The set of captured variables. Together they form the state of the closure. For a closure
++    /// definition, each erased region is replaced by the capture tag of its occurrence.
+     pub upvar_tys: Vec<Ty>,
++    /// The free region occurrences of `upvar_tys`, in canonical capture order (see
++    /// `closure_regions::fold_capture_regions`).
++    pub capture_regions: Vec<Region>,
+     /// Real borrowck requirements between the independently freshened regions.
+     pub region_outlives: Vec<(ClosureRegion, ClosureRegion)>,
+-    pub erased_capture_regions: usize,
+-}
+-
+-impl ClosureArgs {
+-    /// Iterate over the upvars that are borrows with erased regions. These may require allocating
+-    /// fresh regions.
+-    pub fn iter_upvar_borrows(&self) -> impl Iterator<Item = &Ty> {
+-        self.upvar_tys.iter().filter(|ty| {
+-            matches!(
+-                ty.kind(),
+-                TyKind::Ref(
+-                    Region {
+-                        kind: RegionKind::ReErased
+-                    },
+-                    ..
+-                )
+-            )
+-        })
+-    }
+ }
+ 
+ impl ClosureArgs {
+@@ -1574,18 +1560,31 @@ impl ClosureArgs {
+         };
+         let erased_signature_regions = sig.bound_vars().len() - original_signature_bound_vars;
+         let signature_regions = regions.len();
++        let upvar_tys = if for_definition {
++            // Charon freshens erased capture regions wherever its translation of the captured
++            // types puts them, which need not match rustc's layout of the same types (e.g. a
++            // captured closure's signature has no counterpart in Charon's closure ADT). Tag each
++            // erased occurrence so that Charon recognises it by identity rather than position.
++            crate::closure_regions::fold_capture_regions(tcx, closure.upvar_tys(), |index, r| {
++                if r.is_erased() {
++                    crate::closure_regions::capture_region_tag(tcx, def_id, index)
++                } else {
++                    r
++                }
++            })
++        } else {
++            closure.upvar_tys()
++        };
+         let mut erased_capture_regions = 0;
+-        ty::fold_regions(tcx, closure.upvar_tys(), |r, _| {
+-            let region = if r.is_erased() {
+-                let index = erased_capture_regions;
++        let mut capture_regions = Vec::new();
++        crate::closure_regions::fold_capture_regions(tcx, upvar_tys, |index, r| {
++            if crate::closure_regions::is_capture_region_tag(r, def_id, index) {
+                 erased_capture_regions += 1;
+-                ClosureRegion::ErasedCapture(index)
+-            } else {
+-                ClosureRegion::Capture(r.sinto(s))
+-            };
+-            regions.push(region);
++            }
++            capture_regions.push(r.sinto(s));
+             r
+         });
++        regions.extend(capture_regions.iter().cloned().map(ClosureRegion::Capture));
+         let region_outlives = if !for_definition {
+             // Use-site arguments may instantiate type parameters with types
+             // containing additional lifetimes. Requirements belong to the
+@@ -1639,9 +1638,9 @@ impl ClosureArgs {
+             item,
+             kind: closure.kind().sinto(s),
+             fn_sig: sig.sinto(s),
+-            upvar_tys: closure.upvar_tys().sinto(s),
++            upvar_tys: upvar_tys.sinto(s),
++            capture_regions,
+             region_outlives,
+-            erased_capture_regions,
+         }
+     }
+ }
+diff --git a/src/bin/charon-driver/translate/translate_closures.rs b/src/bin/charon-driver/translate/translate_closures.rs
+index 06fe0c2..ca48a6a 100644
+--- a/src/bin/charon-driver/translate/translate_closures.rs
++++ b/src/bin/charon-driver/translate/translate_closures.rs
+@@ -144,7 +144,99 @@ impl ItemTransCtx<'_, '_> {
+         span: Span,
+         closure: &hax::ClosureArgs,
+     ) -> Result<TypeDeclRef, Error> {
+-        self.translate_item(span, &closure.item, TransItemSourceKind::Type)
++        let mut tref: TypeDeclRef = self.translate_item(span, &closure.item, TransItemSourceKind::Type)?;
++        if self.outermost_binder().materialize_capture_tags
++            && &closure.item.def_id != self.item_src.def_id()
++        {
++            self.instantiate_captured_closure_regions(span, closure, &mut tref)?;
++        }
++        Ok(tref)
++    }
++
++    /// A closure captured by the closure item being translated has a type whose upvar region
++    /// arguments `translate_item` leaves erased. Each of them corresponds to one of the captured
++    /// closure's capture occurrences, which rustc also lists in the captured type (its tupled
++    /// upvars, here carrying the capture tags of the closure being translated). Use those regions
++    /// so that the relations borrowck proved about them carry over. This requires the occurrences
++    /// of this instance to line up with those of the definition: instantiating a type parameter
++    /// with a type that has lifetimes inserts occurrences, and changes their number. Otherwise,
++    /// or for upvar regions without rustc occurrence, the argument stays erased: a fresh region
++    /// without relations (dropping relations is conservative; inventing them is not).
++    fn instantiate_captured_closure_regions(
++        &mut self,
++        span: Span,
++        closure: &hax::ClosureArgs,
++        tref: &mut TypeDeclRef,
++    ) -> Result<(), Error> {
++        let Some(params) = self.t_ctx.closure_capture_params.get(&closure.item.def_id).cloned()
++        else {
++            return Ok(());
++        };
++        if params.capture_regions != closure.capture_regions.len() {
++            return Ok(());
++        }
++        let Some(start) = tref.generics.regions.len().checked_sub(params.occurrences.len()) else {
++            raise_error!(
++                self,
++                span,
++                "closure type reference has fewer regions than its upvar regions"
++            )
++        };
++        for (param, occurrence) in params.occurrences.iter().enumerate() {
++            if let Some(occurrence) = occurrence {
++                let region = &closure.capture_regions[*occurrence as usize];
++                let region = self.translate_region(span, region)?;
++                tref.generics.regions[RegionId::new(start + param)] = region;
++            }
++        }
++        Ok(())
++    }
++
++    /// Record which capture occurrence each upvar region of the closure being translated stands
++    /// for, for `instantiate_captured_closure_regions`. Also checks that the regions were
++    /// introduced only for tags of the occurrences of this closure.
++    pub fn record_closure_capture_params(
++        &mut self,
++        span: Span,
++        args: &hax::ClosureArgs,
++    ) -> Result<(), Error> {
++        let binder = self.the_only_binder();
++        let mut occurrences = vec![None; binder.closure_upvar_regions.len()];
++        for (&index, rid) in &binder.closure_capture_tags {
++            let position = binder
++                .closure_upvar_regions
++                .iter()
++                .position(|r| r == rid)
++                .expect("capture tag region is not an upvar region");
++            occurrences[position] = Some(index);
++        }
++        let closure = self.item_src.def_id();
++        let foreign_tag = binder.closure_capture_tags.keys().copied().find(|&index| {
++            !args.capture_regions.get(index as usize).is_some_and(|r| {
++                matches!(
++                    &r.kind,
++                    hax::RegionKind::ReLateParam(hax::LateParamRegion {
++                        scope,
++                        kind: hax::LateParamRegionKind::Anon(i),
++                    }) if scope == closure && *i == index
++                )
++            })
++        });
++        if let Some(index) = foreign_tag {
++            raise_error!(
++                self,
++                span,
++                "capture region tag {index} does not name a capture occurrence of this closure"
++            )
++        }
++        let params = ClosureCaptureParams {
++            capture_regions: args.capture_regions.len(),
++            occurrences,
++        };
++        self.t_ctx
++            .closure_capture_params
++            .insert(self.item_src.def_id().clone(), params);
++        Ok(())
+     }
+ 
+     /// For stateless closures, translate a function reference to the top-level function that
+@@ -243,30 +335,33 @@ impl ItemTransCtx<'_, '_> {
+     /// Restore the requirements proved by rustc for independently freshened
+     /// signature and capture lifetimes. Captures also need their mutual
+     /// requirements on the closure ADT, which has no signature lifetime params.
++    ///
++    /// A capture occurrence is identified by its tag (see `closure_regions::capture_region_tag`).
++    /// An occurrence whose tag the translated captured types never used has no Charon
++    /// counterpart; relations involving it are dropped.
+     pub fn translate_closure_region_outlives(
+         &mut self,
+         span: Span,
+         args: &hax::ClosureArgs,
+         include_signature: bool,
+     ) -> Result<(), Error> {
+-        assert_eq!(
+-            args.erased_capture_regions,
+-            self.the_only_binder().closure_upvar_regions.len(),
+-            "closure capture lifetime traversal changed during type translation; \
+-             rustc captures: {:?}; translated captures: {:?}",
+-            args.upvar_tys,
+-            self.the_only_binder().closure_upvar_tys,
+-        );
+         let mut translate = |region: &hax::ClosureRegion| -> Result<Option<Region>, Error> {
+             Ok(Some(match region {
+                 hax::ClosureRegion::Signature(_) if !include_signature => return Ok(None),
+-                hax::ClosureRegion::Signature(r) | hax::ClosureRegion::Capture(r) => {
+-                    self.translate_region(span, r)?
+-                }
+-                hax::ClosureRegion::ErasedCapture(index) => {
+-                    let id = self.the_only_binder().closure_upvar_regions[*index];
+-                    Region::Var(DeBruijnVar::new_at_zero(id))
++                hax::ClosureRegion::Signature(r) => self.translate_region(span, r)?,
++                hax::ClosureRegion::Capture(hax::Region {
++                    kind:
++                        hax::RegionKind::ReLateParam(hax::LateParamRegion {
++                            scope,
++                            kind: hax::LateParamRegionKind::Anon(index),
++                        }),
++                }) if scope == self.item_src.def_id() => {
++                    match self.the_only_binder().closure_capture_tags.get(index) {
++                        Some(id) => Region::Var(DeBruijnVar::new_at_zero(*id)),
++                        None => return Ok(None),
++                    }
+                 }
++                hax::ClosureRegion::Capture(r) => self.translate_region(span, r)?,
+             }))
+         };
+         let mut predicates = Vec::new();
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index a58da53..80e6a01 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -745,6 +745,7 @@ pub fn translate<'tcx>(
+         cached_names: Default::default(),
+         lt_mutability_computer: Default::default(),
+         translated_preshims: Default::default(),
++        closure_capture_params: Default::default(),
+     };
+     ctx.register_target_info();
+ 
+diff --git a/src/bin/charon-driver/translate/translate_ctx.rs b/src/bin/charon-driver/translate/translate_ctx.rs
+index 0e71bc0..1f5fe95 100644
+--- a/src/bin/charon-driver/translate/translate_ctx.rs
++++ b/src/bin/charon-driver/translate/translate_ctx.rs
+@@ -71,6 +71,20 @@ pub struct TranslateCtx<'tcx> {
+     /// This is used to fetch the unique preshim
+     /// when invoking dyn trait methods (see transform_dyn_trait_calls.rs).
+     pub translated_preshims: HashSet<(TraitDeclId, Vec<Ty>)>,
++    /// For each translated closure, which capture occurrence each of its upvar region params
++    /// stands for (see `ClosureCaptureParams`).
++    pub closure_capture_params: HashMap<hax::DefId, ClosureCaptureParams>,
++}
++
++/// How the upvar region params of a closure item relate to the capture region occurrences of its
++/// definition (in canonical capture order, see `closure_regions::fold_capture_regions`).
++#[derive(Debug, Clone)]
++pub struct ClosureCaptureParams {
++    /// Number of capture region occurrences of the definition.
++    pub capture_regions: usize,
++    /// For each upvar region param, in order: the occurrence it was introduced for, or `None` for
++    /// a region the translation introduced without rustc counterpart.
++    pub occurrences: Vec<Option<u32>>,
+ }
+ 
+ /// Tracks whether a method is used (i.e. called or (non-opaquely) implemented).
+diff --git a/src/bin/charon-driver/translate/translate_generics.rs b/src/bin/charon-driver/translate/translate_generics.rs
+index 68f9ed9..b293a74 100644
+--- a/src/bin/charon-driver/translate/translate_generics.rs
++++ b/src/bin/charon-driver/translate/translate_generics.rs
+@@ -49,6 +49,12 @@ pub(crate) struct BindingLevel {
+     pub closure_upvar_tys: Option<IndexVec<FieldId, Ty>>,
+     /// The regions we added for the upvars.
+     pub closure_upvar_regions: Vec<RegionId>,
++    /// The upvar regions introduced for capture tags (see `closure_regions::capture_region_tag`),
++    /// by capture occurrence index.
++    pub closure_capture_tags: HashMap<u32, RegionId>,
++    /// Set while translating the captured types of the closure item being translated: the only
++    /// place where its capture tags may appear and introduce upvar regions.
++    pub materialize_capture_tags: bool,
+     /// RPITIT can cause region names to be reused. To avoid clashes in our output, we rename
+     /// duplicate names.
+     pub used_region_names: HashSet<Symbol>,
+@@ -438,14 +444,21 @@ impl<'tcx, 'ctx> ItemTransCtx<'tcx, 'ctx> {
+ 
+         if let hax::FullDefKind::Closure { args, .. } = def.kind() {
+             // Add the lifetime generics coming from the upvars. We translate the upvar types early
+-            // to know what lifetimes are needed.
+-            let upvar_tys = self.translate_closure_upvar_tys(span, args)?;
+-            // Add new lifetimes params to replace the erased ones.
++            // to know what lifetimes are needed. Each capture tag becomes an upvar region the
++            // first time the translation uses it.
++            self.the_only_binder_mut().materialize_capture_tags = true;
++            let upvar_tys = self.translate_closure_upvar_tys(span, args);
++            self.the_only_binder_mut().materialize_capture_tags = false;
++            let upvar_tys = upvar_tys?;
++            // Add new lifetimes params to replace the erased ones: these come from the
++            // translation itself (e.g. the capture regions of a captured closure whose
++            // occurrences could not be matched), and have no rustc occurrence.
+             let upvar_tys = upvar_tys.replace_erased_regions(|| {
+                 let region_id = self.the_only_binder_mut().push_upvar_region();
+                 Region::Var(DeBruijnVar::new_at_zero(region_id))
+             });
+             self.the_only_binder_mut().closure_upvar_tys = Some(upvar_tys);
++            self.record_closure_capture_params(span, args)?;
+ 
+             // Add the lifetime generics coming from the higher-kindedness of the signature.
+             if let TransItemSourceKind::TraitImpl(TraitImplSource::Closure(..))
+diff --git a/src/bin/charon-driver/translate/translate_types.rs b/src/bin/charon-driver/translate/translate_types.rs
+index ecb8ce9..578f03d 100644
+--- a/src/bin/charon-driver/translate/translate_types.rs
++++ b/src/bin/charon-driver/translate/translate_types.rs
+@@ -56,12 +56,36 @@ impl<'tcx, 'ctx> ItemTransCtx<'tcx, 'ctx> {
+                     "Should not exist outside of type inference: {region:?}"
+                 )
+             }
++            ReLateParam(hax::LateParamRegion {
++                scope,
++                kind: hax::LateParamRegionKind::Anon(index),
++            }) if self.outermost_binder().materialize_capture_tags
++                && scope == self.item_src.def_id() =>
++            {
++                Ok(self.translate_capture_tag(*index))
++            }
+             ReBound(..) | ReLateParam(..) | ReError(..) => {
+                 raise_error!(self, span, "Unexpected region kind: {region:?}")
+             }
+         }
+     }
+ 
++    /// The upvar region standing for capture occurrence `index` of the closure item being
++    /// translated (see `closure_regions::capture_region_tag`), introduced on first use.
++    fn translate_capture_tag(&mut self, index: u32) -> Region {
++        let depth = self.binding_levels.depth();
++        let binder = self.outermost_binder_mut();
++        let rid = match binder.closure_capture_tags.get(&index) {
++            Some(rid) => *rid,
++            None => {
++                let rid = binder.push_upvar_region();
++                binder.closure_capture_tags.insert(index, rid);
++                rid
++            }
++        };
++        Region::Var(DeBruijnVar::bound(depth, rid))
++    }
++
+     pub(crate) fn translate_hax_int_ty(int_ty: &hax::IntTy) -> IntTy {
+         match int_ty {
+             hax::IntTy::Isize => IntTy::Isize,
+diff --git a/tests/ui/closure-captures-closure.out b/tests/ui/closure-captures-closure.out
+new file mode 100644
+index 0000000..4c15ace
+--- /dev/null
++++ b/tests/ui/closure-captures-closure.out
+@@ -0,0 +1,925 @@
++# Final LLBC before serialization:
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args, Self_Output>
++{
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args, Self_Output>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self_Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnOnce<Self, Args, Self_Clause0_Output>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args, Self_Clause0_Output>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self_Clause0_Output>
++}
++
++// Full name: core::ops::function::Fn
++#[lang_item("fn")]
++pub trait Fn<Self, Args, Self_Clause0_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnMut<Self, Args, Self_Clause0_Clause0_Output>
++    fn call<'_0_1> = core::ops::function::Fn::call<'_0_1, Self, Args, Self_Clause0_Clause0_Output>[Self]
++    vtable: core::ops::function::Fn::{vtable}<Args, Self_Clause0_Clause0_Output>
++}
++
++pub fn core::ops::function::Fn::call<'_0, Self, Args, Clause0_Clause0_Clause0_Output>(_1: &'_0 Self, _2: Args) -> Clause0_Clause0_Clause0_Output
++where
++    [@TraitClause0]: Fn<Self, Args, Clause0_Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
++where
++    [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
++where
++    [@TraitClause0]: FnOnce<Self, Args, Clause0_Output>,
++= <opaque>
++
++// Full name: core::slice::{[T]}::len
++#[lang_item("slice_len_fn")]
++pub fn len<'_0, T>(_1: &'_0 [T]) -> usize
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Ctx
++pub struct Ctx<'p> {
++  data: &'p [u32],
++}
++
++struct test_crate::{Ctx<'p>}::run::closure<'p> {}
++
++struct test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++  &'_1 test_crate::{Ctx<'p>}::run::closure<'_2>,
++  &'_3 &'_4 Ctx<'_5>,
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call
++fn {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call<'p, '_1, '_2, '_3>(_1: &'_3 test_crate::{Ctx<'p>}::run::closure<'p>, tupled_args_2: (&'_1 Ctx<'_2>, usize)) -> u32
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::{Ctx<'p>}::run::closure<'p>; // arg #1
++    let tupled_args_2: (&'_1 Ctx<'_2>, usize); // arg #2
++    let ctx_3: &'2 Ctx<'3>; // local
++    let id_4: usize; // local
++    let _5: usize; // anonymous local
++    let _6: &'_ [u32]; // anonymous local
++    let _7: &'_ u32; // anonymous local
++
++    storage_live(ctx_3)
++    storage_live(id_4)
++    ctx_3 = move tupled_args_2.0
++    id_4 = move tupled_args_2.1
++    storage_live(_5)
++    _5 = copy id_4
++    storage_live(_6)
++    _6 = &(*((*ctx_3)).data) with_metadata(copy ((*ctx_3)).data.metadata)
++    storage_live(_7)
++    _7 = @SliceIndexShared<'_, u32>(move _6, copy _5)
++    _0 = copy (*_7)
++    storage_dead(_5)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call
++fn {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6>(_1: &'_6 test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>, tupled_args_2: (usize,)) -> u32
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>; // arg #1
++    let tupled_args_2: (usize,); // arg #2
++    let id_3: usize; // local
++    let _4: u32; // anonymous local
++    let _5: &'5 test_crate::{Ctx<'p>}::run::closure<'6>; // anonymous local
++    let _6: (&'12 Ctx<'13>, usize); // anonymous local
++    let _7: &'14 Ctx<'15>; // anonymous local
++    let _8: usize; // anonymous local
++    let _9: u32; // anonymous local
++
++    storage_live(id_3)
++    storage_live(_9)
++    id_3 = move tupled_args_2.0
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &(*((*_1)).0)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = &(*(*((*_1)).1))
++    storage_live(_8)
++    _8 = copy id_3
++    _6 = (move _7, move _8)
++    _4 = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call<'38, '39, '40, '41>(move _5, move _6)
++    storage_dead(_8)
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(_5)
++    _9 = copy _4 panic.+ const 1 : u32
++    _0 = move _9
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run
++pub fn run<'p, '_1, '_2>(self_1: &'_1 Ctx<'p>, ids_2: &'_2 [usize]) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'3 Ctx<'4>; // arg #1
++    let ids_2: &'6 [usize]; // arg #2
++    let lookup_3: test_crate::{Ctx<'p>}::run::closure<'8>; // local
++    let total_4: test_crate::{Ctx<'p>}::run::closure#1<'15, '16, '17, '18, '19, '20>; // local
++    let _5: &'23 test_crate::{Ctx<'p>}::run::closure<'24>; // anonymous local
++    let _6: &'28 &'29 Ctx<'30>; // anonymous local
++    let sum_7: u32; // local
++    let i_8: usize; // local
++    let _9: bool; // anonymous local
++    let _10: usize; // anonymous local
++    let _11: usize; // anonymous local
++    let _12: &'31 [usize]; // anonymous local
++    let _13: u32; // anonymous local
++    let _14: &'39 test_crate::{Ctx<'p>}::run::closure#1<'40, '41, '42, '43, '44, '45>; // anonymous local
++    let _15: (usize,); // anonymous local
++    let _16: usize; // anonymous local
++    let _17: usize; // anonymous local
++    let _18: u32; // anonymous local
++    let _19: usize; // anonymous local
++    let _20: &'_ [usize]; // anonymous local
++    let _21: &'_ usize; // anonymous local
++
++    storage_live(_18)
++    storage_live(_19)
++    storage_live(lookup_3)
++    lookup_3 = test_crate::{Ctx<'p>}::run::closure {  }
++    storage_live(total_4)
++    storage_live(_5)
++    _5 = &lookup_3
++    storage_live(_6)
++    _6 = &self_1
++    total_4 = test_crate::{Ctx<'p>}::run::closure#1 { 0: move _5, 1: move _6 }
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_live(sum_7)
++    sum_7 = const 0 : u32
++    storage_live(i_8)
++    i_8 = const 0 : usize
++    loop {
++        storage_live(_9)
++        storage_live(_10)
++        _10 = copy i_8
++        storage_live(_11)
++        storage_live(_12)
++        _12 = &(*ids_2) with_metadata(copy ids_2.metadata)
++        _11 = len<'54, usize>(move _12)
++        storage_dead(_12)
++        _9 = move _10 < move _11
++        if move _9 {
++        } else {
++            break 0
++        }
++        storage_dead(_11)
++        storage_dead(_10)
++        storage_live(_13)
++        storage_live(_14)
++        _14 = &total_4
++        storage_live(_15)
++        storage_live(_16)
++        storage_live(_17)
++        _17 = copy i_8
++        storage_live(_20)
++        _20 = &(*ids_2) with_metadata(copy ids_2.metadata)
++        storage_live(_21)
++        _21 = @SliceIndexShared<'_, usize>(move _20, copy _17)
++        _16 = copy (*_21)
++        _15 = (move _16,)
++        _13 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call<'68, '69, '70, '71, '72, '73, '74>(move _14, move _15)
++        storage_dead(_16)
++        storage_dead(_15)
++        storage_dead(_14)
++        _18 = copy sum_7 panic.+ copy _13
++        sum_7 = move _18
++        storage_dead(_13)
++        storage_dead(_17)
++        _19 = copy i_8 panic.+ const 1 : usize
++        i_8 = move _19
++        storage_dead(_9)
++        continue 0
++    }
++    storage_dead(_11)
++    storage_dead(_10)
++    storage_dead(_9)
++    _0 = copy sum_7
++    storage_dead(i_8)
++    storage_dead(sum_7)
++    storage_dead(total_4)
++    storage_dead(lookup_3)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_mut
++fn {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_mut<'p, '_1, '_2, '_3>(state_1: &'_3 mut test_crate::{Ctx<'p>}::run::closure<'p>, args_2: (&'_1 Ctx<'_2>, usize)) -> u32
++{
++    let _0: u32; // return
++    let state_1: &'_3 mut test_crate::{Ctx<'p>}::run::closure<'p>; // arg #1
++    let args_2: (&'_1 Ctx<'_2>, usize); // arg #2
++    let _3: &'0 test_crate::{Ctx<'p>}::run::closure<'p>; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call<'p, '_1, '_2, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_once
++fn {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_once<'p, '_1, '_2>(_1: test_crate::{Ctx<'p>}::run::closure<'p>, _2: (&'_1 Ctx<'_2>, usize)) -> u32
++{
++    let _0: u32; // return
++    let _1: test_crate::{Ctx<'p>}::run::closure<'p>; // arg #1
++    let _2: (&'0 Ctx<'1>, usize); // arg #2
++    let _3: &'3 mut test_crate::{Ctx<'p>}::run::closure<'p>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_mut<'p, '_1, '_2, '16>(move _3, move _2)
++    drop[{impl#15}<'p>] _1
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}
++impl<'p, '_1, '_2> FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p> {
++    fn call_once = {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_once<'p, '_1, '_2>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}
++impl<'p, '_1, '_2> FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p> {
++    parent_clause0 = {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}<'p, '_1, '_2>
++    fn call_mut<'_0_1> = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call_mut<'p, '_1, '_2, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}
++impl<'p, '_1, '_2> Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p> {
++    parent_clause0 = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}<'p, '_1, '_2>
++    fn call<'_0_1> = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::run::closure<'p>}::call<'p, '_1, '_2, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_mut
++fn {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6>(state_1: &'_6 mut test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>, args_2: (usize,)) -> u32
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    let _0: u32; // return
++    let state_1: &'_6 mut test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>; // arg #1
++    let args_2: (usize,); // arg #2
++    let _3: &'0 test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call<'p, '_1, '_2, '_3, '_4, '_5, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_once
++fn {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_once<'p, '_1, '_2, '_3, '_4, '_5>(_1: test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>, _2: (usize,)) -> u32
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    let _0: u32; // return
++    let _1: test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>; // arg #1
++    let _2: (usize,); // arg #2
++    let _3: &'1 mut test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '15>(move _3, move _2)
++    drop[{impl#16}<'p, '_1, '_2, '_3, '_4, '_5>] _1
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}
++impl<'p, '_1, '_2, '_3, '_4, '_5> FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    fn call_once = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_once<'p, '_1, '_2, '_3, '_4, '_5>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}
++impl<'p, '_1, '_2, '_3, '_4, '_5> FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    parent_clause0 = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}<'p, '_1, '_2, '_3, '_4, '_5>
++    fn call_mut<'_0_1> = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::run::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}
++impl<'p, '_1, '_2, '_3, '_4, '_5> Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>
++where
++    '_4 : '_3,
++    '_5 : '_3,
++    '_5 : '_4,
++{
++    parent_clause0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}<'p, '_1, '_2, '_3, '_4, '_5>
++    fn call<'_0_1> = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::run::closure#1<'p, '_1, '_2, '_3, '_4, '_5>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_0_1>
++    non-dyn-compatible
++}
++
++struct test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>
++where
++    '_2 : '_1,
++{
++  &'_1 &'_2 u32,
++}
++
++struct test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++  &'_1 test_crate::{Ctx<'p>}::nested::closure<'_2, '_3, '_4>,
++  &'_5 &'_6 Ctx<'_7>,
++}
++
++struct test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++  &'_1 test_crate::{Ctx<'p>}::nested::closure#1<'_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>,
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call
++fn {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call<'p, '_1, '_2, '_3, '_4, '_5>(_1: &'_5 test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>, tupled_args_2: (&'_3 Ctx<'_4>, usize)) -> u32
++where
++    '_2 : '_1,
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>; // arg #1
++    let tupled_args_2: (&'_3 Ctx<'_4>, usize); // arg #2
++    let ctx_3: &'2 Ctx<'3>; // local
++    let id_4: usize; // local
++    let _5: u32; // anonymous local
++    let _6: usize; // anonymous local
++    let _7: u32; // anonymous local
++    let _8: u32; // anonymous local
++    let _9: &'_ [u32]; // anonymous local
++    let _10: &'_ u32; // anonymous local
++
++    storage_live(ctx_3)
++    storage_live(id_4)
++    storage_live(_8)
++    ctx_3 = move tupled_args_2.0
++    id_4 = move tupled_args_2.1
++    storage_live(_5)
++    storage_live(_6)
++    _6 = copy id_4
++    storage_live(_9)
++    _9 = &(*((*ctx_3)).data) with_metadata(copy ((*ctx_3)).data.metadata)
++    storage_live(_10)
++    _10 = @SliceIndexShared<'_, u32>(move _9, copy _6)
++    _5 = copy (*_10)
++    storage_live(_7)
++    _7 = copy (*(*((*_1)).0))
++    _8 = copy _5 panic.+ copy _7
++    _0 = move _8
++    storage_dead(_7)
++    storage_dead(_5)
++    storage_dead(_6)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call
++fn {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8>(_1: &'_8 test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>, tupled_args_2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>; // arg #1
++    let tupled_args_2: (usize,); // arg #2
++    let id_3: usize; // local
++    let _4: u32; // anonymous local
++    let _5: &'9 test_crate::{Ctx<'p>}::nested::closure<'10, '11, '12>; // anonymous local
++    let _6: (&'18 Ctx<'19>, usize); // anonymous local
++    let _7: &'20 Ctx<'21>; // anonymous local
++    let _8: usize; // anonymous local
++    let _9: u32; // anonymous local
++    let _10: &'22 test_crate::{Ctx<'p>}::nested::closure<'23, '24, '25>; // anonymous local
++    let _11: (&'26 Ctx<'27>, usize); // anonymous local
++    let _12: &'28 Ctx<'29>; // anonymous local
++    let _13: usize; // anonymous local
++    let _14: u32; // anonymous local
++
++    storage_live(id_3)
++    storage_live(_14)
++    id_3 = move tupled_args_2.0
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &(*((*_1)).0)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = &(*(*((*_1)).1))
++    storage_live(_8)
++    _8 = copy id_3
++    _6 = (move _7, move _8)
++    _4 = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call<'60, '61, '62, '63, '64, '65>(move _5, move _6)
++    storage_dead(_8)
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_live(_9)
++    storage_live(_10)
++    _10 = &(*((*_1)).0)
++    storage_live(_11)
++    storage_live(_12)
++    _12 = &(*(*((*_1)).1))
++    storage_live(_13)
++    _13 = copy id_3
++    _11 = (move _12, move _13)
++    _9 = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call<'93, '94, '95, '96, '97, '98>(move _10, move _11)
++    storage_dead(_13)
++    storage_dead(_12)
++    storage_dead(_11)
++    storage_dead(_10)
++    _14 = copy _4 panic.+ copy _9
++    _0 = move _14
++    storage_dead(_9)
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call
++fn {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '_10>(_1: &'_10 test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>, tupled_args_2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>; // arg #1
++    let tupled_args_2: (usize,); // arg #2
++    let id_3: usize; // local
++    let _4: u32; // anonymous local
++    let _5: &'19 test_crate::{Ctx<'p>}::nested::closure#1<'20, '21, '22, '23, '24, '25, '26, '27>; // anonymous local
++    let _6: (usize,); // anonymous local
++    let _7: usize; // anonymous local
++    let _8: u32; // anonymous local
++
++    storage_live(id_3)
++    storage_live(_8)
++    id_3 = move tupled_args_2.0
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &(*((*_1)).0)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = copy id_3
++    _6 = (move _7,)
++    _4 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call<'62, '63, '64, '65, '66, '67, '68, '69, '70>(move _5, move _6)
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(_5)
++    _8 = copy _4 panic.* const 2 : u32
++    _0 = move _8
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested
++pub fn nested<'p, '_1, '_2, '_3>(self_1: &'_1 Ctx<'p>, extra_2: &'_2 u32, ids_3: &'_3 [usize]) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'3 Ctx<'4>; // arg #1
++    let extra_2: &'6 u32; // arg #2
++    let ids_3: &'8 [usize]; // arg #3
++    let lookup_4: test_crate::{Ctx<'p>}::nested::closure<'12, '13, '14>; // local
++    let _5: &'17 &'18 u32; // anonymous local
++    let total_6: test_crate::{Ctx<'p>}::nested::closure#1<'27, '28, '29, '30, '31, '32, '33, '34>; // local
++    let _7: &'39 test_crate::{Ctx<'p>}::nested::closure<'40, '41, '42>; // anonymous local
++    let _8: &'46 &'47 Ctx<'48>; // anonymous local
++    let pick_9: test_crate::{Ctx<'p>}::nested::closure#2<'59, '60, '61, '62, '63, '64, '65, '66, '67, '68>; // local
++    let _10: &'78 test_crate::{Ctx<'p>}::nested::closure#1<'79, '80, '81, '82, '83, '84, '85, '86>; // anonymous local
++    let sum_11: u32; // local
++    let i_12: usize; // local
++    let _13: bool; // anonymous local
++    let _14: usize; // anonymous local
++    let _15: usize; // anonymous local
++    let _16: &'87 [usize]; // anonymous local
++    let _17: u32; // anonymous local
++    let _18: &'99 test_crate::{Ctx<'p>}::nested::closure#2<'100, '101, '102, '103, '104, '105, '106, '107, '108, '109>; // anonymous local
++    let _19: (usize,); // anonymous local
++    let _20: usize; // anonymous local
++    let _21: usize; // anonymous local
++    let _22: u32; // anonymous local
++    let _23: usize; // anonymous local
++    let _24: &'_ [usize]; // anonymous local
++    let _25: &'_ usize; // anonymous local
++
++    storage_live(_22)
++    storage_live(_23)
++    storage_live(lookup_4)
++    storage_live(_5)
++    _5 = &extra_2
++    lookup_4 = test_crate::{Ctx<'p>}::nested::closure { 0: move _5 }
++    storage_dead(_5)
++    storage_live(total_6)
++    storage_live(_7)
++    _7 = &lookup_4
++    storage_live(_8)
++    _8 = &self_1
++    total_6 = test_crate::{Ctx<'p>}::nested::closure#1 { 0: move _7, 1: move _8 }
++    storage_dead(_8)
++    storage_dead(_7)
++    storage_live(pick_9)
++    storage_live(_10)
++    _10 = &total_6
++    pick_9 = test_crate::{Ctx<'p>}::nested::closure#2 { 0: move _10 }
++    storage_dead(_10)
++    storage_live(sum_11)
++    sum_11 = const 0 : u32
++    storage_live(i_12)
++    i_12 = const 0 : usize
++    loop {
++        storage_live(_13)
++        storage_live(_14)
++        _14 = copy i_12
++        storage_live(_15)
++        storage_live(_16)
++        _16 = &(*ids_3) with_metadata(copy ids_3.metadata)
++        _15 = len<'132, usize>(move _16)
++        storage_dead(_16)
++        _13 = move _14 < move _15
++        if move _13 {
++        } else {
++            break 0
++        }
++        storage_dead(_15)
++        storage_dead(_14)
++        storage_live(_17)
++        storage_live(_18)
++        _18 = &pick_9
++        storage_live(_19)
++        storage_live(_20)
++        storage_live(_21)
++        _21 = copy i_12
++        storage_live(_24)
++        _24 = &(*ids_3) with_metadata(copy ids_3.metadata)
++        storage_live(_25)
++        _25 = @SliceIndexShared<'_, usize>(move _24, copy _21)
++        _20 = copy (*_25)
++        _19 = (move _20,)
++        _17 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call<'154, '155, '156, '157, '158, '159, '160, '161, '162, '163, '164>(move _18, move _19)
++        storage_dead(_20)
++        storage_dead(_19)
++        storage_dead(_18)
++        _22 = copy sum_11 panic.+ copy _17
++        sum_11 = move _22
++        storage_dead(_17)
++        storage_dead(_21)
++        _23 = copy i_12 panic.+ const 1 : usize
++        i_12 = move _23
++        storage_dead(_13)
++        continue 0
++    }
++    storage_dead(_15)
++    storage_dead(_14)
++    storage_dead(_13)
++    _0 = copy sum_11
++    storage_dead(i_12)
++    storage_dead(sum_11)
++    storage_dead(pick_9)
++    storage_dead(total_6)
++    storage_dead(lookup_4)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_mut
++fn {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5>(state_1: &'_5 mut test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>, args_2: (&'_3 Ctx<'_4>, usize)) -> u32
++where
++    '_2 : '_1,
++{
++    let _0: u32; // return
++    let state_1: &'_5 mut test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>; // arg #1
++    let args_2: (&'_3 Ctx<'_4>, usize); // arg #2
++    let _3: &'0 test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call<'p, '_1, '_2, '_3, '_4, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_once
++fn {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_once<'p, '_1, '_2, '_3, '_4>(_1: test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>, _2: (&'_3 Ctx<'_4>, usize)) -> u32
++where
++    '_2 : '_1,
++{
++    let _0: u32; // return
++    let _1: test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>; // arg #1
++    let _2: (&'0 Ctx<'1>, usize); // arg #2
++    let _3: &'3 mut test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_mut<'p, '_1, '_2, '_3, '_4, '20>(move _3, move _2)
++    drop[{impl#17}<'p, '_1, '_2>] _1
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}
++impl<'p, '_1, '_2, '_3, '_4> FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>
++where
++    '_2 : '_1,
++{
++    fn call_once = {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_once<'p, '_1, '_2, '_3, '_4>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}
++impl<'p, '_1, '_2, '_3, '_4> FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>
++where
++    '_2 : '_1,
++{
++    parent_clause0 = {impl FnOnce<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}<'p, '_1, '_2, '_3, '_4>
++    fn call_mut<'_0_1> = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call_mut<'p, '_1, '_2, '_3, '_4, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}
++impl<'p, '_1, '_2, '_3, '_4> Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>
++where
++    '_2 : '_1,
++{
++    parent_clause0 = {impl FnMut<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}<'p, '_1, '_2, '_3, '_4>
++    fn call<'_0_1> = {impl Fn<(&'_ Ctx<'_>, usize), u32> for test_crate::{Ctx<'p>}::nested::closure<'p, '_1, '_2>}::call<'p, '_1, '_2, '_3, '_4, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_mut
++fn {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8>(state_1: &'_8 mut test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>, args_2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    let _0: u32; // return
++    let state_1: &'_8 mut test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>; // arg #1
++    let args_2: (usize,); // arg #2
++    let _3: &'0 test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_once
++fn {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_once<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>(_1: test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>, _2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    let _0: u32; // return
++    let _1: test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>; // arg #1
++    let _2: (usize,); // arg #2
++    let _3: &'1 mut test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '19>(move _3, move _2)
++    drop[{impl#18}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>] _1
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7> FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    fn call_once = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_once<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7> FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    parent_clause0 = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++    fn call_mut<'_0_1> = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7> Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++where
++    '_3 : '_1,
++    '_4 : '_1,
++    '_4 : '_3,
++    '_6 : '_5,
++    '_7 : '_5,
++    '_7 : '_6,
++{
++    parent_clause0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>
++    fn call<'_0_1> = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#1<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_mut
++fn {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '_10>(state_1: &'_10 mut test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>, args_2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    let _0: u32; // return
++    let state_1: &'_10 mut test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>; // arg #1
++    let args_2: (usize,); // arg #2
++    let _3: &'0 test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_once
++fn {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_once<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>(_1: test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>, _2: (usize,)) -> u32
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    let _0: u32; // return
++    let _1: test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>; // arg #1
++    let _2: (usize,); // arg #2
++    let _3: &'1 mut test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '23>(move _3, move _2)
++    drop[{impl#19}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>] _1
++    return
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9> FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    fn call_once = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_once<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9> FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    parent_clause0 = {impl FnOnce<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++    fn call_mut<'_0_1> = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call_mut<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::{Ctx<'p>}::nested::{impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}
++impl<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9> Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++where
++    '_3 : '_1,
++    '_5 : '_1,
++    '_5 : '_3,
++    '_6 : '_1,
++    '_6 : '_3,
++    '_6 : '_5,
++    '_7 : '_1,
++    '_8 : '_1,
++    '_8 : '_7,
++    '_9 : '_1,
++    '_9 : '_7,
++    '_9 : '_8,
++{
++    parent_clause0 = {impl FnMut<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>
++    fn call<'_0_1> = {impl Fn<(usize,), u32> for test_crate::{Ctx<'p>}::nested::closure#2<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>}::call<'p, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9, '_0_1>
++    non-dyn-compatible
++}
++
++
++
+diff --git a/tests/ui/closure-captures-closure.rs b/tests/ui/closure-captures-closure.rs
+new file mode 100644
+index 0000000..9f491c3
+--- /dev/null
++++ b/tests/ui/closure-captures-closure.rs
+@@ -0,0 +1,39 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas
++
++// A closure capturing another closure. rustc's type for the captured closure
++// includes its signature, whose free lifetime (`Self` names `Ctx<'p>`) has no
++// counterpart in Charon's closure ADT; the outer closure's borrowck relations
++// must be matched to the regions Charon introduces by identity, not position.
++pub struct Ctx<'p> {
++    pub data: &'p [u32],
++}
++
++impl<'p> Ctx<'p> {
++    pub fn run(&self, ids: &[usize]) -> u32 {
++        let lookup = |ctx: &Self, id: usize| -> u32 { ctx.data[id] };
++        let total = |id: usize| lookup(self, id) + 1;
++        let mut sum = 0;
++        let mut i = 0;
++        while i < ids.len() {
++            sum += total(ids[i]);
++            i += 1;
++        }
++        sum
++    }
++
++    // The captured closure itself captures state, whose regions become
++    // arguments of its closure type in the outer closure's captures.
++    pub fn nested(&self, extra: &u32, ids: &[usize]) -> u32 {
++        let lookup = |ctx: &Self, id: usize| -> u32 { ctx.data[id] + *extra };
++        let total = |id: usize| lookup(self, id) + lookup(self, id);
++        let pick = |id: usize| total(id) * 2;
++        let mut sum = 0;
++        let mut i = 0;
++        while i < ids.len() {
++            sum += pick(ids[i]);
++            i += 1;
++        }
++        sum
++    }
++}
+diff --git a/tests/ui/issue-323-closure-borrow.out b/tests/ui/issue-323-closure-borrow.out
+index 10be19e..0d6c10b 100644
+--- a/tests/ui/issue-323-closure-borrow.out
++++ b/tests/ui/issue-323-closure-borrow.out
+@@ -123,13 +123,13 @@ fn {impl FnMut<()> for closure<'_0>}::call_mut<'_0, '_1>(_1: &'_1 mut closure<'_
+     let _1: &'1 mut closure<'_0>; // arg #1
+     let tupled_args_2: (); // arg #2
+     let _3: (); // anonymous local
+-    let _4: &'2 mut Rng; // anonymous local
++    let _4: &'3 mut Rng; // anonymous local
+ 
+     _0 = ()
+     storage_live(_3)
+     storage_live(_4)
+     _4 = &two-phase-mut (*((*_1)).0)
+-    _3 = next_u64<'5>(move _4)
++    _3 = next_u64<'6>(move _4)
+     storage_dead(_4)
+     storage_dead(_3)
+     _0 = ()
+diff --git a/tests/ui/simple/closure-with-non-upvar-lifetime.out b/tests/ui/simple/closure-with-non-upvar-lifetime.out
+index 7f77713..be1a768 100644
+--- a/tests/ui/simple/closure-with-non-upvar-lifetime.out
++++ b/tests/ui/simple/closure-with-non-upvar-lifetime.out
+@@ -112,7 +112,7 @@ where
+     let _1: &'1 closure<'_0, '_1>; // arg #1
+     let tupled_args_2: (usize,); // arg #2
+     let i_3: usize; // local
+-    let _4: &'2 &'3 [u8]; // anonymous local
++    let _4: &'5 &'6 [u8]; // anonymous local
+     let _5: usize; // anonymous local
+     let _6: &'_ [u8]; // anonymous local
+     let _7: &'_ u8; // anonymous local
+diff --git a/tests/ui/simple/nested-closure-lifetime.out b/tests/ui/simple/nested-closure-lifetime.out
+index 984b831..169b51c 100644
+--- a/tests/ui/simple/nested-closure-lifetime.out
++++ b/tests/ui/simple/nested-closure-lifetime.out
+@@ -286,8 +286,8 @@ where
+     [@TraitClause1]: Clone<T>,
+     '_0 : '_1,
+ {
+-    let _0: &'0 T; // return
+-    let _1: &'2 test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
++    let _0: &'1 T; // return
++    let _1: &'3 test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let tupled_args_2: (); // arg #2
+ 
+     _0 = copy ((*_1)).0
+@@ -336,14 +336,14 @@ where
+     [@TraitClause1]: Clone<T>,
+     '_0 : '_1,
+ {
+-    let _0: &'0 T; // return
++    let _0: &'1 T; // return
+     let _1: test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let _2: (); // arg #2
+-    let _3: &'2 mut test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // anonymous local
++    let _3: &'3 mut test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]; // anonymous local
+ 
+     storage_live(_3)
+     _3 = &mut _1
+-    _0 = {impl FnMut<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_mut<'_0, '_1, '7, T>[@TraitClause0, @TraitClause1](move _3, move _2)
++    _0 = {impl FnMut<()> for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_mut<'_0, '_1, '8, T>[@TraitClause0, @TraitClause1](move _3, move _2)
+     drop[{impl Destruct for test_crate::foo::closure::closure<'_0, T>[@TraitClause0, @TraitClause1]}<'_0, T>[@TraitClause0, @TraitClause1]] _1
+     return
+ }
+diff --git a/tests/ui/simple/nested-closure.out b/tests/ui/simple/nested-closure.out
+index 5ee6a27..e1799cf 100644
+--- a/tests/ui/simple/nested-closure.out
++++ b/tests/ui/simple/nested-closure.out
+@@ -138,13 +138,13 @@ where
+     let _1: &'1 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let tupled_args_2: (&'_2 u32,); // arg #2
+     let _z_3: &'2 u32; // local
+-    let _4: &'3 T; // anonymous local
++    let _4: &'4 T; // anonymous local
+ 
+     storage_live(_z_3)
+     _z_3 = move tupled_args_2.0
+     storage_live(_4)
+     _4 = &(*((*_1)).0)
+-    _0 = @TraitClause1::clone<'6>(move _4)
++    _0 = @TraitClause1::clone<'7>(move _4)
+     storage_dead(_4)
+     return
+ }
+@@ -168,7 +168,7 @@ where
+     let _1: &'5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let tupled_args_2: (&'_2 u32,); // arg #2
+     let _y_3: &'6 u32; // local
+-    let _4: &'7 T; // anonymous local
++    let _4: &'8 T; // anonymous local
+ 
+     storage_live(_y_3)
+     _y_3 = move tupled_args_2.0
+@@ -201,7 +201,7 @@ where
+     let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'2, '3, T>[@TraitClause0, @TraitClause1]; // return
+     let _1: &'5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let tupled_args_2: (); // arg #2
+-    let _3: &'6 T; // anonymous local
++    let _3: &'7 T; // anonymous local
+ 
+     storage_live(_3)
+     _3 = &(*((*_1)).0)

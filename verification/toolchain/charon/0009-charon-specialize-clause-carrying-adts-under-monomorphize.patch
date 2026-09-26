@@ -1,0 +1,130 @@
+# charon integration step 9 after 546078ea5d: commit 5c66a244c9bdde7f40ea86ead9aeba548ab656eb
+# first parent 428e107753e8af06f9005c3eb4fa122027708e01
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: specialize clause-carrying ADTs under monomorphize-mut=except-types
+
+diff --git a/src/transform/normalize/partial_monomorphization.rs b/src/transform/normalize/partial_monomorphization.rs
+index cd233ba..56cdfb8 100644
+--- a/src/transform/normalize/partial_monomorphization.rs
++++ b/src/transform/normalize/partial_monomorphization.rs
+@@ -506,11 +506,8 @@ impl<'a> PartialMonomorphizer<'a> {
+             .entry(key.clone())
+             .or_insert_with(|| {
+                 let new_id = match id {
+-                    ItemId::Type(_) => {
+-                        let new_id = self.ctx.translated.type_decls.reserve_slot();
+-                        self.infected_types.insert(new_id);
+-                        new_id.into()
+-                    }
++                    // The caller records whether the new type is infected.
++                    ItemId::Type(_) => self.ctx.translated.type_decls.reserve_slot().into(),
+                     ItemId::Fun(_) => self.ctx.translated.fun_decls.reserve_slot().into(),
+                     ItemId::Global(_) => self.ctx.translated.global_decls.reserve_slot().into(),
+                     ItemId::TraitDecl(_) => self.ctx.translated.trait_decls.reserve_slot().into(),
+@@ -537,6 +534,23 @@ impl<'a> PartialMonomorphizer<'a> {
+         })
+     }
+ 
++    /// Whether references to this ADT get partially monomorphized.
++    ///
++    /// `--monomorphize-mut=except-types` keeps ADTs generic, which is only coherent for ADTs
++    /// without trait clauses: every reference passes witnesses for the clauses, and witnesses whose
++    /// types are infected get rewritten to point at specialized trait declarations, which the
++    /// generic clauses do not mention. `--remove-adt-clauses` clears the clauses of ordinary ADTs,
++    /// but closures keep theirs (their Fn impl metadata refers to them). An ADT that keeps trait
++    /// clauses is therefore specialized like a function, so that its instantiated clauses agree
++    /// with the witnesses it receives.
++    fn specializes_type(&self, id: TypeDeclId) -> bool {
++        self.specialize_adts
++            || self
++                .generic_params
++                .get(&id.into())
++                .is_some_and(|params| !params.trait_clauses.is_empty())
++    }
++
+     /// A conditional default can constrain `Self` more precisely than the enclosing
+     /// trait (for example, `Iterator::copied` requires `Item = &T`). After lifting
+     /// associated types, the method's function item expects that stronger predicate
+@@ -621,10 +635,23 @@ impl VisitAstMut for PartialMonomorphizer<'_> {
+         }
+     }
+     fn exit_type_decl_ref(&mut self, x: &mut TypeDeclRef) {
+-        if self.specialize_adts
+-            && let TypeId::Adt(id) = x.id
+-            && let Some(new_decl_ref) = self.process_generics(id.into(), &x.generics)
+-        {
++        let TypeId::Adt(id) = x.id else {
++            return;
++        };
++        if !self.specializes_type(id) {
++            return;
++        }
++        // The specialized type stores a mutable borrow iff this instance does. With
++        // `specialize_adts`, `is_infected` only inspects the ADT id (it assumes arguments were
++        // already specialized), so it cannot classify this instance: keep treating every
++        // specialized type as infected there.
++        let infected =
++            self.specialize_adts || self.is_infected(&TyKind::Adt(x.clone()).into_ty());
++        if let Some(new_decl_ref) = self.process_generics(id.into(), &x.generics) {
++            let new_id: TypeDeclId = new_decl_ref.id.try_into().unwrap();
++            if infected {
++                self.infected_types.insert(new_id);
++            }
+             *x = new_decl_ref.try_into().unwrap()
+         }
+     }
+diff --git a/tests/ui/monomorphize-mut-closure-clauses.rs b/tests/ui/monomorphize-mut-closure-clauses.rs
+new file mode 100644
+index 0000000..9433de8
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-closure-clauses.rs
+@@ -0,0 +1,48 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++//@ no-check-output
++
++// Closures keep the trait clauses they inherit from their parent, even with
++// `--remove-adt-clauses`. Instantiating those parents with closures that
++// capture `&mut` used to produce ill-formed partial monomorphizations:
++// - the clauses merged from a nested closure type were shifted twice, leaving
++//   references to clauses that do not exist;
++// - generic closure types kept their generic clauses while receiving
++//   witnesses for specialized trait declarations.
++pub struct Expr(pub u32);
++
++pub struct Meta {
++    pub values: Vec<Expr>,
++}
++
++impl Meta {
++    pub fn find_expression<'a, T>(&'a self, mut f: impl FnMut(&'a Expr) -> Option<T>) -> Option<T> {
++        let mut result = None;
++        self.visit_expressions(&mut |value| {
++            if result.is_none() {
++                result = f(value);
++            }
++        });
++        result
++    }
++
++    pub fn any_expression(&self, mut f: impl FnMut(&Expr) -> bool) -> bool {
++        self.find_expression(|value| f(value).then_some(())).is_some()
++    }
++
++    pub fn visit_expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
++        let mut i = 0;
++        while i < self.values.len() {
++            visit(&self.values[i]);
++            i += 1;
++        }
++    }
++}
++
++pub fn uses(m: &Meta) -> bool {
++    let mut n = 0;
++    m.any_expression(|e| {
++        n += e.0;
++        n > 3
++    })
++}

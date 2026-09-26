@@ -1,0 +1,674 @@
+# aeneas integration step 67 after cba11f3beb: commit 85544e8c6f4d4351dfe5b8422e87122ab0eda71f
+# first parent 0a62ef5c5676bcb28ab03d264ab4b1aa79252966, merged fde179605f7ebb82a165ced57f8ca0f8856055f9
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (same-region nesting gives back the inner borrows unchanged)
+
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 8b31b08..ce1a22f 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1626,7 +1626,9 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+     let ctx, stages =
+       match signature.early with
+       | [] ->
+-          let ctx, input_values = abs_to_given_back None abs abs_level ctx in
++          let ctx, input_values =
++            abs_to_given_back ~ectx None abs abs_level ctx
++          in
+           ( ctx,
+             [ (input_values, lookup_level (find_group ctx.backward_inputs)) ] )
+       | _ ->
+@@ -1637,7 +1639,9 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+           List.fold_left_map
+             (fun ctx (index, bound) ->
+               let sides = staged_abs_sides ctx.span signature index abs in
+-              let ctx, values = abs_to_given_back ~sides None abs abs_level ctx in
++              let ctx, values =
++                abs_to_given_back ~ectx ~sides None abs abs_level ctx
++              in
+               (ctx, (values, bound)))
+             ctx
+             (List.mapi (fun index bound -> (index, bound)) bound)
+@@ -1725,7 +1729,7 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+        bound. A pure let-binding which uses them is never emitted, and any
+        other use of them is reported as an unbound variable by the closedness
+        checks. *)
+-    let ctx', outputs = abs_to_given_back None abs abs_level ctx in
++    let ctx', outputs = abs_to_given_back ~ectx None abs abs_level ctx in
+     [%cassert] ctx.span (abs_level > 0 || outputs = []) "Unimplemented";
+     let unavailable =
+       V.SymbolicValueId.Map.filter
+@@ -1805,7 +1809,9 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+               level level
+             = None
+          && (late_sides = None
+-            || snd (abs_to_given_back ?sides:late_sides None abs abs_level ctx)
++            || snd
++                 (abs_to_given_back ~ectx ?sides:late_sides None abs abs_level
++                    ctx)
+                <> [])
+          && abs_to_consumed ?sides:late_sides ctx ectx abs level <> [] ->
+       translate_end_abstraction_fun_call ectx abs level
+@@ -2287,7 +2293,7 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+      positions are no longer source-place indices for these output patterns. *)
+   let ctx, outputs =
+     if late_promised then (ctx, [])
+-    else abs_to_given_back ?sides None abs abs_level ctx
++    else abs_to_given_back ~ectx ?sides None abs abs_level ctx
+   in
+   match V.AbsId.Map.find_opt abs.abs_id ctx.fun_call_stages with
+   | Some stage when not (fun_call_last_stage_ready stage) ->
+@@ -2683,7 +2689,7 @@ and translate_end_abs_identity (ectx : C.eval_ctx) (abs : V.abs)
+ 
+     (* We can do this simply by checking that it consumes and gives back nothing *)
+     let inputs = abs_to_consumed ctx ectx abs abs_level in
+-    let ctx, outputs = abs_to_given_back None abs abs_level ctx in
++    let ctx, outputs = abs_to_given_back ~ectx None abs abs_level ctx in
+     [%sanity_check] ctx.span (inputs = []);
+     [%sanity_check] ctx.span (outputs = []);
+ 
+@@ -2903,7 +2909,7 @@ and translate_end_abstraction_join_or_loop (ectx : C.eval_ctx) (abs : V.abs)
+   in
+   (* Compute the input and output values *)
+   let back_inputs = abs_to_consumed ctx ectx abs abs_level in
+-  let ctx, outputs = abs_to_given_back None abs abs_level ctx in
++  let ctx, outputs = abs_to_given_back ~ectx None abs abs_level ctx in
+   let output = mk_simpl_tuple_pat outputs in
+   (* Lookup the continuation to check if the abstraction is output by a join
+      or a loop - note that it might not be there if the backward function was
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index d05e0d0..5bcf9b2 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -1559,10 +1559,22 @@ and aloan_content_to_consumed_aux ~(filter : bool)
+         current_level child
+   | AEndedMutLoan { child; given_back; given_back_meta } ->
+       if abs_level = current_level then (
+-        [%cassert] ctx.span (ValuesUtils.is_aignored child.value) "Unreachable";
+-        [%cassert] ctx.span
+-          (ValuesUtils.is_aignored given_back.value)
+-          "Unreachable";
++        (* With same-region nesting (the loaned value holds mutable borrows of
++           the abstraction), the loaned value holds the loans of these borrows
++           and the value given back holds the borrows themselves: they are part
++           of the value given back, which we translate as a whole (see
++           [bind_unchanged_given_back]) *)
++        if
++          not
++            (TypesUtils.ty_has_mut_borrow_for_region_in_set
++               ctx.type_ctx.type_infos abs_regions child.ty)
++        then (
++          [%cassert] ctx.span
++            (ValuesUtils.is_aignored child.value)
++            "Unreachable";
++          [%cassert] ctx.span
++            (ValuesUtils.is_aignored given_back.value)
++            "Unreachable");
+         (* Return the meta-value *)
+         Some (tvalue_to_texpr ctx ectx given_back_meta))
+       else
+@@ -2432,6 +2444,124 @@ type borrow_or_symbolic_id =
+   | Symbolic of V.SymbolicValueId.id
+ [@@deriving show, ord]
+ 
++(** The value held by the mutable borrow [bid] in a value, if it holds it. *)
++let find_mut_borrow_content (bid : V.BorrowId.id) (v : V.tvalue) :
++    V.tvalue option =
++  let found = ref None in
++  let visitor =
++    object
++      inherit [_] V.iter_tvalue as super
++
++      method! visit_VMutBorrow env bid' child =
++        if bid' = bid then found := Some child;
++        super#visit_VMutBorrow env bid' child
++    end
++  in
++  visitor#visit_tvalue () v;
++  !found
++
++(** Same-region nesting: a mutable loan of the abstraction whose value contains
++    mutable borrows of the abstraction's regions, e.g., the input
++    [s : &'a mut (&'a mut u32, u32)] of a function whose region group is ['a].
++    The backward functions do not look inside such a loan: the value given back
++    to it is translated as a whole, at the level of the loan, from its
++    [given_back_meta] (see [aloan_content_to_consumed_aux] and
++    [SymbolicToPureTypes.translate_back_nested_ty], which stops at the borrows
++    of the region group). The borrows of the abstraction's regions in that
++    value (the [given_back] side of the ended loan, one level deeper) end with
++    the region of the loan: the values given back to them are the values they
++    held when the loan ended, not inputs of a backward function. We bind the
++    values given back at [abs_level] to them (pure let-bindings emitted with
++    the next ones, see [bs_ctx.deferred_lets]): e.g., the value given back to
++    the inner borrow above is the value of [*s.0] when ['a] ends.
++
++    [given_back_meta] is the value given back to the loan whose [given_back]
++    side [av] is part of, and [ectx] translates the values which contain shared
++    borrows. *)
++let rec bind_unchanged_given_back (ectx : C.eval_ctx option)
++    (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
++    (current_level : abs_level) (given_back_meta : V.tvalue) (av : V.tavalue)
++    (ctx : bs_ctx) : bs_ctx =
++  let recurse = bind_unchanged_given_back ectx abs_regions abs_level in
++  let bind ctx (given_back : V.symbolic_value) (unchanged : texpr) =
++    let ctx, var = fresh_var_for_symbolic_value given_back ctx in
++    [%cassert] ctx.span (var.ty = unchanged.ty)
++      "Nested borrows: the value given back to a borrow of a region of the \
++       abstraction inside the value given back to one of its loans \
++       (same-region nesting) disagrees with the value it held";
++    {
++      ctx with
++      deferred_lets =
++        ctx.deferred_lets @ [ (mk_tpat_from_fvar None var, unchanged) ];
++    }
++  in
++  if current_level > abs_level then ctx
++  else
++    match av.value with
++    | AAdt adt_v ->
++        List.fold_left
++          (fun ctx field ->
++            recurse current_level given_back_meta field ctx)
++          ctx adt_v.fields
++    | ABorrow (AEndedMutBorrow (msv, child)) ->
++        if current_level = abs_level then
++          let content =
++            [%unwrap_with_span] ctx.span
++              (find_mut_borrow_content msv.bid given_back_meta)
++              "Nested borrows: a borrow of a region of the abstraction inside \
++               the value given back to one of its loans (same-region nesting) \
++               is not in that value"
++          in
++          let ectx =
++            [%unwrap_with_span] ctx.span ectx
++              "Nested borrows: the value given back to a borrow of a region of \
++               the abstraction inside the value given back to one of its loans \
++               (same-region nesting) is needed where the evaluation context is \
++               not available"
++          in
++          bind ctx msv.given_back (tvalue_to_texpr ctx ectx content)
++        else recurse current_level given_back_meta child ctx
++    | ABorrow (AMutBorrow (_, _, child) | AIgnoredMutBorrow (_, child))
++    | ALoan (AMutLoan (_, _, child) | AIgnoredMutLoan (_, child)) ->
++        recurse current_level given_back_meta child ctx
++    | ABorrow (AEndedIgnoredMutBorrow { child; given_back; _ })
++    | ALoan (AEndedIgnoredMutLoan { child; given_back; _ }) ->
++        let ctx = recurse current_level given_back_meta child ctx in
++        recurse (current_level + 1) given_back_meta given_back ctx
++    | ALoan (AEndedMutLoan { child; given_back; given_back_meta = meta }) ->
++        let ctx = recurse current_level given_back_meta child ctx in
++        recurse (current_level + 1) meta given_back ctx
++    | ABorrow (ASharedBorrow _ | AEndedSharedBorrow | AProjSharedBorrow _)
++    | ALoan (ASharedLoan _ | AEndedSharedLoan _ | AIgnoredSharedLoan _)
++    | AIgnored _ -> ctx
++    | ASymbolic (_, aproj) ->
++        fold_aproj_at_level abs_level current_level
++          (fun ctx aproj _ ->
++            match aproj with
++            | AEndedProjBorrows { mvalues = mv; _ }
++              when mv.consumed <> mv.given_back.sv_id
++                   && TypesUtils.ty_has_mut_borrow_for_region_in_set
++                        ctx.type_ctx.type_infos abs_regions
++                        mv.given_back.sv_ty ->
++                let original =
++                  match
++                    V.SymbolicValueId.Map.find_opt mv.consumed ctx.sv_to_var
++                  with
++                  | Some var -> Some var
++                  | None ->
++                      V.SymbolicValueId.Map.find_opt mv.consumed
++                        ctx.unavailable_svs
++                in
++                let original =
++                  [%unwrap_with_span] ctx.span original
++                    "Nested borrows: the value held by a borrow projector of \
++                     a region of the abstraction inside the value given back \
++                     to one of its loans (same-region nesting) is not in scope"
++                in
++                bind ctx mv.given_back (mk_texpr_from_fvar original)
++            | _ -> ctx)
++          ctx aproj av.ty
++
+ (** Explore an abstraction value which we know **was generated by a borrow
+     projection** (this means we won't find loans or loan projectors inside it)
+     and convert it to a given back value by collecting all the meta-values from
+@@ -2460,7 +2590,7 @@ type borrow_or_symbolic_id =
+       which gave it back. We need this to compute default values (see
+       [bs_ctx.mut_borrow_to_consumed]).
+     - the pattern *)
+-let rec tavalue_to_given_back_aux ~(filter : bool)
++let rec tavalue_to_given_back_aux ~(ectx : C.eval_ctx option) ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (mp : mplace option) (av : V.tavalue)
+     (ctx : bs_ctx) : bs_ctx * tpat option =
+@@ -2472,13 +2602,13 @@ let rec tavalue_to_given_back_aux ~(filter : bool)
+   let (ctx, value) : _ * tpat option =
+     match av.value with
+     | AAdt adt_v ->
+-        adt_avalue_to_given_back_aux ~filter abs_regions abs_level current_level
+-          av adt_v ctx
++        adt_avalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++          current_level av adt_v ctx
+     | ALoan lc ->
+-        aloan_content_to_given_back_aux ~filter abs_regions abs_level
++        aloan_content_to_given_back_aux ~ectx ~filter abs_regions abs_level
+           current_level mp lc ctx
+     | ABorrow bc ->
+-        aborrow_content_to_given_back_aux ~filter abs_regions abs_level
++        aborrow_content_to_given_back_aux ~ectx ~filter abs_regions abs_level
+           current_level mp bc av.ty ctx
+     | ASymbolic (pm, aproj) ->
+         [%sanity_check] ctx.span (pm = PNone);
+@@ -2512,7 +2642,7 @@ let rec tavalue_to_given_back_aux ~(filter : bool)
+   (* Return *)
+   (ctx, value)
+ 
+-and adt_avalue_to_given_back_aux ~(filter : bool)
++and adt_avalue_to_given_back_aux ~(ectx : C.eval_ctx option) ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (av : V.tavalue) (adt_v : V.adt_avalue)
+     (ctx : bs_ctx) : bs_ctx * tpat option =
+@@ -2521,8 +2651,8 @@ and adt_avalue_to_given_back_aux ~(filter : bool)
+       (tpat_to_string ctx)
+       (fun ~filter ctx v ->
+         let ctx, v =
+-          tavalue_to_given_back_aux ~filter abs_regions abs_level current_level
+-            None v ctx
++          tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++            current_level None v ctx
+         in
+         match v with
+         | None -> (ctx, None)
+@@ -2539,20 +2669,30 @@ and adt_avalue_to_given_back_aux ~(filter : bool)
+   in
+   (ctx, Option.map snd out)
+ 
+-and aloan_content_to_given_back_aux ~(filter : bool)
++and aloan_content_to_given_back_aux ~(ectx : C.eval_ctx option)
++    ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (mp : mplace option) (lc : V.aloan_content)
+     (ctx : bs_ctx) : bs_ctx * tpat option =
+   match lc with
+   | V.AMutLoan (_, _, child) | V.AIgnoredMutLoan (_, child) ->
+       (* Can happen with nested borrows *)
+-      tavalue_to_given_back_aux ~filter abs_regions abs_level current_level mp
+-        child ctx
++      tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++        current_level mp child ctx
+   | V.ASharedLoan _ -> (ctx, None)
+-  | V.AEndedMutLoan { child; given_back; given_back_meta = _ }
++  | V.AEndedMutLoan { child; given_back; given_back_meta } ->
++      (* The values given back to the borrows of the abstraction in the value
++         given back to the loan are unchanged (same-region nesting, see
++         [bind_unchanged_given_back]) *)
++      let ctx =
++        bind_unchanged_given_back ectx abs_regions abs_level
++          (current_level + 1) given_back_meta given_back ctx
++      in
++      tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++        current_level mp child ctx
+   | V.AEndedIgnoredMutLoan { child; given_back; _ } ->
+-      ended_nested_to_given_back ~filter abs_regions abs_level current_level mp
+-        child given_back ctx
++      ended_nested_to_given_back ~ectx ~filter abs_regions abs_level
++        current_level mp child given_back ctx
+   | V.AEndedSharedLoan _ -> (ctx, None)
+   | V.AIgnoredSharedLoan _ ->
+       (* The mutable borrows below a shared loan are frozen: they give
+@@ -2561,14 +2701,15 @@ and aloan_content_to_given_back_aux ~(filter : bool)
+          [aloan_content_to_consumed_aux]) *)
+       (ctx, None)
+ 
+-and aborrow_content_to_given_back_aux ~(filter : bool)
++and aborrow_content_to_given_back_aux ~(ectx : C.eval_ctx option)
++    ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (mp : mplace option) (bc : V.aborrow_content)
+     (ty : T.ty) (ctx : bs_ctx) : bs_ctx * tpat option =
+   match bc with
+   | V.AMutBorrow (_, _, child) | V.AIgnoredMutBorrow (_, child) ->
+-      tavalue_to_given_back_aux ~filter abs_regions abs_level current_level mp
+-        child ctx
++      tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++        current_level mp child ctx
+   | ASharedBorrow _ -> (ctx, None)
+   | AEndedMutBorrow (msv, child) ->
+       if abs_level = current_level then
+@@ -2593,11 +2734,11 @@ and aborrow_content_to_given_back_aux ~(filter : bool)
+         (* *)
+         (ctx, Some pat)
+       else
+-        tavalue_to_given_back_aux ~filter abs_regions abs_level current_level mp
+-          child ctx
++        tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++          current_level mp child ctx
+   | AEndedIgnoredMutBorrow { child; given_back; given_back_meta = _ } ->
+-      ended_nested_to_given_back ~filter abs_regions abs_level current_level mp
+-        child given_back ctx
++      ended_nested_to_given_back ~ectx ~filter abs_regions abs_level
++        current_level mp child given_back ctx
+   | AEndedSharedBorrow | AProjSharedBorrow _ ->
+       if filter then (ctx, None)
+       else
+@@ -2607,19 +2748,19 @@ and aborrow_content_to_given_back_aux ~(filter : bool)
+ (** The borrowed value ([child]) of an ended ignored borrow or loan stays at the
+     current level, the value given back is one level deeper. With three levels
+     of nested borrows or more, both may give back values at the selected level. *)
+-and ended_nested_to_given_back ~(filter : bool)
++and ended_nested_to_given_back ~(ectx : C.eval_ctx option) ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (current_level : abs_level) (mp : mplace option) (child : V.tavalue)
+     (given_back : V.tavalue) (ctx : bs_ctx) : bs_ctx * tpat option =
+   let child_av = child in
+   let given_back_av = given_back in
+   let ctx, child =
+-    tavalue_to_given_back_aux ~filter abs_regions abs_level current_level mp
+-      child ctx
++    tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++      current_level mp child ctx
+   in
+   let ctx, given_back =
+-    tavalue_to_given_back_aux ~filter abs_regions abs_level (current_level + 1)
+-      mp given_back ctx
++    tavalue_to_given_back_aux ~ectx ~filter abs_regions abs_level
++      (current_level + 1) mp given_back ctx
+   in
+   match (child, given_back) with
+   | Some v, None | None, Some v -> (ctx, Some v)
+@@ -2777,7 +2918,8 @@ and aproj_to_given_back_aux ~(filter : bool) (abs_regions : T.RegionId.Set.t)
+   | [] -> (ctx, None)
+   | _ -> (ctx, Some (mk_simpl_tuple_pat (List.rev pats)))
+ 
+-let tavalue_to_given_back ?(side : back_side = BothSides)
++let tavalue_to_given_back ?(ectx : C.eval_ctx option)
++    ?(side : back_side = BothSides)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+     (mp : mplace option) (v : V.tavalue) (ctx : bs_ctx) : bs_ctx * tpat option
+     =
+@@ -2792,7 +2934,8 @@ let tavalue_to_given_back ?(side : back_side = BothSides)
+       ctx.type_ctx.type_infos abs_regions abs_level 0 v
+   with
+   | BorrowProj BMut ->
+-      tavalue_to_given_back_aux abs_regions abs_level 0 mp ~filter:true v ctx
++      tavalue_to_given_back_aux ~ectx abs_regions abs_level 0 mp ~filter:true
++        v ctx
+   | BorrowProj BShared | LoanProj _ | UnknownProj ->
+       (* If it is a loan proj we ignore it. If it is an unknown projection,
+          it means the value doesn't contain loans nor borrows, so nothing
+@@ -2801,10 +2944,12 @@ let tavalue_to_given_back ?(side : back_side = BothSides)
+ 
+ (** Convert the abstraction values in an abstraction to given back values.
+ 
+-    [sides]: see [abs_back_sides].
++    [sides]: see [abs_back_sides]. [ectx]: the evaluation context, see
++    [bind_unchanged_given_back].
+ 
+     See [tavalue_to_given_back]. *)
+-let abs_to_given_back ?(sides : back_side option list option)
++let abs_to_given_back ?(ectx : C.eval_ctx option)
++    ?(sides : back_side option list option)
+     (mpl : mplace option list option) (abs : V.abs) (abs_level : abs_level)
+     (ctx : bs_ctx) : bs_ctx * tpat list =
+   [%ltrace
+@@ -2825,7 +2970,8 @@ let abs_to_given_back ?(sides : back_side option list option)
+         match side with
+         | None -> (ctx, None)
+         | Some side ->
+-            tavalue_to_given_back ~side abs.regions.owned abs_level mp av ctx)
++            tavalue_to_given_back ?ectx ~side abs.regions.owned abs_level mp av
++              ctx)
+       ctx avalues
+   in
+   let values = List.filter_map (fun x -> x) values in
+diff --git a/tests/lean/NestedBorrowsSameRegion.lean b/tests/lean/NestedBorrowsSameRegion.lean
+new file mode 100644
+index 0000000..75b7da7
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSameRegion.lean
+@@ -0,0 +1 @@
++import NestedBorrowsSameRegion.Checks
+diff --git a/tests/lean/NestedBorrowsSameRegion/Checks.lean b/tests/lean/NestedBorrowsSameRegion/Checks.lean
+new file mode 100644
+index 0000000..8bc5037
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSameRegion/Checks.lean
+@@ -0,0 +1,52 @@
++import NestedBorrowsSameRegion.NestedBorrowsSameRegion
++
++/-! Evaluate the model of `tests/src/nested-borrows-same-region.rs` on the
++    inputs of its `native` test module and compare with the native results: the
++    returned values and the final value of the lender of the inner borrow (the
++    first component of the value given back for the outer borrow). -/
++
++namespace nested_borrows_same_region.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++/-- `run_j`: the two returned values and the final value of `a` -/
++def jRun (a b : Nat) : Option (Nat × Nat × Nat) :=
++  match j (u a, u b) with
++  | ok ((r0, r1), (a', _)) => some (r0.val, r1.val, a'.val)
++  | _ => none
++
++/-- `run_m`: the returned value and the final value of `a` -/
++def mRun (a : Nat) : Option (Nat × Nat) :=
++  match m (u a) with
++  | ok (x, a') => some (x.val, a'.val)
++  | _ => none
++
++/-- `run_call_k`: the returned value and the final value of `a` -/
++def callKRun (a b : Nat) : Option (Nat × Nat) :=
++  match call_k (u a, u b) with
++  | ok (r, (a', _)) => some (r.val, a'.val)
++  | _ => none
++
++/-- `run_call_k_then`: the returned values and the final value of `a` -/
++def callKThenRun (a b : Nat) : Option (Nat × Nat × Nat) :=
++  match call_k_then (u a, u b) with
++  | ok ((r, t1), (a', _)) => some (r.val, t1.val, a'.val)
++  | _ => none
++
++#guard jRun 1 2 == some (3, 3, 3)
++#guard jRun max 2 == some (1, 3, 1)
++#guard jRun 7 max == some (6, 0, 6)
++
++#guard mRun 0 == some (1, 1)
++#guard mRun max == some (0, 0)
++
++#guard callKRun 1 2 == some (3, 3)
++#guard callKRun max 3 == some (2, 2)
++
++#guard callKThenRun 1 2 == some (3, 5, 3)
++#guard callKThenRun max 3 == some (2, 5, 2)
++
++end nested_borrows_same_region.checks
+diff --git a/tests/lean/NestedBorrowsSameRegion/NestedBorrowsSameRegion.lean b/tests/lean/NestedBorrowsSameRegion/NestedBorrowsSameRegion.lean
+new file mode 100644
+index 0000000..647d228
+--- /dev/null
++++ b/tests/lean/NestedBorrowsSameRegion/NestedBorrowsSameRegion.lean
+@@ -0,0 +1,74 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_same_region]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_same_region
++
++/-- [nested_borrows_same_region::j]:
++    Source: 'tests/src/nested-borrows-same-region.rs', lines 12:0-16:1
++    Visibility: public -/
++def j
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1) := s
++  let i2 ← lift (core.num.U32.wrapping_add i i1)
++  let i3 ← lift (core.num.U32.wrapping_add i1 1#u32)
++  _root_.Aeneas.Std.Result.ok ((i2, i3), (i2, i3))
++
++/-- [nested_borrows_same_region::m]:
++    Source: 'tests/src/nested-borrows-same-region.rs', lines 17:0-20:1
++    Visibility: public -/
++def m
++  (s : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let s1 ← lift (core.num.U32.wrapping_add s 1#u32)
++  _root_.Aeneas.Std.Result.ok (s1, s1)
++
++/-- [nested_borrows_same_region::k]:
++    Source: 'tests/src/nested-borrows-same-region.rs', lines 21:0-24:1
++    Visibility: public -/
++def k
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1) := s
++  let i2 ← lift (core.num.U32.wrapping_add i i1)
++  _root_.Aeneas.Std.Result.ok (i2, (i2, i1), fun s1 => s1)
++
++/-- [nested_borrows_same_region::call_k]:
++    Source: 'tests/src/nested-borrows-same-region.rs', lines 25:0-27:1
++    Visibility: public -/
++def call_k
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, s1, _) ← _root_.nested_borrows_same_region.k s
++  _root_.Aeneas.Std.Result.ok (i, s1)
++
++/-- [nested_borrows_same_region::call_k_then]:
++    Source: 'tests/src/nested-borrows-same-region.rs', lines 28:0-32:1
++    Visibility: public -/
++def call_k_then
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let (r, s1, _) ← _root_.nested_borrows_same_region.k s
++  let (i, i1) := s1
++  let i2 ← lift (core.num.U32.wrapping_add i1 r)
++  _root_.Aeneas.Std.Result.ok ((r, i2), (i, i2))
++
++end nested_borrows_same_region
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index f12158a..3efdb2d 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -38,6 +38,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsClosureOutlives
+ @[default_target] lean_lib NestedBorrowsAbsentLevel
+ @[default_target] lean_lib NestedBorrowsTuple
++@[default_target] lean_lib NestedBorrowsSameRegion
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectFlatten
+diff --git a/tests/src/nested-borrows-same-region.rs b/tests/src/nested-borrows-same-region.rs
+new file mode 100644
+index 0000000..f4c4413
+--- /dev/null
++++ b/tests/src/nested-borrows-same-region.rs
+@@ -0,0 +1,87 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsSameRegion
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Same-region nesting: a mutable borrow of a region group whose borrowed
++//! value holds mutable borrows of the same group, e.g.
++//! `&'a mut (&'a mut u32, u32)`. The backward function gives back the borrowed
++//! value as a whole, the inner borrows as the values they hold when the region
++//! ends: their region ends with the outer borrow, so nothing is given back to
++//! them.
++
++pub fn j<'a>(s: &'a mut (&'a mut u32, u32)) -> (u32, u32) {
++    *s.0 = s.0.wrapping_add(s.1);
++    s.1 = s.1.wrapping_add(1);
++    (*s.0, s.1)
++}
++pub fn m<'a>(s: &'a mut &'a mut u32) -> u32 {
++    **s = s.wrapping_add(1);
++    **s
++}
++pub fn k<'a, 'b>(s: &'a mut (&'b mut u32, u32)) -> u32 {
++    *s.0 = s.0.wrapping_add(s.1);
++    *s.0
++}
++pub fn call_k<'a>(s: &'a mut (&'a mut u32, u32)) -> u32 {
++    k(s)
++}
++pub fn call_k_then<'a>(s: &'a mut (&'a mut u32, u32)) -> (u32, u32) {
++    let r = k(s);
++    s.1 = s.1.wrapping_add(r);
++    (r, s.1)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn run_j(a: u32, b: u32) -> (u32, u32, u32) {
++        let mut a = a;
++        let mut t = (&mut a, b);
++        let (r0, r1) = j(&mut t);
++        (r0, r1, a)
++    }
++    fn run_m(a: u32) -> (u32, u32) {
++        let mut a = a;
++        let mut r = &mut a;
++        let x = m(&mut r);
++        (x, a)
++    }
++    fn run_call_k(a: u32, b: u32) -> (u32, u32) {
++        let mut a = a;
++        let mut t = (&mut a, b);
++        let r = call_k(&mut t);
++        (r, a)
++    }
++    fn run_call_k_then(a: u32, b: u32) -> (u32, u32, u32) {
++        let mut a = a;
++        let mut t = (&mut a, b);
++        let (r, t1) = call_k_then(&mut t);
++        (r, t1, a)
++    }
++
++    #[test]
++    fn j_native() {
++        assert_eq!(run_j(1, 2), (3, 3, 3));
++        assert_eq!(run_j(u32::MAX, 2), (1, 3, 1));
++        assert_eq!(run_j(7, u32::MAX), (6, 0, 6));
++    }
++
++    #[test]
++    fn m_native() {
++        assert_eq!(run_m(0), (1, 1));
++        assert_eq!(run_m(u32::MAX), (0, 0));
++    }
++
++    #[test]
++    fn call_k_native() {
++        assert_eq!(run_call_k(1, 2), (3, 3));
++        assert_eq!(run_call_k(u32::MAX, 3), (2, 2));
++    }
++
++    #[test]
++    fn call_k_then_native() {
++        assert_eq!(run_call_k_then(1, 2), (3, 5, 3));
++        assert_eq!(run_call_k_then(u32::MAX, 3), (2, 5, 2));
++    }
++}

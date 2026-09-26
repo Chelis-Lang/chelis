@@ -1,0 +1,102 @@
+# charon integration step 17 after 546078ea5d: commit 4dada634cf6f0cfcb6a72d467180a6edc8280c99
+# first parent dd8057477216c51a66a902e1bea402633c84b3c0
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: per-selection start-from entries in the coverage report
+#
+# When CHARON_COVERAGE_REPORT is set, complete the report once the transformation passes have run
+# with `start_from`: for each selection, its pattern, whether it is strict, and the items it
+# selected (`id`, `name`, and `declared`: whether the final `ordered_decls` declares it).
+
+diff --git a/src/bin/charon-driver/main.rs b/src/bin/charon-driver/main.rs
+index baea0fb..66c3f95 100644
+--- a/src/bin/charon-driver/main.rs
++++ b/src/bin/charon-driver/main.rs
+@@ -146,6 +146,7 @@ fn run_charon() -> Result<usize, CharonFailure> {
+ 
+     let error_count = ctx.errors.borrow().error_count;
+     size_report::write(&ctx);
++    translate::translate_crate::write_start_from_coverage(&ctx);
+ 
+     // # Final step: generate the files.
+     if !options.no_serialize {
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index ce10013..6c96e3e 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -403,6 +403,7 @@ impl<'tcx> TranslateCtx<'tcx> {
+     /// of this run as JSON: per crate, the definitions enumerated as roots; and per crate and
+     /// item kind, the items that were translated, those processed without producing an item, and
+     /// those registered as references but never needed (unused methods, unneeded vtables).
++    /// `write_start_from_coverage` completes it once the transformation passes have run.
+     pub fn write_coverage_report(&self) {
+         let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
+             return;
+@@ -1064,3 +1065,67 @@ pub fn translate<'tcx>(
+         start_from_roots,
+     })
+ }
++
++/// Complete the `CHARON_COVERAGE_REPORT` written at translation time with what each start-from
++/// selection yields in the final output: `start_from` lists, per selection, the items it
++/// selected and whether each is declared (in `ordered_decls`).
++pub fn write_start_from_coverage(ctx: &TransformCtx) {
++    use charon_lib::pretty::FmtWithCtx;
++    use charon_lib::pretty::formatter::IntoFormatter;
++    let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
++        return;
++    };
++    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
++        panic!(
++            "cannot read coverage report {}: {error}",
++            path.to_string_lossy()
++        )
++    });
++    let mut report: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|error| {
++        panic!(
++            "cannot parse coverage report {}: {error}",
++            path.to_string_lossy()
++        )
++    });
++    let declared: HashSet<ItemId> = ctx
++        .translated
++        .ordered_decls
++        .iter()
++        .flatten()
++        .flat_map(|group| group.get_ids())
++        .collect();
++    let fmt = ctx.into_fmt();
++    let selections = ctx
++        .start_from_roots
++        .iter()
++        .map(|selection| {
++            let items = selection
++                .items
++                .iter()
++                .map(|id| {
++                    serde_json::json!({
++                        "id": id.to_string(),
++                        "name": ctx
++                            .translated
++                            .item_name(*id)
++                            .map(|name| name.with_ctx(&fmt).to_string()),
++                        "declared": declared.contains(id),
++                    })
++                })
++                .collect_vec();
++            serde_json::json!({
++                "pattern": selection.label,
++                "strict": selection.strict,
++                "items": items,
++            })
++        })
++        .collect_vec();
++    report["start_from"] = selections.into();
++    let text = serde_json::to_string_pretty(&report).unwrap();
++    std::fs::write(&path, text).unwrap_or_else(|error| {
++        panic!(
++            "cannot write coverage report {}: {error}",
++            path.to_string_lossy()
++        )
++    });
++}

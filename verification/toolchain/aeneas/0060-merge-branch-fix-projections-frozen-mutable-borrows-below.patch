@@ -1,0 +1,495 @@
+# aeneas integration step 60 after cba11f3beb: commit e7bd101d954cacb86ffa4f5c898f927ce8fb03fc
+# first parent d8cc84ce5a61032456d936e516abe655a739b9d1, merged 093543e5514b5119e9405b27eb69c996fee506fc
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/projections' (frozen mutable borrows below shared borrows of a call's output)
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 4ca18c3..377898e 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -205,6 +205,7 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       mk_continue = None;
+       mk_break = [];
+       mk_join = Contexts.SymbolicExprId.Map.empty;
++      mut_borrow_to_original = BorrowId.Map.empty;
+       mut_borrow_to_consumed = BorrowId.Map.empty;
+       var_id_to_default = Pure.FVarId.Map.empty;
+       abs_id_to_info = AbsId.Map.empty;
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index f0206c6..59e67e3 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -331,6 +331,17 @@ type bs_ctx = {
+   mk_join : (ty * (bs_ctx -> texpr -> texpr)) Contexts.SymbolicExprId.Map.t;
+       (** Scoped join continuations, including their payload types. Inner
+           bindings forward nonlocal joins through their tagged exit payloads. *)
++  mut_borrow_to_original : texpr V.BorrowId.Map.t;
++      (** The values of the mutable borrows introduced by the expansions of
++          symbolic mutable references, at the time of the expansion.
++
++          The mutable borrows below a shared borrow are frozen: ending them
++          gives back their original values. A function-call abstraction which
++          holds such borrows at a level (e.g., [Option::as_ref] on
++          [Option<&'1 mut Frame<'2>>] where [Frame<'2>] holds a [&'2 mut u32]:
++          the frame given back to ['1] holds a borrow of ['2] of the call) gives
++          nothing back for them (see
++          [SymbolicToPureValues.abs_frozen_given_back_bindings]). *)
+   mut_borrow_to_consumed : texpr V.BorrowId.Map.t;
+       (** A map from mutable borrows consumed by region abstractions to consumed
+           values.
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 07930e4..2982158 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1799,7 +1799,13 @@ and translate_end_abstraction_fun_call (ectx : C.eval_ctx) (abs : V.abs)
+       translate_end_abstraction_fun_call ectx abs level
+         (S.EndAbs (ectx, abs, abs_level, e))
+         ctx
+-  | _ -> translate_end_abstraction_fun_call_level ectx abs abs_level e ctx
++  | _ ->
++      (* The mutable borrows of this level frozen below shared loans give
++         back their original values (see
++         [SymbolicToPureValues.abs_frozen_given_back_bindings]) *)
++      let ctx, frozen = abs_frozen_given_back_bindings ctx abs abs_level in
++      emit_pure_lets ctx frozen (fun ctx ->
++          translate_end_abstraction_fun_call_level ectx abs abs_level e ctx)
+ 
+ (** Staged backward functions (see [Pure.back_sg_info.early]): whether the
+     values consumed by a function-call abstraction on the positions of the
+@@ -2723,6 +2729,31 @@ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+     let ctx, given_back = abs_to_given_back_no_mp abs abs_level ctx in
+     [%ltrace
+       "given back: " ^ Print.list_to_string (tpat_to_string ctx) given_back];
++    (* The mutable borrows of this region group may all be frozen below
++       shared borrows of the output (e.g., ['1] and ['2] in
++       [Option<&'0 &'1 mut Frame<'2>>], returned by [Option::as_ref] on
++       [Option<&'1 mut Frame<'2>>]). The backward function then receives the
++       final values of the frozen values (see
++       [SymbolicToPureTypes.translate_back_ty_aux]), which cannot have
++       changed: the abstraction gives nothing back for them (see
++       [SymbolicToPureValues.aloan_content_to_given_back_aux]), and the
++       inputs are unused. *)
++    let frozen =
++      given_back = [] && inputs <> []
++      && List.for_all
++           (fun (av : V.tavalue) ->
++             not
++               (TypesUtils.ty_has_mut_borrow_for_region_in_pred
++                  ~frozen_under_shared:true ctx.type_ctx.type_infos
++                  (function
++                    | T.RVar (Free rid) ->
++                        T.RegionId.Set.mem rid abs.regions.owned
++                    | _ -> false)
++                  av.ty))
++           abs.avalues
++    in
++    if frozen then translate_expr e ctx
++    else begin
+     [%sanity_check] ctx.span (List.length given_back = List.length inputs);
+     (* Link the inputs to those given back values - note that this also
+      checks we have the same number of values, of course *)
+@@ -2751,7 +2782,8 @@ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+     (* Generate the assignments *)
+     let monadic = false in
+     mk_closed_checked_lets __FILE__ __LINE__ ctx monadic given_back_inputs
+-      next_e)
++      next_e
++    end)
+   else
+     let ctx, given_back = abs_to_given_back_no_mp abs abs_level ctx in
+     let bindings = ref [] in
+@@ -2938,6 +2970,17 @@ and translate_expansion (p : S.mplace option) (sv : V.symbolic_value)
+           (* The (mut/shared) borrow type is extracted to identity: we thus simply
+              introduce an reassignment *)
+           let ctx, var = fresh_var_for_symbolic_value nsv ctx in
++          let ctx =
++            match sexp with
++            | SeMutRef (bid, _) ->
++                {
++                  ctx with
++                  mut_borrow_to_original =
++                    V.BorrowId.Map.add bid (mk_texpr_from_fvar var)
++                      ctx.mut_borrow_to_original;
++                }
++            | _ -> ctx
++          in
+           let next_e = translate_expr e ctx in
+           let monadic = false in
+           [%add_loc] mk_closed_checked_let ctx monadic
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 27b94aa..75f6e72 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -2241,8 +2241,8 @@ let rec tavalue_to_given_back_aux ~(filter : bool)
+            a value; do not end or bind the carrier's other ownership. *)
+         begin
+           match
+-            compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos
+-              abs_regions abs_level current_level av
++            compute_tavalue_proj_kind ~below_shared_loans:false ctx.span
++              ctx.type_ctx.type_infos abs_regions abs_level current_level av
+           with
+           | BorrowProj BMut ->
+               aproj_to_given_back_aux abs_regions abs_level current_level mp
+@@ -2281,8 +2281,11 @@ and adt_avalue_to_given_back_aux ~(filter : bool)
+         match v with
+         | None -> (ctx, None)
+         | Some x -> (ctx, Some ((), x)))
+-      (compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-         abs_level current_level)
++      (* Nothing is given back from below a shared loan (see
++         [aloan_content_to_given_back_aux]): the mutable borrows there are
++         frozen *)
++      (compute_tavalue_proj_kind ~below_shared_loans:false ctx.span
++         ctx.type_ctx.type_infos abs_regions abs_level current_level)
+       (fun fields ->
+         let ty = translate_fwd_ty (Some ctx.span) ctx.decls_ctx av.ty in
+         mk_adt_pat ty adt_v.variant_id fields)
+@@ -2305,7 +2308,12 @@ and aloan_content_to_given_back_aux ~(filter : bool)
+       ended_nested_to_given_back ~filter abs_regions abs_level current_level mp
+         child given_back ctx
+   | V.AEndedSharedLoan _ -> (ctx, None)
+-  | V.AIgnoredSharedLoan _ -> (ctx, None)
++  | V.AIgnoredSharedLoan _ ->
++      (* The mutable borrows below a shared loan are frozen: they give
++         nothing back (the backward functions of a callee whose output holds
++         them receive their final values and give nothing back for them, see
++         [aloan_content_to_consumed_aux]) *)
++      (ctx, None)
+ 
+ and aborrow_content_to_given_back_aux ~(filter : bool)
+     (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
+@@ -2374,8 +2382,8 @@ and ended_nested_to_given_back ~(filter : bool)
+       ( ctx,
+         combine_nested_sides ctx.span ~filter
+           ~real:(fun level av ->
+-            compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos
+-              abs_regions abs_level level av
++            compute_tavalue_proj_kind ~below_shared_loans:false ctx.span
++              ctx.type_ctx.type_infos abs_regions abs_level level av
+             = BorrowProj BMut)
+           ~mk_tuple:mk_simpl_tuple_pat
+           (current_level, child_av, child)
+@@ -2472,11 +2480,12 @@ let tavalue_to_given_back ?(side : back_side = BothSides)
+   (* Check if the value was generated from a borrow projector: if yes, and if
+      it contains mutable borrows we generate a given back pattern (because
+      upon ending the borrow the abstraction gave back a value).
+-     Otherwise we ignore it. *)
++     Otherwise we ignore it. The mutable borrows below a shared loan are
++     frozen: nothing is given back from there. *)
+   let v = select_back_side ctx abs_regions side abs_level v in
+   match
+-    compute_tavalue_proj_kind ctx.span ctx.type_ctx.type_infos abs_regions
+-      abs_level 0 v
++    compute_tavalue_proj_kind ~below_shared_loans:false ctx.span
++      ctx.type_ctx.type_infos abs_regions abs_level 0 v
+   with
+   | BorrowProj BMut ->
+       tavalue_to_given_back_aux abs_regions abs_level 0 mp ~filter:true v ctx
+@@ -2523,6 +2532,57 @@ let abs_to_given_back ?(sides : back_side option list option)
+     ^ Print.list_to_string (tpat_to_string ctx) values];
+   (ctx, values)
+ 
++(** Nested borrows: the values given back by the mutable borrows of an
++    abstraction which end at [abs_level] below one of its ignored shared loans.
++
++    Such borrows are frozen: e.g., [Option::as_ref] on
++    [Option<&'1 mut Frame<'2>>] where [Frame<'2>] holds a [&'2 mut u32] returns
++    [Option<&'0 &'1 mut Frame<'2>>]; the abstraction of ['2] of the call holds,
++    below the shared loan of ['0], the frame given back to ['1] (at level 1),
++    whose field is a borrow of ['2] of the call. Ending this borrow gives its
++    value back to the loan of the same abstraction at level 0: the callee gives
++    nothing back for the frozen positions (see [aloan_content_to_given_back_aux]
++    and [SymbolicToPureTypes.translate_back_ty_aux]), and the value is the
++    original value of the borrow, which nothing can have updated below the
++    shared borrow ([bs_ctx.mut_borrow_to_original]). We bind the values given
++    back which are not bound yet to these original values. *)
++let abs_frozen_given_back_bindings (ctx : bs_ctx) (abs : V.abs)
++    (abs_level : abs_level) : bs_ctx * (tpat * texpr) list =
++  let found = ref [] in
++  let visitor =
++    object
++      inherit [_] InterpBorrowsCore.iter_tavalue_with_levels as super
++      method incr_level (level, frozen) = (level + 1, frozen)
++
++      method! visit_AIgnoredSharedLoan (level, _) child =
++        super#visit_AIgnoredSharedLoan (level, true) child
++
++      method! visit_AEndedMutBorrow ((level, frozen) as state) meta child =
++        if frozen && level = abs_level then found := meta :: !found;
++        super#visit_AEndedMutBorrow state meta child
++    end
++  in
++  List.iter (visitor#visit_tavalue (0, false)) abs.avalues;
++  List.fold_left_map
++    (fun ctx (meta : V.aended_mut_borrow_meta) ->
++      let sv = meta.given_back in
++      if V.SymbolicValueId.Map.mem sv.sv_id ctx.sv_to_var then (ctx, None)
++      else
++        let original =
++          [%unwrap_with_span] ctx.span
++            (V.BorrowId.Map.find_opt meta.bid ctx.mut_borrow_to_original)
++            "Nested borrows: a mutable borrow frozen below a shared borrow of \
++             a region abstraction was not introduced by the expansion of a \
++             symbolic mutable reference: its original value is unknown"
++        in
++        let ctx, var = fresh_var_for_symbolic_value sv ctx in
++        [%cassert] ctx.span (var.ty = original.ty)
++          "Nested borrows: the value given back by a frozen mutable borrow \
++           disagrees with its original value";
++        (ctx, Some (mk_tpat_from_fvar None var, original)))
++    ctx (List.rev !found)
++  |> fun (ctx, bindings) -> (ctx, List.filter_map Fun.id bindings)
++
+ (** The values consumed by the loans nested in a continuation abstraction (the
+     abstraction of a join, a loop or a reborrow), with the level of each loan.
+ 
+diff --git a/tests/lean/FrozenNestedRegion.lean b/tests/lean/FrozenNestedRegion.lean
+new file mode 100644
+index 0000000..f593068
+--- /dev/null
++++ b/tests/lean/FrozenNestedRegion.lean
+@@ -0,0 +1 @@
++import FrozenNestedRegion.Checks
+diff --git a/tests/lean/FrozenNestedRegion/Checks.lean b/tests/lean/FrozenNestedRegion/Checks.lean
+new file mode 100644
+index 0000000..e71013e
+--- /dev/null
++++ b/tests/lean/FrozenNestedRegion/Checks.lean
+@@ -0,0 +1,27 @@
++import FrozenNestedRegion.FrozenNestedRegion
++
++/-! Evaluate the model of `tests/src/frozen-nested-region.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace frozen_nested_region.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def steps : Slice U32 := ⟨[u 3, u 5, u 7], by simp; scalar_tac⟩
++
++def frame (pos : Nat) : Frame := { steps, ctx := u 1, pos := ⟨BitVec.ofNat _ pos⟩ }
++
++def val (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++#guard val (first_step (some (frame 1))) == some 6
++#guard val (first_step none) == some 0
++#guard val (first_step_as_ref (some (frame 1))) == some 6
++#guard val (first_step_as_ref none) == some 0
++#guard val (first_step_as_ref (some (frame 2))) == some 8
++#guard val (first_step (some (frame 2))) == some 8
++
++end frozen_nested_region.checks
+diff --git a/tests/lean/FrozenNestedRegion/FrozenNestedRegion.lean b/tests/lean/FrozenNestedRegion/FrozenNestedRegion.lean
+new file mode 100644
+index 0000000..98cfa0e
+--- /dev/null
++++ b/tests/lean/FrozenNestedRegion/FrozenNestedRegion.lean
+@@ -0,0 +1,119 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [frozen_nested_region]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace frozen_nested_region
++
++/-- [frozen_nested_region::Frame]
++    Source: 'tests/src/frozen-nested-region.rs', lines 14:0-18:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- [core::option::{core::option::Option<T>}::as_ref::<0, &1 mut (frozen_nested_region::Frame<2>)>]:
++    Source: '/rustc/library/core/src/option.rs', lines 744:4-744:44
++    Name pattern: [core::option::{core::option::Option<@T>}::as_ref<'0, &'1 mut frozen_nested_region::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_ref<'0, &'1 mut frozen_nested_region::Frame<'2>>"]
++def
++  core.option.Option.as_ref0Mut1Frame_specialized_1a6dc24ddc6d0b8fd43ba1adc256700c
++  (self : _root_.Option _root_.frozen_nested_region.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.frozen_nested_region.Frame)
++    × (_root_.Option _root_.frozen_nested_region.Frame → _root_.Unit) ×
++    (_root_.Option _root_.frozen_nested_region.Frame → _root_.Unit))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    let back1 :=
++      (fun o => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (none, back, back1)
++  | some _ =>
++    let back :=
++      (fun o => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    let back1 :=
++      (fun o => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (self, back, back1)
++
++/-- [frozen_nested_region::{frozen_nested_region::Frame<0>}::steps]:
++    Source: 'tests/src/frozen-nested-region.rs', lines 21:4-23:5
++    Visibility: public -/
++def Frame.impl.steps
++  (self : _root_.frozen_nested_region.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  := do
++  _root_.Aeneas.Std.Result.ok self.steps
++
++/-- [frozen_nested_region::first]:
++    Source: 'tests/src/frozen-nested-region.rs', lines 27:0-29:1
++    Visibility: public -/
++def first
++  (o : _root_.Option _root_.frozen_nested_region.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.frozen_nested_region.Frame)
++    × (_root_.Option _root_.frozen_nested_region.Frame → _root_.Unit) ×
++    (_root_.Option _root_.frozen_nested_region.Frame → _root_.Unit))
++  := do
++  match o with
++  | none =>
++    let back'b :=
++      (fun o1 => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    let back'c :=
++      (fun o1 => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (none, back'b, back'c)
++  | some _ =>
++    let back'b :=
++      (fun o1 => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    let back'c :=
++      (fun o1 => () : _root_.Option _root_.frozen_nested_region.Frame →
++        _root_.Unit)
++    _root_.Aeneas.Std.Result.ok (o, back'b, back'c)
++
++/-- [frozen_nested_region::first_step]:
++    Source: 'tests/src/frozen-nested-region.rs', lines 32:0-37:1
++    Visibility: public -/
++def first_step
++  (execution : _root_.Option _root_.frozen_nested_region.Frame) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (o, _, _) ← _root_.frozen_nested_region.first execution
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some f => let i ← Slice.index_usize f.steps f.pos
++              i + f.ctx
++
++/-- [frozen_nested_region::first_step_as_ref]:
++    Source: 'tests/src/frozen-nested-region.rs', lines 41:0-46:1
++    Visibility: public -/
++def first_step_as_ref
++  (execution : _root_.Option _root_.frozen_nested_region.Frame) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (o, _, _) ←
++    _root_.frozen_nested_region.core.option.Option.as_ref0Mut1Frame_specialized_1a6dc24ddc6d0b8fd43ba1adc256700c
++      execution
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some f =>
++    let s ← _root_.frozen_nested_region.Frame.impl.steps f
++    let i ← Slice.index_usize s f.pos
++    i + f.ctx
++
++end frozen_nested_region
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 6d6f3b3..04cdbc6 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -61,6 +61,7 @@ package «tests» {}
+ @[default_target] lean_lib DynamicSize
+ @[default_target] lean_lib FnOnceMutArgMutArg
+ @[default_target] lean_lib FromTo
++@[default_target] lean_lib FrozenNestedRegion
+ @[default_target] lean_lib GenericIntoIteratorLoop
+ @[default_target] lean_lib Hashmap
+ @[default_target] lean_lib Into
+diff --git a/tests/src/frozen-nested-region.rs b/tests/src/frozen-nested-region.rs
+new file mode 100644
+index 0000000..eb12ec2
+--- /dev/null
++++ b/tests/src/frozen-nested-region.rs
+@@ -0,0 +1,65 @@
++//@ [!lean] skip
++//@ [lean] subdir=FrozenNestedRegion
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A shared borrow of a mutable borrow of a struct which holds a mutable
++//! borrow itself, as `Option::as_ref` on the `Option<&mut ExecutionFrame<'_>>`
++//! of `chelis_ir::eval` (`ExecutionFrame` holds `context: &mut _`):
++//! `Option<&'a &'b mut Frame<'c>>`. The regions `'b` and `'c` are frozen below
++//! `'a`: their backward functions receive the final value of the frame
++//! (unchanged) and give nothing back, at every level.
++//! `FrozenNestedRegion/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub struct Frame<'a> {
++    steps: &'a [u32],
++    ctx: &'a mut u32,
++    pos: usize,
++}
++
++impl Frame<'_> {
++    pub fn steps(&self) -> &[u32] {
++        self.steps
++    }
++}
++
++/// The callee: a shared borrow of the payload
++pub fn first<'a, 'b, 'c>(o: &'a Option<&'b mut Frame<'c>>) -> Option<&'a &'b mut Frame<'c>> {
++    if let Some(f) = o { Some(f) } else { None }
++}
++
++/// The caller: read through the frozen borrows
++pub fn first_step(execution: &Option<&mut Frame<'_>>) -> u32 {
++    match first(execution) {
++        Some(frame) => frame.steps[frame.pos] + *frame.ctx,
++        None => 0,
++    }
++}
++
++/// `Option::as_ref`, reading through a method which takes `&self` (as
++/// `frame.steps()` in `eval_tensor_internal_with_result_claims`)
++pub fn first_step_as_ref(execution: &Option<&mut Frame<'_>>) -> u32 {
++    match execution.as_ref() {
++        Some(frame) => frame.steps()[frame.pos] + *frame.ctx,
++        None => 0,
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn frames() {
++        let steps = [3, 5, 7];
++        let mut ctx = 1;
++        let mut frame = Frame { steps: &steps, ctx: &mut ctx, pos: 1 };
++        assert_eq!(first_step(&Some(&mut frame)), 6);
++        assert_eq!(first_step(&None), 0);
++        assert_eq!(first_step_as_ref(&Some(&mut frame)), 6);
++        assert_eq!(first_step_as_ref(&None), 0);
++        frame.pos = 2;
++        assert_eq!(first_step_as_ref(&Some(&mut frame)), 8);
++        assert_eq!(first_step(&Some(&mut frame)), 8);
++    }
++}

@@ -1,0 +1,1149 @@
+# aeneas integration step 37 after cba11f3beb: commit b3cc9438b55af6f3c4c3b5b2dff3e42e3ff18b40
+# first parent 7754c5863b1c26361b2888080b1bfe00f84b59a7, merged bb433b88e73eaecce5945e50e63a63016912b8f1
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (two-level backward functions when only the output nests borrows in type arguments)
+
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 2abd8a5..86e4139 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -382,11 +382,11 @@ let tuple_fields span (e : texpr) tys =
+ 
+ (** The backward translation filters tuple fields but keeps a struct's shape.
+     Never identify a source field merely by its erased Lean type. *)
+-let rec project_back span ctx get_group gid level ty (e : texpr) =
++let rec project_back ~nested span ctx get_group gid level ty (e : texpr) =
+   let target =
+     (* Nested borrows beyond two levels, or inside ADTs: see
+        [SymbolicToPureTypes.back_ty_is_deeply_nested] *)
+-    if back_ty_is_deeply_nested (Some span) ctx get_group gid ty then
++    if back_ty_is_deeply_nested ~nested (Some span) ctx get_group gid ty then
+       translate_back_nested_ty (Some span) ctx get_group gid level ty
+     else translate_back_ty_aux (Some span) ctx get_group gid level ty
+   in
+@@ -396,9 +396,10 @@ let rec project_back span ctx get_group gid level ty (e : texpr) =
+   | Some target ->
+       let value =
+         match ty with
+-        | T.TRef (_, ty, _) -> project_back span ctx get_group gid level ty e
++        | T.TRef (_, ty, _) ->
++            project_back ~nested span ctx get_group gid level ty e
+         | T.TAdt { id = T.TBuiltin T.TBox; generics = { types = [ ty ]; _ } } ->
+-            project_back span ctx get_group gid level ty e
++            project_back ~nested span ctx get_group gid level ty e
+         | T.TAdt { id = T.TTuple; generics } ->
+             let fields =
+               tuple_fields span e
+@@ -408,7 +409,7 @@ let rec project_back span ctx get_group gid level ty (e : texpr) =
+               (mk_simpl_tuple_texpr span
+                  (List.filter_map
+                     (fun (ty, e) ->
+-                      project_back span ctx get_group gid level ty e)
++                      project_back ~nested span ctx get_group gid level ty e)
+                     (List.combine generics.types fields)))
+         | _ -> [%craise] span "Unsupported structural model-state projection"
+       in
+@@ -737,6 +738,9 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+         then None
+         else (
+           let staged = Option.is_some back.early in
++          let nested =
++            back_sig_is_nested (Some span) ctx get_group gid sg.inputs sg.output
++          in
+           [%cassert] span
+             ((not staged) || not back.effect_info.can_fail)
+             "Model state recovery does not support failing staged backward \
+@@ -777,11 +781,13 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                          Option.map
+                            (fun _ -> (level, i))
+                            (if early then
+-                              translate_back_early_ty (Some span) ctx get_group
+-                                gid level ~to_input:true ~from_input ty
++                              translate_back_early_ty ~nested (Some span) ctx
++                                get_group gid level ~to_input:true ~from_input
++                                ty
+                             else
+-                              translate_back_input_ty ~staged (Some span) ctx
+-                                get_group gid level ~from_input ty))
++                              translate_back_input_ty ~staged ~nested
++                                (Some span) ctx get_group gid level ~from_input
++                                ty))
+                        sources
+                    in
+                    [%sanity_check] span (List.length sources = List.length es);
+@@ -827,11 +833,11 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+           let level_outputs ~early (level, _) =
+             let output_ty ~from_input ty =
+               if early then
+-                translate_back_early_ty (Some span) ctx get_group gid level
+-                  ~to_input:false ~from_input ty
++                translate_back_early_ty ~nested (Some span) ctx get_group gid
++                  level ~to_input:false ~from_input ty
+               else
+-                translate_back_output_ty ~staged (Some span) ctx get_group gid
+-                  level ~from_input ty
++                translate_back_output_ty ~staged ~nested (Some span) ctx
++                  get_group gid level ~from_input ty
+             in
+             let from_inputs =
+               List.filter_map
+@@ -844,7 +850,7 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                           outputs of level "
+                         ^ string_of_int level ^ " for the inputs");
+                       let state = state i ty in
+-                      project_back span ctx get_group gid 0 ty state)
++                      project_back ~nested span ctx get_group gid 0 ty state)
+                 (List.mapi (fun i ty -> (i, ty)) sg.inputs)
+             in
+             (* Nested borrows: a constructor moves its inputs into its output.
+@@ -1085,6 +1091,9 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+   in
+   let raw_call = [%add_loc] mk_apps span raw_fun args in
+   let get_group = region_group span sg in
++  let nested gid =
++    back_sig_is_nested (Some span) ctx get_group gid sg.inputs sg.output
++  in
+   let indexed_inputs = List.mapi (fun i ty -> (i, ty)) sg.inputs in
+   let groups : ((T.region_group_id * back_sg_info) * fvar option) list =
+     List.combine (T.RegionGroupId.Map.bindings dsg.back_sg) back_vars
+@@ -1095,8 +1104,8 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+         (fun (i, ty) ->
+           Option.map
+             (fun ty -> (i, ty))
+-            (translate_back_output_ty (Some span) ctx get_group gid 0
+-               ~from_input:true ty))
++            (translate_back_output_ty ~nested:(nested gid) (Some span) ctx
++               get_group gid 0 ~from_input:true ty))
+         indexed_inputs
+     in
+     let fields = tuple_fields span value (List.map snd outputs) in
+@@ -1151,14 +1160,16 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                   "Dictionary state recovery does not support higher-level \
+                    outputs";
+                 let back_fun = mk_texpr_from_fvar (Option.get var) in
++                let nested = nested gid in
+                 let level_input level project =
+                   mk_simpl_tuple_texpr span
+                     (List.filter_map
+                        (fun (i, ty) ->
+                          Option.bind
+                            (translate_back_input_ty
+-                              ~staged:(Option.is_some back.early) (Some span)
+-                              ctx get_group gid level ~from_input:true ty)
++                              ~staged:(Option.is_some back.early) ~nested
++                              (Some span) ctx get_group gid level
++                              ~from_input:true ty)
+                            (project i ty level))
+                        indexed_inputs)
+                 in
+@@ -1172,11 +1183,12 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                     | Some state ->
+                         mk_simpl_tuple_texpr span
+                           (Option.to_list
+-                             (project_back span ctx get_group gid 0 sg.output
++                             (project_back ~nested span ctx get_group gid 0
++                                sg.output
+                                 (mk_texpr_from_fvar state)))
+                   else
+                     level_input level (fun i ty level _ ->
+-                        project_back span ctx get_group gid level ty
++                        project_back ~nested span ctx get_group gid level ty
+                           (base_state i))
+                 in
+                 let back_fun, late_input =
+@@ -1206,7 +1218,8 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                                          "Dictionary state recovery: \
+                                           unsupported staged input state";
+                                        state)
+-                                     (translate_back_early_ty (Some span) ctx
++                                     (translate_back_early_ty ~nested
++                                        (Some span) ctx
+                                         get_group gid level ~to_input:true
+                                         ~from_input:true ty))
+                                  indexed_inputs))
+@@ -1254,7 +1267,8 @@ let adapt_dictionary_method span (ctx : Contexts.decls_ctx) (decl : A.fun_decl)
+                               (fun (i, ty) ->
+                                 Option.map
+                                   (fun _ -> i)
+-                                  (translate_back_early_ty (Some span) ctx
++                                  (translate_back_early_ty ~nested (Some span)
++                                     ctx
+                                      get_group gid (level + 1) ~to_input:false
+                                      ~from_input:true ty))
+                               indexed_inputs
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 8566ae4..d248e8b 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -569,6 +569,10 @@ and translate_return (ectx : C.eval_ctx) (opt_v : V.tvalue option)
+ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+     (signature : back_sg_info) =
+   let get_group = ModelStateABI.region_group ctx.span inst_sg in
++  let nested =
++    back_sig_is_nested (Some ctx.span) ctx.decls_ctx get_group gid
++      inst_sg.inputs inst_sg.output
++  in
+   let output_types =
+     List.map
+       (fun (level, _) ->
+@@ -585,7 +589,7 @@ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+               if
+                 Option.is_some
+                   (translate_back_output_ty
+-                     ~staged:(Option.is_some signature.early)
++                     ~staged:(Option.is_some signature.early) ~nested
+                      (Some ctx.span) ctx.decls_ctx get_group gid level
+                      ~from_input ty)
+               then Some ty
+@@ -1844,12 +1848,17 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+             let call = V.FunCallId.Map.find call_id ctx.calls in
+             let sg = Option.get call.inst_sg in
+             let get_group = ModelStateABI.region_group ctx.span sg in
++            let nested =
++              back_sig_is_nested (Some ctx.span) ctx.decls_ctx get_group gid
++                sg.inputs sg.output
++            in
+             let returned_inputs =
+               List.filter_map
+                 (fun (index, ty) ->
+                   Option.map
+                     (fun _ -> (index, ty))
+-                    (translate_back_output_ty (Some ctx.span) ctx.decls_ctx
++                    (translate_back_output_ty ~nested (Some ctx.span)
++                       ctx.decls_ctx
+                        get_group gid 0 ~from_input:true ty))
+                 (List.mapi (fun index ty -> (index, ty)) sg.inputs)
+             in
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index 842fc34..54e4052 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -823,10 +823,12 @@ and translate_back_nested_ty ?(side : back_side = BothSides)
+ 
+ (** Types with three levels of nested borrows or more, or whose levels of
+     nested borrows come from the fields of ADTs (e.g., a closure capturing
+-    [&'a mut Ctx<'b>] where [Ctx<'b>] contains [&'b mut T]), are translated with
++    [&'a mut Ctx<'b>] where [Ctx<'b>] contains [&'b mut T]), need
+     [translate_back_nested_ty]. [compute_back_ty_num_levels] and
+-    [translate_back_ty_aux] only handle two levels of nesting outside of ADTs. *)
+-and back_ty_is_deeply_nested (span : Meta.span option)
++    [translate_back_ty_aux] only handle two levels of nesting outside of ADTs.
++    This is a property of the type alone: see [back_sig_is_nested] for the
++    signatures translated with [translate_back_nested_ty]. *)
++and back_ty_needs_nested_scheme (span : Meta.span option)
+     (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
+     (gid : T.region_group_id) (ty : T.ty) : bool =
+   let max_level = back_ty_max_level span decls_ctx get_region_group gid ty in
+@@ -837,18 +839,57 @@ and back_ty_is_deeply_nested (span : Meta.span option)
+         || compute_back_ty_num_levels span decls_ctx get_region_group gid ty
+            <> max_level + 1)
+ 
++(** Whether the region group [gid] of a signature is translated with the
++    nested-borrows scheme ([translate_back_nested_ty], possibly staged: see
++    [Pure.back_early_sg]). This is the case if one of the input types needs it
++    (see [back_ty_needs_nested_scheme]), or if the output type has three levels
++    of nested borrows or more, or nested mutable borrows in the fields of its
++    ADTs. Otherwise, the whole signature keeps the two-level translation, even
++    if the output type is an ADT whose type arguments hold a mutable borrow
++    of a mutable borrow of the region group (e.g., [Zip<&'a mut Map<I, F<'c>>,
++    ..>] returned by [Iterator::zip] on [&'a mut Map<I, F<'c>>]): the values
++    given back to the borrows of such an output at level 1 are the values given
++    back to the borrows of the inputs they come from, which the two-level
++    translation handles through the backward functions of the enclosing
++    regions. *)
++and back_sig_is_nested (span : Meta.span option) (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (inputs : T.ty list) (output : T.ty) : bool =
++  List.exists
++    (back_ty_needs_nested_scheme span decls_ctx get_region_group gid)
++    inputs
++  ||
++  let max_level =
++    back_ty_max_level span decls_ctx get_region_group gid output
++  in
++  max_level >= 2
++  || max_level >= 0
++     && (TypesAnalysis.analyze_ty span decls_ctx.type_ctx.type_infos output)
++          .contains_nested_mut
++
++(** Whether [ty] is translated with [translate_back_nested_ty] in a signature
++    whose region group [gid] is [nested] (see [back_sig_is_nested]). *)
++and back_ty_is_deeply_nested ~(nested : bool) (span : Meta.span option)
++    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
++    (gid : T.region_group_id) (ty : T.ty) : bool =
++  nested && back_ty_needs_nested_scheme span decls_ctx get_region_group gid ty
++
+ (** Compute the number of levels required to translate a signature *)
+ and compute_back_tys_num_levels (span : Meta.span option)
+     (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
+     (gid : T.region_group_id) (inputs : T.ty list) (output : T.ty) : int =
+   let max x y = if x > y then x else y in
++  let nested =
++    back_sig_is_nested span decls_ctx get_region_group gid inputs output
++  in
+   let num_levels ty =
+     let max_level = back_ty_max_level span decls_ctx get_region_group gid ty in
+     (* A type without mutable borrows of the region group (e.g., a closure
+        capturing nested mutable borrows of other regions) has no levels *)
+     if max_level < 0 then 0
+-    else if back_ty_is_deeply_nested span decls_ctx get_region_group gid ty then
+-      max_level + 1
++    else if
++      back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
++    then max_level + 1
+     else compute_back_ty_num_levels span decls_ctx get_region_group gid ty
+   in
+   List.fold_left (fun n ty -> max n (num_levels ty)) (num_levels output) inputs
+@@ -880,11 +921,12 @@ and back_staged_side ~(early : bool) ~(from_input : bool) (level : int) :
+   else if early then Some BorrowedSide
+   else Some GivenBackSide
+ 
+-and translate_back_output_ty ?(staged : bool = false) (span : Meta.span option)
+-    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
+-    (gid : T.region_group_id) (level : int) ~(from_input : bool) (ty : T.ty) :
+-    ty option =
+-  if back_ty_is_deeply_nested span decls_ctx get_region_group gid ty then
++and translate_back_output_ty ?(staged : bool = false) ~(nested : bool)
++    (span : Meta.span option) (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
++  if back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
++  then
+     if back_level_is_output ~from_input level then (
+       match
+         if staged then back_staged_side ~early:false ~from_input level
+@@ -902,11 +944,12 @@ and translate_back_output_ty ?(staged : bool = false) (span : Meta.span option)
+ (** Translate the input type of a backward function, for a given region group.
+ 
+     We return an option, because the translated type may be empty. *)
+-and translate_back_input_ty ?(staged : bool = false) (span : Meta.span option)
+-    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
+-    (gid : T.region_group_id) (level : int) ~(from_input : bool) (ty : T.ty) :
+-    ty option =
+-  if back_ty_is_deeply_nested span decls_ctx get_region_group gid ty then
++and translate_back_input_ty ?(staged : bool = false) ~(nested : bool)
++    (span : Meta.span option) (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
++  if back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
++  then
+     if back_level_is_output ~from_input level then None
+     else (
+       match
+@@ -923,12 +966,12 @@ and translate_back_input_ty ?(staged : bool = false) (span : Meta.span option)
+ 
+ (** The types of the first stage of a staged backward function (see
+     [Pure.back_early_sg]). *)
+-and translate_back_early_ty (span : Meta.span option) (decls_ctx : C.decls_ctx)
+-    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+-    (level : int) ~(to_input : bool) ~(from_input : bool) (ty : T.ty) :
+-    ty option =
++and translate_back_early_ty ~(nested : bool) (span : Meta.span option)
++    (decls_ctx : C.decls_ctx) (get_region_group : T.region -> T.region_group_id)
++    (gid : T.region_group_id) (level : int) ~(to_input : bool)
++    ~(from_input : bool) (ty : T.ty) : ty option =
+   if
+-    back_ty_is_deeply_nested span decls_ctx get_region_group gid ty
++    back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+     && back_level_is_output ~from_input level <> to_input
+   then (
+     match back_staged_side ~early:true ~from_input level with
+@@ -1039,17 +1082,21 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+      - [to_input] controls whether we compute an input type or an output type.
+      - [from_input] should be [true] if we compute from a type of an input argument,
+        and [false] if we compute from the output type of the function. *)
++  let gid_is_nested (gid : T.RegionGroupId.id) : bool =
++    back_sig_is_nested span decls_ctx get_region_group gid sg.inputs sg.output
++  in
+   let back_gid_is_staged (gid : T.RegionGroupId.id) : bool =
+     let num_levels =
+       compute_back_tys_num_levels span decls_ctx get_region_group gid sg.inputs
+         sg.output
+     in
++    let nested = gid_is_nested gid in
+     List.exists
+       (fun (ty, from_input) ->
+         List.exists
+           (fun level ->
+-            translate_back_early_ty span decls_ctx get_region_group gid level
+-              ~to_input:false ~from_input ty
++            translate_back_early_ty ~nested span decls_ctx get_region_group gid
++              level ~to_input:false ~from_input ty
+             <> None)
+           (List.init num_levels (fun l -> l)))
+       (List.map (fun ty -> (ty, true)) sg.inputs @ [ (sg.output, false) ])
+@@ -1063,16 +1110,17 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+         sg.output
+     in
+     let staged = back_gid_is_staged gid in
++    let nested = gid_is_nested gid in
+     let translate_ty ~from_input level =
+       if early then
+-        translate_back_early_ty span decls_ctx get_region_group gid level
+-          ~to_input ~from_input
++        translate_back_early_ty ~nested span decls_ctx get_region_group gid
++          level ~to_input ~from_input
+       else if to_input then
+-        translate_back_input_ty ~staged span decls_ctx get_region_group gid
+-          level ~from_input
++        translate_back_input_ty ~staged ~nested span decls_ctx get_region_group
++          gid level ~from_input
+       else
+-        translate_back_output_ty ~staged span decls_ctx get_region_group gid
+-          level ~from_input
++        translate_back_output_ty ~staged ~nested span decls_ctx
++          get_region_group gid level ~from_input
+     in
+     let translate_level (level : int) :
+         (abs_level * (string option * ty) list) option =
+@@ -1552,13 +1600,6 @@ let ctx_translate_fwd_generic_args (ctx : bs_ctx) (generics : T.generic_args) :
+     generic_args =
+   translate_fwd_generic_args (Some ctx.span) ctx.decls_ctx generics
+ 
+-(** Simply calls [translate_back_ty] *)
+-let ctx_translate_back_output_ty (ctx : bs_ctx)
+-    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+-    (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
+-  translate_back_output_ty (Some ctx.span) ctx.decls_ctx get_region_group gid
+-    level ~from_input ty
+-
+ let mk_type_check_ctx (ctx : bs_ctx) : PureTypeCheck.tc_ctx =
+   let const_generics =
+     T.ConstGenericVarId.Map.of_list
+diff --git a/tests/lean/ZipBorrowedAdapters.lean b/tests/lean/ZipBorrowedAdapters.lean
+new file mode 100644
+index 0000000..3294778
+--- /dev/null
++++ b/tests/lean/ZipBorrowedAdapters.lean
+@@ -0,0 +1,2 @@
++import ZipBorrowedAdapters.Checks
++import ZipBorrowedAdapters.ZipBorrowedAdapters
+diff --git a/tests/lean/ZipBorrowedAdapters/Checks.lean b/tests/lean/ZipBorrowedAdapters/Checks.lean
+new file mode 100644
+index 0000000..c5ef167
+--- /dev/null
++++ b/tests/lean/ZipBorrowedAdapters/Checks.lean
+@@ -0,0 +1,33 @@
++import ZipBorrowedAdapters.ZipBorrowedAdapters
++
++/-! Evaluate the model of `tests/src/zip-borrowed-adapters.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace zip_borrowed_adapters.checks
++open Aeneas Aeneas.Std Result
++
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def val {α} (f : α → β) : Result α → Option β
++  | ok x => some (f x)
++  | _ => none
++
++def show4 : Usize × Option Usize × Usize × Usize → Nat × Option Nat × Nat × Nat
++  | (c, n, l, r) => (c.val, n.map (·.val), l.val, r.val)
++
++def thenLeft (n m : Nat) := val show4 (zip_borrowed_count_then_left (us n) (us m))
++def thenRight (n m : Nat) := val show4 (zip_borrowed_count_then_right (us n) (us m))
++
++#guard thenLeft 4 2 == some (2, some 2, 3, 2)
++#guard thenLeft 2 4 == some (2, none, 2, 2)
++#guard thenLeft 0 3 == some (0, none, 0, 0)
++#guard thenLeft 3 3 == some (3, none, 3, 3)
++#guard thenLeft 3 0 == some (0, some 0, 1, 0)
++
++#guard thenRight 4 2 == some (2, none, 2, 2)
++#guard thenRight 2 4 == some (2, some 4, 2, 3)
++#guard thenRight 0 3 == some (0, some 0, 0, 1)
++#guard thenRight 3 3 == some (3, none, 3, 3)
++#guard thenRight 3 0 == some (0, none, 0, 0)
++
++end zip_borrowed_adapters.checks
+diff --git a/tests/lean/ZipBorrowedAdapters/ZipBorrowedAdapters.lean b/tests/lean/ZipBorrowedAdapters/ZipBorrowedAdapters.lean
+new file mode 100644
+index 0000000..40e6f5f
+--- /dev/null
++++ b/tests/lean/ZipBorrowedAdapters/ZipBorrowedAdapters.lean
+@@ -0,0 +1,596 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [zip_borrowed_adapters]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace zip_borrowed_adapters
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::closure]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 16:39-19:9 -/
++@[reducible]
++def zip_borrowed_count_then_left.closure := _root_.Aeneas.Std.Usize
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::closure#1]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 20:40-23:9 -/
++@[reducible]
++def zip_borrowed_count_then_left.closure_1 := _root_.Aeneas.Std.Usize
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::closure]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 34:39-37:9 -/
++@[reducible]
++def zip_borrowed_count_then_right.closure := _root_.Aeneas.Std.Usize
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::closure#1]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 38:40-41:9 -/
++@[reducible]
++def zip_borrowed_count_then_right.closure_1 := _root_.Aeneas.Std.Usize
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure#1<0>}::call_mut]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 20:40-23:9 -/
++def
++  zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1 ×
++    (_root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1 →
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1))
++  := do
++  let i ← c + 1#usize
++  let i1 ← tupled_args * 2#usize
++  let back :=
++    (fun c1 => c1 :
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1 →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  _root_.Aeneas.Std.Result.ok (i1, i, back)
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure#1<0>}::call_once]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 20:40-23:9 -/
++def
++  zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure#1<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 20:40-23:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure#1<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 20:40-23:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  FnOnceInst :=
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure<0>}::call_mut]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 16:39-19:9 -/
++def
++  zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure ×
++    (_root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure →
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure))
++  := do
++  let i ← c + 1#usize
++  let back :=
++    (fun c1 => c1 :
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  _root_.Aeneas.Std.Result.ok (tupled_args, i, back)
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure<0>}::call_once]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 16:39-19:9 -/
++def
++  zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 16:39-19:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_left::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_left::closure<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 16:39-19:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  FnOnceInst :=
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_left]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 12:0-28:1
++    Visibility: public -/
++def zip_borrowed_count_then_left
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize)
++  := do
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      { start := 0#usize, «end» := n } 0#usize
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      { start := 0#usize, «end» := m } 0#usize
++  let map_back1 :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1 →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  let (model_state2, model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize)))
++      model_state model_state1
++  let zip_back :=
++    (fun state_back state_back1 => state_back :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure →
++      _root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++  let zip_back1 :=
++    (fun state_back state_back1 => state_back :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1 →
++      _root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure)
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1)
++  let (model_state5, model_state6) ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))).count
++      model_state2
++  let left :=
++    model_state3 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => current) (fun original current => original)
++      model_state2 model_state6)
++  let (model_state7, model_state8) ←
++    _root_.Aeneas.Std.core.iter.adapters.map.IteratorMap.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_left.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      left
++  let m1 :=
++    model_state4 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original) (fun original current => current)
++      model_state2 model_state6)
++  let i := model_state8.f
++  let z :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := i })
++      (fun original current => original) model_state6 model_state6
++  let back := zip_back { left with f := i }
++  let z1 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := current.f })
++      (fun original current => original) model_state6 z
++  let m2 :=
++    back (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := current.f })
++      (fun original current => original) model_state2 z1)
++  let c := map_back { model_state with f := m2.f }
++  let z2 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := m1.f }) model_state6
++      model_state6
++  let back1 := zip_back1 m1
++  let z3 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := current.f }) model_state6
++      z2
++  let m3 :=
++    back1 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := current.f }) model_state2
++      z3)
++  let c1 := map_back1 { model_state1 with f := m3.f }
++  _root_.Aeneas.Std.Result.ok (model_state5, model_state7, c, c1)
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure#1<0>}::call_mut]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 38:40-41:9 -/
++def
++  zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1 ×
++    (_root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1 →
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1))
++  := do
++  let i ← c + 1#usize
++  let i1 ← tupled_args * 2#usize
++  let back :=
++    (fun c1 => c1 :
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1 →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  _root_.Aeneas.Std.Result.ok (i1, i, back)
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure#1<0>}::call_once]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 38:40-41:9 -/
++def
++  zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure#1<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 38:40-41:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure#1<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 38:40-41:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  FnOnceInst :=
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure<0>}::call_mut]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 34:39-37:9 -/
++def
++  zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure ×
++    (_root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure →
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure))
++  := do
++  let i ← c + 1#usize
++  let back :=
++    (fun c1 => c1 :
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  _root_.Aeneas.Std.Result.ok (tupled_args, i, back)
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure<0>}::call_once]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 34:39-37:9 -/
++def
++  zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++  (c : _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnOnce<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 34:39-37:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [zip_borrowed_adapters::zip_borrowed_count_then_right::{core::ops::function::FnMut<(usize), usize> for zip_borrowed_adapters::zip_borrowed_count_then_right::closure<0>}]
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 34:39-37:9 -/
++@[reducible]
++def
++  zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure
++  _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize := {
++  FnOnceInst :=
++    _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeUsize
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [zip_borrowed_adapters::zip_borrowed_count_then_right]:
++    Source: 'tests/src/zip-borrowed-adapters.rs', lines 30:0-46:1
++    Visibility: public -/
++def zip_borrowed_count_then_right
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize)
++  := do
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      { start := 0#usize, «end» := n } 0#usize
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      { start := 0#usize, «end» := m } 0#usize
++  let map_back1 :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1 →
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  let (model_state2, model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize)))
++      model_state model_state1
++  let zip_back :=
++    (fun state_back state_back1 => state_back :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure →
++      _root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++  let zip_back1 :=
++    (fun state_back state_back1 => state_back :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1 →
++      _root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure)
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.ops.range.Range _root_.Aeneas.Std.Usize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1)
++  let (model_state5, model_state6) ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize))).count
++      model_state2
++  let right :=
++    model_state4 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original) (fun original current => current)
++      model_state2 model_state6)
++  let (model_state7, model_state8) ←
++    _root_.Aeneas.Std.core.iter.adapters.map.IteratorMap.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      _root_.zip_borrowed_adapters.zip_borrowed_count_then_right.closure_1.Insts.CoreOpsFunctionFnMutTupleUsizeUsize
++      right
++  let i := model_state8.f
++  let m1 :=
++    model_state3 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => current) (fun original current => original)
++      model_state2 model_state6)
++  let z :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := m1.f })
++      (fun original current => original) model_state6 model_state6
++  let back := zip_back m1
++  let z1 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := current.f })
++      (fun original current => original) model_state6 z
++  let m2 :=
++    back (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => { original with f := current.f })
++      (fun original current => original) model_state2 z1)
++  let c := map_back { model_state with f := m2.f }
++  let z2 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := i }) model_state6
++      model_state6
++  let back1 := zip_back1 { right with f := i }
++  let z3 :=
++    Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := current.f }) model_state6
++      z2
++  let m3 :=
++    back1 (Aeneas.Std.core.iter.adapters.zip.Zip.recombine
++      (fun original current => original)
++      (fun original current => { original with f := current.f }) model_state2
++      z3)
++  let c1 := map_back1 { model_state1 with f := m3.f }
++  _root_.Aeneas.Std.Result.ok (model_state5, model_state7, c, c1)
++
++end zip_borrowed_adapters
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index bdf7d98..1252ffb 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -24,6 +24,7 @@ package «tests» {}
+ @[default_target] lean_lib Closures
+ @[default_target] lean_lib ClosureSharedContext
+ @[default_target] lean_lib ClosureMutContext
++@[default_target] lean_lib ZipBorrowedAdapters
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectGenericClosure
+diff --git a/tests/src/zip-borrowed-adapters.rs b/tests/src/zip-borrowed-adapters.rs
+new file mode 100644
+index 0000000..47134ea
+--- /dev/null
++++ b/tests/src/zip-borrowed-adapters.rs
+@@ -0,0 +1,69 @@
++//@ [!lean] skip
++//@ [lean] subdir=ZipBorrowedAdapters
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Iterator::zip` on mutable borrows of `Map` adapters whose closures capture
++//! `&mut` counters. The zip returns `Zip<&'a mut Map<I, F<'c>>, ..>`: a mutable
++//! borrow of `'c` nested under `'a` in the type arguments of a model type,
++//! while its inputs `&'a mut Map<I, F<'c>>` only have two levels. The region
++//! groups keep the two-level backward functions, so that the model state
++//! recovery of the zip constructor applies.
++
++pub fn zip_borrowed_count_then_left(n: usize, m: usize) -> (usize, Option<usize>, usize, usize) {
++    let mut left_calls = 0;
++    let mut right_calls = 0;
++    let (count, next) = {
++        let mut left = (0usize..n).map(|x| {
++            left_calls += 1;
++            x
++        });
++        let mut right = (0usize..m).map(|x| {
++            right_calls += 1;
++            x * 2
++        });
++        let count = (&mut left).zip(&mut right).count();
++        (count, left.next())
++    };
++    (count, next, left_calls, right_calls)
++}
++
++pub fn zip_borrowed_count_then_right(n: usize, m: usize) -> (usize, Option<usize>, usize, usize) {
++    let mut left_calls = 0;
++    let mut right_calls = 0;
++    let (count, next) = {
++        let mut left = (0usize..n).map(|x| {
++            left_calls += 1;
++            x
++        });
++        let mut right = (0usize..m).map(|x| {
++            right_calls += 1;
++            x * 2
++        });
++        let count = (&mut left).zip(&mut right).count();
++        (count, right.next())
++    };
++    (count, next, left_calls, right_calls)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn zip_borrowed_count_then_left_native() {
++        assert_eq!(zip_borrowed_count_then_left(4, 2), (2, Some(2), 3, 2));
++        assert_eq!(zip_borrowed_count_then_left(2, 4), (2, None, 2, 2));
++        assert_eq!(zip_borrowed_count_then_left(0, 3), (0, None, 0, 0));
++        assert_eq!(zip_borrowed_count_then_left(3, 3), (3, None, 3, 3));
++        assert_eq!(zip_borrowed_count_then_left(3, 0), (0, Some(0), 1, 0));
++    }
++
++    #[test]
++    fn zip_borrowed_count_then_right_native() {
++        assert_eq!(zip_borrowed_count_then_right(4, 2), (2, None, 2, 2));
++        assert_eq!(zip_borrowed_count_then_right(2, 4), (2, Some(4), 2, 3));
++        assert_eq!(zip_borrowed_count_then_right(0, 3), (0, Some(0), 0, 1));
++        assert_eq!(zip_borrowed_count_then_right(3, 3), (3, None, 3, 3));
++        assert_eq!(zip_borrowed_count_then_right(3, 0), (0, None, 0, 0));
++    }
++}

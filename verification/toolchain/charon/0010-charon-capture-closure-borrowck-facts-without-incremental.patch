@@ -1,0 +1,119 @@
+# charon integration step 10 after 546078ea5d: commit 6d289adf02f3a015d32cab05113b3cd9cb0f334c
+# first parent 5c66a244c9bdde7f40ea86ead9aeba548ab656eb
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: capture closure borrowck facts without incremental reuse; version and check exported tables
+
+diff --git a/src/bin/charon-driver/closure_regions.rs b/src/bin/charon-driver/closure_regions.rs
+index 356e65c..54913b0 100644
+--- a/src/bin/charon-driver/closure_regions.rs
++++ b/src/bin/charon-driver/closure_regions.rs
+@@ -29,18 +29,32 @@ pub struct ClosureRegionRelations {
+ static RELATIONS: LazyLock<Mutex<FxHashMap<LocalDefId, ClosureRegionRelations>>> =
+     LazyLock::new(|| Mutex::new(FxHashMap::default()));
+ static CLOSURE_ROOTS: Mutex<Option<FxHashSet<LocalDefId>>> = Mutex::new(None);
++/// Typeck roots whose closures `capture` has processed.
++static CAPTURED_ROOTS: LazyLock<Mutex<FxHashSet<LocalDefId>>> =
++    LazyLock::new(|| Mutex::new(FxHashSet::default()));
+ 
+ pub fn clear() {
+     RELATIONS.lock().expect("closure-region cache poisoned").clear();
++    CAPTURED_ROOTS.lock().expect("closure-region cache poisoned").clear();
+     *CLOSURE_ROOTS.lock().expect("closure-region cache poisoned") = None;
+ }
+ 
++/// The relations are captured when the `mir_borrowck` provider runs. Incremental compilation
++/// replays green query results from its cache without running providers, which would leave
++/// closures without relations. Compile from scratch instead.
++pub fn disable_incremental_reuse(config: &mut rustc_interface::interface::Config) {
++    config.opts.incremental = None;
++}
++
+ pub fn lookup(def_id: LocalDefId) -> Option<ClosureRegionRelations> {
+     RELATIONS.lock().expect("closure-region cache poisoned").get(&def_id).cloned()
+ }
+ 
+ /// Extension of the relation table written beside a dependency artifact.
+ const TABLE_EXTENSION: &str = "charon-closures";
++/// First line of a table. Bump the version whenever the meaning of the relation indices or the
++/// completeness guarantees change, so that tables written by older drivers are rejected.
++const TABLE_HEADER: &str = "charon-closure-regions v2";
+ 
+ type ExternalTable = FxHashMap<String, ClosureRegionRelations>;
+ static EXTERNAL: LazyLock<Mutex<FxHashMap<CrateNum, ExternalTable>>> =
+@@ -64,6 +78,21 @@ pub fn export_dependency_table(tcx: TyCtxt<'_>) {
+             panic!("cannot export closure-region relations for metadata written to stdout")
+         }
+     };
++    // A partial table would only fail later, when a dependent translates a closure the table
++    // lacks. Check here that borrowck ran through our provider for every closure's root.
++    {
++        let captured = CAPTURED_ROOTS.lock().expect("closure-region cache poisoned");
++        for id in tcx.hir_body_owners() {
++            if matches!(tcx.def_kind(id), DefKind::Closure) {
++                let root = tcx.typeck_root_def_id(id.to_def_id()).expect_local();
++                assert!(
++                    captured.contains(&root),
++                    "closure {id:?} was not borrow-checked through the charon driver; \
++                     cannot export its region relations"
++                );
++            }
++        }
++    }
+     let mut lines = Vec::new();
+     for (id, relation) in RELATIONS.lock().expect("closure-region cache poisoned").iter() {
+         let edges = relation.outlives.iter()
+@@ -79,6 +108,7 @@ pub fn export_dependency_table(tcx: TyCtxt<'_>) {
+         ));
+     }
+     lines.sort();
++    lines.insert(0, TABLE_HEADER.to_string());
+     let path = artifact_table_path(&artifact);
+     std::fs::write(&path, lines.join("\n")).unwrap_or_else(|error| {
+         panic!("cannot write closure-region table {}: {error}", path.display())
+@@ -92,8 +122,16 @@ fn parse_table(path: &Path) -> ExternalTable {
+             path.display()
+         )
+     });
++    let mut lines = text.lines();
++    if lines.next() != Some(TABLE_HEADER) {
++        panic!(
++            "closure-region table {} was written by another charon driver version; \
++             rebuild the dependency with charon (e.g. `cargo clean` its target)",
++            path.display()
++        );
++    }
+     let mut table = ExternalTable::default();
+-    for line in text.lines().filter(|line| !line.is_empty()) {
++    for line in lines.filter(|line| !line.is_empty()) {
+         let fields = line.split('\t').collect::<Vec<_>>();
+         let [key, signature, capture, edges] = fields[..] else {
+             panic!("malformed closure-region table {}: {line:?}", path.display());
+@@ -261,4 +299,5 @@ pub fn capture<'tcx>(tcx: TyCtxt<'tcx>, root: LocalDefId) {
+             ClosureRegionRelations { signature_regions, capture_regions, outlives },
+         );
+     }
++    CAPTURED_ROOTS.lock().expect("closure-region cache poisoned").insert(root);
+ }
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index 00a0a89..7132aad 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -84,6 +84,9 @@ fn setup_compiler(config: &mut Config, options: &CliOpts, do_translate: bool) {
+             //     tcx.alloc_steal_mir(mir)
+             // };
+         });
++        if !options.skip_borrowck {
++            crate::closure_regions::disable_incremental_reuse(config);
++        }
+ 
+         set_no_codegen(config);
+     }
+@@ -231,6 +234,7 @@ impl Callbacks for DependencyCallbacks {
+         config.override_queries = Some(|_sess, providers| {
+             crate::closure_regions::install(providers);
+         });
++        crate::closure_regions::disable_incremental_reuse(config);
+     }
+ 
+     fn after_analysis<'tcx>(&mut self, _: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {

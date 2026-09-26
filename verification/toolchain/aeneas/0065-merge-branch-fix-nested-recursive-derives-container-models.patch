@@ -1,0 +1,3756 @@
+# aeneas integration step 65 after cba11f3beb: commit 07f1181f74261732cf7203126ff58c307d585601
+# first parent c7d076df6bf257095b0a0755439280de863daeb8, merged 955c875188d1c569226a3a1a94a5931c270c1207
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-recursive-derives' (container models monotone in their trait instances; Debug for BTreeMap; unfold-monotone fallback)
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 8af6a8b..7d128bb 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -12,6 +12,7 @@ import Aeneas.Std.Float
+ import Aeneas.Std.FloatFmt
+ import Aeneas.Std.FlatMap
+ import Aeneas.Std.Half
++import Aeneas.Std.InstanceMonotonicity
+ import Aeneas.Std.IteratorAdapters
+ import Aeneas.Std.IteratorCombinators
+ import Aeneas.Std.IteratorSources
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index e647d82..dc1a106 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -230,6 +230,21 @@ def PartialEqBTreeMap {K V : Type} (keyEq : core.cmp.PartialEq K K)
+   ne := PartialEqBTreeMap.ne keyEq valueEq
+ }
+ 
++/-- `impl<K: Debug, V: Debug, A: Allocator + Clone> Debug for BTreeMap<K, V, A>`
++    (alloc collections/btree/map.rs): `f.debug_map().entries(self.iter()).finish()`,
++    the entries in key order. -/
++@[rust_fun "alloc::collections::btree::map::{core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::fmt"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, true, false])]
++def DebugBTreeMap.fmt {K V : Type} (keyDebug : core.fmt.Debug K) (valueDebug : core.fmt.Debug V)
++    (map : BTreeMap K V) (fmt : core.fmt.Formatter) : core.fmt.Outcome :=
++  fmt.debugMap keyDebug valueDebug map.entries
++
++@[reducible, rust_trait_impl "core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, true, false])]
++def DebugBTreeMap {K V : Type} (keyDebug : core.fmt.Debug K) (valueDebug : core.fmt.Debug V) :
++    core.fmt.Debug (BTreeMap K V) :=
++  ⟨DebugBTreeMap.fmt keyDebug valueDebug⟩
++
+ def entry.Entry.restore {K V : Type} : entry.Entry K V → BTreeMap K V
+   | .Occupied e => ⟨e.before ++ (e.key, e.value) :: e.after⟩
+   | .Vacant e => ⟨e.before ++ (match e.value with
+diff --git a/backends/lean/Aeneas/Std/Core/Fmt.lean b/backends/lean/Aeneas/Std/Core/Fmt.lean
+index a7a37da..d15b332 100644
+--- a/backends/lean/Aeneas/Std/Core/Fmt.lean
++++ b/backends/lean/Aeneas/Std/Core/Fmt.lean
+@@ -280,6 +280,20 @@ def Formatter.debugList {T : Type} (fmt : Formatter) (inst : Debug T) (values :
+       (debugEntries pretty inst.fmt values))
+       (fun f => f.append "]"))
+ 
++/-- `Formatter::debug_map().entries(..).finish()` (core/src/fmt/builders.rs `DebugMap`):
++    `{`, the entries as `key: value` separated by `, ` (pretty: each entry on its own
++    indented line followed by `,`), then `}`. The key and the value of an entry are
++    written through the same pad adapter. -/
++def Formatter.debugMap {K V : Type} (fmt : Formatter) (keyInst : Debug K) (valueInst : Debug V)
++    (entries : List (K × V)) : Outcome :=
++  let pretty := fmt.options.bit 23 && !entries.isEmpty
++  thenFormat (fmt.append (if pretty then "{\n" else "{")) (fun f =>
++    thenFormat (f.indented (if pretty then fmt.indent + 4 else fmt.indent)
++      (debugEntries pretty (fun (key, value) fmt =>
++        thenFormat (keyInst.fmt key fmt) (fun fmt =>
++          thenFormat (fmt.append ": ") (valueInst.fmt value))) entries))
++      (fun f => f.append "}"))
++
+ @[rust_fun "core::fmt::{core::fmt::Debug<&'0 @T>}::fmt"]
+ def DebugShared.fmt {T : Type} (inst : Debug T) (x : T) (fmt : Formatter) : Outcome := inst.fmt x fmt
+ @[reducible, rust_trait_impl "core::fmt::Debug<&'0 @T>"]
+diff --git a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+index 52759ba..83745ef 100644
+--- a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
++++ b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+@@ -192,13 +192,49 @@ def alloc.string.ToStringBlanket {T : Type} (inst : core.fmt.Display T) : alloc.
+ 
+ end Aeneas.Std
+ 
++open Lean Meta Elab Tactic in
++/-- Fallback step of `aeneas_monotonicity`, for a goal `monotone (fun f => c args)` to
++    which no monotonicity lemma applies. If `c` is a non-recursive definition (e.g. the
++    derived method of a generic type, called with an instance built from the recursive
++    function `f`), unfold it once; if `c` is a structure projection, reduce it.
++    Recursive definitions (structural, well-founded, `partial_fixpoint`) and matchers
++    are never unfolded, so repeating this step terminates. -/
++elab "aeneas_unfold_monotone" : tactic => do
++  let goal ← getMainGoal
++  let unfolded? ← goal.withContext do
++    let type ← instantiateMVars (← goal.getType)
++    let_expr Lean.Order.monotone α inst_α β inst_β f := type
++      | throwError "aeneas_unfold_monotone: not a monotonicity goal"
++    let f := f.headBeta
++    unless f.isLambda do throwError "aeneas_unfold_monotone: not a lambda"
++    let some c := f.bindingBody!.getAppFn.constName?
++      | throwError "aeneas_unfold_monotone: no head constant"
++    let env ← getEnv
++    if (← isProjectionFn c) then return none
++    if isMatcherCore env c || (← isRecursiveDefinition c) ||
++        (Lean.Elab.PartialFixpoint.eqnInfoExt.find? env c).isSome then
++      throwError "aeneas_unfold_monotone: {c} is recursive or a matcher"
++    let f' ← lambdaBoundedTelescope f 1 fun xs b => do
++      let some b' ← unfoldDefinition? b
++        | throwError "aeneas_unfold_monotone: cannot unfold {c}"
++      mkLambdaFVars xs b'.headBeta
++    return some (← goal.replaceTargetDefEq (mkAppN type.getAppFn #[α, inst_α, β, inst_β, f']))
++  match unfolded? with
++  | some goal' =>
++    replaceMainGoal [goal']
++    evalTactic (← `(tactic| dsimp (config := { failIfUnchanged := false }) only))
++  | none => evalTactic (← `(tactic| dsimp only))
++
+ open Aeneas.Std Lean.Order in
+ /-- Normalize callback containers before monadic monotonicity: `Result.ok` has
+-    flat equality, so its callback payload must be consumed before comparing it. -/
++    flat equality, so its callback payload must be consumed before comparing it.
++    Goals no monotonicity lemma applies to go through `aeneas_unfold_monotone`
++    (the monotonicity lemmas of the models taking trait instances are in
++    `Aeneas.Std.InstanceMonotonicity`). -/
+ macro "aeneas_monotonicity" : tactic =>
+   `(tactic| (
+     simp (config := { failIfUnchanged := false }) only
+       [core.fmt.rt.Argument.new_display, core.fmt.rt.Argument.new_debug,
+       core.fmt.rt.Argument.new_lower_hex, core.fmt.rt.Argument.new_debug_noop,
+       core.fmt.Arguments.new, Aeneas.Std.Array.make, bind_tc_ok]
+-    repeat' monotonicity))
++    repeat' (first | monotonicity | aeneas_unfold_monotone)))
+diff --git a/backends/lean/Aeneas/Std/InstanceMonotonicity.lean b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+new file mode 100644
+index 0000000..0fb6e26
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+@@ -0,0 +1,811 @@
++import Aeneas.Std.Array
++import Aeneas.Std.BTreeMap
++import Aeneas.Std.Core
++import Aeneas.Std.SliceCmp
++import Aeneas.Std.Sync
++import Aeneas.Std.Tuple
++import Aeneas.Std.Vec
++
++/-!
++# Monotonicity of the models in their trait instances
++
++The methods of a type which is recursive through a collection (`Vec<Self>`,
++`Option<Box<Self>>`, `BTreeMap<K, Self>`, ...) call the model of the
++collection's trait implementation with an instance built from the method being
++defined, e.g. the derived `Clone` of `enum T { Node(Vec<T>) }` is
++
++```
++def T.clone (self : T) : Result T := do
++  match self with
++  | .Node v => ... alloc.vec.CloneVec.clone { clone := T.clone } v ...
++partial_fixpoint
++```
++
++`partial_fixpoint` needs the body to be monotone in the recursive function,
++so the monotonicity prover needs to know that every such model is monotone in
++the methods of its instance arguments. The lemmas below state this for the
++models of the implementations of the derivable traits (`Clone`, `PartialEq`,
++`Debug`) on containers. Each instance argument is a structure literal whose
++fields all depend on the recursive function `g`; the hypotheses only concern
++the fields the model calls (e.g. `PartialEq for [T]` compares with `ne`).
++Each lemma comes in the forms the derived code produces: the model applied to
++its instances only (when it is itself a field of an enclosing instance, e.g.
++`PartialEqShared (PartialEqVec {..})`) and fully applied (the discrimination
++tree keys of the monotonicity lemmas include the number of arguments).
++-/
++
++namespace Aeneas.Std
++
++open Lean.Order
++
++section CloneMono
++
++variable {γ : Type w} [Lean.Order.PartialOrder γ]
++
++/-- `List.clone` is the element-wise fallible map; its length proof is carried by
++    the result. -/
++theorem List.clone_eq_bind {α : Type u} (c : α → Result α) (l : List α) :
++    List.clone c l = (List.mapM c l >>= fun v =>
++      if h : v.length = l.length then .ok ⟨v, h⟩ else .div) := by
++  unfold List.clone
++  split
++  · rename_i v h
++    simp [h, List.mapM_Result_length h]
++  · rename_i h; simp [h]
++  · rename_i h; simp [h]
++
++@[partial_fixpoint_monotone]
++theorem List.clone.monotone {α : Type u} (c : γ → α → Result α) (l : List α)
++    (hmono : Lean.Order.monotone c) : Lean.Order.monotone (fun g => List.clone (c g) l) := by
++  simp only [List.clone_eq_bind]
++  exact monotone_bind Result _ _ (List.monotone_mapM c l hmono) (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem Slice.clone.monotone {α : Type} (c : γ → α → Result α) (s : Slice α)
++    (hmono : Lean.Order.monotone c) : Lean.Order.monotone (fun g => Slice.clone (c g) s) :=
++  monotone_bind Result _ _ (List.clone.monotone c s.val hmono) (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem Array.clone.monotone {α : Type u} {n : Usize} (c : γ → α → Result α) (s : Array α n)
++    (hmono : Lean.Order.monotone c) : Lean.Order.monotone (fun g => Array.clone (c g) s) :=
++  monotone_bind Result _ _ (List.clone.monotone c s.val hmono) (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem core.alloc.boxed.CloneBox.clone.monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.alloc.boxed.CloneBox.clone { clone := clone g, clone_from := clone_from g }) :=
++  hmono
++
++@[partial_fixpoint_monotone]
++theorem core.alloc.boxed.CloneBox.clone.apply_monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (x : T)
++    (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.alloc.boxed.CloneBox.clone
++      { clone := clone g, clone_from := clone_from g } x) :=
++  monotone_apply x _ hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.CloneVec.clone.monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => alloc.vec.CloneVec.clone { clone := clone g, clone_from := clone_from g }) :=
++  monotone_of_monotone_apply _ fun v => Slice.clone.monotone clone v hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.CloneVec.clone.apply_monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (v : alloc.vec.Vec T)
++    (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => alloc.vec.CloneVec.clone
++      { clone := clone g, clone_from := clone_from g } v) :=
++  Slice.clone.monotone clone v hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.CloneBoxSlice.clone.monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => alloc.boxed.CloneBoxSlice.clone
++      { clone := clone g, clone_from := clone_from g }) :=
++  monotone_of_monotone_apply _ fun s => Slice.clone.monotone clone s hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.CloneBoxSlice.clone.apply_monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (s : Slice T)
++    (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => alloc.boxed.CloneBoxSlice.clone
++      { clone := clone g, clone_from := clone_from g } s) :=
++  Slice.clone.monotone clone s hmono
++
++@[partial_fixpoint_monotone]
++theorem core.array.CloneArray.clone.monotone {T : Type} {N : Usize}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.array.CloneArray.clone (N := N)
++      { clone := clone g, clone_from := clone_from g }) :=
++  monotone_of_monotone_apply _ fun a => Array.clone.monotone clone a hmono
++
++@[partial_fixpoint_monotone]
++theorem core.array.CloneArray.clone.apply_monotone {T : Type} {N : Usize}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (a : Array T N)
++    (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.array.CloneArray.clone
++      { clone := clone g, clone_from := clone_from g } a) :=
++  Array.clone.monotone clone a hmono
++
++@[partial_fixpoint_monotone]
++theorem core.option.Option.Clone.clone.apply_monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (x : Option T)
++    (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.option.Option.Clone.clone
++      { clone := clone g, clone_from := clone_from g } x) := by
++  cases x with
++  | none => exact monotone_const _
++  | some v => exact monotone_bind Result _ _ (monotone_apply v _ hmono) (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem core.option.Option.Clone.clone.monotone {T : Type}
++    (clone : γ → T → Result T) (clone_from : γ → T → T → Result T) (hmono : Lean.Order.monotone clone) :
++    Lean.Order.monotone (fun g => core.option.Option.Clone.clone
++      { clone := clone g, clone_from := clone_from g }) :=
++  monotone_of_monotone_apply _ fun x =>
++    core.option.Option.Clone.clone.apply_monotone clone clone_from x hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.BTreeMap.clone.apply_monotone {K V : Type}
++    (kclone : γ → K → Result K) (kclone_from : γ → K → K → Result K)
++    (vclone : γ → V → Result V) (vclone_from : γ → V → V → Result V)
++    (map : alloc.collections.btree.map.BTreeMap K V)
++    (hk : Lean.Order.monotone kclone) (hv : Lean.Order.monotone vclone) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.BTreeMap.clone
++      { clone := kclone g, clone_from := kclone_from g }
++      { clone := vclone g, clone_from := vclone_from g } map) := by
++  simp only [alloc.collections.btree.map.BTreeMap.clone]
++  repeat' first
++    | exact monotone_apply _ _ hk
++    | exact monotone_apply _ _ hv
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.BTreeMap.clone.monotone {K V : Type}
++    (kclone : γ → K → Result K) (kclone_from : γ → K → K → Result K)
++    (vclone : γ → V → Result V) (vclone_from : γ → V → V → Result V)
++    (hk : Lean.Order.monotone kclone) (hv : Lean.Order.monotone vclone) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.BTreeMap.clone
++      { clone := kclone g, clone_from := kclone_from g }
++      { clone := vclone g, clone_from := vclone_from g }) :=
++  monotone_of_monotone_apply _ fun map =>
++    alloc.collections.btree.map.BTreeMap.clone.apply_monotone
++      kclone kclone_from vclone vclone_from map hk hv
++
++end CloneMono
++
++section PartialEqMono
++
++variable {γ : Type w} [Lean.Order.PartialOrder γ]
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.partial_eq.PartialEqVec.eq.apply_monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (v0 : alloc.vec.Vec T) (v1 : alloc.vec.Vec U)
++    (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => alloc.vec.partial_eq.PartialEqVec.eq
++      { eq := eq g, ne := ne g } v0 v1) := by
++  simp only [alloc.vec.partial_eq.PartialEqVec.eq]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.partial_eq.PartialEqVec.eq.monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => alloc.vec.partial_eq.PartialEqVec.eq { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun v0 => monotone_of_monotone_apply _ fun v1 =>
++    alloc.vec.partial_eq.PartialEqVec.eq.apply_monotone eq ne v0 v1 hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.partial_eq.PartialEqVec.ne.apply_monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (v0 : alloc.vec.Vec T) (v1 : alloc.vec.Vec U)
++    (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => alloc.vec.partial_eq.PartialEqVec.ne
++      { eq := eq g, ne := ne g } v0 v1) := by
++  simp only [alloc.vec.partial_eq.PartialEqVec.ne]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.partial_eq.PartialEqVec.ne.monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => alloc.vec.partial_eq.PartialEqVec.ne { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun v0 => monotone_of_monotone_apply _ fun v1 =>
++    alloc.vec.partial_eq.PartialEqVec.ne.apply_monotone eq ne v0 v1 hmono
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.eqList.monotone {T U : Type} (ne : γ → T → U → Result Bool)
++    (xs : List T) (ys : List U) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.slice.cmp.eqList (ne g) xs ys) := by
++  induction xs generalizing ys with
++  | nil => exact monotone_const _
++  | cons x xs ih =>
++    cases ys with
++    | nil => exact monotone_const _
++    | cons y ys =>
++      simp only [core.slice.cmp.eqList]
++      repeat' first
++        | exact ih _
++        | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++        | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialEqSlice.eq.apply_monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (x : Slice T) (y : Slice U) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialEqSlice.eq { eq := eq g, ne := ne g } x y) := by
++  simp only [core.slice.cmp.PartialEqSlice.eq]
++  repeat' first
++    | exact core.slice.cmp.eqList.monotone ne _ _ hmono
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialEqSlice.eq.monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialEqSlice.eq { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.slice.cmp.PartialEqSlice.eq.apply_monotone eq ne x y hmono
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialEqSlice.ne.apply_monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (x : Slice T) (y : Slice U) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialEqSlice.ne { eq := eq g, ne := ne g } x y) :=
++  monotone_bind Result _ _
++    (core.slice.cmp.PartialEqSlice.eq.apply_monotone eq ne x y hmono) (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialEqSlice.ne.monotone {T U : Type}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialEqSlice.ne { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.slice.cmp.PartialEqSlice.ne.apply_monotone eq ne x y hmono
++
++@[partial_fixpoint_monotone]
++theorem core.option.Option.Insts.CoreCmpPartialEqOption.eq.apply_monotone {T : Type}
++    (eq ne : γ → T → T → Result Bool) (x y : Option T) (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.option.Option.Insts.CoreCmpPartialEqOption.eq
++      { eq := eq g, ne := ne g } x y) := by
++  cases x <;> cases y <;> simp only [core.option.Option.Insts.CoreCmpPartialEqOption.eq] <;>
++    first
++      | exact monotone_const _
++      | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++
++@[partial_fixpoint_monotone]
++theorem core.option.Option.Insts.CoreCmpPartialEqOption.eq.monotone {T : Type}
++    (eq ne : γ → T → T → Result Bool) (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.option.Option.Insts.CoreCmpPartialEqOption.eq
++      { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.option.Option.Insts.CoreCmpPartialEqOption.eq.apply_monotone eq ne x y hmono
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqPair.eq.apply_monotone {U T : Type}
++    (eq₁ ne₁ : γ → U → U → Result Bool) (eq₂ ne₂ : γ → T → T → Result Bool) (x y : U × T)
++    (h₁ : Lean.Order.monotone eq₁) (h₂ : Lean.Order.monotone eq₂) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqPair.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g } x y) := by
++  simp only [core.tuple.PartialEqPair.eq]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ h₁)
++    | exact monotone_apply _ _ (monotone_apply _ _ h₂)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqPair.eq.monotone {U T : Type}
++    (eq₁ ne₁ : γ → U → U → Result Bool) (eq₂ ne₂ : γ → T → T → Result Bool)
++    (h₁ : Lean.Order.monotone eq₁) (h₂ : Lean.Order.monotone eq₂) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqPair.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.tuple.PartialEqPair.eq.apply_monotone eq₁ ne₁ eq₂ ne₂ x y h₁ h₂
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqPair.ne.apply_monotone {U T : Type}
++    (eq₁ ne₁ : γ → U → U → Result Bool) (eq₂ ne₂ : γ → T → T → Result Bool) (x y : U × T)
++    (h₁ : Lean.Order.monotone ne₁) (h₂ : Lean.Order.monotone ne₂) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqPair.ne
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g } x y) := by
++  simp only [core.tuple.PartialEqPair.ne]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ h₁)
++    | exact monotone_apply _ _ (monotone_apply _ _ h₂)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqPair.ne.monotone {U T : Type}
++    (eq₁ ne₁ : γ → U → U → Result Bool) (eq₂ ne₂ : γ → T → T → Result Bool)
++    (h₁ : Lean.Order.monotone ne₁) (h₂ : Lean.Order.monotone ne₂) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqPair.ne
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.tuple.PartialEqPair.ne.apply_monotone eq₁ ne₁ eq₂ ne₂ x y h₁ h₂
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.eqEntries.monotone {K V : Type}
++    (keq kne : γ → K → K → Result Bool) (veq vne : γ → V → V → Result Bool)
++    (l r : List (K × V)) (hk : Lean.Order.monotone keq) (hv : Lean.Order.monotone veq) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.eqEntries
++      { eq := keq g, ne := kne g } { eq := veq g, ne := vne g } l r) := by
++  induction l generalizing r with
++  | nil => exact monotone_const _
++  | cons e l ih =>
++    cases r with
++    | nil => exact monotone_const _
++    | cons e' r =>
++      simp only [alloc.collections.btree.map.eqEntries]
++      repeat' first
++        | exact ih _
++        | exact monotone_apply _ _ (monotone_apply _ _ hk)
++        | exact monotone_apply _ _ (monotone_apply _ _ hv)
++        | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.PartialEqBTreeMap.eq.apply_monotone {K V : Type}
++    (keq kne : γ → K → K → Result Bool) (veq vne : γ → V → V → Result Bool)
++    (l r : alloc.collections.btree.map.BTreeMap K V) (hk : Lean.Order.monotone keq) (hv : Lean.Order.monotone veq) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.PartialEqBTreeMap.eq
++      { eq := keq g, ne := kne g } { eq := veq g, ne := vne g } l r) := by
++  simp only [alloc.collections.btree.map.PartialEqBTreeMap.eq]
++  repeat' first
++    | exact alloc.collections.btree.map.eqEntries.monotone keq kne veq vne _ _ hk hv
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.PartialEqBTreeMap.eq.monotone {K V : Type}
++    (keq kne : γ → K → K → Result Bool) (veq vne : γ → V → V → Result Bool)
++    (hk : Lean.Order.monotone keq) (hv : Lean.Order.monotone veq) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.PartialEqBTreeMap.eq
++      { eq := keq g, ne := kne g } { eq := veq g, ne := vne g }) :=
++  monotone_of_monotone_apply _ fun l => monotone_of_monotone_apply _ fun r =>
++    alloc.collections.btree.map.PartialEqBTreeMap.eq.apply_monotone keq kne veq vne l r hk hv
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.PartialEqBTreeMap.ne.apply_monotone {K V : Type}
++    (keq kne : γ → K → K → Result Bool) (veq vne : γ → V → V → Result Bool)
++    (l r : alloc.collections.btree.map.BTreeMap K V) (hk : Lean.Order.monotone keq) (hv : Lean.Order.monotone veq) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.PartialEqBTreeMap.ne
++      { eq := keq g, ne := kne g } { eq := veq g, ne := vne g } l r) :=
++  monotone_bind Result _ _
++    (alloc.collections.btree.map.PartialEqBTreeMap.eq.apply_monotone keq kne veq vne l r hk hv)
++    (monotone_const _)
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.PartialEqBTreeMap.ne.monotone {K V : Type}
++    (keq kne : γ → K → K → Result Bool) (veq vne : γ → V → V → Result Bool)
++    (hk : Lean.Order.monotone keq) (hv : Lean.Order.monotone veq) :
++    Lean.Order.monotone (fun g => alloc.collections.btree.map.PartialEqBTreeMap.ne
++      { eq := keq g, ne := kne g } { eq := veq g, ne := vne g }) :=
++  monotone_of_monotone_apply _ fun l => monotone_of_monotone_apply _ fun r =>
++    alloc.collections.btree.map.PartialEqBTreeMap.ne.apply_monotone keq kne veq vne l r hk hv
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqQuad.eq.apply_monotone {W V U T : Type}
++    (eq₁ ne₁ : γ → W → W → Result Bool) (eq₂ ne₂ : γ → V → V → Result Bool)
++    (eq₃ ne₃ : γ → U → U → Result Bool) (eq₄ ne₄ : γ → T → T → Result Bool)
++    (x y : W × V × U × T) (h₁ : Lean.Order.monotone eq₁) (h₂ : Lean.Order.monotone eq₂)
++    (h₃ : Lean.Order.monotone eq₃) (h₄ : Lean.Order.monotone eq₄) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqQuad.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g }
++      { eq := eq₃ g, ne := ne₃ g } { eq := eq₄ g, ne := ne₄ g } x y) := by
++  simp only [core.tuple.PartialEqQuad.eq]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ h₁)
++    | exact monotone_apply _ _ (monotone_apply _ _ h₂)
++    | exact monotone_apply _ _ (monotone_apply _ _ h₃)
++    | exact monotone_apply _ _ (monotone_apply _ _ h₄)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.tuple.PartialEqQuad.eq.monotone {W V U T : Type}
++    (eq₁ ne₁ : γ → W → W → Result Bool) (eq₂ ne₂ : γ → V → V → Result Bool)
++    (eq₃ ne₃ : γ → U → U → Result Bool) (eq₄ ne₄ : γ → T → T → Result Bool)
++    (h₁ : Lean.Order.monotone eq₁) (h₂ : Lean.Order.monotone eq₂)
++    (h₃ : Lean.Order.monotone eq₃) (h₄ : Lean.Order.monotone eq₄) :
++    Lean.Order.monotone (fun g => core.tuple.PartialEqQuad.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g }
++      { eq := eq₃ g, ne := ne₃ g } { eq := eq₄ g, ne := ne₄ g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.tuple.PartialEqQuad.eq.apply_monotone eq₁ ne₁ eq₂ ne₂ eq₃ ne₃ eq₄ ne₄ x y h₁ h₂ h₃ h₄
++
++@[partial_fixpoint_monotone]
++theorem core.result.PartialEqResult.eq.apply_monotone {T E : Type}
++    (eq₁ ne₁ : γ → T → T → Aeneas.Std.Result Bool) (eq₂ ne₂ : γ → E → E → Aeneas.Std.Result Bool)
++    (x y : core.result.Result T E) (h₁ : Lean.Order.monotone eq₁)
++    (h₂ : Lean.Order.monotone eq₂) :
++    Lean.Order.monotone (fun g => core.result.PartialEqResult.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g } x y) := by
++  cases x <;> cases y <;> simp only [core.result.PartialEqResult.eq] <;>
++    first
++      | exact monotone_const _
++      | exact monotone_apply _ _ (monotone_apply _ _ h₁)
++      | exact monotone_apply _ _ (monotone_apply _ _ h₂)
++
++@[partial_fixpoint_monotone]
++theorem core.result.PartialEqResult.eq.monotone {T E : Type}
++    (eq₁ ne₁ : γ → T → T → Aeneas.Std.Result Bool) (eq₂ ne₂ : γ → E → E → Aeneas.Std.Result Bool)
++    (h₁ : Lean.Order.monotone eq₁) (h₂ : Lean.Order.monotone eq₂) :
++    Lean.Order.monotone (fun g => core.result.PartialEqResult.eq
++      { eq := eq₁ g, ne := ne₁ g } { eq := eq₂ g, ne := ne₂ g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.result.PartialEqResult.eq.apply_monotone eq₁ ne₁ eq₂ ne₂ x y h₁ h₂
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqArray.eq.apply_monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (a0 : Array T N) (a1 : Array U N)
++    (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqArray.eq
++      { eq := eq g, ne := ne g } a0 a1) := by
++  simp only [core.array.equality.PartialEqArray.eq]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqArray.eq.monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqArray.eq (N := N)
++      { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun a0 => monotone_of_monotone_apply _ fun a1 =>
++    core.array.equality.PartialEqArray.eq.apply_monotone eq ne a0 a1 hmono
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqArray.ne.apply_monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (a0 : Array T N) (a1 : Array U N)
++    (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqArray.ne
++      { eq := eq g, ne := ne g } a0 a1) := by
++  simp only [core.array.equality.PartialEqArray.ne]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqArray.ne.monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqArray.ne (N := N)
++      { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun a0 => monotone_of_monotone_apply _ fun a1 =>
++    core.array.equality.PartialEqArray.ne.apply_monotone eq ne a0 a1 hmono
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqSliceArray.eq.apply_monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (s : Slice T) (a : Array U N)
++    (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqSliceArray.eq
++      { eq := eq g, ne := ne g } s a) := by
++  unfold core.array.equality.PartialEqSliceArray.eq
++  split
++  · exact core.array.equality.PartialEqArray.eq.apply_monotone eq ne _ a hmono
++  · exact monotone_const _
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqSliceArray.eq.monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone eq) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqSliceArray.eq (N := N)
++      { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun s => monotone_of_monotone_apply _ fun a =>
++    core.array.equality.PartialEqSliceArray.eq.apply_monotone eq ne s a hmono
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqSliceArray.ne.apply_monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (s : Slice T) (a : Array U N)
++    (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqSliceArray.ne
++      { eq := eq g, ne := ne g } s a) := by
++  unfold core.array.equality.PartialEqSliceArray.ne
++  split
++  · exact core.array.equality.PartialEqArray.ne.apply_monotone eq ne _ a hmono
++  · exact monotone_const _
++
++@[partial_fixpoint_monotone]
++theorem core.array.equality.PartialEqSliceArray.ne.monotone {T U : Type} {N : Usize}
++    (eq ne : γ → T → U → Result Bool) (hmono : Lean.Order.monotone ne) :
++    Lean.Order.monotone (fun g => core.array.equality.PartialEqSliceArray.ne (N := N)
++      { eq := eq g, ne := ne g }) :=
++  monotone_of_monotone_apply _ fun s => monotone_of_monotone_apply _ fun a =>
++    core.array.equality.PartialEqSliceArray.ne.apply_monotone eq ne s a hmono
++
++end PartialEqMono
++
++section DebugMono
++
++open core.fmt
++
++variable {γ : Type w} [Lean.Order.PartialOrder γ]
++
++/-- The entries of a list rendered by a callback which depends monotonically on `g`. -/
++@[partial_fixpoint_monotone]
++theorem core.fmt.debugEntries.render_monotone {T : Type u} (pretty : Bool)
++    (render : γ → T → Callback) (l : List T) (hmono : Lean.Order.monotone render) :
++    Lean.Order.monotone (fun g => debugEntries pretty (render g) l) := by
++  induction l with
++  | nil => exact monotone_const _
++  | cons v rest ih =>
++    apply monotone_of_monotone_apply
++    intro fmt
++    simp only [debugEntries]
++    repeat' first
++      | exact ih
++      | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++      | monotonicity
++
++/-- The entries of a list whose elements depend monotonically on `g`. -/
++theorem core.fmt.debugEntries.values_monotone {α : Type v} {T : Type u} (pretty : Bool)
++    (render : T → Callback) (elem : γ → α → T) (vs : List α)
++    (hmono : ∀ v ∈ vs, Lean.Order.monotone (fun g => render (elem g v))) :
++    Lean.Order.monotone (fun g => debugEntries pretty render (vs.map (elem g))) := by
++  induction vs with
++  | nil => exact monotone_const _
++  | cons v vs ih =>
++    have hv := hmono v List.mem_cons_self
++    have ih := ih (fun w hw => hmono w (List.mem_cons_of_mem _ hw))
++    apply monotone_of_monotone_apply
++    intro fmt
++    simp only [List.map_cons, debugEntries, List.isEmpty_map]
++    repeat' first
++      | exact ih
++      | exact monotone_apply _ _ hv
++      | monotonicity
++
++theorem core.fmt.Formatter.debugTuple.values_monotone {α : Type v} (fmt : Formatter)
++    (nm : String) (elem : γ → α → DebugValue) (vs : List α)
++    (hmono : ∀ v ∈ vs, Lean.Order.monotone (fun g => debugValue (elem g v))) :
++    Lean.Order.monotone (fun g => fmt.debugTuple nm (vs.map (elem g))) := by
++  simp only [Formatter.debugTuple, List.isEmpty_map, List.length_map]
++  repeat' first
++    | exact debugEntries.values_monotone _ debugValue elem vs hmono
++    | monotonicity
++
++theorem core.fmt.Formatter.debugStruct.values_monotone (fmt : Formatter) (nm : String)
++    (fields : List (String × (γ → DebugValue)))
++    (hmono : ∀ p ∈ fields, Lean.Order.monotone (fun g => debugValue (p.2 g))) :
++    Lean.Order.monotone (fun g => fmt.debugStruct nm (fields.map (fun p => (p.1, p.2 g)))) := by
++  have hfields : ∀ p ∈ fields, Lean.Order.monotone (fun g =>
++      (fun (x : String × DebugValue) (fmt : Formatter) =>
++        thenFormat (fmt.append (x.1 ++ ": ")) (debugValue x.2)) (p.1, p.2 g)) := by
++    intro p hp
++    dsimp only
++    apply monotone_of_monotone_apply
++    intro fmt'
++    exact thenFormat.monotone _ _ (monotone_const _) (hmono p hp)
++  simp only [Formatter.debugStruct, debugFields, List.isEmpty_map]
++  repeat' first
++    | exact debugEntries.values_monotone _ _ (fun g (p : String × (γ → DebugValue)) => (p.1, p.2 g))
++        fields hfields
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debugList.monotone {T : Type} (fmt : Formatter)
++    (callback : γ → T → Callback) (values : List T) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => fmt.debugList ⟨callback g⟩ values) := by
++  simp only [Formatter.debugList]
++  repeat' first
++    | exact debugEntries.render_monotone _ callback values hmono
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.DebugVec.fmt.monotone {T : Type} (callback : γ → T → Callback)
++    (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => alloc.vec.DebugVec.fmt ⟨callback g⟩) :=
++  monotone_of_monotone_apply _ fun v => monotone_of_monotone_apply _ fun fmt =>
++    Formatter.debugList.monotone fmt callback v.val hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.DebugVec.fmt.apply_monotone {T : Type} (callback : γ → T → Callback)
++    (v : alloc.vec.Vec T) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => alloc.vec.DebugVec.fmt ⟨callback g⟩ v) :=
++  monotone_of_monotone_apply _ fun fmt => Formatter.debugList.monotone fmt callback v.val hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.vec.DebugVec.fmt.apply_fmt_monotone {T : Type} (callback : γ → T → Callback)
++    (v : alloc.vec.Vec T) (fmt : Formatter) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => alloc.vec.DebugVec.fmt ⟨callback g⟩ v fmt) :=
++  Formatter.debugList.monotone fmt callback v.val hmono
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugOption.fmt.apply_fmt_monotone {T : Type} (callback : γ → T → Callback)
++    (x : Option T) (fmt : Formatter) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => DebugOption.fmt ⟨callback g⟩ x fmt) := by
++  cases x with
++  | none => exact monotone_const _
++  | some v =>
++    exact Formatter.debugTuple.values_monotone fmt "Some"
++      (fun g (_ : Unit) => (⟨T, ⟨callback g⟩, v⟩ : DebugValue)) [()]
++      (fun _ _ => monotone_apply v _ hmono)
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugOption.fmt.apply_monotone {T : Type} (callback : γ → T → Callback)
++    (x : Option T) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => DebugOption.fmt ⟨callback g⟩ x) :=
++  monotone_of_monotone_apply _ fun fmt => DebugOption.fmt.apply_fmt_monotone callback x fmt hmono
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugOption.fmt.monotone {T : Type} (callback : γ → T → Callback)
++    (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => DebugOption.fmt ⟨callback g⟩) :=
++  monotone_of_monotone_apply _ fun x => DebugOption.fmt.apply_monotone callback x hmono
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugPair.fmt.apply_fmt_monotone {A B : Type} (ca : γ → A → Callback)
++    (cb : γ → B → Callback) (x : A × B) (fmt : Formatter)
++    (ha : Lean.Order.monotone ca) (hb : Lean.Order.monotone cb) :
++    Lean.Order.monotone (fun g => DebugPair.fmt ⟨ca g⟩ ⟨cb g⟩ x fmt) := by
++  refine Formatter.debugTuple.values_monotone fmt ""
++    (fun g (b : Bool) => if b then (⟨A, ⟨ca g⟩, x.1⟩ : DebugValue) else ⟨B, ⟨cb g⟩, x.2⟩)
++    [true, false] ?_
++  intro b _
++  cases b
++  · exact monotone_apply x.2 _ hb
++  · exact monotone_apply x.1 _ ha
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugPair.fmt.apply_monotone {A B : Type} (ca : γ → A → Callback)
++    (cb : γ → B → Callback) (x : A × B)
++    (ha : Lean.Order.monotone ca) (hb : Lean.Order.monotone cb) :
++    Lean.Order.monotone (fun g => DebugPair.fmt ⟨ca g⟩ ⟨cb g⟩ x) :=
++  monotone_of_monotone_apply _ fun fmt => DebugPair.fmt.apply_fmt_monotone ca cb x fmt ha hb
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugPair.fmt.monotone {A B : Type} (ca : γ → A → Callback)
++    (cb : γ → B → Callback) (ha : Lean.Order.monotone ca) (hb : Lean.Order.monotone cb) :
++    Lean.Order.monotone (fun g => DebugPair.fmt ⟨ca g⟩ ⟨cb g⟩) :=
++  monotone_of_monotone_apply _ fun x => DebugPair.fmt.apply_monotone ca cb x ha hb
++
++@[partial_fixpoint_monotone]
++theorem alloc.sync.DebugArc.fmt.monotone {T : Type} (callback : γ → T → Callback)
++    (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => alloc.sync.DebugArc.fmt ⟨callback g⟩) :=
++  hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.sync.DebugArc.fmt.apply_fmt_monotone {T : Type} (callback : γ → T → Callback)
++    (x : alloc.sync.Arc T) (fmt : Formatter) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => alloc.sync.DebugArc.fmt ⟨callback g⟩ x fmt) :=
++  monotone_apply fmt _ (monotone_apply x _ hmono)
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debug_struct_field1_finish.monotone (fmt : Formatter)
++    (nm n0 : Str) (v₀ : γ → DebugValue)
++    (h₀ : Lean.Order.monotone (fun g => debugValue (v₀ g))) :
++    Lean.Order.monotone (fun g => fmt.debug_struct_field1_finish nm n0 (v₀ g)) := by
++  simp only [Formatter.debug_struct_field1_finish]
++  repeat' first
++    | exact Formatter.debugStruct.values_monotone fmt _ [(_, v₀)]
++        (fun p hp => by simp only [List.mem_cons, List.not_mem_nil, or_false] at hp; subst hp; exact h₀)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debug_struct_field2_finish.monotone (fmt : Formatter)
++    (nm n0 : Str) (v₀ : γ → DebugValue) (n1 : Str) (v₁ : γ → DebugValue)
++    (h₀ : Lean.Order.monotone (fun g => debugValue (v₀ g)))
++    (h₁ : Lean.Order.monotone (fun g => debugValue (v₁ g))) :
++    Lean.Order.monotone (fun g => fmt.debug_struct_field2_finish nm n0 (v₀ g) n1 (v₁ g)) := by
++  simp only [Formatter.debug_struct_field2_finish]
++  repeat' first
++    | exact Formatter.debugStruct.values_monotone fmt _ [(_, v₀), (_, v₁)]
++        (fun p hp => by
++          simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
++          rcases hp with rfl | rfl <;> assumption)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debug_struct_field3_finish.monotone (fmt : Formatter)
++    (nm n0 : Str) (v₀ : γ → DebugValue) (n1 : Str) (v₁ : γ → DebugValue)
++    (n2 : Str) (v₂ : γ → DebugValue)
++    (h₀ : Lean.Order.monotone (fun g => debugValue (v₀ g)))
++    (h₁ : Lean.Order.monotone (fun g => debugValue (v₁ g)))
++    (h₂ : Lean.Order.monotone (fun g => debugValue (v₂ g))) :
++    Lean.Order.monotone (fun g =>
++      fmt.debug_struct_field3_finish nm n0 (v₀ g) n1 (v₁ g) n2 (v₂ g)) := by
++  simp only [Formatter.debug_struct_field3_finish]
++  repeat' first
++    | exact Formatter.debugStruct.values_monotone fmt _ [(_, v₀), (_, v₁), (_, v₂)]
++        (fun p hp => by
++          simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
++          rcases hp with rfl | rfl | rfl <;> assumption)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debug_struct_field4_finish.monotone (fmt : Formatter)
++    (nm n0 : Str) (v₀ : γ → DebugValue) (n1 : Str) (v₁ : γ → DebugValue)
++    (n2 : Str) (v₂ : γ → DebugValue) (n3 : Str) (v₃ : γ → DebugValue)
++    (h₀ : Lean.Order.monotone (fun g => debugValue (v₀ g)))
++    (h₁ : Lean.Order.monotone (fun g => debugValue (v₁ g)))
++    (h₂ : Lean.Order.monotone (fun g => debugValue (v₂ g)))
++    (h₃ : Lean.Order.monotone (fun g => debugValue (v₃ g))) :
++    Lean.Order.monotone (fun g =>
++      fmt.debug_struct_field4_finish nm n0 (v₀ g) n1 (v₁ g) n2 (v₂ g) n3 (v₃ g)) := by
++  simp only [Formatter.debug_struct_field4_finish]
++  repeat' first
++    | exact Formatter.debugStruct.values_monotone fmt _ [(_, v₀), (_, v₁), (_, v₂), (_, v₃)]
++        (fun p hp => by
++          simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
++          rcases hp with rfl | rfl | rfl | rfl <;> assumption)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debug_struct_field5_finish.monotone (fmt : Formatter)
++    (nm n0 : Str) (v₀ : γ → DebugValue) (n1 : Str) (v₁ : γ → DebugValue)
++    (n2 : Str) (v₂ : γ → DebugValue) (n3 : Str) (v₃ : γ → DebugValue)
++    (n4 : Str) (v₄ : γ → DebugValue)
++    (h₀ : Lean.Order.monotone (fun g => debugValue (v₀ g)))
++    (h₁ : Lean.Order.monotone (fun g => debugValue (v₁ g)))
++    (h₂ : Lean.Order.monotone (fun g => debugValue (v₂ g)))
++    (h₃ : Lean.Order.monotone (fun g => debugValue (v₃ g)))
++    (h₄ : Lean.Order.monotone (fun g => debugValue (v₄ g))) :
++    Lean.Order.monotone (fun g =>
++      fmt.debug_struct_field5_finish nm n0 (v₀ g) n1 (v₁ g) n2 (v₂ g) n3 (v₃ g) n4 (v₄ g)) := by
++  simp only [Formatter.debug_struct_field5_finish]
++  repeat' first
++    | exact Formatter.debugStruct.values_monotone fmt _
++        [(_, v₀), (_, v₁), (_, v₂), (_, v₃), (_, v₄)]
++        (fun p hp => by
++          simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
++          rcases hp with rfl | rfl | rfl | rfl | rfl <;> assumption)
++    | monotonicity
++
++/-- The model of `Debug for [T; N]` does not call the element instance. -/
++@[partial_fixpoint_monotone]
++theorem core.array.DebugArray.fmt.monotone {T : Type} {N : Usize} (callback : γ → T → Callback) :
++    Lean.Order.monotone (fun g => core.array.DebugArray.fmt (N := N) ⟨callback g⟩) :=
++  monotone_const _
++
++@[partial_fixpoint_monotone]
++theorem core.array.DebugArray.fmt.apply_fmt_monotone {T : Type} {N : Usize}
++    (callback : γ → T → Callback) (a : Array T N) (fmt : Formatter) :
++    Lean.Order.monotone (fun g => core.array.DebugArray.fmt ⟨callback g⟩ a fmt) :=
++  monotone_const _
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugSlice.fmt.monotone {T : Type} (callback : γ → T → Callback)
++    (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => core.fmt.DebugSlice.fmt ⟨callback g⟩) :=
++  monotone_of_monotone_apply _ fun s => monotone_of_monotone_apply _ fun fmt =>
++    Formatter.debugList.monotone fmt callback s.val hmono
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.DebugSlice.fmt.apply_fmt_monotone {T : Type} (callback : γ → T → Callback)
++    (s : Slice T) (fmt : Formatter) (hmono : Lean.Order.monotone callback) :
++    Lean.Order.monotone (fun g => core.fmt.DebugSlice.fmt ⟨callback g⟩ s fmt) :=
++  Formatter.debugList.monotone fmt callback s.val hmono
++
++@[partial_fixpoint_monotone]
++theorem core.fmt.Formatter.debugMap.monotone {K V : Type} (fmt : Formatter)
++    (kcb : γ → K → Callback) (vcb : γ → V → Callback) (entries : List (K × V))
++    (hk : Lean.Order.monotone kcb) (hv : Lean.Order.monotone vcb) :
++    Lean.Order.monotone (fun g => fmt.debugMap ⟨kcb g⟩ ⟨vcb g⟩ entries) := by
++  have hrender : Lean.Order.monotone (fun g (e : K × V) (fmt : Formatter) =>
++      thenFormat (kcb g e.1 fmt) (fun fmt => thenFormat (fmt.append ": ") (vcb g e.2))) := by
++    apply monotone_of_monotone_apply; intro e
++    apply monotone_of_monotone_apply; intro fmt
++    repeat' first
++      | exact monotone_apply _ _ (monotone_apply _ _ hk)
++      | exact monotone_apply _ _ hv
++      | monotonicity
++  simp only [Formatter.debugMap]
++  repeat' first
++    | exact debugEntries.render_monotone _ _ entries hrender
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.DebugBTreeMap.fmt.monotone {K V : Type}
++    (kcb : γ → K → Callback) (vcb : γ → V → Callback)
++    (hk : Lean.Order.monotone kcb) (hv : Lean.Order.monotone vcb) :
++    Lean.Order.monotone (fun g =>
++      alloc.collections.btree.map.DebugBTreeMap.fmt ⟨kcb g⟩ ⟨vcb g⟩) :=
++  monotone_of_monotone_apply _ fun map => monotone_of_monotone_apply _ fun fmt =>
++    Formatter.debugMap.monotone fmt kcb vcb map.entries hk hv
++
++@[partial_fixpoint_monotone]
++theorem alloc.collections.btree.map.DebugBTreeMap.fmt.apply_fmt_monotone {K V : Type}
++    (kcb : γ → K → Callback) (vcb : γ → V → Callback)
++    (map : alloc.collections.btree.map.BTreeMap K V) (fmt : Formatter)
++    (hk : Lean.Order.monotone kcb) (hv : Lean.Order.monotone vcb) :
++    Lean.Order.monotone (fun g =>
++      alloc.collections.btree.map.DebugBTreeMap.fmt ⟨kcb g⟩ ⟨vcb g⟩ map fmt) :=
++  Formatter.debugMap.monotone fmt kcb vcb map.entries hk hv
++
++end DebugMono
++
++end Aeneas.Std
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 2c8b018..24f85d3 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -126,7 +126,7 @@ let lean_builtin_types = [
+   mk_type "core::num::niche_types::NonZeroUsizeInner" "_root_.Aeneas.Std.core.num.niche_types.NonZeroUsizeInner";
+   (* file: "Aeneas/Std/Core/NonZero.lean", line: 14 *)
+   mk_type "core::num::nonzero::NonZero" "_root_.Aeneas.Std.core.num.nonzero.NonZero" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 145 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 202 *)
+   mk_type "core::ops::control_flow::ControlFlow" "_root_.Aeneas.Std.core.ops.control_flow.ControlFlow" ~kind:(KEnum [("Continue", Some "Continue"); ("Break", Some "Break")]);
+   (* file: "Aeneas/Std/Range.lean", line: 14 *)
+   mk_type "core::ops::range::Range" "_root_.Aeneas.Std.core.ops.range.Range" ~kind:(KStruct [("start", Some "start"); ("end", Some "«end»")]);
+@@ -264,13 +264,13 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::ops::deref::Deref<Box<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.boxed.Box.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Alloc.lean", line: 22 *)
+   mk_fun "alloc::boxed::{core::ops::deref::DerefMut<Box<@T>, @T>}::deref_mut" "_root_.Aeneas.Std.alloc.boxed.Box.deref_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 255 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 270 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::into_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 261 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 276 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 129 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::contains_key" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.contains_key" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 248 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 263 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::entry" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false; true]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 123 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+@@ -296,45 +296,47 @@ let lean_builtin_funs = [
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::eq" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.eq" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 218 *)
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::ne" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.ne" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 236 *)
++  mk_fun "alloc::collections::btree::map::{core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::fmt" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap.fmt" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 159 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>}::extend" "_root_.Aeneas.Std.alloc.collections.btree.map.ExtendBTreeMap.extend" ~keep_params:(Some [true; true; false; true; true]) ~keep_trait_clauses:(Some [true; false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 472 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 487 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>}::from_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 436 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 451 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 428 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 443 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 418 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 433 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.collect" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 349 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 364 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.enumerate" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 287 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 302 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.next" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 301 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 316 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.size_hint" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 343 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 358 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.step_by" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 354 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 369 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.take" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 412 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 427 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.collect";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 335 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 350 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.enumerate";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 281 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 296 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 295 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 310 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 330 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 345 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.step_by";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 339 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 354 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.take";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 309 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 324 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 315 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 330 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 320 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 335 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 326 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 341 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.size_hint";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 32 *)
+   mk_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, @A>}::contains" "_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.contains" ~keep_params:(Some [true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+@@ -838,39 +840,39 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Arguments<'a>}::from_str_nonconst" "_root_.Aeneas.Std.core.fmt.Arguments.from_str_nonconst";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 145 *)
+   mk_fun "core::fmt::{core::fmt::Arguments<'a>}::new" "_root_.Aeneas.Std.core.fmt.Arguments.new";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 283 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 297 *)
+   mk_fun "core::fmt::{core::fmt::Debug<&'0 @T>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugShared.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 299 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 313 *)
+   mk_fun "core::fmt::{core::fmt::Debug<()>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugUnit.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 157 *)
+   mk_fun "core::fmt::{core::fmt::Debug<(@A, @B)>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugPair.fmt";
+   (* file: "Aeneas/Std/Vec.lean", line: 651 *)
+   mk_fun "core::fmt::{core::fmt::Debug<[@T]>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugSlice.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 288 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 302 *)
+   mk_fun "core::fmt::{core::fmt::Debug<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBool.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 45 *)
+   mk_fun "core::fmt::{core::fmt::Debug<str>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugStr.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 65 *)
+   mk_fun "core::fmt::{core::fmt::Display<&'0 @T>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayShared.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 294 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 308 *)
+   mk_fun "core::fmt::{core::fmt::Display<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBool.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 50 *)
+   mk_fun "core::fmt::{core::fmt::Display<str>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayStr.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 304 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 318 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field1_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field1_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 309 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 323 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field2_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 314 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 328 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field3_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field3_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 320 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 334 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field4_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field4_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 327 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 341 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field5_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field5_finish";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 12 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_fields_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_fields_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 335 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 349 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field1_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 339 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 353 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field2_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field2_finish";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 228 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_fmt" "_root_.Aeneas.Std.core.fmt.Formatter.write_fmt";
+@@ -1306,9 +1308,9 @@ let lean_builtin_funs = [
+   mk_fun "core::ops::arith::{core::ops::arith::MulAssign<usize, &'a usize>}::mul_assign" "_root_.Aeneas.Std.core.ops.arith.MulAssignUsizeShared.mul_assign";
+   (* file: "Aeneas/Std/Scalar/Ops/Sub.lean", line: 21 *)
+   mk_fun "core::ops::arith::{core::ops::arith::Sub<usize, &'a usize, usize>}::sub" "_root_.Aeneas.Std.core.ops.arith.SubUsizeSharedUsize.sub";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 129 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 186 *)
+   mk_fun "core::ops::function::impls::{core::ops::function::FnMut<&'0 mut @F, @A, @Clause0_Clause0_Output>}::call_mut" "_root_.Aeneas.Std.core.ops.function.FnMutMutRef.call_mut";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 117 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 174 *)
+   mk_fun "core::ops::function::impls::{core::ops::function::FnOnce<&'0 mut @F, @A, @Clause0_Clause0_Output>}::call_once" "_root_.Aeneas.Std.core.ops.function.FnOnceMutRef.call_once";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 13 *)
+   mk_fun "core::ops::range::{core::ops::range::Range<@Idx>}::contains" "_root_.Aeneas.Std.core.ops.range.Range.contains";
+@@ -1366,9 +1368,9 @@ let lean_builtin_funs = [
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::branch" "_root_.Aeneas.Std.core.result.TryResult.branch";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 31 *)
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::from_output" "_root_.Aeneas.Std.core.result.TryResult.from_output";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 513 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 527 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::expect" "_root_.Aeneas.Std.core.result.Result.expect";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 500 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 514 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::unwrap" "_root_.Aeneas.Std.core.result.Result.unwrap";
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 135 *)
+   mk_fun "core::slice::cmp::{core::cmp::Ord<[@T]>}::cmp" "_root_.Aeneas.Std.core.slice.cmp.OrdSlice.cmp";
+@@ -1895,9 +1897,9 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::deref::Deref" "_root_.Aeneas.Std.core.ops.deref.Deref" ~methods:[("deref", "deref")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 23 *)
+   mk_trait_decl "core::ops::deref::DerefMut" "_root_.Aeneas.Std.core.ops.deref.DerefMut" ~parent_clauses:["derefInst"] ~methods:[("deref_mut", "deref_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 87 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 144 *)
+   mk_trait_decl "core::ops::function::Fn" "_root_.Aeneas.Std.core.ops.function.Fn" ~parent_clauses:["FnMutInst"] ~methods:[("call", "call")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 82 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 139 *)
+   mk_trait_decl "core::ops::function::FnMut" "_root_.Aeneas.Std.core.ops.function.FnMut" ~parent_clauses:["FnOnceInst"] ~methods:[("call_mut", "call_mut")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 51 *)
+   mk_trait_decl "core::ops::function::FnOnce" "_root_.Aeneas.Std.core.ops.function.FnOnce" ~methods:[("call_once", "call_once")];
+@@ -1911,11 +1913,11 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::index::Index" "_root_.Aeneas.Std.core.ops.index.Index" ~methods:[("index", "index")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 14 *)
+   mk_trait_decl "core::ops::index::IndexMut" "_root_.Aeneas.Std.core.ops.index.IndexMut" ~parent_clauses:["indexInst"] ~methods:[("index_mut", "index_mut")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 141 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 198 *)
+   mk_trait_decl "core::ops::try_trait::FromResidual" "_root_.Aeneas.Std.core.ops.try_trait.FromResidual" ~methods:[("from_residual", "from_residual")];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 156 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 213 *)
+   mk_trait_decl "core::ops::try_trait::Residual" "_root_.Aeneas.Std.core.ops.try_trait.Residual" ~parent_clauses:["TryInst"];
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 150 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 207 *)
+   mk_trait_decl "core::ops::try_trait::Try" "_root_.Aeneas.Std.core.ops.try_trait.Try" ~parent_clauses:["FromResidualInst"] ~methods:[("from_output", "from_output"); ("branch", "branch")];
+   (* file: "Aeneas/Std/Slice.lean", line: 298 *)
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+@@ -2146,9 +2148,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::default::Default<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.alloc.vec.DefaultVec";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 16 *)
+   mk_trait_impl "core::default::Default<core::option::Option<@T>>" "_root_.Aeneas.Std.core.option.DefaultOption";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 285 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 299 *)
+   mk_trait_impl "core::fmt::Debug<&'0 @T>" "_root_.Aeneas.Std.core.fmt.DebugShared";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 301 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 315 *)
+   mk_trait_impl "core::fmt::Debug<()>" "_root_.Aeneas.Std.core.fmt.DebugUnit";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 160 *)
+   mk_trait_impl "core::fmt::Debug<(@A, @B)>" "_root_.Aeneas.Std.core.fmt.DebugPair";
+@@ -2156,13 +2158,15 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 72 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 242 *)
++  mk_trait_impl "core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 57 *)
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+   (* file: "Aeneas/Std/Sync.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.fmt.DebugArc" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 664 *)
+   mk_trait_impl "core::fmt::Debug<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.fmt.DebugVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 292 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 306 *)
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 169 *)
+   mk_trait_impl "core::fmt::Debug<core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.fmt.DebugTryFromSliceError";
+@@ -2212,7 +2216,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Display<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DisplayBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 62 *)
+   mk_trait_impl "core::fmt::Display<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DisplayString";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 296 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 310 *)
+   mk_trait_impl "core::fmt::Display<bool>" "_root_.Aeneas.Std.core.fmt.DisplayBool";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 157 *)
+   mk_trait_impl "core::fmt::Display<f32>" "_root_.Aeneas.Std.core.fmt.DisplayF32";
+@@ -2258,13 +2262,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::range::Step<usize>" "_root_.Aeneas.Std.core.iter.range.StepUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 752 *)
+   mk_trait_impl "core::iter::traits::accum::Product<usize, &'a usize>" "_root_.Aeneas.Std.core.iter.traits.accum.ProductUsizeSharedUsize";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 509 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 524 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 155 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::set::BTreeSet<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 100 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>" "_root_.Aeneas.Std.alloc.vec.ExtendVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 503 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 518 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 149 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet";
+@@ -2276,7 +2280,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T; @N], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedArray";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 294 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 495 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 510 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 203 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -2288,7 +2292,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBoxSlice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 104 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<[@T; @N], @T, core::array::iter::IntoIter<@T, @N>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 487 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 502 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 173 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -2314,13 +2318,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::exact_size::ExactSizeIterator<core::ops::range::Range<usize>, usize>" "_root_.Aeneas.Std.core.iter.traits.exact_size.ExactSizeIteratorRangeUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 442 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<&'a mut @I, @Item>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 375 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 390 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoIter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 363 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 378 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 390 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 405 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeKeys";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 401 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 416 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeValues";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 164 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::set::IntoIter<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIntoIter" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -2488,9 +2492,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::deref::DerefMut<Box<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefMutBoxInst" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 498 *)
+   mk_trait_impl "core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.ops.deref.DerefMutVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 134 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 191 *)
+   mk_trait_impl "core::ops::function::FnMut<&'0 mut @F, @A, @Clause0_Clause0_Output>" "_root_.Aeneas.Std.core.ops.function.FnMutMutRef";
+-  (* file: "Aeneas/Std/Core/Ops.lean", line: 122 *)
++  (* file: "Aeneas/Std/Core/Ops.lean", line: 179 *)
+   mk_trait_impl "core::ops::function::FnOnce<&'0 mut @F, @A, @Clause0_Clause0_Output>" "_root_.Aeneas.Std.core.ops.function.FnOnceMutRef";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 100 *)
+   mk_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexArray";
+diff --git a/tests/lean/NestedRecursiveDerives.lean b/tests/lean/NestedRecursiveDerives.lean
+new file mode 100644
+index 0000000..1ca7a62
+--- /dev/null
++++ b/tests/lean/NestedRecursiveDerives.lean
+@@ -0,0 +1 @@
++import NestedRecursiveDerives.Checks
+diff --git a/tests/lean/NestedRecursiveDerives/Checks.lean b/tests/lean/NestedRecursiveDerives/Checks.lean
+new file mode 100644
+index 0000000..c8acacf
+--- /dev/null
++++ b/tests/lean/NestedRecursiveDerives/Checks.lean
+@@ -0,0 +1,65 @@
++import NestedRecursiveDerives.NestedRecursiveDerives
++
++/-! Evaluate the model of `tests/src/nested-recursive-derives.rs` on the inputs
++    of its `native` test module and compare with the native results. The
++    derived `Clone`, `PartialEq` and `Debug` methods are `partial_fixpoint`s
++    which recurse through the models of `Vec`, `Option`, `Box` and `BTreeMap`,
++    and through the derived methods of a generic type. -/
++
++namespace nested_recursive_derives.checks
++open Aeneas Aeneas.Std Result
++
++def okU32 : Result U32 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++def okString : Result String → Option String
++  | ok s => some s
++  | _ => none
++
++#guard okU32 (tree_clone_scenario 2#u32 3#u32) == some 110010013
++#guard okU32 (tree_clone_scenario 0#u32 0#u32) == some 110000003
++#guard okString (tree_debug 2#u32 3#u32) ==
++  some "Node([Leaf(2), Node([Leaf(3), Opt(None)]), Opt(Some(Leaf(5)))])"
++
++#guard okU32 (env_scenario 4#u32) == some 111
++#guard okString (env_debug 9#u32) == some "Env { scopes: {7: [Leaf(9)]}, depth: 1 }"
++#guard okString (env_pretty 9#u32) ==
++  some ("Env {\n    scopes: {\n        7: [\n            Leaf(\n                9,\n" ++
++    "            ),\n        ],\n        8: [],\n    },\n    depth: 1,\n}")
++
++#guard okU32 (scope_scenario 3#u32) == some 112
++#guard okString (scope_debug 6#u32) == some "Nest({6: Leaf(6)})"
++
++#guard okU32 (term_scenario 3#u32) == some 1105
++#guard okString (term_debug 8#u32) == some "Call(2, [Val(8), Maybe(None)])"
++
++#guard okU32 (doc_scenario 5#u32) == some 11
++#guard okString (doc_debug 5#u32) == some "Block(Wrapper { items: [Text(5)], tag: 1 })"
++
++#guard okU32 (expr_scenario 3#u32) == some 11
++#guard okString (expr_debug 3#u32) ==
++  some ("Expr { kind: Guard(Expr { kind: Tuple([Expr { kind: Lit(3), span: 1 }]), span: 3 }, " ++
++    "Some(Expr { kind: Lit(3), span: 1 })), span: 4 }")
++
++/-! The derived methods are definitions, not axioms. -/
++
++/-- info: 'nested_recursive_derives.tree_clone_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms tree_clone_scenario
++
++/-- info: 'nested_recursive_derives.env_pretty' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms env_pretty
++
++/-- info: 'nested_recursive_derives.scope_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms scope_scenario
++
++/-- info: 'nested_recursive_derives.term_debug' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms term_debug
++
++/-- info: 'nested_recursive_derives.doc_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms doc_scenario
++
++/-- info: 'nested_recursive_derives.expr_debug' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms expr_debug
++
++end nested_recursive_derives.checks
+diff --git a/tests/lean/NestedRecursiveDerives/NestedRecursiveDerives.lean b/tests/lean/NestedRecursiveDerives/NestedRecursiveDerives.lean
+new file mode 100644
+index 0000000..b8f84a7
+--- /dev/null
++++ b/tests/lean/NestedRecursiveDerives/NestedRecursiveDerives.lean
+@@ -0,0 +1,2013 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_recursive_derives]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_recursive_derives
++
++/-- Trait implementation: [core::option::{core::cmp::PartialEq<core::option::Option<T>> for core::option::Option<T>}]
++    Source: '/rustc/library/core/src/option.rs', lines 2422:0-2422:56
++    Name pattern: [core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>] -/
++@[reducible, rust_trait_impl
++  "core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>"]
++def core.option.Option.Insts.CoreCmpPartialEqOption {T : Type}
++  (cmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T) :
++  _root_.Aeneas.Std.core.cmp.PartialEq (_root_.Option T) (_root_.Option T) := {
++  eq := _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++    cmpPartialEqInst
++}
++
++/-- [nested_recursive_derives::Tree]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 17:0-21:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Tree where
++| Leaf : _root_.Aeneas.Std.U32 → Tree
++| Node : _root_.Aeneas.Std.NestedVec Tree → Tree
++| Opt : _root_.Option Tree → Tree
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Tree}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:9-16:14
++    Visibility: public -/
++def Tree.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Tree
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Tree.Leaf __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Leaf i)
++  | _root_.nested_recursive_derives.Tree.Node __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++    let v ←
++      _root_.Aeneas.Std.alloc.vec.CloneVec.clone
++        ({
++            clone := Tree.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Tree) __self_01
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Node
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested v))
++  | _root_.nested_recursive_derives.Tree.Opt __self_0 =>
++    let o ←
++      _root_.Aeneas.Std.core.option.Option.Clone.clone
++        (_root_.Aeneas.Std.core.core.clone.CloneBox
++        ({
++            clone := Tree.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Tree)) __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Opt o)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Tree}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:9-16:14 -/
++@[reducible]
++def Tree.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.Tree := {
++  clone := _root_.nested_recursive_derives.Tree.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Tree}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:16-16:25 -/
++@[reducible]
++def Tree.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.Tree := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Tree> for nested_recursive_derives::Tree}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:16-16:25
++    Visibility: public -/
++def Tree.Insts.CoreCmpPartialEqTree.eq
++  (self : _root_.nested_recursive_derives.Tree)
++  (other : _root_.nested_recursive_derives.Tree) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.nested_recursive_derives.Tree.Leaf __self_0 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Tree.Leaf __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqU32 __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Node _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Opt _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.Tree.Node __self_0 =>
++      let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Tree.Leaf _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Node __arg1_0 =>
++          do
++          let __arg1_01 := _root_.Aeneas.Std.NestedVec.toVec __arg1_0
++          let b ←
++            _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq
++              ({
++                  eq := Tree.Insts.CoreCmpPartialEqTree.eq } :
++                _root_.Aeneas.Std.core.cmp.PartialEq
++                _root_.nested_recursive_derives.Tree
++                _root_.nested_recursive_derives.Tree) __self_01 __arg1_01
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Opt _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.Tree.Opt __self_0 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Tree.Leaf _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Node _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++        | _root_.nested_recursive_derives.Tree.Opt __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++              (_root_.Aeneas.Std.core.cmp.PartialEqBox
++              ({
++                  eq := Tree.Insts.CoreCmpPartialEqTree.eq } :
++                _root_.Aeneas.Std.core.cmp.PartialEq
++                _root_.nested_recursive_derives.Tree
++                _root_.nested_recursive_derives.Tree)) __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.nested_recursive_derives.Tree _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Tree> for nested_recursive_derives::Tree}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:16-16:25 -/
++@[reducible]
++def Tree.Insts.CoreCmpPartialEqTree : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_recursive_derives.Tree _root_.nested_recursive_derives.Tree
++  := {
++  eq := _root_.nested_recursive_derives.Tree.Insts.CoreCmpPartialEqTree.eq
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Tree}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:27-16:32
++    Visibility: public -/
++def Tree.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.Tree)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Tree.Leaf __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Leaf") __self_01
++  | _root_.nested_recursive_derives.Tree.Node __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++    let __self_02 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugVec
++        ({
++            fmt := Tree.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Tree))) __self_01
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Node") __self_02
++  | _root_.nested_recursive_derives.Tree.Opt __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugOption
++        (_root_.Aeneas.Std.core.fmt.DebugBox
++        ({
++            fmt := Tree.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Tree)))) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Opt") __self_01
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Tree}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 16:27-16:32 -/
++@[reducible]
++def Tree.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.Tree := {
++  fmt := _root_.nested_recursive_derives.Tree.Insts.CoreFmtDebug.fmt
++}
++
++/-- [nested_recursive_derives::Env]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 25:0-28:1
++    Visibility: public -/
++structure Env where
++  scopes : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_recursive_derives.Tree)
++  depth : _root_.Aeneas.Std.U32
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Env}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:9-24:14
++    Visibility: public -/
++def Env.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.Env) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Env
++  := do
++  let bm ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.clone
++      core.clone.CloneU32 (_root_.Aeneas.Std.core.clone.CloneallocvecVec
++      _root_.nested_recursive_derives.Tree.Insts.CoreCloneClone) self.scopes
++  let i ← lift (core.clone.impls.CloneU32.clone self.depth)
++  _root_.Aeneas.Std.Result.ok { scopes := bm, depth := i }
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Env}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:9-24:14 -/
++@[reducible]
++def Env.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.Env := {
++  clone := _root_.nested_recursive_derives.Env.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Env}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:16-24:25 -/
++@[reducible]
++def Env.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.Env := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Env> for nested_recursive_derives::Env}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:16-24:25
++    Visibility: public -/
++def Env.Insts.CoreCmpPartialEqEnv.eq
++  (self : _root_.nested_recursive_derives.Env)
++  (other : _root_.nested_recursive_derives.Env) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  if self.depth = other.depth
++  then
++    _root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.eq
++      core.cmp.PartialEqU32 (_root_.Aeneas.Std.core.cmp.PartialEqVec
++      _root_.nested_recursive_derives.Tree.Insts.CoreCmpPartialEqTree)
++      self.scopes other.scopes
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Env> for nested_recursive_derives::Env}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:16-24:25 -/
++@[reducible]
++def Env.Insts.CoreCmpPartialEqEnv : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_recursive_derives.Env _root_.nested_recursive_derives.Env := {
++  eq := _root_.nested_recursive_derives.Env.Insts.CoreCmpPartialEqEnv.eq
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Env}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:27-24:32
++    Visibility: public -/
++def Env.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.Env)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    Dyn.mk _ (_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap
++      _root_.Aeneas.Std.core.fmt.DebugU32 (_root_.Aeneas.Std.core.fmt.DebugVec
++      _root_.nested_recursive_derives.Tree.Insts.CoreFmtDebug)) self.scopes
++  let dyn1 :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.depth
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++    (_root_.Aeneas.Std.toStr "Env") (_root_.Aeneas.Std.toStr "scopes") dyn
++    (_root_.Aeneas.Std.toStr "depth") dyn1
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Env}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 24:27-24:32 -/
++@[reducible]
++def Env.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.Env := {
++  fmt := _root_.nested_recursive_derives.Env.Insts.CoreFmtDebug.fmt
++}
++
++/-- [nested_recursive_derives::Scope]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 32:0-35:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Scope where
++| Leaf : _root_.Aeneas.Std.U32 → Scope
++| Nest :
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++    Scope →
++  Scope
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Scope}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:9-31:14
++    Visibility: public -/
++def Scope.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.Scope) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Scope
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Scope.Leaf __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Scope.Leaf i)
++  | _root_.nested_recursive_derives.Scope.Nest __self_0 =>
++    let bm ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.clone
++        core.clone.CloneU32
++        ({
++            clone := Scope.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Scope) __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Scope.Nest bm)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Scope}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:9-31:14 -/
++@[reducible]
++def Scope.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.Scope := {
++  clone := _root_.nested_recursive_derives.Scope.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Scope}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:16-31:25 -/
++@[reducible]
++def Scope.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.Scope := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Scope> for nested_recursive_derives::Scope}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:16-31:25
++    Visibility: public -/
++def Scope.Insts.CoreCmpPartialEqScope.eq
++  (self : _root_.nested_recursive_derives.Scope)
++  (other : _root_.nested_recursive_derives.Scope) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.nested_recursive_derives.Scope.Leaf __self_0 =>
++      match other with
++      | _root_.nested_recursive_derives.Scope.Leaf __arg1_0 =>
++        _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++          core.cmp.PartialEqU32 __self_0 __arg1_0
++      | _root_.nested_recursive_derives.Scope.Nest _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.nested_recursive_derives.Scope.Nest __self_0 =>
++      match other with
++      | _root_.nested_recursive_derives.Scope.Leaf _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.nested_recursive_derives.Scope.Nest __arg1_0 =>
++        _root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.eq
++          core.cmp.PartialEqU32
++          ({
++              eq := Scope.Insts.CoreCmpPartialEqScope.eq } :
++            _root_.Aeneas.Std.core.cmp.PartialEq
++            _root_.nested_recursive_derives.Scope
++            _root_.nested_recursive_derives.Scope) __self_0 __arg1_0
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Scope> for nested_recursive_derives::Scope}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:16-31:25 -/
++@[reducible]
++def Scope.Insts.CoreCmpPartialEqScope : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_recursive_derives.Scope _root_.nested_recursive_derives.Scope
++  := {
++  eq := _root_.nested_recursive_derives.Scope.Insts.CoreCmpPartialEqScope.eq
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Scope}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:27-31:32
++    Visibility: public -/
++def Scope.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.Scope)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Scope.Leaf __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Leaf") __self_01
++  | _root_.nested_recursive_derives.Scope.Nest __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap
++        _root_.Aeneas.Std.core.fmt.DebugU32
++        ({
++            fmt := Scope.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Scope))) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Nest") __self_01
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Scope}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 31:27-31:32 -/
++@[reducible]
++def Scope.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.Scope := {
++  fmt := _root_.nested_recursive_derives.Scope.Insts.CoreFmtDebug.fmt
++}
++
++/-- [nested_recursive_derives::Term]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 40:0-44:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Term (A : Type) where
++| Val : A → Term A
++| Call :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.NestedVec (Term A) →
++  Term A
++| Maybe : _root_.Option (Term A) → Term A
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Term<A>}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:9-39:14
++    Visibility: public -/
++def Term.Insts.CoreCloneClone.clone
++  {A : Type} (corecloneCloneInst : _root_.Aeneas.Std.core.clone.Clone A)
++  (self : _root_.nested_recursive_derives.Term A) :
++  _root_.Aeneas.Std.Result (_root_.nested_recursive_derives.Term A)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Term.Val __self_0 =>
++    let t ← corecloneCloneInst.clone __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Term.Val t)
++  | _root_.nested_recursive_derives.Term.Call __self_0 __self_1 =>
++    let __self_11 := _root_.Aeneas.Std.NestedVec.toVec __self_1
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    let v ←
++      _root_.Aeneas.Std.alloc.vec.CloneVec.clone
++        (( fun {A1 : Type} (corecloneCloneInst1 :
++           _root_.Aeneas.Std.core.clone.Clone A1) =>
++           ({
++               clone := Term.Insts.CoreCloneClone.clone corecloneCloneInst1 } :
++           _root_.Aeneas.Std.core.clone.Clone
++           (_root_.nested_recursive_derives.Term A1))) corecloneCloneInst)
++        __self_11
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Term.Call i
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested v))
++  | _root_.nested_recursive_derives.Term.Maybe __self_0 =>
++    let o ←
++      _root_.Aeneas.Std.core.option.Option.Clone.clone
++        (_root_.Aeneas.Std.core.core.clone.CloneBox
++        (( fun {A1 : Type} (corecloneCloneInst1 :
++           _root_.Aeneas.Std.core.clone.Clone A1) =>
++           ({
++               clone := Term.Insts.CoreCloneClone.clone corecloneCloneInst1 } :
++           _root_.Aeneas.Std.core.clone.Clone
++           (_root_.nested_recursive_derives.Term A1))) corecloneCloneInst))
++        __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Term.Maybe o)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Term<A>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:9-39:14 -/
++@[reducible]
++def Term.Insts.CoreCloneClone {A : Type} (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone A) : _root_.Aeneas.Std.core.clone.Clone
++  (_root_.nested_recursive_derives.Term A) := {
++  clone := _root_.nested_recursive_derives.Term.Insts.CoreCloneClone.clone
++    corecloneCloneInst
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Term<A>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:16-39:25 -/
++@[reducible]
++def Term.Insts.CoreMarkerStructuralPartialEq (A : Type) :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  (_root_.nested_recursive_derives.Term A) := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Term<A>> for nested_recursive_derives::Term<A>}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:16-39:25
++    Visibility: public -/
++def Term.Insts.CoreCmpPartialEqTerm.eq
++  {A : Type} (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq A A)
++  (self : _root_.nested_recursive_derives.Term A)
++  (other : _root_.nested_recursive_derives.Term A) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.nested_recursive_derives.Term.Val __self_0 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Term.Val __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              corecmpPartialEqInst __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Call _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Maybe _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.Term.Call __self_0 __self_1 =>
++      let __self_11 := _root_.Aeneas.Std.NestedVec.toVec __self_1
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Term.Val _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Call __arg1_0 __arg1_1 =>
++          do
++          let __arg1_11 := _root_.Aeneas.Std.NestedVec.toVec __arg1_1
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqU32 __self_0 __arg1_0
++          if b
++          then
++            let b1 ←
++              _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq
++                (( fun {A1 : Type} (corecmpPartialEqInst1 :
++                   _root_.Aeneas.Std.core.cmp.PartialEq A1 A1) =>
++                   ({
++                       eq := Term.Insts.CoreCmpPartialEqTerm.eq
++                         corecmpPartialEqInst1 } :
++                   _root_.Aeneas.Std.core.cmp.PartialEq
++                   (_root_.nested_recursive_derives.Term A1)
++                   (_root_.nested_recursive_derives.Term A1)))
++                corecmpPartialEqInst) __self_11 __arg1_11
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b1 : _root_.Sum
++              (_root_.nested_recursive_derives.Term A) _root_.Bool)
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr false : _root_.Sum
++              (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Maybe _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.Term.Maybe __self_0 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.Term.Val _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Call _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++        | _root_.nested_recursive_derives.Term.Maybe __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++              (_root_.Aeneas.Std.core.cmp.PartialEqBox
++              (( fun {A1 : Type} (corecmpPartialEqInst1 :
++                 _root_.Aeneas.Std.core.cmp.PartialEq A1 A1) =>
++                 ({
++                     eq := Term.Insts.CoreCmpPartialEqTerm.eq
++                       corecmpPartialEqInst1 } :
++                 _root_.Aeneas.Std.core.cmp.PartialEq
++                 (_root_.nested_recursive_derives.Term A1)
++                 (_root_.nested_recursive_derives.Term A1)))
++              corecmpPartialEqInst)) __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            (_root_.nested_recursive_derives.Term A) _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Term<A>> for nested_recursive_derives::Term<A>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:16-39:25 -/
++@[reducible]
++def Term.Insts.CoreCmpPartialEqTerm {A : Type} (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq A A) :
++  _root_.Aeneas.Std.core.cmp.PartialEq (_root_.nested_recursive_derives.Term A)
++  (_root_.nested_recursive_derives.Term A) := {
++  eq := _root_.nested_recursive_derives.Term.Insts.CoreCmpPartialEqTerm.eq
++    corecmpPartialEqInst
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Term<A>}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:27-39:32
++    Visibility: public -/
++def Term.Insts.CoreFmtDebug.fmt
++  {A : Type} (corefmtDebugInst : _root_.Aeneas.Std.core.fmt.Debug A)
++  (self : _root_.nested_recursive_derives.Term A)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Term.Val __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared corefmtDebugInst)
++        __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Val") __self_01
++  | _root_.nested_recursive_derives.Term.Call __self_0 __self_1 =>
++    let __self_11 := _root_.Aeneas.Std.NestedVec.toVec __self_1
++    let __self_01 := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU32 __self_0
++    let __self_12 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugVec
++        (( fun {A1 : Type} (corefmtDebugInst1 :
++           _root_.Aeneas.Std.core.fmt.Debug A1) =>
++           ({
++               fmt := Term.Insts.CoreFmtDebug.fmt corefmtDebugInst1 } :
++           _root_.Aeneas.Std.core.fmt.Debug
++           (_root_.nested_recursive_derives.Term A1))) corefmtDebugInst)))
++        __self_11
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field2_finish f
++      (_root_.Aeneas.Std.toStr "Call") __self_01 __self_12
++  | _root_.nested_recursive_derives.Term.Maybe __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugOption
++        (_root_.Aeneas.Std.core.fmt.DebugBox
++        (( fun {A1 : Type} (corefmtDebugInst1 :
++           _root_.Aeneas.Std.core.fmt.Debug A1) =>
++           ({
++               fmt := Term.Insts.CoreFmtDebug.fmt corefmtDebugInst1 } :
++           _root_.Aeneas.Std.core.fmt.Debug
++           (_root_.nested_recursive_derives.Term A1))) corefmtDebugInst))))
++        __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Maybe") __self_01
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Term<A>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 39:27-39:32 -/
++@[reducible]
++def Term.Insts.CoreFmtDebug {A : Type} (corefmtDebugInst :
++  _root_.Aeneas.Std.core.fmt.Debug A) : _root_.Aeneas.Std.core.fmt.Debug
++  (_root_.nested_recursive_derives.Term A) := {
++  fmt := _root_.nested_recursive_derives.Term.Insts.CoreFmtDebug.fmt
++    corefmtDebugInst
++}
++
++/-- [nested_recursive_derives::Wrapper]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 49:0-52:1
++    Visibility: public -/
++structure Wrapper (T : Type) where
++  items : _root_.Aeneas.Std.NestedVec T
++  tag : _root_.Aeneas.Std.U32
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Wrapper<T>}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:9-48:14
++    Visibility: public -/
++def Wrapper.Insts.CoreCloneClone.clone
++  {T : Type} (corecloneCloneInst : _root_.Aeneas.Std.core.clone.Clone T)
++  (self : _root_.nested_recursive_derives.Wrapper T) :
++  _root_.Aeneas.Std.Result (_root_.nested_recursive_derives.Wrapper T)
++  := do
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.CloneVec.clone corecloneCloneInst
++      (_root_.Aeneas.Std.NestedVec.toVec self.items)
++  let i ← lift (core.clone.impls.CloneU32.clone self.tag)
++  _root_.Aeneas.Std.Result.ok
++    { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested v), tag := i }
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Wrapper<T>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:9-48:14 -/
++@[reducible]
++def Wrapper.Insts.CoreCloneClone {T : Type} (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone T) : _root_.Aeneas.Std.core.clone.Clone
++  (_root_.nested_recursive_derives.Wrapper T) := {
++  clone := _root_.nested_recursive_derives.Wrapper.Insts.CoreCloneClone.clone
++    corecloneCloneInst
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Wrapper<T>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:16-48:25 -/
++@[reducible]
++def Wrapper.Insts.CoreMarkerStructuralPartialEq (T : Type) :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  (_root_.nested_recursive_derives.Wrapper T) := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Wrapper<T>> for nested_recursive_derives::Wrapper<T>}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:16-48:25
++    Visibility: public -/
++def Wrapper.Insts.CoreCmpPartialEqWrapper.eq
++  {T : Type} (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T)
++  (self : _root_.nested_recursive_derives.Wrapper T)
++  (other : _root_.nested_recursive_derives.Wrapper T) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  if self.tag = other.tag
++  then
++    _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq corecmpPartialEqInst
++      (_root_.Aeneas.Std.NestedVec.toVec self.items)
++      (_root_.Aeneas.Std.NestedVec.toVec other.items)
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Wrapper<T>> for nested_recursive_derives::Wrapper<T>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:16-48:25 -/
++@[reducible]
++def Wrapper.Insts.CoreCmpPartialEqWrapper {T : Type} (corecmpPartialEqInst :
++  _root_.Aeneas.Std.core.cmp.PartialEq T T) :
++  _root_.Aeneas.Std.core.cmp.PartialEq (_root_.nested_recursive_derives.Wrapper
++  T) (_root_.nested_recursive_derives.Wrapper T) := {
++  eq :=
++    _root_.nested_recursive_derives.Wrapper.Insts.CoreCmpPartialEqWrapper.eq
++    corecmpPartialEqInst
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Wrapper<T>}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:27-48:32
++    Visibility: public -/
++def Wrapper.Insts.CoreFmtDebug.fmt
++  {T : Type} (corefmtDebugInst : _root_.Aeneas.Std.core.fmt.Debug T)
++  (self : _root_.nested_recursive_derives.Wrapper T)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugVec corefmtDebugInst)
++      (_root_.Aeneas.Std.NestedVec.toVec self.items)
++  let dyn1 :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.tag
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++    (_root_.Aeneas.Std.toStr "Wrapper") (_root_.Aeneas.Std.toStr "items") dyn
++    (_root_.Aeneas.Std.toStr "tag") dyn1
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Wrapper<T>}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 48:27-48:32 -/
++@[reducible]
++def Wrapper.Insts.CoreFmtDebug {T : Type} (corefmtDebugInst :
++  _root_.Aeneas.Std.core.fmt.Debug T) : _root_.Aeneas.Std.core.fmt.Debug
++  (_root_.nested_recursive_derives.Wrapper T) := {
++  fmt := _root_.nested_recursive_derives.Wrapper.Insts.CoreFmtDebug.fmt
++    corefmtDebugInst
++}
++
++/-- [nested_recursive_derives::Doc]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 55:0-58:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Doc where
++| Text : _root_.Aeneas.Std.U32 → Doc
++| Block : _root_.nested_recursive_derives.Wrapper Doc → Doc
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Doc}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:9-54:14
++    Visibility: public -/
++def Doc.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.Doc) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Doc
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Doc.Text __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Doc.Text i)
++  | _root_.nested_recursive_derives.Doc.Block __self_0 =>
++    let w ←
++      _root_.nested_recursive_derives.Wrapper.Insts.CoreCloneClone.clone
++        ({
++            clone := Doc.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Doc) __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Doc.Block w)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Doc}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:9-54:14 -/
++@[reducible]
++def Doc.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.Doc := {
++  clone := _root_.nested_recursive_derives.Doc.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Doc}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:16-54:25 -/
++@[reducible]
++def Doc.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.Doc := {
++}
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Doc> for nested_recursive_derives::Doc}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:16-54:25
++    Visibility: public -/
++def Doc.Insts.CoreCmpPartialEqDoc.eq
++  (self : _root_.nested_recursive_derives.Doc)
++  (other : _root_.nested_recursive_derives.Doc) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.nested_recursive_derives.Doc.Text __self_0 =>
++      match other with
++      | _root_.nested_recursive_derives.Doc.Text __arg1_0 =>
++        _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++          core.cmp.PartialEqU32 __self_0 __arg1_0
++      | _root_.nested_recursive_derives.Doc.Block _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.nested_recursive_derives.Doc.Block __self_0 =>
++      match other with
++      | _root_.nested_recursive_derives.Doc.Text _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.nested_recursive_derives.Doc.Block __arg1_0 =>
++        _root_.nested_recursive_derives.Wrapper.Insts.CoreCmpPartialEqWrapper.eq
++          ({
++              eq := Doc.Insts.CoreCmpPartialEqDoc.eq } :
++            _root_.Aeneas.Std.core.cmp.PartialEq
++            _root_.nested_recursive_derives.Doc
++            _root_.nested_recursive_derives.Doc) __self_0 __arg1_0
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Doc> for nested_recursive_derives::Doc}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:16-54:25 -/
++@[reducible]
++def Doc.Insts.CoreCmpPartialEqDoc : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_recursive_derives.Doc _root_.nested_recursive_derives.Doc := {
++  eq := _root_.nested_recursive_derives.Doc.Insts.CoreCmpPartialEqDoc.eq
++}
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Doc}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:27-54:32
++    Visibility: public -/
++def Doc.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.Doc)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.Doc.Text __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Text") __self_01
++  | _root_.nested_recursive_derives.Doc.Block __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.nested_recursive_derives.Wrapper.Insts.CoreFmtDebug
++        ({
++            fmt := Doc.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug _root_.nested_recursive_derives.Doc)))
++        __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Block") __self_01
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Doc}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 54:27-54:32 -/
++@[reducible]
++def Doc.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.Doc := {
++  fmt := _root_.nested_recursive_derives.Doc.Insts.CoreFmtDebug.fmt
++}
++
++mutual
++
++/-- [nested_recursive_derives::Expr]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 62:0-65:1
++    Visibility: public -/
++inductive Expr where
++| mk : ExprKind → _root_.Aeneas.Std.U32 → Expr
++
++/-- [nested_recursive_derives::ExprKind]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 68:0-72:1
++    Visibility: public -/
++@[discriminant isize]
++inductive ExprKind where
++| Lit : _root_.Aeneas.Std.U32 → ExprKind
++| Tuple : _root_.Aeneas.Std.NestedVec Expr → ExprKind
++| Guard : Expr → _root_.Option Expr → ExprKind
++
++end
++
++def Expr.kind (x : _root_.nested_recursive_derives.Expr) :=
++  match x with | _root_.nested_recursive_derives.Expr.mk x1 _ => x1
++
++def Expr.span (x : _root_.nested_recursive_derives.Expr) :=
++  match x with | _root_.nested_recursive_derives.Expr.mk _ x1 => x1
++
++@[simp]
++theorem Expr.kind._simpLemma_ (kind : _root_.nested_recursive_derives.ExprKind)
++  (span : _root_.Aeneas.Std.U32) :
++  (_root_.nested_recursive_derives.Expr.mk kind span).kind = kind := by rfl
++
++@[simp]
++theorem Expr.span._simpLemma_ (kind : _root_.nested_recursive_derives.ExprKind)
++  (span : _root_.Aeneas.Std.U32) :
++  (_root_.nested_recursive_derives.Expr.mk kind span).span = span := by rfl
++
++mutual
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Expr}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:9-61:14
++    Visibility: public -/
++def Expr.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.Expr) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Expr
++  := do
++  let ek ← ExprKind.Insts.CoreCloneClone.clone self.kind
++  let i ← lift (core.clone.impls.CloneU32.clone self.span)
++  _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Expr.mk ek i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::ExprKind}::clone]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:9-67:14
++    Visibility: public -/
++def ExprKind.Insts.CoreCloneClone.clone
++  (self : _root_.nested_recursive_derives.ExprKind) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.ExprKind
++  := do
++  match self with
++  | _root_.nested_recursive_derives.ExprKind.Lit __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.ExprKind.Lit
++      i)
++  | _root_.nested_recursive_derives.ExprKind.Tuple __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++    let v ←
++      _root_.Aeneas.Std.alloc.vec.CloneVec.clone
++        ({
++            clone := Expr.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Expr) __self_01
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.ExprKind.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested v))
++  | _root_.nested_recursive_derives.ExprKind.Guard __self_0 __self_1 =>
++    let e ← Expr.Insts.CoreCloneClone.clone __self_0
++    let o ←
++      _root_.Aeneas.Std.core.option.Option.Clone.clone
++        (_root_.Aeneas.Std.core.core.clone.CloneBox
++        ({
++            clone := Expr.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.nested_recursive_derives.Expr)) __self_1
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.ExprKind.Guard
++      e o)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::Expr}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:9-61:14 -/
++@[reducible]
++def Expr.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.Expr := {
++  clone := _root_.nested_recursive_derives.Expr.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::Expr}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:16-61:25 -/
++@[reducible]
++def Expr.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.Expr := {
++}
++
++mutual
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Expr> for nested_recursive_derives::Expr}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:16-61:25
++    Visibility: public -/
++def Expr.Insts.CoreCmpPartialEqExpr.eq
++  (self : _root_.nested_recursive_derives.Expr)
++  (other : _root_.nested_recursive_derives.Expr) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  if self.span = other.span
++  then ExprKind.Insts.CoreCmpPartialEqExprKind.eq self.kind other.kind
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::ExprKind> for nested_recursive_derives::ExprKind}::eq]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:16-67:25
++    Visibility: public -/
++def ExprKind.Insts.CoreCmpPartialEqExprKind.eq
++  (self : _root_.nested_recursive_derives.ExprKind)
++  (other : _root_.nested_recursive_derives.ExprKind) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.nested_recursive_derives.ExprKind.Lit __self_0 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.ExprKind.Lit __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqU32 __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Tuple _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Guard _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.ExprKind.Tuple __self_0 =>
++      let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.ExprKind.Lit _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Tuple __arg1_0 =>
++          do
++          let __arg1_01 := _root_.Aeneas.Std.NestedVec.toVec __arg1_0
++          let b ←
++            _root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq
++              ({
++                  eq := Expr.Insts.CoreCmpPartialEqExpr.eq } :
++                _root_.Aeneas.Std.core.cmp.PartialEq
++                _root_.nested_recursive_derives.Expr
++                _root_.nested_recursive_derives.Expr) __self_01 __arg1_01
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Guard _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_recursive_derives.ExprKind.Guard __self_0 __self_1 =>
++      let joined ←
++        match other with
++        | _root_.nested_recursive_derives.ExprKind.Lit _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Tuple _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.nested_recursive_derives.ExprKind _root_.Bool)
++        | _root_.nested_recursive_derives.ExprKind.Guard __arg1_0 __arg1_1 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              (_root_.Aeneas.Std.core.cmp.PartialEqBox
++              ({
++                  eq := Expr.Insts.CoreCmpPartialEqExpr.eq } :
++                _root_.Aeneas.Std.core.cmp.PartialEq
++                _root_.nested_recursive_derives.Expr
++                _root_.nested_recursive_derives.Expr)) __self_0 __arg1_0
++          if b
++          then
++            let b1 ←
++              _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++                (_root_.Aeneas.Std.core.cmp.PartialEqBox
++                ({
++                    eq := Expr.Insts.CoreCmpPartialEqExpr.eq } :
++                  _root_.Aeneas.Std.core.cmp.PartialEq
++                  _root_.nested_recursive_derives.Expr
++                  _root_.nested_recursive_derives.Expr)) __self_1 __arg1_1
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b1 : _root_.Sum
++              _root_.nested_recursive_derives.ExprKind _root_.Bool)
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr false : _root_.Sum
++              _root_.nested_recursive_derives.ExprKind _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::Expr> for nested_recursive_derives::Expr}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:16-61:25 -/
++@[reducible]
++def Expr.Insts.CoreCmpPartialEqExpr : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_recursive_derives.Expr _root_.nested_recursive_derives.Expr
++  := {
++  eq := _root_.nested_recursive_derives.Expr.Insts.CoreCmpPartialEqExpr.eq
++}
++
++mutual
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Expr}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:27-61:32
++    Visibility: public -/
++def Expr.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.Expr)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    Dyn.mk _
++      ({
++          fmt := ExprKind.Insts.CoreFmtDebug.fmt } :
++        _root_.Aeneas.Std.core.fmt.Debug
++        _root_.nested_recursive_derives.ExprKind) self.kind
++  let dyn1 :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      _root_.Aeneas.Std.core.fmt.DebugU32) self.span
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++    (_root_.Aeneas.Std.toStr "Expr") (_root_.Aeneas.Std.toStr "kind") dyn
++    (_root_.Aeneas.Std.toStr "span") dyn1
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::ExprKind}::fmt]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:27-67:32
++    Visibility: public -/
++def ExprKind.Insts.CoreFmtDebug.fmt
++  (self : _root_.nested_recursive_derives.ExprKind)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.nested_recursive_derives.ExprKind.Lit __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Lit") __self_01
++  | _root_.nested_recursive_derives.ExprKind.Tuple __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedVec.toVec __self_0
++    let __self_02 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugVec
++        ({
++            fmt := Expr.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Expr))) __self_01
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Tuple") __self_02
++  | _root_.nested_recursive_derives.ExprKind.Guard __self_0 __self_1 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugBox
++        ({
++            fmt := Expr.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Expr)) __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugOption
++        (_root_.Aeneas.Std.core.fmt.DebugBox
++        ({
++            fmt := Expr.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.nested_recursive_derives.Expr)))) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field2_finish f
++      (_root_.Aeneas.Std.toStr "Guard") __self_01 __self_11
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::Expr}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 61:27-61:32 -/
++@[reducible]
++def Expr.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.Expr := {
++  fmt := _root_.nested_recursive_derives.Expr.Insts.CoreFmtDebug.fmt
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::fmt::Debug for nested_recursive_derives::ExprKind}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:27-67:32 -/
++@[reducible]
++def ExprKind.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.nested_recursive_derives.ExprKind := {
++  fmt := _root_.nested_recursive_derives.ExprKind.Insts.CoreFmtDebug.fmt
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::clone::Clone for nested_recursive_derives::ExprKind}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:9-67:14 -/
++@[reducible]
++def ExprKind.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_recursive_derives.ExprKind := {
++  clone := _root_.nested_recursive_derives.ExprKind.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::marker::StructuralPartialEq for nested_recursive_derives::ExprKind}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:16-67:25 -/
++@[reducible]
++def ExprKind.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_recursive_derives.ExprKind := {
++}
++
++/-- Trait implementation: [nested_recursive_derives::{core::cmp::PartialEq<nested_recursive_derives::ExprKind> for nested_recursive_derives::ExprKind}]
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 67:16-67:25 -/
++@[reducible]
++def ExprKind.Insts.CoreCmpPartialEqExprKind :
++  _root_.Aeneas.Std.core.cmp.PartialEq _root_.nested_recursive_derives.ExprKind
++  _root_.nested_recursive_derives.ExprKind := {
++  eq :=
++    _root_.nested_recursive_derives.ExprKind.Insts.CoreCmpPartialEqExprKind.eq
++}
++
++mutual
++
++/-- [nested_recursive_derives::sum]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 80:12-83:13
++    Visibility: public -/
++@[rust_loop]
++def sum_loop
++  (children : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_recursive_derives.Tree) (s : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => sum_loop.body children s1 i1 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::sum]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 80:12-83:13
++    Visibility: public -/
++@[rust_loop_body]
++def sum_loop.body
++  (children : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_recursive_derives.Tree) (s : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len children
++  if i < i1
++  then
++    let t ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.nested_recursive_derives.Tree) children i
++    let i2 ← sum t
++    let s1 ← lift (core.num.U32.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::sum]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 74:0-89:1
++    Visibility: public -/
++def sum
++  (t : _root_.nested_recursive_derives.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match t with
++  | _root_.nested_recursive_derives.Tree.Leaf n =>
++    _root_.Aeneas.Std.Result.ok n
++  | _root_.nested_recursive_derives.Tree.Node children =>
++    let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++    sum_loop children1 0#u32 0#usize
++  | _root_.nested_recursive_derives.Tree.Opt o =>
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 0#u32
++    | some t1 => sum t1
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++mutual
++
++/-- [nested_recursive_derives::bump]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 96:12-99:13
++    Visibility: public -/
++@[rust_loop]
++def bump_loop
++  (children : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_recursive_derives.Tree) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_recursive_derives.Tree)
++  := do
++  loop
++    (fun (children1, i1) => bump_loop.body children1 i1 :
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_recursive_derives.Tree)
++      × _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_recursive_derives.Tree) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_recursive_derives.Tree)))
++    (children, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::bump]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 96:12-99:13
++    Visibility: public -/
++@[rust_loop_body]
++def bump_loop.body
++  (children : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_recursive_derives.Tree) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_recursive_derives.Tree) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_recursive_derives.Tree))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len children
++  if i < i1
++  then
++    let (t, index_mut_back) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.nested_recursive_derives.Tree) children i
++    let t1 ← bump t
++    let i2 ← i + 1#usize
++    let children1 := index_mut_back t1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (children1,
++      i2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done children)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::bump]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 91:0-104:1
++    Visibility: public -/
++def bump
++  (t : _root_.nested_recursive_derives.Tree) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Tree
++  := do
++  match t with
++  | _root_.nested_recursive_derives.Tree.Leaf n =>
++    let n1 ← lift (core.num.U32.wrapping_add n 1#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Leaf n1)
++  | _root_.nested_recursive_derives.Tree.Node children =>
++    let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++    let children2 ← bump_loop children1 0#usize
++    _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Node
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested children2))
++  | _root_.nested_recursive_derives.Tree.Opt o =>
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok t
++    | some t1 =>
++      let t2 ← bump t1
++      _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Opt
++        (some t2))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_recursive_derives::sample]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 106:0-115:1
++    Visibility: public -/
++def sample
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_recursive_derives.Tree
++  := do
++  let inner ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++      (_root_.nested_recursive_derives.Tree.Leaf b)
++  let inner1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push inner
++      (_root_.nested_recursive_derives.Tree.Opt none)
++  let children ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++      (_root_.nested_recursive_derives.Tree.Leaf a)
++  let children1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push children
++      (_root_.nested_recursive_derives.Tree.Node
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested inner1))
++  let i ← lift (core.num.U32.wrapping_add a b)
++  let children2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push children1
++      (_root_.nested_recursive_derives.Tree.Opt (some
++      (_root_.nested_recursive_derives.Tree.Leaf i)))
++  _root_.Aeneas.Std.Result.ok (_root_.nested_recursive_derives.Tree.Node
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested children2))
++
++/-- [nested_recursive_derives::tree_clone_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 118:0-133:1
++    Visibility: public -/
++def tree_clone_scenario
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let t ← _root_.nested_recursive_derives.sample a b
++  let c ← _root_.nested_recursive_derives.Tree.Insts.CoreCloneClone.clone t
++  let c1 ← _root_.nested_recursive_derives.bump c
++  let i ← _root_.nested_recursive_derives.sum t
++  let i1 ← lift (core.num.U32.wrapping_mul i 1000#u32)
++  let i2 ← _root_.nested_recursive_derives.sum c1
++  let r ← lift (core.num.U32.wrapping_add i1 i2)
++  let b1 ←
++    _root_.nested_recursive_derives.Tree.Insts.CoreCmpPartialEqTree.eq t c1
++  let r1 ←
++    if b1
++    then _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add r 1000000#u32)
++    else _root_.Aeneas.Std.Result.ok r
++  let b2 ←
++    _root_.nested_recursive_derives.Tree.Insts.CoreCmpPartialEqTree.eq t c
++  let r2 ←
++    if b2
++    then
++      _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add r1 10000000#u32)
++    else _root_.Aeneas.Std.Result.ok r1
++  let i3 ← lift (core.num.U32.wrapping_add b 1#u32)
++  let t1 ← _root_.nested_recursive_derives.sample a i3
++  let b3 ←
++    _root_.nested_recursive_derives.Tree.Insts.CoreCmpPartialEqTree.ne t t1
++  if b3
++  then _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add r2 100000000#u32)
++  else _root_.Aeneas.Std.Result.ok r2
++
++/-- [nested_recursive_derives::tree_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 135:0-137:1
++    Visibility: public -/
++def tree_debug
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let args ← _root_.nested_recursive_derives.sample a b
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Tree.Insts.CoreFmtDebug args
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [nested_recursive_derives::env_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 139:0-165:1
++    Visibility: public -/
++def env_scenario
++  (a : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let scopes ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_recursive_derives.Tree)
++  let t ← _root_.nested_recursive_derives.sample a 1#u32
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree) t
++  let (_, scopes1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 scopes 1#u32 v
++  let (_, scopes2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 scopes1 2#u32 (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++  let copy ←
++    _root_.nested_recursive_derives.Env.Insts.CoreCloneClone.clone
++      { scopes := scopes2, depth := 3#u32 }
++  let b ←
++    _root_.nested_recursive_derives.Env.Insts.CoreCmpPartialEqEnv.eq copy
++      { scopes := scopes2, depth := 3#u32 }
++  let r ← if b
++            then 0#u32 + 1#u32
++            else _root_.Aeneas.Std.Result.ok 0#u32
++  let b1 ←
++    _root_.nested_recursive_derives.Env.Insts.CoreCmpPartialEqEnv.ne
++      { copy with depth := 4#u32 } ({ scopes := scopes2, depth := 3#u32 } :
++      _root_.nested_recursive_derives.Env)
++  let r1 ← if b1
++             then r + 10#u32
++             else _root_.Aeneas.Std.Result.ok r
++  let (_, bm) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 copy.scopes 2#u32 (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++  let b2 ←
++    _root_.nested_recursive_derives.Env.Insts.CoreCmpPartialEqEnv.eq
++      { copy with scopes := bm } { scopes := scopes2, depth := 3#u32 }
++  let r2 ← if b2
++             then r1 + 100#u32
++             else _root_.Aeneas.Std.Result.ok r1
++  let (_, bm1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 bm 3#u32 (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++  let b3 ←
++    _root_.nested_recursive_derives.Env.Insts.CoreCmpPartialEqEnv.eq
++      { copy with scopes := bm1 } { scopes := scopes2, depth := 3#u32 }
++  if b3
++  then r2 + 1000#u32
++  else _root_.Aeneas.Std.Result.ok r2
++
++/-- [nested_recursive_derives::env_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 167:0-173:1
++    Visibility: public -/
++def env_debug
++  (a : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let scopes ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_recursive_derives.Tree)
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++      (_root_.nested_recursive_derives.Tree.Leaf a)
++  let (_, scopes1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 scopes 7#u32 v
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Env.Insts.CoreFmtDebug
++      { scopes := scopes1, depth := 1#u32 }
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [nested_recursive_derives::env_pretty]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 176:0-183:1
++    Visibility: public -/
++def env_pretty
++  (a : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let scopes ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_recursive_derives.Tree)
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++      (_root_.nested_recursive_derives.Tree.Leaf a)
++  let (_, scopes1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 scopes 7#u32 v
++  let (_, scopes2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 scopes1 8#u32 (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Tree)
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Env.Insts.CoreFmtDebug
++      { scopes := scopes2, depth := 1#u32 }
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 6#usize [
++        193#u8, 32#u8, 0#u8, 128#u8, 96#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++mutual
++
++/-- [nested_recursive_derives::scope_depth]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 190:12-195:13
++    Visibility: public -/
++@[rust_loop]
++def scope_depth_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.Iter
++  _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, d1) => scope_depth_loop.body iter1 d1 :
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter
++      _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter
++      _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, d)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::scope_depth]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 190:12-195:13
++    Visibility: public -/
++@[rust_loop_body]
++def scope_depth_loop.body
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.Iter
++  _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter _root_.Aeneas.Std.U32
++    _root_.nested_recursive_derives.Scope) × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done d)
++  | some p =>
++    let (_, v) := p
++    let x ← scope_depth v
++    let d1 ←
++      if x > d
++      then _root_.Aeneas.Std.Result.ok x
++      else _root_.Aeneas.Std.Result.ok d
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, d1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::scope_depth]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 185:0-199:1
++    Visibility: public -/
++def scope_depth
++  (s : _root_.nested_recursive_derives.Scope) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match s with
++  | _root_.nested_recursive_derives.Scope.Leaf _ =>
++    _root_.Aeneas.Std.Result.ok 0#u32
++  | _root_.nested_recursive_derives.Scope.Nest m =>
++    let iter ← _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.iter m
++    let d ← scope_depth_loop iter 0#u32
++    d + 1#u32
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_recursive_derives::scope_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 201:0-217:1
++    Visibility: public -/
++def scope_scenario
++  (a : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let inner ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope
++  let (_, inner1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 inner 0#u32 (_root_.nested_recursive_derives.Scope.Leaf
++      a)
++  let (_, outer) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 inner a (_root_.nested_recursive_derives.Scope.Nest
++      inner1)
++  let i ← lift (core.num.U32.wrapping_add a 1#u32)
++  let (_, outer1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 outer i (_root_.nested_recursive_derives.Scope.Leaf
++      1#u32)
++  let c ←
++    _root_.nested_recursive_derives.Scope.Insts.CoreCloneClone.clone
++      (_root_.nested_recursive_derives.Scope.Nest outer1)
++  let r ← _root_.nested_recursive_derives.scope_depth c
++  let b ←
++    _root_.nested_recursive_derives.Scope.Insts.CoreCmpPartialEqScope.eq c
++      (_root_.nested_recursive_derives.Scope.Nest outer1)
++  let r1 ← if b
++             then r + 10#u32
++             else _root_.Aeneas.Std.Result.ok r
++  let b1 ←
++    _root_.nested_recursive_derives.Scope.Insts.CoreCmpPartialEqScope.ne c
++      (_root_.nested_recursive_derives.Scope.Leaf a)
++  if b1
++  then r1 + 100#u32
++  else _root_.Aeneas.Std.Result.ok r1
++
++/-- [nested_recursive_derives::scope_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 219:0-223:1
++    Visibility: public -/
++def scope_debug
++  (a : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let m ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.nested_recursive_derives.Scope
++  let (_, m1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 m a (_root_.nested_recursive_derives.Scope.Leaf a)
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Scope.Insts.CoreFmtDebug
++      (_root_.nested_recursive_derives.Scope.Nest m1)
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++mutual
++
++/-- [nested_recursive_derives::term_size]: loop 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 231:12-234:13
++    Visibility: public -/
++@[rust_loop]
++def term_size_loop
++  {A : Type}
++  (args : _root_.Aeneas.Std.alloc.vec.Vec (_root_.nested_recursive_derives.Term
++  A)) (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (s1, i1) => term_size_loop.body args s1 i1 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (s, i)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::term_size]: loop body 0:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 231:12-234:13
++    Visibility: public -/
++@[rust_loop_body]
++def term_size_loop.body
++  {A : Type}
++  (args : _root_.Aeneas.Std.alloc.vec.Vec (_root_.nested_recursive_derives.Term
++  A)) (s : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len args
++  if i < i1
++  then
++    let t ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        (_root_.nested_recursive_derives.Term A)) args i
++    let i2 ← term_size t
++    let s1 ← lift (core.num.U32.wrapping_add s i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (s1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_recursive_derives::term_size]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 225:0-240:1
++    Visibility: public -/
++def term_size
++  {A : Type} (t : _root_.nested_recursive_derives.Term A) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match t with
++  | _root_.nested_recursive_derives.Term.Val _ =>
++    _root_.Aeneas.Std.Result.ok 1#u32
++  | _root_.nested_recursive_derives.Term.Call _ args =>
++    let args1 := _root_.Aeneas.Std.NestedVec.toVec args
++    term_size_loop args1 1#u32 0#usize
++  | _root_.nested_recursive_derives.Term.Maybe o =>
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 1#u32
++    | some t1 => let i ← term_size t1
++                 1#u32 + i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_recursive_derives::term_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 242:0-257:1
++    Visibility: public -/
++def term_scenario
++  (a : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let args ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.nested_recursive_derives.Term _root_.Aeneas.Std.U32))
++      (_root_.nested_recursive_derives.Term.Val a)
++  let i ← a + 1#u32
++  let args1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push args
++      (_root_.nested_recursive_derives.Term.Maybe (some
++      (_root_.nested_recursive_derives.Term.Val i)))
++  let args2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push args1
++      (_root_.nested_recursive_derives.Term.Maybe none)
++  let c ←
++    _root_.nested_recursive_derives.Term.Insts.CoreCloneClone.clone
++      core.clone.CloneU32 (_root_.nested_recursive_derives.Term.Call 5#u32
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested args2))
++  let r ← _root_.nested_recursive_derives.term_size c
++  let b ←
++    _root_.nested_recursive_derives.Term.Insts.CoreCmpPartialEqTerm.eq
++      core.cmp.PartialEqU32 c (_root_.nested_recursive_derives.Term.Call 5#u32
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested args2))
++  let r1 ← if b
++             then r + 100#u32
++             else _root_.Aeneas.Std.Result.ok r
++  let b1 ←
++    (_root_.nested_recursive_derives.Term.Insts.CoreCmpPartialEqTerm
++      core.cmp.PartialEqU32).ne c (_root_.nested_recursive_derives.Term.Call
++      5#u32 (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++      (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.nested_recursive_derives.Term _root_.Aeneas.Std.U32))))
++  if b1
++  then r1 + 1000#u32
++  else _root_.Aeneas.Std.Result.ok r1
++
++/-- [nested_recursive_derives::term_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 259:0-264:1
++    Visibility: public -/
++def term_debug
++  (a : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let args ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.nested_recursive_derives.Term _root_.Aeneas.Std.U32))
++      (_root_.nested_recursive_derives.Term.Val a)
++  let args1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push args
++      (_root_.nested_recursive_derives.Term.Maybe none)
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.nested_recursive_derives.Term.Insts.CoreFmtDebug
++      _root_.Aeneas.Std.core.fmt.DebugU32)
++      (_root_.nested_recursive_derives.Term.Call 2#u32
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested args1))
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [nested_recursive_derives::doc_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 266:0-283:1
++    Visibility: public -/
++def doc_scenario
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Doc)
++      (_root_.nested_recursive_derives.Doc.Text n)
++  let items1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push items
++      (_root_.nested_recursive_derives.Doc.Block
++      {
++        items :=
++          (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++            (_root_.Aeneas.Std.alloc.vec.Vec.new
++            _root_.nested_recursive_derives.Doc)),
++        tag := 2#u32
++      })
++  let c ←
++    _root_.nested_recursive_derives.Doc.Insts.CoreCloneClone.clone
++      (_root_.nested_recursive_derives.Doc.Block
++      {
++        items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested items1),
++        tag := 1#u32
++      })
++  let b ←
++    _root_.nested_recursive_derives.Doc.Insts.CoreCmpPartialEqDoc.eq c
++      (_root_.nested_recursive_derives.Doc.Block
++      {
++        items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested items1),
++        tag := 1#u32
++      })
++  let r ← if b
++            then 0#u32 + 1#u32
++            else _root_.Aeneas.Std.Result.ok 0#u32
++  let b1 ←
++    _root_.nested_recursive_derives.Doc.Insts.CoreCmpPartialEqDoc.ne c
++      (_root_.nested_recursive_derives.Doc.Text n)
++  if b1
++  then r + 10#u32
++  else _root_.Aeneas.Std.Result.ok r
++
++/-- [nested_recursive_derives::doc_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 285:0-289:1
++    Visibility: public -/
++def doc_debug
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Doc)
++      (_root_.nested_recursive_derives.Doc.Text n)
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Doc.Insts.CoreFmtDebug
++      (_root_.nested_recursive_derives.Doc.Block
++      { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested items), tag := 1#u32
++      })
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a1
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [nested_recursive_derives::expr_scenario]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 291:0-323:1
++    Visibility: public -/
++def expr_scenario
++  (a : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let e ←
++    _root_.nested_recursive_derives.Expr.Insts.CoreCloneClone.clone
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32)
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Expr) e
++  let items1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push items
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Guard e none) 2#u32)
++  let c ←
++    _root_.nested_recursive_derives.Expr.Insts.CoreCloneClone.clone
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Guard
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested items1)) 3#u32) (some
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32))) 4#u32)
++  let b ←
++    _root_.nested_recursive_derives.Expr.Insts.CoreCmpPartialEqExpr.eq c
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Guard
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested items1)) 3#u32) (some
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32))) 4#u32)
++  let r ← if b
++            then 0#u32 + 1#u32
++            else _root_.Aeneas.Std.Result.ok 0#u32
++  let b1 ←
++    _root_.nested_recursive_derives.Expr.Insts.CoreCmpPartialEqExpr.ne
++      (_root_.nested_recursive_derives.Expr.mk c.kind 5#u32)
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Guard
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested items1)) 3#u32) (some
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32))) 4#u32)
++  if b1
++  then r + 10#u32
++  else _root_.Aeneas.Std.Result.ok r
++
++/-- [nested_recursive_derives::expr_debug]:
++    Source: '/Users/brittonr/git/.work/chelis-lean-core-rust-extraction/.work/toolchain/aeneas-nestedtypes4/tests/src/nested-recursive-derives.rs', lines 325:0-345:1
++    Visibility: public -/
++def expr_debug
++  (a : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let e ←
++    _root_.nested_recursive_derives.Expr.Insts.CoreCloneClone.clone
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32)
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_recursive_derives.Expr) e
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.nested_recursive_derives.Expr.Insts.CoreFmtDebug
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Guard
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested items)) 3#u32) (some
++      (_root_.nested_recursive_derives.Expr.mk
++      (_root_.nested_recursive_derives.ExprKind.Lit a) 1#u32))) 4#u32)
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++end nested_recursive_derives
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 01c5451..d9dc8ca 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -107,6 +107,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrows
+ @[default_target] lean_lib NestedCollections
+ @[default_target] lean_lib NestedLoopExits
++@[default_target] lean_lib NestedRecursiveDerives
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
+ @[default_target] lean_lib OptionMutNestedRegion
+diff --git a/tests/src/nested-recursive-derives.rs b/tests/src/nested-recursive-derives.rs
+new file mode 100644
+index 0000000..09ac231
+--- /dev/null
++++ b/tests/src/nested-recursive-derives.rs
+@@ -0,0 +1,398 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedRecursiveDerives
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Derived `Clone`, `PartialEq` and `Debug` of types which are recursive through
++//! `Vec`, `Option<Box<_>>` and `BTreeMap`: the derived methods recurse through
++//! the models of the collections' trait implementations, called with an
++//! instance built from the method being defined, directly or through the
++//! derived methods of a generic type. The Lean definitions are
++//! `partial_fixpoint`s, whose monotonicity goes through those models.
++//! `NestedRecursiveDerives/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++use std::collections::BTreeMap;
++
++#[derive(Clone, PartialEq, Debug)]
++pub enum Tree {
++    Leaf(u32),
++    Node(Vec<Tree>),
++    Opt(Option<Box<Tree>>),
++}
++
++/// Not recursive itself: holds the recursive type in a vector inside a map
++#[derive(Clone, PartialEq, Debug)]
++pub struct Env {
++    pub scopes: BTreeMap<u32, Vec<Tree>>,
++    pub depth: u32,
++}
++
++/// Recursive through a map
++#[derive(Clone, PartialEq, Debug)]
++pub enum Scope {
++    Leaf(u32),
++    Nest(BTreeMap<u32, Scope>),
++}
++
++/// Generic recursive type (the shape of `HostExprKind<T>`): the instance of the
++/// collection model is built from the method applied to the caller's instance
++#[derive(Clone, PartialEq, Debug)]
++pub enum Term<A> {
++    Val(A),
++    Call(u32, Vec<Term<A>>),
++    Maybe(Option<Box<Term<A>>>),
++}
++
++/// A generic, non-recursive type whose derived methods are called with the
++/// methods of a recursive type (`Wrapper<Doc>`)
++#[derive(Clone, PartialEq, Debug)]
++pub struct Wrapper<T> {
++    pub items: Vec<T>,
++    pub tag: u32,
++}
++
++#[derive(Clone, PartialEq, Debug)]
++pub enum Doc {
++    Text(u32),
++    Block(Wrapper<Doc>),
++}
++
++/// Mutually recursive pair (the shape of `HostExpr`/`HostExprKind`)
++#[derive(Clone, PartialEq, Debug)]
++pub struct Expr {
++    pub kind: ExprKind,
++    pub span: u32,
++}
++
++#[derive(Clone, PartialEq, Debug)]
++pub enum ExprKind {
++    Lit(u32),
++    Tuple(Vec<Expr>),
++    Guard(Box<Expr>, Option<Box<Expr>>),
++}
++
++pub fn sum(t: &Tree) -> u32 {
++    match t {
++        Tree::Leaf(n) => *n,
++        Tree::Node(children) => {
++            let mut s = 0u32;
++            let mut i = 0;
++            while i < children.len() {
++                s = s.wrapping_add(sum(&children[i]));
++                i += 1;
++            }
++            s
++        }
++        Tree::Opt(Some(t)) => sum(t),
++        Tree::Opt(None) => 0,
++    }
++}
++
++pub fn bump(t: &mut Tree) {
++    match t {
++        Tree::Leaf(n) => *n = n.wrapping_add(1),
++        Tree::Node(children) => {
++            let mut i = 0;
++            while i < children.len() {
++                bump(&mut children[i]);
++                i += 1;
++            }
++        }
++        Tree::Opt(Some(t)) => bump(t),
++        Tree::Opt(None) => {}
++    }
++}
++
++pub fn sample(a: u32, b: u32) -> Tree {
++    let mut inner = Vec::new();
++    inner.push(Tree::Leaf(b));
++    inner.push(Tree::Opt(None));
++    let mut children = Vec::new();
++    children.push(Tree::Leaf(a));
++    children.push(Tree::Node(inner));
++    children.push(Tree::Opt(Some(Box::new(Tree::Leaf(a.wrapping_add(b))))));
++    Tree::Node(children)
++}
++
++/// Clone, then change the copy only
++pub fn tree_clone_scenario(a: u32, b: u32) -> u32 {
++    let t = sample(a, b);
++    let mut c = t.clone();
++    bump(&mut c);
++    let mut r = sum(&t).wrapping_mul(1000).wrapping_add(sum(&c));
++    if t == c {
++        r = r.wrapping_add(1_000_000);
++    }
++    if t == t.clone() {
++        r = r.wrapping_add(10_000_000);
++    }
++    if t != sample(a, b.wrapping_add(1)) {
++        r = r.wrapping_add(100_000_000);
++    }
++    r
++}
++
++pub fn tree_debug(a: u32, b: u32) -> String {
++    format!("{:?}", sample(a, b))
++}
++
++pub fn env_scenario(a: u32) -> u32 {
++    let mut scopes = BTreeMap::new();
++    let mut v = Vec::new();
++    v.push(sample(a, 1));
++    scopes.insert(1, v);
++    scopes.insert(2, Vec::new());
++    let env = Env { scopes, depth: 3 };
++    let mut copy = env.clone();
++    let mut r = 0u32;
++    if copy == env {
++        r += 1;
++    }
++    copy.depth = 4;
++    if copy != env {
++        r += 10;
++    }
++    let mut copy2 = env.clone();
++    copy2.scopes.insert(2, Vec::new());
++    if copy2 == env {
++        r += 100;
++    }
++    copy2.scopes.insert(3, Vec::new());
++    if copy2 == env {
++        r += 1000;
++    }
++    r
++}
++
++pub fn env_debug(a: u32) -> String {
++    let mut scopes = BTreeMap::new();
++    let mut v = Vec::new();
++    v.push(Tree::Leaf(a));
++    scopes.insert(7, v);
++    format!("{:?}", Env { scopes, depth: 1 })
++}
++
++/// Pretty (`{:#?}`) output of a map entry holding a vector of the recursive type
++pub fn env_pretty(a: u32) -> String {
++    let mut scopes = BTreeMap::new();
++    let mut v = Vec::new();
++    v.push(Tree::Leaf(a));
++    scopes.insert(7, v);
++    scopes.insert(8, Vec::new());
++    format!("{:#?}", Env { scopes, depth: 1 })
++}
++
++pub fn scope_depth(s: &Scope) -> u32 {
++    match s {
++        Scope::Leaf(_) => 0,
++        Scope::Nest(m) => {
++            let mut d = 0u32;
++            for (_, v) in m.iter() {
++                let x = scope_depth(v);
++                if x > d {
++                    d = x;
++                }
++            }
++            d + 1
++        }
++    }
++}
++
++pub fn scope_scenario(a: u32) -> u32 {
++    let mut inner = BTreeMap::new();
++    inner.insert(0, Scope::Leaf(a));
++    let mut outer = BTreeMap::new();
++    outer.insert(a, Scope::Nest(inner));
++    outer.insert(a.wrapping_add(1), Scope::Leaf(1));
++    let s = Scope::Nest(outer);
++    let c = s.clone();
++    let mut r = scope_depth(&c);
++    if c == s {
++        r += 10;
++    }
++    if c != Scope::Leaf(a) {
++        r += 100;
++    }
++    r
++}
++
++pub fn scope_debug(a: u32) -> String {
++    let mut m = BTreeMap::new();
++    m.insert(a, Scope::Leaf(a));
++    format!("{:?}", Scope::Nest(m))
++}
++
++pub fn term_size<A>(t: &Term<A>) -> u32 {
++    match t {
++        Term::Val(_) => 1,
++        Term::Call(_, args) => {
++            let mut s = 1u32;
++            let mut i = 0;
++            while i < args.len() {
++                s = s.wrapping_add(term_size(&args[i]));
++                i += 1;
++            }
++            s
++        }
++        Term::Maybe(Some(t)) => 1 + term_size(t),
++        Term::Maybe(None) => 1,
++    }
++}
++
++pub fn term_scenario(a: u32) -> u32 {
++    let mut args = Vec::new();
++    args.push(Term::Val(a));
++    args.push(Term::Maybe(Some(Box::new(Term::Val(a + 1)))));
++    args.push(Term::Maybe(None));
++    let t: Term<u32> = Term::Call(5, args);
++    let c = t.clone();
++    let mut r = term_size(&c);
++    if c == t {
++        r += 100;
++    }
++    if c != Term::Call(5, Vec::new()) {
++        r += 1000;
++    }
++    r
++}
++
++pub fn term_debug(a: u32) -> String {
++    let mut args = Vec::new();
++    args.push(Term::Val(a));
++    args.push(Term::Maybe(None));
++    format!("{:?}", Term::Call(2, args))
++}
++
++pub fn doc_scenario(n: u32) -> u32 {
++    let mut items = Vec::new();
++    items.push(Doc::Text(n));
++    items.push(Doc::Block(Wrapper {
++        items: Vec::new(),
++        tag: 2,
++    }));
++    let d = Doc::Block(Wrapper { items, tag: 1 });
++    let c = d.clone();
++    let mut r = 0u32;
++    if c == d {
++        r += 1;
++    }
++    if c != Doc::Text(n) {
++        r += 10;
++    }
++    r
++}
++
++pub fn doc_debug(n: u32) -> String {
++    let mut items = Vec::new();
++    items.push(Doc::Text(n));
++    format!("{:?}", Doc::Block(Wrapper { items, tag: 1 }))
++}
++
++pub fn expr_scenario(a: u32) -> u32 {
++    let lit = Expr {
++        kind: ExprKind::Lit(a),
++        span: 1,
++    };
++    let mut items = Vec::new();
++    items.push(lit.clone());
++    items.push(Expr {
++        kind: ExprKind::Guard(Box::new(lit.clone()), None),
++        span: 2,
++    });
++    let e = Expr {
++        kind: ExprKind::Guard(
++            Box::new(Expr {
++                kind: ExprKind::Tuple(items),
++                span: 3,
++            }),
++            Some(Box::new(lit)),
++        ),
++        span: 4,
++    };
++    let c = e.clone();
++    let mut r = 0u32;
++    if c == e {
++        r += 1;
++    }
++    let mut d = e.clone();
++    d.span = 5;
++    if d != e {
++        r += 10;
++    }
++    r
++}
++
++pub fn expr_debug(a: u32) -> String {
++    let lit = Expr {
++        kind: ExprKind::Lit(a),
++        span: 1,
++    };
++    let mut items = Vec::new();
++    items.push(lit.clone());
++    format!(
++        "{:?}",
++        Expr {
++            kind: ExprKind::Guard(
++                Box::new(Expr {
++                    kind: ExprKind::Tuple(items),
++                    span: 3
++                }),
++                Some(Box::new(lit))
++            ),
++            span: 4,
++        }
++    )
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn trees() {
++        assert_eq!(tree_clone_scenario(2, 3), 110010013);
++        assert_eq!(tree_clone_scenario(0, 0), 110000003);
++        assert_eq!(
++            tree_debug(2, 3),
++            "Node([Leaf(2), Node([Leaf(3), Opt(None)]), Opt(Some(Leaf(5)))])"
++        );
++    }
++
++    #[test]
++    fn envs() {
++        assert_eq!(env_scenario(4), 111);
++        assert_eq!(env_debug(9), "Env { scopes: {7: [Leaf(9)]}, depth: 1 }");
++        assert_eq!(
++            env_pretty(9),
++            "Env {\n    scopes: {\n        7: [\n            Leaf(\n                9,\n            ),\n        ],\n        8: [],\n    },\n    depth: 1,\n}"
++        );
++    }
++
++    #[test]
++    fn scopes() {
++        assert_eq!(scope_scenario(3), 112);
++        assert_eq!(scope_debug(6), "Nest({6: Leaf(6)})");
++    }
++
++    #[test]
++    fn terms() {
++        assert_eq!(term_scenario(3), 1105);
++        assert_eq!(term_debug(8), "Call(2, [Val(8), Maybe(None)])");
++    }
++
++    #[test]
++    fn docs() {
++        assert_eq!(doc_scenario(5), 11);
++        assert_eq!(doc_debug(5), "Block(Wrapper { items: [Text(5)], tag: 1 })");
++    }
++
++    #[test]
++    fn exprs() {
++        assert_eq!(expr_scenario(3), 11);
++        assert_eq!(
++            expr_debug(3),
++            "Expr { kind: Guard(Expr { kind: Tuple([Expr { kind: Lit(3), span: 1 }]), span: 3 }, \
++             Some(Expr { kind: Lit(3), span: 1 })), span: 4 }"
++        );
++    }
++}

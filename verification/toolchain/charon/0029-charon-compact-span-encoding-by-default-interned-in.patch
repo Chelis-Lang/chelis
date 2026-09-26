@@ -1,0 +1,1112 @@
+# charon integration step 29 after 546078ea5d: commit 3160c39ada7c293084ed7ca97134b33c12028d2e
+# first parent 91205de1a7077df662bf8d62cc86e87cec0be7b8
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: compact span encoding by default, interned in deduplicated files
+#
+# Spans took a quarter of large LLBC files ({"data":{"file_id":..,"beg":{"line":..,"col":..},
+# "end":{..}},"generated_from_span":..}). A span is now the array [file, beg_line, beg_col,
+# end_line, end_col], followed by five more numbers when generated_from_span is present. This
+# replaces the CHARON_COMPACT_SPANS prototype: the compact form is the only one.
+#
+# When values are deduplicated (the default; not with --no-dedup-serialized-ast), spans are also
+# interned like hash-consed values: the first occurrence of each distinct span is prefixed with its
+# id (6 or 11 numbers), later ones are the id alone. Ids are consecutive in serialization order and
+# the deserializers check that, so a decoder that skips a span fails instead of shifting ids. Spans
+# in stateless positions (ItemMeta) are written without id.
+#
+# generate-ml decodes spans with a hand-written span_numbers_of_json (span table in of_json_ctx),
+# and also decodes opaque fields that may contain spans (they must be visited in order, like
+# hash-consed values).
+
+diff --git a/src/ast/hash_cons.rs b/src/ast/hash_cons.rs
+index 474abfd..7f8c9f9 100644
+--- a/src/ast/hash_cons.rs
++++ b/src/ast/hash_cons.rs
+@@ -208,6 +208,9 @@ where
+ /// Note that the deduplication scheme is highly order-dependent: we serialize the real value
+ /// the first time it comes up, and use ids only subsequent times. This relies on the fact that
+ /// `derive(Serialize, Deserialize)` traverse the value in the same order.
++///
++/// The same state also interns [`Span`](crate::ast::Span)s, with the same order-dependent scheme
++/// (see the serialization of `Span`).
+ pub use serialize::{HashConsDedupSerializer, HashConsSerializerState};
+ mod serialize {
+     use indexmap::IndexMap as SeqHashMap;
+@@ -215,9 +218,10 @@ mod serialize {
+     use serde_state::{DeserializeState, SerializeState};
+     use std::any::type_name;
+     use std::cell::RefCell;
+-    use std::collections::HashSet;
++    use std::collections::{HashMap, HashSet};
+ 
+     use super::{HashConsId, HashConsable, HashConsed};
++    use crate::ast::Span;
+     use crate::common::type_map::{Mappable, Mapper, TypeMap};
+ 
+     pub trait HashConsSerializerState: Sized {
+@@ -228,6 +232,15 @@ mod serialize {
+         fn record_deserialized<T: Mappable>(&self, id: HashConsId, value: HashConsed<T>);
+         /// Find the previously-deserialized type with that id.
+         fn get_deserialized_val<T: Mappable>(&self, id: HashConsId) -> Option<HashConsed<T>>;
++        /// Record that this span is being serialized. Return `None` if we're not deduplicating
++        /// values, otherwise return its id and whether it was newly recorded. Ids are allocated
++        /// consecutively from 0 in the order spans are first serialized.
++        fn record_serialized_span(&self, span: Span) -> Option<(usize, bool)>;
++        /// Record the span deserialized with that id. Return `false` (a serialization mismatch)
++        /// unless `id` is the next id, i.e. spans are recorded in the order they were serialized.
++        fn record_deserialized_span(&self, id: usize, span: Span) -> bool;
++        /// Find the previously-deserialized span with that id.
++        fn get_deserialized_span(&self, id: usize) -> Option<Span>;
+     }
+ 
+     impl HashConsSerializerState for () {
+@@ -238,6 +251,15 @@ mod serialize {
+         fn get_deserialized_val<T: Mappable>(&self, _id: HashConsId) -> Option<HashConsed<T>> {
+             None
+         }
++        fn record_serialized_span(&self, _span: Span) -> Option<(usize, bool)> {
++            None
++        }
++        fn record_deserialized_span(&self, _id: usize, _span: Span) -> bool {
++            false
++        }
++        fn get_deserialized_span(&self, _id: usize) -> Option<Span> {
++            None
++        }
+     }
+ 
+     struct SerializeTableMapper;
+@@ -254,6 +276,10 @@ mod serialize {
+         ser: RefCell<TypeMap<SerializeTableMapper>>,
+         // Table used for deserialization.
+         de: RefCell<TypeMap<DeserializeTableMapper>>,
++        // Span ids, for serialization.
++        ser_spans: RefCell<HashMap<Span, usize>>,
++        // Spans indexed by id, for deserialization.
++        de_spans: RefCell<Vec<Span>>,
+     }
+     impl HashConsSerializerState for HashConsDedupSerializer {
+         fn record_serialized<T: Mappable>(&self, id: HashConsId) -> Option<bool> {
+@@ -269,6 +295,23 @@ mod serialize {
+                 .and_then(|map| map.get(&id))
+                 .cloned()
+         }
++        fn record_serialized_span(&self, span: Span) -> Option<(usize, bool)> {
++            let mut spans = self.ser_spans.borrow_mut();
++            let next_id = spans.len();
++            let id = *spans.entry(span).or_insert(next_id);
++            Some((id, id == next_id))
++        }
++        fn record_deserialized_span(&self, id: usize, span: Span) -> bool {
++            let mut spans = self.de_spans.borrow_mut();
++            let expected = id == spans.len();
++            if expected {
++                spans.push(span);
++            }
++            expected
++        }
++        fn get_deserialized_span(&self, id: usize) -> Option<Span> {
++            self.de_spans.borrow().get(id).copied()
++        }
+     }
+ 
+     /// A dummy enum used when serializing/deserializing a `HashConsed<T>`.
+diff --git a/src/ast/meta.rs b/src/ast/meta.rs
+index b99a2a9..b672297 100644
+--- a/src/ast/meta.rs
++++ b/src/ast/meta.rs
+@@ -1,6 +1,7 @@
+ //! Meta-information about programs (spans, etc.).
+ 
+ pub use super::meta_utils::*;
++use crate::ast::HashConsSerializerState;
+ use crate::names::Name;
+ use derive_generic_visitor::{Drive, DriveMut};
+ use macros::{EnumAsGetters, EnumIsA, EnumToGetters};
+@@ -44,21 +45,16 @@ pub struct SpanData {
+ }
+ 
+ /// Meta information about a piece of code (block, statement, etc.)
+-#[derive(
+-    Debug,
+-    Copy,
+-    Clone,
+-    PartialEq,
+-    Eq,
+-    PartialOrd,
+-    Ord,
+-    Hash,
+-    Serialize,
+-    Deserialize,
+-    Drive,
+-    DriveMut,
+-)]
+-#[serde(into = "SpanRepr", from = "SpanRepr")]
++///
++/// A span is serialized as the array `[file, beg_line, beg_col, end_line, end_col]`, followed by
++/// the same five numbers for `generated_from_span` when present.
++///
++/// When values are deduplicated (see [crate::ast::HashConsSerializerState]), each distinct span is
++/// interned: its first occurrence is prefixed with its id (`[id, file, ..]`, 6 or 11 numbers) and
++/// the later ones are that id alone. Like hash-consing, this relies on serialization and
++/// deserialization visiting values in the same order. Spans in stateless positions (e.g. the span
++/// of an `ItemMeta`) are written without id.
++#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Drive, DriveMut)]
+ pub struct Span {
+     /// The source code span.
+     ///
+@@ -84,113 +80,132 @@ pub struct Span {
+     pub generated_from_span: Option<SpanData>,
+ }
+ 
+-// Stateless, like `#[serde_state(stateless)]`, whose derive does not support `serde(into/from)`.
+-impl<State: ?Sized> SerializeState<State> for Span {
+-    fn serialize_state<S: serde::Serializer>(&self, _: &State, s: S) -> Result<S::Ok, S::Error> {
+-        self.serialize(s)
++impl Span {
++    fn to_numbers(&self) -> ([usize; 10], usize) {
++        let mut numbers = [0; 10];
++        let write = |numbers: &mut [usize], data: &SpanData| {
++            numbers.copy_from_slice(&[
++                data.file_id.index(),
++                data.beg.line,
++                data.beg.col,
++                data.end.line,
++                data.end.col,
++            ])
++        };
++        write(&mut numbers[..5], &self.data);
++        match &self.generated_from_span {
++            None => (numbers, 5),
++            Some(generated) => {
++                write(&mut numbers[5..], generated);
++                (numbers, 10)
++            }
++        }
+     }
+-}
+-impl<'de, State: ?Sized> DeserializeState<'de, State> for Span {
+-    fn deserialize_state<D: serde::Deserializer<'de>>(_: &State, d: D) -> Result<Self, D::Error> {
+-        Self::deserialize(d)
++
++    /// The inverse of `to_numbers`, given 5 or 10 numbers.
++    fn from_numbers(numbers: &[usize]) -> Self {
++        let data = |n: &[usize]| SpanData {
++            file_id: FileId::new(n[0]),
++            beg: Loc {
++                line: n[1],
++                col: n[2],
++            },
++            end: Loc {
++                line: n[3],
++                col: n[4],
++            },
++        };
++        Span {
++            data: data(&numbers[..5]),
++            generated_from_span: (numbers.len() == 10).then(|| data(&numbers[5..])),
++        }
+     }
+ }
+ 
+-thread_local! {
+-    static COMPACT_SPANS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++impl Serialize for Span {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        let (numbers, len) = self.to_numbers();
++        serializer.collect_seq(&numbers[..len])
++    }
+ }
+ 
+-/// Run `f` (a serialization) with the experimental compact span encoding: a span is the array
+-/// `[file, beg_line, beg_col, end_line, end_col]`, followed by the same five numbers for
+-/// `generated_from_span` when present. Only charon's own deserializer reads it; charon-ml does not.
+-pub fn with_compact_spans<R>(f: impl FnOnce() -> R) -> R {
+-    struct Reset(bool);
+-    impl Drop for Reset {
+-        fn drop(&mut self) {
+-            COMPACT_SPANS.set(self.0);
++impl<State: HashConsSerializerState> SerializeState<State> for Span {
++    fn serialize_state<S: serde::Serializer>(
++        &self,
++        state: &State,
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        match state.record_serialized_span(*self) {
++            None => self.serialize(serializer),
++            Some((id, false)) => serializer.serialize_u64(id as u64),
++            Some((id, true)) => {
++                let (numbers, len) = self.to_numbers();
++                serializer.collect_seq(std::iter::once(&id).chain(&numbers[..len]))
++            }
+         }
+     }
+-    let _reset = Reset(COMPACT_SPANS.replace(true));
+-    f()
+ }
+ 
+-/// The serialized form of a [Span]; deserialization accepts both encodings.
+-#[derive(Serialize, Deserialize)]
+-#[serde(untagged)]
+-enum SpanRepr {
+-    Compact([usize; 5]),
+-    CompactGenerated([usize; 10]),
+-    Full {
+-        data: SpanData,
+-        generated_from_span: Option<SpanData>,
+-    },
++impl<'de> Deserialize<'de> for Span {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        deserializer.deserialize_any(SpanVisitor::<()>(None))
++    }
+ }
+ 
+-impl SpanData {
+-    fn to_array(self) -> [usize; 5] {
+-        [
+-            self.file_id.index(),
+-            self.beg.line,
+-            self.beg.col,
+-            self.end.line,
+-            self.end.col,
+-        ]
++impl<'de, State: HashConsSerializerState> DeserializeState<'de, State> for Span {
++    fn deserialize_state<D: serde::Deserializer<'de>>(
++        state: &State,
++        deserializer: D,
++    ) -> Result<Self, D::Error> {
++        deserializer.deserialize_any(SpanVisitor(Some(state)))
+     }
++}
+ 
+-    fn from_array([file, beg_line, beg_col, end_line, end_col]: [usize; 5]) -> Self {
+-        SpanData {
+-            file_id: FileId::new(file),
+-            beg: Loc {
+-                line: beg_line,
+-                col: beg_col,
+-            },
+-            end: Loc {
+-                line: end_line,
+-                col: end_col,
+-            },
+-        }
++/// Reads the encodings written by the `Serialize` and `SerializeState` impls of [Span]; ids
++/// require a state.
++struct SpanVisitor<'a, State>(Option<&'a State>);
++
++impl<'de, State: HashConsSerializerState> serde::de::Visitor<'de> for SpanVisitor<'_, State> {
++    type Value = Span;
++
++    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++        write!(f, "a span: an array of 5 or 10 numbers, or an interned span")
+     }
+-}
+ 
+-impl From<Span> for SpanRepr {
+-    fn from(span: Span) -> Self {
+-        if !COMPACT_SPANS.get() {
+-            return SpanRepr::Full {
+-                data: span.data,
+-                generated_from_span: span.generated_from_span,
+-            };
+-        }
+-        let data = span.data.to_array();
+-        match span.generated_from_span {
+-            None => SpanRepr::Compact(data),
+-            Some(generated) => {
+-                let mut both = [0; 10];
+-                both[..5].copy_from_slice(&data);
+-                both[5..].copy_from_slice(&generated.to_array());
+-                SpanRepr::CompactGenerated(both)
+-            }
+-        }
++    fn visit_u64<E: serde::de::Error>(self, id: u64) -> Result<Span, E> {
++        self.0
++            .and_then(|state| state.get_deserialized_span(id as usize))
++            .ok_or_else(|| {
++                E::custom(format!(
++                    "unknown span id {id}; there is a serialization/deserialization mismatch"
++                ))
++            })
+     }
+-}
+ 
+-impl From<SpanRepr> for Span {
+-    fn from(repr: SpanRepr) -> Self {
+-        match repr {
+-            SpanRepr::Compact(data) => Span {
+-                data: SpanData::from_array(data),
+-                generated_from_span: None,
+-            },
+-            SpanRepr::CompactGenerated(both) => Span {
+-                data: SpanData::from_array(both[..5].try_into().unwrap()),
+-                generated_from_span: Some(SpanData::from_array(both[5..].try_into().unwrap())),
+-            },
+-            SpanRepr::Full {
+-                data,
+-                generated_from_span,
+-            } => Span {
+-                data,
+-                generated_from_span,
+-            },
++    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Span, A::Error> {
++        use serde::de::Error;
++        let mut numbers = [0; 11];
++        let mut len = 0;
++        while let Some(n) = seq.next_element::<usize>()? {
++            if len == numbers.len() {
++                return Err(A::Error::invalid_length(len + 1, &self));
++            }
++            numbers[len] = n;
++            len += 1;
++        }
++        match (len, self.0) {
++            (5 | 10, _) => Ok(Span::from_numbers(&numbers[..len])),
++            (6 | 11, Some(state)) => {
++                let (id, span) = (numbers[0], Span::from_numbers(&numbers[1..len]));
++                if state.record_deserialized_span(id, span) {
++                    Ok(span)
++                } else {
++                    Err(A::Error::custom(format!(
++                        "unexpected span id {id}; there is a serialization/deserialization mismatch"
++                    )))
++                }
++            }
++            _ => Err(A::Error::invalid_length(len, &self)),
+         }
+     }
+ }
+@@ -381,7 +396,8 @@ pub struct File {
+ }
+ 
+ #[test]
+-fn compact_spans_round_trip() {
++fn span_serialization() {
++    use crate::ast::HashConsDedupSerializer;
+     let data = |file, line| SpanData {
+         file_id: FileId::new(file),
+         beg: Loc { line, col: 4 },
+@@ -390,28 +406,43 @@ fn compact_spans_round_trip() {
+             col: 0,
+         },
+     };
+-    for span in [
+-        Span {
+-            data: data(3, 10),
+-            generated_from_span: None,
+-        },
+-        Span {
+-            data: data(3, 10),
+-            generated_from_span: Some(data(7, 2)),
+-        },
+-    ] {
+-        let full = serde_json::to_string(&span).unwrap();
+-        let compact = with_compact_spans(|| serde_json::to_string(&span).unwrap());
+-        assert!(full.starts_with("{\"data\":"), "{full}");
+-        assert!(compact.starts_with("[3,10,4,11,0"), "{compact}");
+-        for json in [full, compact] {
+-            assert_eq!(serde_json::from_str::<Span>(&json).unwrap(), span, "{json}");
+-        }
+-    }
+-    // The flag is scoped to the closure.
+-    let span = Span {
+-        data: data(1, 1),
++    let plain = Span {
++        data: data(3, 10),
+         generated_from_span: None,
+     };
+-    assert!(serde_json::to_string(&span).unwrap().starts_with('{'));
++    let generated = Span {
++        data: data(3, 10),
++        generated_from_span: Some(data(7, 2)),
++    };
++    let spans = vec![plain, generated, plain, generated];
++    let full = "[3,10,4,11,0]";
++    let full_generated = "[3,10,4,11,0,7,2,4,3,0]";
++    let with_state = |state: &HashConsDedupSerializer, json: &str| {
++        Vec::<Span>::deserialize_state(state, &mut serde_json::Deserializer::from_str(json))
++    };
++
++    // Without deduplication, every span is written in full.
++    let json = serde_json::to_string(&spans).unwrap();
++    assert_eq!(
++        json,
++        format!("[{full},{full_generated},{full},{full_generated}]")
++    );
++    assert_eq!(serde_json::from_str::<Vec<Span>>(&json).unwrap(), spans);
++    assert_eq!(with_state(&Default::default(), &json).unwrap(), spans);
++
++    // With deduplication, the first occurrence carries the id, the later ones are the id.
++    let mut json = Vec::new();
++    let state = HashConsDedupSerializer::default();
++    spans
++        .serialize_state(&state, &mut serde_json::Serializer::new(&mut json))
++        .unwrap();
++    let json = String::from_utf8(json).unwrap();
++    assert_eq!(json, "[[0,3,10,4,11,0],[1,3,10,4,11,0,7,2,4,3,0],0,1]");
++    assert_eq!(with_state(&Default::default(), &json).unwrap(), spans);
++
++    // Mismatches fail: ids need a state, must be defined before use, and in order.
++    assert!(serde_json::from_str::<Vec<Span>>(&json).is_err());
++    assert!(with_state(&Default::default(), "[0]").is_err());
++    assert!(with_state(&Default::default(), "[[1,3,10,4,11,0]]").is_err());
++    assert!(with_state(&Default::default(), "[[3,10,4,11]]").is_err());
+ }
+diff --git a/src/bin/generate-ml/of_json.rs b/src/bin/generate-ml/of_json.rs
+index ae8a08d..2518da2 100644
+--- a/src/bin/generate-ml/of_json.rs
++++ b/src/bin/generate-ml/of_json.rs
+@@ -70,6 +70,8 @@ const MANUAL_IMPLS: &[(&str, &str)] = &[
+         "TraitRef",
+         "hash_consed_val_of_json ctx.tref_hashcons_map trait_ref_contents_of_json ctx json",
+     ),
++    // Hand-written because spans are serialized as arrays of numbers, and interned.
++    ("charon_lib::ast::meta::Span", "span_numbers_of_json ctx json"),
+ ];
+ 
+ impl<'a> GenerateCtx<'a> {
+@@ -187,17 +189,19 @@ impl<'a> GenerateCtx<'a> {
+         }
+     }
+ 
+-    /// Whether values of this type may contain hash-consed values (`Ty`, `TraitRef`). The Rust
+-    /// serializer deduplicates those across the whole file: the first occurrence carries the value
+-    /// and its key, later occurrences only the key. The decoder must therefore visit every such
+-    /// value in serialization order, including values of fields that OCaml does not keep.
+-    fn may_contain_hash_consed(&self, ty: &Ty) -> bool {
+-        let hash_consed = self.name_to_type["HashConsed"].def_id;
++    /// Whether values of this type may contain values that are deduplicated in serialization order:
++    /// hash-consed values (`Ty`, `TraitRef`) and spans. The Rust serializer deduplicates those
++    /// across the whole file: the first occurrence carries the value and its key, later occurrences
++    /// only the key. The decoder must therefore visit every such value in serialization order,
++    /// including values of fields that OCaml does not keep.
++    fn may_contain_deduplicated(&self, ty: &Ty) -> bool {
++        let deduplicated =
++            ["HashConsed", "charon_lib::ast::meta::Span"].map(|name| self.name_to_type[name].def_id);
+         let mut stack = vec![];
+         ty.dyn_visit(|id: &TypeDeclId| stack.push(*id));
+         let mut seen = HashSet::new();
+         while let Some(id) = stack.pop() {
+-            if id == hash_consed {
++            if deduplicated.contains(&id) {
+                 return true;
+             }
+             if seen.insert(id)
+@@ -210,10 +214,10 @@ impl<'a> GenerateCtx<'a> {
+     }
+ 
+     /// Opaque fields are absent from the OCaml types. Their JSON is still decoded (and the result
+-    /// discarded) when it may register hash-consing keys that later parts of the file refer to;
++    /// discarded) when it may contain deduplicated values that later parts of the file refer to;
+     /// only the other opaque fields are skipped without decoding.
+     fn skip_field(&self, f: &Field) -> bool {
+-        f.is_opaque() && !self.may_contain_hash_consed(&f.ty)
++        f.is_opaque() && !self.may_contain_deduplicated(&f.ty)
+     }
+ 
+     fn convert_vars<'b>(&self, fields: impl IntoIterator<Item = &'b Field>) -> String {
+diff --git a/src/bin/generate-ml/templates/OfJson.ml b/src/bin/generate-ml/templates/OfJson.ml
+index fc54c87..23e454d 100644
+--- a/src/bin/generate-ml/templates/OfJson.ml
++++ b/src/bin/generate-ml/templates/OfJson.ml
+@@ -35,6 +35,7 @@ type of_json_ctx = {
+   id_to_file_map : file FileTbl.t;
+   ty_hashcons_map : ty HashConsId.Map.t ref;
+   tref_hashcons_map : trait_ref HashConsId.Map.t ref;
++  span_table : (int, span) Hashtbl.t;  (** Interned spans, by id. *)
+ }
+ 
+ (** A fresh context for decoding one file. The file and hash-consing tables are
+@@ -44,6 +45,7 @@ let fresh_of_json_ctx () : of_json_ctx =
+     id_to_file_map = FileTbl.create 8;
+     ty_hashcons_map = ref HashConsId.Map.empty;
+     tref_hashcons_map = ref HashConsId.Map.empty;
++    span_table = Hashtbl.create 1024;
+   }
+ 
+ let hash_consed_val_of_json (map : 'a HashConsId.Map.t ref)
+@@ -68,6 +70,60 @@ let hash_consed_val_of_json (map : 'a HashConsId.Map.t ref)
+       end
+     | _ -> Error "")
+ 
++(** A span is the array [[file; beg_line; beg_col; end_line; end_col]], followed
++    by the same numbers for [generated_from_span] when present. In deduplicated
++    files, the first occurrence of each span is prefixed with its id (ids are
++    consecutive from 0) and the later occurrences are the id alone. *)
++let span_numbers_of_json (ctx : of_json_ctx) (js : json) : (span, string) result
++    =
++  let span_data file beg_line beg_col end_line end_col :
++      (span_data, string) result =
++    match FileTbl.find_opt ctx.id_to_file_map (FileId.of_int file) with
++    | Some file ->
++        Ok
++          {
++            file;
++            beg_loc = { line = beg_line; col = beg_col };
++            end_loc = { line = end_line; col = end_col };
++          }
++    | None -> Error ("unknown file id " ^ string_of_int file)
++  in
++  let span (numbers : int list) : (span, string) result =
++    match numbers with
++    | [ f; bl; bc; el; ec ] ->
++        let* data = span_data f bl bc el ec in
++        Ok { data; generated_from_span = None }
++    | [ f; bl; bc; el; ec; gf; gbl; gbc; gel; gec ] ->
++        let* data = span_data f bl bc el ec in
++        let* generated = span_data gf gbl gbc gel gec in
++        Ok { data; generated_from_span = Some generated }
++    | _ -> Error "a span has 5 or 10 numbers"
++  in
++  combine_error_msgs js __FUNCTION__
++    (match js with
++    | `Int id -> (
++        match Hashtbl.find_opt ctx.span_table id with
++        | Some span -> Ok span
++        | None ->
++            Error
++              "Span id not found; there is a serialization mismatch between \
++               Rust and OCaml")
++    | `List numbers -> (
++        let* numbers = of_json_list int_of_json ctx numbers in
++        match numbers with
++        | id :: numbers when List.length numbers = 5 || List.length numbers = 10
++          ->
++            if id <> Hashtbl.length ctx.span_table then
++              Error
++                "Unexpected span id; there is a serialization mismatch between \
++                 Rust and OCaml"
++            else
++              let* span = span numbers in
++              Hashtbl.add ctx.span_table id span;
++              Ok span
++        | _ -> span numbers)
++    | _ -> Error "")
++
+ let path_buf_of_json = string_of_json
+ 
+ let big_int_of_json _ (js : json) : (big_int, string) result =
+diff --git a/src/export.rs b/src/export.rs
+index da1235c..e8b5223 100644
+--- a/src/export.rs
++++ b/src/export.rs
+@@ -102,14 +102,7 @@ impl CrateData {
+         // Write to the file. `serde_json` emits one small write per token: buffer them, or large
+         // crates spend their serialization time in write syscalls.
+         let mut writer = std::io::BufWriter::new(outfile);
+-        let write = |writer: &mut std::io::BufWriter<File>| serde_json::to_writer(writer, self);
+-        // Experimental, not readable by charon-ml: `CHARON_COMPACT_SPANS=1` writes spans as arrays.
+-        let res = if std::env::var_os("CHARON_COMPACT_SPANS").is_some_and(|v| v == "1") {
+-            crate::ast::with_compact_spans(|| write(&mut writer))
+-        } else {
+-            write(&mut writer)
+-        };
+-        let res = res
++        let res = serde_json::to_writer(&mut writer, self)
+             .map_err(|err| format!("{err:?}"))
+             .and_then(|()| std::io::Write::flush(&mut writer).map_err(|err| format!("{err:?}")));
+         match res {
+diff --git a/tests/ui/ml-interned-spans.out b/tests/ui/ml-interned-spans.out
+new file mode 100644
+index 0000000..50418df
+--- /dev/null
++++ b/tests/ui/ml-interned-spans.out
+@@ -0,0 +1,456 @@
++# Final LLBC before serialization:
++
++// Full name: core::alloc::layout::Layout
++#[lang_item("alloc_layout")]
++pub opaque type Layout
++
++// Full name: core::fmt::Arguments
++#[lang_item("format_arguments")]
++pub opaque type Arguments<'a>
++
++// Full name: core::fmt::rt::Argument
++#[lang_item("format_argument")]
++pub opaque type Argument<'a>
++
++// Full name: core::intrinsics::cold_path
++pub fn cold_path()
++= <intrinsic:cold_path>
++
++// Full name: core::ptr::alignment::Alignment
++pub opaque type Alignment
++
++// Full name: core::mem::SizedTypeProperties
++pub trait SizedTypeProperties<Self>
++{
++    const SIZE : usize
++    const ALIGN : usize
++    const ALIGNMENT : Alignment
++    const IS_ZST : bool
++    const LAYOUT : Layout
++    const MAX_SLICE_LEN : usize
++    non-dyn-compatible
++}
++
++// Full name: core::mem::SizedTypeProperties::SIZE
++#[lang_item("mem_size_const")]
++pub fn SIZE<Self>() -> usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::SIZE
++#[lang_item("mem_size_const")]
++pub const SIZE<Self>: usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = SIZE()
++
++// Full name: core::mem::SizedTypeProperties::ALIGN
++#[lang_item("mem_align_const")]
++pub fn ALIGN<Self>() -> usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::ALIGN
++#[lang_item("mem_align_const")]
++pub const ALIGN<Self>: usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = ALIGN()
++
++// Full name: core::mem::SizedTypeProperties::ALIGNMENT
++pub fn ALIGNMENT<Self>() -> Alignment
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::ALIGNMENT
++pub const ALIGNMENT<Self>: Alignment
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = ALIGNMENT()
++
++// Full name: core::mem::SizedTypeProperties::IS_ZST
++pub fn IS_ZST<Self>() -> bool
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::IS_ZST
++pub const IS_ZST<Self>: bool
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = IS_ZST()
++
++// Full name: core::mem::SizedTypeProperties::LAYOUT
++pub fn LAYOUT<Self>() -> Layout
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::LAYOUT
++pub const LAYOUT<Self>: Layout
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = LAYOUT()
++
++// Full name: core::mem::SizedTypeProperties::MAX_SLICE_LEN
++pub fn MAX_SLICE_LEN<Self>() -> usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++= <opaque>
++
++// Full name: core::mem::SizedTypeProperties::MAX_SLICE_LEN
++pub const MAX_SLICE_LEN<Self>: usize
++where
++    [@TraitClause0]: SizedTypeProperties<Self>,
++ = MAX_SLICE_LEN()
++
++// Full name: core::mem::{impl SizedTypeProperties for T}
++impl<T> SizedTypeProperties for T {
++    const SIZE = SIZE<T>[{impl SizedTypeProperties for T}<T>]
++    const ALIGN = ALIGN<T>[{impl SizedTypeProperties for T}<T>]
++    const ALIGNMENT = ALIGNMENT<T>[{impl SizedTypeProperties for T}<T>]
++    const IS_ZST = IS_ZST<T>[{impl SizedTypeProperties for T}<T>]
++    const LAYOUT = LAYOUT<T>[{impl SizedTypeProperties for T}<T>]
++    const MAX_SLICE_LEN = MAX_SLICE_LEN<T>[{impl SizedTypeProperties for T}<T>]
++    non-dyn-compatible
++}
++
++// Full name: core::panicking::panic_nounwind_fmt
++pub fn panic_nounwind_fmt<'_0>(_1: Arguments<'_0>, _2: bool) -> !
++= <opaque>
++
++// Full name: core::ptr::non_null::NonNull
++#[lang_item("NonNull")]
++pub opaque type NonNull<T>
++
++// Full name: core::ptr::const_ptr::{*const T}::offset::precondition_check
++fn precondition_check(this_1: *const (), count_2: isize, size_3: usize)
++{
++    let _0: (); // return
++    let this_1: *const (); // arg #1
++    let count_2: isize; // arg #2
++    let size_3: usize; // arg #3
++    let _4: bool; // anonymous local
++    let msg_5: &'1 Str; // local
++    let _6: !; // anonymous local
++    let _7: Arguments<'3>; // anonymous local
++    let rhs_8: isize; // local
++    let self_9: usize; // local
++    let _10: i64; // anonymous local
++    let b_11: bool; // local
++    let _12: (i64, bool); // anonymous local
++    let _13: i64; // anonymous local
++    let _14: i64; // anonymous local
++    let byte_offset_15: isize; // local
++    let _16: (); // anonymous local
++    let _17: usize; // anonymous local
++    let overflow_18: bool; // local
++    let _19: bool; // anonymous local
++    let _20: bool; // anonymous local
++    let _21: (u64, bool); // anonymous local
++    let _22: u64; // anonymous local
++    let _23: u64; // anonymous local
++    let _24: NonNull<u8>; // anonymous local
++    let _25: *const u8; // anonymous local
++    let _26: NonNull<Argument<'6>>; // anonymous local
++    let _27: usize; // anonymous local
++    let _28: usize; // anonymous local
++    let _29: usize; // anonymous local
++    let _30: *const Str; // anonymous local
++    let _31: &'8 [u8]; // anonymous local
++
++    storage_live(msg_5)
++    storage_live(_6)
++    storage_live(byte_offset_15)
++    storage_live(_16)
++    _0 = ()
++    storage_live(_4)
++    storage_live(overflow_18)
++    storage_live(rhs_8)
++    rhs_8 = cast<usize, isize>(copy size_3)
++    storage_live(b_11)
++    storage_live(_10)
++    storage_live(_12)
++    storage_live(_13)
++    _13 = cast<isize, i64>(copy count_2)
++    storage_live(_14)
++    _14 = cast<isize, i64>(copy rhs_8)
++    _12 = move _13 checked.* move _14
++    storage_dead(_14)
++    storage_dead(_13)
++    _10 = copy _12.0
++    b_11 = copy _12.1
++    storage_dead(_12)
++    byte_offset_15 = cast<i64, isize>(copy _10)
++    storage_dead(_10)
++    if copy b_11 {
++        _16 = cold_path()
++        storage_dead(b_11)
++        storage_dead(rhs_8)
++        storage_dead(overflow_18)
++    } else {
++        storage_dead(b_11)
++        storage_dead(rhs_8)
++        storage_live(self_9)
++        self_9 = transmute<*const (), usize>(copy this_1)
++        storage_live(_20)
++        storage_live(_17)
++        _17 = cast<isize, usize>(copy byte_offset_15)
++        storage_live(_21)
++        storage_live(_22)
++        _22 = cast<usize, u64>(copy self_9)
++        storage_live(_23)
++        _23 = cast<usize, u64>(copy _17)
++        _21 = move _22 checked.+ move _23
++        storage_dead(_23)
++        storage_dead(_22)
++        _20 = copy _21.1
++        storage_dead(_21)
++        storage_dead(_17)
++        storage_live(_19)
++        _19 = copy byte_offset_15 < const 0 : isize
++        overflow_18 = copy _20 ^ move _19
++        storage_dead(_19)
++        storage_dead(_20)
++        storage_dead(self_9)
++        _4 = ~(copy overflow_18)
++        storage_dead(overflow_18)
++        if move _4 {
++            storage_dead(_4)
++            return
++        } else {
++        }
++    }
++    msg_5 = const "unsafe precondition(s) violated: ptr::offset requires the address calculation to not overflow\n\nThis indicates a bug in the program. This Undefined Behavior check is optional, and cannot be relied on for safety."
++    storage_live(_7)
++    storage_live(_24)
++    storage_live(_25)
++    storage_live(_30)
++    _30 = &raw const (*msg_5) with_metadata(copy msg_5.metadata)
++    _25 = cast<*const Str, *const u8>(copy _30)
++    storage_dead(_30)
++    _24 = transmute<*const u8, NonNull<u8>>(copy _25)
++    storage_dead(_25)
++    storage_live(_26)
++    storage_live(_27)
++    storage_live(_28)
++    storage_live(_29)
++    storage_live(_31)
++    _31 = transmute<&'11 Str, &'10 [u8]>(const "unsafe precondition(s) violated: ptr::offset requires the address calculation to not overflow\n\nThis indicates a bug in the program. This Undefined Behavior check is optional, and cannot be relied on for safety.")
++    _29 = copy _31.metadata
++    storage_dead(_31)
++    _28 = move _29 wrap.<< const 1 : i32
++    storage_dead(_29)
++    _27 = move _28 | const 1 : usize
++    storage_dead(_28)
++    _26 = transmute<usize, NonNull<Argument<'12>>>(move _27)
++    storage_dead(_27)
++    _7 = Arguments { 0: move _24, 1: move _26 }
++    storage_dead(_26)
++    storage_dead(_24)
++    _6 = panic_nounwind_fmt<'15>(move _7, const false)
++}
++
++// Full name: core::ptr::const_ptr::{*const T}::offset
++pub unsafe fn offset<T>(self_1: *const T, count_2: isize) -> *const T
++{
++    let _0: *const T; // return
++    let self_1: *const T; // arg #1
++    let count_2: isize; // arg #2
++    let _3: (); // anonymous local
++    let _4: *const (); // anonymous local
++    let _5: bool; // anonymous local
++
++    storage_live(_3)
++    storage_live(_5)
++    _5 = ub_checks<bool>
++    if move _5 {
++        storage_live(_4)
++        _4 = cast<*const T, *const ()>(copy self_1)
++        _3 = precondition_check(move _4, copy count_2, const {impl SizedTypeProperties for T}<T>::SIZE)
++        storage_dead(_4)
++    } else {
++    }
++    _0 = copy self_1 offset copy count_2
++    return
++}
++
++// Full name: core::slice::{[T]}::len
++#[lang_item("slice_len_fn")]
++pub fn len<'_0, T>(_1: &'_0 [T]) -> usize
++= <opaque>
++
++// Full name: core::slice::{[T]}::as_ptr
++pub fn as_ptr<'_0, T>(_1: &'_0 [T]) -> *const T
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::quadruple
++pub fn quadruple(x_1: u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: u32; // arg #1
++    let y_2: u32; // local
++    let _3: u32; // anonymous local
++    let _4: u32; // anonymous local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: u32; // anonymous local
++    let _8: u32; // anonymous local
++
++    storage_live(_5)
++    storage_live(_8)
++    storage_live(y_2)
++    storage_live(_3)
++    _3 = copy x_1
++    storage_live(_4)
++    _4 = copy x_1
++    _5 = copy _3 panic.+ copy _4
++    y_2 = move _5
++    storage_dead(_4)
++    storage_dead(_3)
++    storage_live(_6)
++    _6 = copy y_2
++    storage_live(_7)
++    _7 = copy y_2
++    _8 = copy _6 panic.+ copy _7
++    _0 = move _8
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(y_2)
++    return
++}
++
++// Full name: test_crate::sum_doubled
++pub fn sum_doubled<'_0>(xs_1: &'_0 [u32]) -> u32
++{
++    let _0: u32; // return
++    let xs_1: &'1 [u32]; // arg #1
++    let total_2: u32; // local
++    let i_3: usize; // local
++    let _4: bool; // anonymous local
++    let _5: usize; // anonymous local
++    let _6: usize; // anonymous local
++    let _7: &'2 [u32]; // anonymous local
++    let _8: u32; // anonymous local
++    let _9: u32; // anonymous local
++    let _10: usize; // anonymous local
++    let _11: u32; // anonymous local
++    let _12: usize; // anonymous local
++    let _13: u32; // anonymous local
++    let _14: u32; // anonymous local
++    let _15: usize; // anonymous local
++    let _16: &'_ [u32]; // anonymous local
++    let _17: &'_ u32; // anonymous local
++    let _18: &'_ [u32]; // anonymous local
++    let _19: &'_ u32; // anonymous local
++
++    storage_live(_13)
++    storage_live(_14)
++    storage_live(_15)
++    storage_live(total_2)
++    total_2 = const 0 : u32
++    storage_live(i_3)
++    i_3 = const 0 : usize
++    loop {
++        storage_live(_4)
++        storage_live(_5)
++        _5 = copy i_3
++        storage_live(_6)
++        storage_live(_7)
++        _7 = &(*xs_1) with_metadata(copy xs_1.metadata)
++        _6 = len<'4, u32>(move _7)
++        storage_dead(_7)
++        _4 = move _5 < move _6
++        if move _4 {
++        } else {
++            break 0
++        }
++        storage_dead(_6)
++        storage_dead(_5)
++        storage_live(_8)
++        storage_live(_9)
++        storage_live(_10)
++        _10 = copy i_3
++        storage_live(_16)
++        _16 = &(*xs_1) with_metadata(copy xs_1.metadata)
++        storage_live(_17)
++        _17 = @SliceIndexShared<'_, u32>(move _16, copy _10)
++        _9 = copy (*_17)
++        storage_live(_11)
++        storage_live(_12)
++        _12 = copy i_3
++        storage_live(_18)
++        _18 = &(*xs_1) with_metadata(copy xs_1.metadata)
++        storage_live(_19)
++        _19 = @SliceIndexShared<'_, u32>(move _18, copy _12)
++        _11 = copy (*_19)
++        _13 = copy _9 panic.+ copy _11
++        _8 = move _13
++        storage_dead(_11)
++        storage_dead(_9)
++        _14 = copy total_2 panic.+ copy _8
++        total_2 = move _14
++        storage_dead(_8)
++        storage_dead(_12)
++        storage_dead(_10)
++        _15 = copy i_3 panic.+ const 1 : usize
++        i_3 = move _15
++        storage_dead(_4)
++        continue 0
++    }
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(_4)
++    _0 = copy total_2
++    storage_dead(i_3)
++    storage_dead(total_2)
++    return
++}
++
++// Full name: test_crate::second
++pub fn second<'_0>(xs_1: &'_0 [u32; 2 : usize]) -> u32
++{
++    let _0: u32; // return
++    let xs_1: &'1 [u32; 2 : usize]; // arg #1
++    let p_2: *const u32; // local
++    let _3: &'3 [u32]; // anonymous local
++    let _4: &'4 [u32; 2 : usize]; // anonymous local
++    let _5: *const u32; // anonymous local
++    let _6: *const u32; // anonymous local
++
++    storage_live(p_2)
++    storage_live(_3)
++    storage_live(_4)
++    _4 = &(*xs_1)
++    _3 = @ArrayToSliceShared<'_, u32, 2 : usize>(move _4)
++    storage_dead(_4)
++    p_2 = as_ptr<'7, u32>(move _3)
++    storage_dead(_3)
++    storage_live(_5)
++    storage_live(_6)
++    _6 = copy p_2
++    _5 = offset<u32>(move _6, const 1 : isize)
++    storage_dead(_6)
++    _0 = copy (*_5)
++    storage_dead(p_2)
++    storage_dead(_5)
++    return
++}
++
++
++
+diff --git a/tests/ui/ml-interned-spans.rs b/tests/ui/ml-interned-spans.rs
+new file mode 100644
+index 0000000..ec7e303
+--- /dev/null
++++ b/tests/ui/ml-interned-spans.rs
+@@ -0,0 +1,34 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas
++//@ charon-args=--include core::ptr::const_ptr::_::offset
++//! Deduplicated llbc files intern spans: the first occurrence of each distinct span carries its
++//! id, later occurrences are the id alone. Macro expansions repeat spans, and the optimized MIR of
++//! `offset` has spans with a `generated_from_span` (inlined callees). The charon-ml
++//! deserialization test loads this file's llbc, which (unlike with the tests preset) is
++//! deduplicated.
++
++macro_rules! double {
++    ($x:expr) => {
++        $x + $x
++    };
++}
++
++pub fn quadruple(x: u32) -> u32 {
++    let y = double!(x);
++    double!(y)
++}
++
++pub fn sum_doubled(xs: &[u32]) -> u32 {
++    let mut total = 0;
++    let mut i = 0;
++    while i < xs.len() {
++        total += double!(xs[i]);
++        i += 1;
++    }
++    total
++}
++
++pub fn second(xs: &[u32; 2]) -> u32 {
++    let p = xs.as_ptr();
++    unsafe { *p.offset(1) }
++}

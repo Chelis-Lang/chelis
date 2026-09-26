@@ -63,7 +63,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for API boundaries and the formal corresp
 ## Rust to Lean extraction
 
 [verification/toolchain.json](verification/toolchain.json) records the source and reference
-revisions. [flake.lock](flake.lock) pins the tool builds:
+revisions and the integration commits of the patched tools. [flake.lock](flake.lock) pins the
+tool builds:
 
 - Native Rust: `1.98.0`.
 - Aeneas: `ee9bb3935375aacfa8ea3682fc21b051b79fc931`.
@@ -71,17 +72,24 @@ revisions. [flake.lock](flake.lock) pins the tool builds:
 - Lean: `leanprover/lean4:v4.29.0`.
 - [LaCaDiLE reference](https://github.com/Chelis-Lang/LaCaDiLE/tree/11531c8b0e3e6fb6650ddbc404937e5c527b0785/lean): `11531c8b0e3e6fb6650ddbc404937e5c527b0785`.
 
-The local Charon patches are applied by the flake, with the matching Aeneas package
-built against that Charon:
+The flake builds Charon, Charon-ML and Aeneas from these upstream sources plus the patch
+series in [verification/toolchain/](verification/toolchain) (`charon/`, `charon-ml/`,
+`aeneas/`; each `SERIES` lists its patches in application order), with the Aeneas package
+built against that Charon and Charon-ML. Each patch is one first-parent step of the
+integration history recorded in `verification/toolchain.json` and carries its commit
+message. `python3 verification/toolchain/series.py refresh` regenerates the series from the
+integration repositories; `python3 verification/toolchain/series.py check` applies them to
+the locked upstream sources and requires the result to equal the recorded integration
+commits file by file. The first Charon patches:
 
-- `verification/charon-box-init.patch` reconstructs acyclic branching Box initialization
+- `verification/toolchain/charon/0001-charon-box-init.patch` reconstructs acyclic branching Box initialization
   at the original pointee assignment, preserving initializer evaluation order and
   user cleanup. It relies on the existing infallible builtin-Box allocation abstraction;
   allocator observations and allocation-failure timing are not covered.
-- `verification/charon-closure-clauses.patch` preserves generic clauses on closure
+- `verification/toolchain/charon/0002-charon-closure-clauses.patch` preserves generic clauses on closure
   types and their instantiations. Erasing them left Fn implementation metadata with
   unbound trait references.
-- `verification/charon-nonlocal-continuations.patch` preserves jumps to outer
+- `verification/toolchain/charon/0003-charon-nonlocal-continuations.patch` preserves jumps to outer
   continuations instead of incorrectly treating them as local fallthrough. This
   prevents a loop's early error return from being overwritten by a later success.
 - The local-trait, closure-region, hidden-trait, and Charon-ML binder patches retain
@@ -89,11 +97,11 @@ built against that Charon:
   specialized implementation identities. Compiler-only destruction constraints
   do not replace explicit runtime witnesses.
 
-The local Aeneas patches are also applied by the flake:
+The first Aeneas patches:
 
-- `verification/aeneas-strict-warnings.patch` makes unknown external definitions fail
+- `verification/toolchain/aeneas/0002-aeneas-strict-warnings.patch` makes unknown external definitions fail
   with `-warnings-as-errors`, rather than logging a warning and returning success.
-- `verification/aeneas-loop-continuations.patch` normalizes function-returning loop
+- `verification/toolchain/aeneas/0003-aeneas-loop-continuations.patch` normalizes function-returning loop
   exits without joining uninitialized return slots or scoped locals. Normal
   continuations run only on their original exits; independent conditionals stay
   joined instead of expanding exponentially. Continuations that resume an outer
@@ -107,7 +115,7 @@ The local Aeneas patches are also applied by the flake:
   Registered function and global models replace their Rust implementations before
   symbolic execution. Reachability preserves local roots, required interfaces and
   initializers, but removes dependencies used only inside replaced bodies.
-- `verification/aeneas-trait-models.patch` preserves associated types and inherited
+- `verification/toolchain/aeneas/0004-aeneas-trait-models.patch` preserves associated types and inherited
   method dispatch, and adapts modeled state only when its borrowed signature is
   compatible with the extracted Rust specialization.
   Owned constructors retain explicit recovery lenses, so consuming adapters and
@@ -120,7 +128,7 @@ The local Aeneas patches are also applied by the flake:
   `PartialEq` implementations.
   Scoped mixed-control joins lower through tagged exit payloads: fallthrough shares its
   continuation, while `return`, `break`, `continue`, and panic retain their targets.
-- `verification/aeneas-shared-borrows.patch` preserves nested projection ownership,
+- `verification/toolchain/aeneas/0005-aeneas-shared-borrows.patch` preserves nested projection ownership,
   parent dependencies, and retained payloads across calls, joins, and loop exits.
   Global region coalescence preserves neighboring projection masks, and concrete
   shared-borrow fragments retain their selected projection owner's region.
@@ -162,14 +170,14 @@ The local Aeneas patches are also applied by the flake:
   Switches share repeated match-arm bodies, then join fallthrough states and
   loop exits with the same destination without redirecting other outcomes.
   Calls returning `!` terminate their path rather than falling through.
-- `verification/aeneas-floating-scalars.patch` retains floating operations and
+- `verification/toolchain/aeneas/0006-aeneas-floating-scalars.patch` retains floating operations and
   literals in the pure IR. Empty matches retain their contextual result type
   through lowering and extract as Lean `nomatch`.
   Callable tuple and variant constructors use a separate generated name from
   their pure type constructors, preserving higher-order constructor calls.
   Monadic constructors are qualified so Rust methods such as `Result::ok` cannot
   shadow generated successful returns.
-- `verification/aeneas-collection-contract.patch` enforces the supported collection
+- `verification/toolchain/aeneas/0007-aeneas-collection-contract.patch` enforces the supported collection
   domain before translation. Modeled `Vec`/B-tree collection and vector extension
   require reviewed standard iterator dictionaries, recursively through supported
   adapters and `Result` collectors. Custom iterators, unresolved generic dictionaries,
@@ -177,7 +185,7 @@ The local Aeneas patches are also applied by the flake:
   a guessed successful result or a replacement Lean panic.
   Structured specializations retain their real borrowed-state ABI; admission follows
   their original Rust implementation identity and instantiated dictionary arguments.
-- `verification/aeneas-stdlib-models.patch` supplies the checked Lean models and
+- `verification/toolchain/aeneas/0001-aeneas-stdlib-models.patch` supplies the checked Lean models and
   generated builtin metadata: slice windows/chunks and borrowed accessors;
   shared and mutable vector iteration; owned array iteration; double-ended,
   copied/cloned, filtered, chained, zipped, skipped, and flat-map adapters;

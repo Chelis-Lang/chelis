@@ -1,0 +1,28 @@
+# charon integration step 22 after 546078ea5d: commit c90cda2427297e24ab0d13fcc44da52a1bb82a8b
+# first parent ac36b347d2d19dedcac134e731ff06b75031c945
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: decode the implied trait refs of associated type impls
+#
+# Regenerated with generate-ml: trait_assoc_ty_impl_of_json decodes and discards
+# implied_trait_refs so that the hash-consed trait refs and types first
+# serialized there are registered for later references.
+
+diff --git a/charon-ml/src/generated/Generated_OfJson.ml b/charon-ml/src/generated/Generated_OfJson.ml
+index 196066b..c7ec39f 100644
+--- a/charon-ml/src/generated/Generated_OfJson.ml
++++ b/charon-ml/src/generated/Generated_OfJson.ml
+@@ -1170,8 +1170,12 @@ and trait_assoc_ty_impl_of_json (ctx : of_json_ctx) (js : json) :
+     (trait_assoc_ty_impl, string) result =
+   combine_error_msgs js __FUNCTION__
+     (match js with
+-    | `Assoc [ ("value", value); ("implied_trait_refs", _) ] ->
++    | `Assoc [ ("value", value); ("implied_trait_refs", implied_trait_refs) ] ->
+         let* value = ty_of_json ctx value in
++        let* _ =
++          index_vec_of_json trait_clause_id_of_json trait_ref_of_json ctx
++            implied_trait_refs
++        in
+         Ok ({ value } : trait_assoc_ty_impl)
+     | _ -> Error "")
+ 

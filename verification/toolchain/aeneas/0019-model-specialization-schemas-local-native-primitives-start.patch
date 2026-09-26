@@ -1,0 +1,294 @@
+# aeneas integration step 19 after cba11f3beb: commit 18e41f17b28a43f7898d0916a217db5ed8c9ef28
+# first parent 283546cedfaaee45ead9df595e7a97ca984f7436
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Model specialization schemas, local native primitives, start-from roots
+#
+# - Specialized trait decls (e.g. FnOnce<(&mut T,)> from --monomorphize-mut)
+#   match builtin models whose pattern instantiates the trait's generics.
+# - A local type with an opaque model loses its Rust fields; items nested in a
+#   modeled function (closures, their impls) are not translation roots.
+# - Translation roots are Charon's --start-from items (all local items when
+#   none were given), so shell-only dependencies of replaced bodies are pruned.
+# - Unit outputs are elided only when the callee declares them (not at a unit
+#   instantiation of a generic output or trait Output).
+# - A modeled trait's associated types absent from its record are ignored.
+# - resolve_modeled_defaults tolerates trait methods Charon did not declare.
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index fff1961..674bb72 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1671,7 +1671,29 @@ let simplify_trait_calls (crate : crate) : crate =
+         else f)
+       crate.fun_decls
+   in
+-  let crate = { crate with fun_decls } in
++  (* Likewise, a local type with an opaque model (a crate-local native
++     primitive) has no Rust representation in the translation: its fields may
++     mention native types that only the replaced bodies used. *)
++  let type_decls =
++    TypeDeclId.Map.map
++      (fun (d : type_decl) ->
++        let opaque_model =
++          d.item_meta.is_local
++          && Config.if_backend
++               (fun () ->
++                 match
++                   ExtractBuiltin.NameMatcherMap.find_opt mctx d.item_meta.name
++                     (ExtractBuiltin.builtin_types_map ())
++                 with
++                 | Some (info : Pure.builtin_type_info) ->
++                     Option.is_none info.body_info
++                 | None -> false)
++               false
++        in
++        if opaque_model then { d with kind = Opaque } else d)
++      crate.type_decls
++  in
++  let crate = { crate with fun_decls; type_decls } in
+   let declared =
+     List.fold_left
+       (fun declared group ->
+@@ -1715,10 +1737,56 @@ let simplify_trait_calls (crate : crate) : crate =
+       method! visit_trait_impl_id _ id = require (IdTraitImpl id)
+     end
+   in
++  (* Items nested in a modeled function (its closures, their trait
++     implementations and methods) belong to the replaced body: they are not
++     roots, even when local. *)
++  let modeled_local_functions =
++    FunDeclId.Map.fold
++      (fun _ (f : fun_decl) names ->
++        if f.item_meta.is_local && is_modeled_function f then
++          f.item_meta.name :: names
++        else names)
++      crate.fun_decls []
++  in
++  let nested_in_modeled_function (name : name) =
++    List.exists
++      (fun owner ->
++        let n = List.length owner in
++        List.length name > n
++        && fst (Collections.List.split_at name n) = owner)
++      modeled_local_functions
++  in
++  (* The roots are the items Charon started from (with everything named under
++     them), or every local item when Charon started from the whole crate.
++     Items Charon translated only as dependencies of replaced bodies are not
++     roots. *)
++  let start_from =
++    List.map
++      (fun pattern ->
++        try NameMatcher.parse_pattern pattern
++        with _ ->
++          [%craise_opt_span] None
++            ("Cannot parse Charon's --start-from pattern: " ^ pattern))
++      crate.options.start_from
++  in
++  let under_start_from (name : name) =
++    List.exists
++      (fun pattern ->
++        let n = List.length pattern in
++        n <= List.length name
++        && NameMatcher.match_name mctx ExtractBuiltin.default_match_config
++             pattern
++             (fst (Collections.List.split_at name n)))
++      start_from
++  in
++  let is_root (meta : item_meta) =
++    (not (nested_in_modeled_function meta.name))
++    && if start_from = [] then meta.is_local else under_start_from meta.name
++  in
+   AnyDeclIdSet.iter
+     (fun id ->
+       match LlbcAstUtils.crate_get_item_meta crate id with
+-      | Some meta when meta.is_local -> require id
++      | Some meta when is_root meta -> require id
+       | _ -> ())
+     declared;
+   (* Preserve explicitly supplied external-only crates when no local root is
+@@ -1893,28 +1961,37 @@ let resolve_modeled_defaults (crate : crate) : crate =
+                 | Some info -> not (List.mem_assoc name info.methods)
+                 | None -> false
+               in
+-              let method_decl =
+-                List.find
+-                  (fun (m : trait_method binder) -> m.binder_value.name = name)
+-                  decl.methods
+-              in
++              (* Charon declares only the trait methods the crate demands: an
++                 implementation can supply a provided method whose trait-side
++                 declaration (and default body) was never translated. Nothing
++                 can then be inherited through the declaration. *)
+               let default_decl =
+-                FunDeclId.Map.find method_decl.binder_value.item.id
+-                  crate.fun_decls
++                Option.bind
++                  (List.find_opt
++                     (fun (m : trait_method binder) ->
++                       m.binder_value.name = name)
++                     decl.methods)
++                  (fun method_decl ->
++                    FunDeclId.Map.find_opt method_decl.binder_value.item.id
++                      crate.fun_decls)
+               in
+               let inherited =
+-                match default_decl.src with
+-                | TraitDeclItem (tr, method_name, true) ->
++                match default_decl with
++                | Some { src = TraitDeclItem (tr, method_name, true); _ } ->
+                     tr.id = decl.def_id && method_name = name
+                 | _ -> false
+               in
+               let modeled =
+                 through_dictionary
+                 || standalone_eligible
+-                   && List.exists
+-                        (fun (pattern, _) ->
+-                          matches pattern default_decl.item_meta.name)
+-                        (ExtractBuiltin.builtin_funs ())
++                   &&
++                   match default_decl with
++                   | Some default_decl ->
++                       List.exists
++                         (fun (pattern, _) ->
++                           matches pattern default_decl.item_meta.name)
++                         (ExtractBuiltin.builtin_funs ())
++                   | None -> false
+               in
+               if (not inherited) || not modeled then None
+               else
+diff --git a/src/extract/ExtractBuiltin.ml b/src/extract/ExtractBuiltin.ml
+index e9af114..968ba98 100644
+--- a/src/extract/ExtractBuiltin.ml
++++ b/src/extract/ExtractBuiltin.ml
+@@ -335,25 +335,48 @@ let builtin_trait_decls_info () =
+     ]
+   @ mk_lean_only lean_builtin_trait_decls
+ 
++(** A model whose pattern instantiates the trait's generics (e.g.
++    [core::ops::function::FnOnce<@Self, (&'a mut @T), @Output>]) is a model of
++    one specialization schema, not of the generic trait. *)
++let is_schema_pattern (pattern : pattern) =
++  match List.rev pattern with
++  | PIdent (_, _, _ :: _) :: _ -> true
++  | _ -> false
++
+ let mk_builtin_trait_decls_map () =
+   NameMatcherMap.of_list
+-    (List.map
+-       (fun (info : Pure.builtin_trait_decl_info) -> (info.rust_name, info))
++    (List.filter_map
++       (fun (info : Pure.builtin_trait_decl_info) ->
++         if is_schema_pattern info.rust_name then None
++         else Some (info.rust_name, info))
+        (builtin_trait_decls_info ()))
+ 
+ let builtin_trait_decls_map = mk_memoized mk_builtin_trait_decls_map
+ 
++let mk_builtin_trait_schemas () =
++  List.filter
++    (fun (info : Pure.builtin_trait_decl_info) ->
++      is_schema_pattern info.rust_name)
++    (builtin_trait_decls_info ())
++
++let builtin_trait_schemas = mk_memoized mk_builtin_trait_schemas
++
+ (** PrePasses folds ABI-compatible modeled specializations to their canonical
+     declarations. Any specialization left over is a genuine Rust schema: the
+     logical name matcher would otherwise ignore [PeInstantiated] and silently
+-    select the incompatible generic record. *)
++    select the incompatible generic record. Such a specialization is modeled
++    only by a schema model whose pattern matches its instantiation. *)
+ let is_trait_specialization (name : Types.name) =
+   match List.rev name with
+   | Types.PeInstantiated _ :: _ -> true
+   | _ -> false
+ 
+ let find_trait_decl_info ctx name =
+-  if backend () = Lean && is_trait_specialization name then None
++  if backend () = Lean && is_trait_specialization name then
++    List.find_opt
++      (fun (info : Pure.builtin_trait_decl_info) ->
++        match_name ctx default_match_config info.rust_name name)
++      (builtin_trait_schemas ())
+   else NameMatcherMap.find_opt ctx name (builtin_trait_decls_map ())
+ 
+ let builtin_trait_impls_info () : (pattern * Pure.builtin_trait_impl_info) list
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index edc7382..9f39559 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -219,6 +219,18 @@ let translate_trait_decl (ctx : Contexts.decls_ctx) (trait_decl : A.trait_decl)
+      ^ Errors.span_to_string span
+       ^ Contexts.compute_local_uses_error_message ctx
+           (IdTraitDecl trait_decl.def_id));
++  (* A model's record declares the associated types it represents; the others
++     (e.g. `Pattern::Searcher<'a>` of a model through provided methods only) are
++     not part of the model. *)
++  let types =
++    match builtin_info with
++    | Some (info : Pure.builtin_trait_decl_info) ->
++        List.filter
++          (fun (t : A.trait_assoc_ty T.binder) ->
++            List.mem_assoc t.binder_value.name info.types)
++          types
++    | None -> types
++  in
+   let types =
+     List.map
+       (fun (t : A.trait_assoc_ty T.binder) ->
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index d328c72..454f300 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -984,11 +984,46 @@ and translate_inst_fun_sig_to_decomposed_fun_type (span : Meta.span option)
+       (List.map compute_back_info_for_group sg.regions_hierarchy)
+   in
+ 
+-  (* The additional information about the forward function *)
++  (* The unit output is elided only when the callee declares it: an
++     instantiation of a generic output (`fn f<R>(..) -> R` at `R = ()`, or a
++     trait method implemented at `Output = ()`) keeps the signature of its
++     declaration, which callers and trait records share. *)
++  let declared_unit_output =
++    let decl_output id =
++      Option.map
++        (fun (d : A.fun_decl) -> d.signature.output)
++        (FunDeclId.Map.find_opt id decls_ctx.fun_ctx.fun_decls)
++    in
++    let trait_method_output (trait_id : T.trait_decl_id) name =
++      Option.bind
++        (T.TraitDeclId.Map.find_opt trait_id decls_ctx.crate.trait_decls)
++        (fun (decl : A.trait_decl) ->
++          Option.bind
++            (List.find_opt
++               (fun (m : A.trait_method T.binder) -> m.binder_value.name = name)
++               decl.methods)
++            (fun m -> decl_output m.binder_value.item.id))
++    in
++    let declared =
++      match fun_id with
++      | TraitMethod (_, _, id) -> decl_output id
++      | FunId (FRegular id) -> (
++          match FunDeclId.Map.find_opt id decls_ctx.fun_ctx.fun_decls with
++          | Some { src = TraitImplItem (_, trait_ref, name, _); _ } -> (
++              match trait_method_output trait_ref.id name with
++              | Some output -> Some output
++              | None -> decl_output id)
++          | _ -> decl_output id)
++      | FunId (FBuiltin _) -> None
++    in
++    match declared with
++    | Some output -> TypesUtils.ty_is_unit output
++    | None -> true
++  in
+   let fwd_info : fun_sig_info =
+     let ignore_output =
+       if !Config.simplify_merged_fwd_backs then
+-        ty_is_unit fwd_output
++        declared_unit_output && ty_is_unit fwd_output
+         && List.exists
+              (fun (info : back_sg_info) -> not info.filter)
+              (RegionGroupId.Map.values back_sg)

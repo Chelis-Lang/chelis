@@ -1,0 +1,672 @@
+# charon integration step 46 after 546078ea5d: commit a5d32339e971fcb0c8959178542d6628f56ceb6b
+# first parent 63d559c859aac68dbfb692e9a46c51789d7d1f74
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: canonical patterns disambiguate by the rustc definitions, not by the translated items
+#
+# The `#0` of a canonical name pattern (`name#0` where a sibling has the same identifier) was decided
+# from the names of the items a run translated: `CHARON_CALLGRAPH` looked at the translated items, and
+# the `start_from_selected` patterns of the coverage report used no disambiguation at all. A run that
+# selects `f::__Visitor#0` (serde's visitors and `__Field` enums in the arms of `visit_enum`, the
+# statics of two expansions of a macro in one body) without its sibling `f::__Visitor#1` so printed
+# `f::__Visitor`, which selects both: patterns did not round-trip between the whole-crate callgraph and
+# the runs of its chunks.
+#
+# `TranslateCtx::name_disambiguation` now records the shared identifiers of the names Charon computed
+# from the rustc definitions (`ExactResolver::shares_ident`: a definition named under the same parent
+# has the same identifier with another disambiguator), whichever items are translated, and both the
+# callgraph and the coverage report print canonical patterns with it (computed once, only if one of
+# them is requested). `Pattern::canonical` takes the `Disambiguation`; `Disambiguation::new` (from
+# names) and the undisambiguated `Pattern::canonical` are gone.
+
+diff --git a/src/bin/charon-driver/translate/callgraph.rs b/src/bin/charon-driver/translate/callgraph.rs
+index ae5bae0..98117ee 100644
+--- a/src/bin/charon-driver/translate/callgraph.rs
++++ b/src/bin/charon-driver/translate/callgraph.rs
+@@ -14,9 +14,12 @@
+ //!   `closure_method(FnMut)`, `closure_as_fn`, `defaulted_method(name)`, `implicit_destruct_impl`,
+ //!   `drop_in_place`, `synthetic` for items with no definition such as `UNIT_METADATA`, ...);
+ //! - `name`: the pretty-printed Charon name;
+-//! - `pattern`: the canonical name pattern (`Pattern::canonical`), accepted by `--start-from`,
+-//!   `--start-from-file`, `--opaque` and `--opaque-file`; `null` with a `pattern_error` if the
+-//!   name has none, or if the pattern does not parse back to itself or does not match the name;
++//! - `pattern`: the canonical name pattern (`Pattern::canonical`, with `#0` where a sibling
++//!   definition has the same identifier, whether or not it is translated), accepted by
++//!   `--start-from`, `--start-from-file`, `--opaque` and `--opaque-file`; `null` with a
++//!   `pattern_error` if the name has none, or if the pattern does not parse back to itself or
++//!   does not match the name. The coverage report (`start_from_selected`) prints the same
++//!   pattern for the item in any run;
+ //! - `pattern_also_matches`: the other items whose names the pattern matches. Name patterns match
+ //!   prefixes, so this lists the items nested in this one (closures and nested items of a
+ //!   function, provided methods of a trait, drop glue of a type); where such a pattern should not
+@@ -35,6 +38,7 @@
+ //!   `removed_by_passes: true` for the impls of hidden marker traits, which the transformation
+ //!   passes remove.
+ use std::collections::HashMap;
++use std::ops::Deref;
+ 
+ use super::translate_crate::{TraitImplSource, TransItemSource, TransItemSourceKind};
+ use super::translate_ctx::TranslateCtx;
+@@ -85,11 +89,13 @@ impl TranslateCtx<'_> {
+         Some(path.join("::"))
+     }
+ 
+-    pub fn write_callgraph(&self) {
++    /// `disambiguation`: `name_disambiguation`, evaluated only if the callgraph is requested.
++    pub fn write_callgraph(&self, disambiguation: &impl Deref<Target = Disambiguation>) {
+         let Some(path) = std::env::var_os("CHARON_CALLGRAPH").filter(|path| !path.is_empty())
+         else {
+             return;
+         };
++        let disambiguation: &Disambiguation = disambiguation;
+         let krate = &self.translated;
+         let fmt = krate.into_fmt();
+ 
+@@ -164,13 +170,11 @@ impl TranslateCtx<'_> {
+         }
+ 
+         // Canonical patterns, checked to parse back to themselves and to match their item.
+-        let disambiguation =
+-            Disambiguation::new(krate.all_items().map(|item| &item.item_meta().name));
+         let patterns: Vec<Result<NamePattern, String>> = items
+             .iter()
+             .map(|item| {
+                 let name = &item.item_meta().name;
+-                let pat = NamePattern::canonical_with(krate, &disambiguation, name)
++                let pat = NamePattern::canonical(krate, disambiguation, name)
+                     .ok_or_else(|| "the name cannot be expressed as a pattern".to_owned())?;
+                 let text = pat.to_string();
+                 match NamePattern::parse(&text) {
+diff --git a/src/bin/charon-driver/translate/resolve_exact.rs b/src/bin/charon-driver/translate/resolve_exact.rs
+index ddc5b14..6ca62d0 100644
+--- a/src/bin/charon-driver/translate/resolve_exact.rs
++++ b/src/bin/charon-driver/translate/resolve_exact.rs
+@@ -69,6 +69,16 @@ fn elem_of(tcx: TyCtxt<'_>, def_id: DefId) -> Elem {
+     }
+ }
+ 
++/// The definition under which `def_id` is named: its parent, skipping the parents that are not
++/// part of Charon names.
++fn named_parent(tcx: TyCtxt<'_>, def_id: DefId) -> Option<DefId> {
++    let mut parent = tcx.opt_parent(def_id)?;
++    while !parent.is_crate_root() && matches!(elem_of(tcx, parent), Elem::Skipped) {
++        parent = tcx.parent(parent);
++    }
++    Some(parent)
++}
++
+ #[derive(Default)]
+ struct Children {
+     idents: HashMap<String, Vec<(u32, DefId)>>,
+@@ -127,13 +137,9 @@ impl<'tcx> ExactResolver<'tcx> {
+                 if matches!(elem, Elem::Skipped | Elem::None) {
+                     continue;
+                 }
+-                // The parent under which this definition is named.
+-                let Some(mut parent) = tcx.opt_parent(def_id) else {
++                let Some(parent) = named_parent(tcx, def_id) else {
+                     continue;
+                 };
+-                while !parent.is_crate_root() && matches!(elem_of(tcx, parent), Elem::Skipped) {
+-                    parent = tcx.parent(parent);
+-                }
+                 let children = index.children.entry(parent).or_default();
+                 match elem {
+                     Elem::Ident(name, d) => children.idents.entry(name).or_default().push((d, def_id)),
+@@ -149,6 +155,24 @@ impl<'tcx> ExactResolver<'tcx> {
+         self.index(parent.krate).children.get(&parent)
+     }
+ 
++    /// Whether a sibling of `def_id` (a definition named under the same parent) has the same
++    /// identifier in Charon names with a different disambiguator, e.g. the `__Field` enums a
++    /// derive macro generates in the arms of one function, or the statics of two expansions of a
++    /// macro in one body. Canonical patterns then spell out the disambiguator of `def_id`, even
++    /// `#0`.
++    pub fn shares_ident(&mut self, def_id: DefId) -> bool {
++        let tcx = self.tcx;
++        let Elem::Ident(name, d) = elem_of(tcx, def_id) else {
++            return false;
++        };
++        let Some(parent) = named_parent(tcx, def_id) else {
++            return false;
++        };
++        self.children(parent)
++            .and_then(|children| children.idents.get(&name))
++            .is_some_and(|defs| defs.iter().any(|(other, _)| *other != d))
++    }
++
+     /// The items whose Charon name the pattern spells out exactly (the pattern is not a prefix).
+     /// Generic arguments of the path elements are ignored, except in impl blocks. Errors if the
+     /// pattern uses syntax the resolver does not support (globs in the path).
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index 628abad..c6e59bd 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -26,7 +26,7 @@ use crate::hax;
+ use crate::hax::SInto;
+ use charon_lib::ast::*;
+ use charon_lib::formatter::IntoFormatter;
+-use charon_lib::name_matcher::{NamePattern, PatElem};
++use charon_lib::name_matcher::{Disambiguation, NamePattern, PatElem};
+ use charon_lib::pretty::FmtWithCtx;
+ use charon_lib::options::{CliOpts, StartFrom, TranslateOptions};
+ use charon_lib::transform::{StartFromSelection, TransformCtx};
+@@ -496,12 +496,19 @@ impl<'tcx> TranslateCtx<'tcx> {
+     /// item kind, the items that were translated, those processed without producing an item, and
+     /// those registered as references but never needed (unused methods, unneeded vtables).
+     /// `start_from_selected` lists what each start-from selection selected, with the names and
+-    /// canonical patterns the items have before the transformation passes.
++    /// canonical patterns the items have before the transformation passes (the patterns
++    /// `CHARON_CALLGRAPH` prints for them, whichever items the run translates;
++    /// `disambiguation` is `name_disambiguation`, evaluated only if the report is requested).
+     /// `write_start_from_coverage` completes it once the transformation passes have run.
+-    pub fn write_coverage_report(&self, start_from_roots: &[StartFromSelection]) {
++    pub fn write_coverage_report(
++        &self,
++        start_from_roots: &[StartFromSelection],
++        disambiguation: &impl std::ops::Deref<Target = Disambiguation>,
++    ) {
+         let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
+             return;
+         };
++        let disambiguation: &Disambiguation = disambiguation;
+         use std::collections::BTreeMap;
+         let tcx = self.tcx;
+         let crate_of = |def_id: &hax::DefId| match def_id.as_rust_def_id() {
+@@ -572,7 +579,9 @@ impl<'tcx> TranslateCtx<'tcx> {
+                             "id": id.to_string(),
+                             "name": name.map(|name| name.with_ctx(&fmt).to_string()),
+                             "pattern": name
+-                                .and_then(|name| NamePattern::canonical(&self.translated, name))
++                                .and_then(|name| {
++                                    NamePattern::canonical(&self.translated, disambiguation, name)
++                                })
+                                 .map(|pat| pat.to_string()),
+                             "pattern_spells_name": spells_name,
+                         })
+@@ -1261,8 +1270,11 @@ pub fn translate<'tcx>(
+     // them. This removes them from the traits and impls.
+     ctx.remove_unused_methods();
+     let start_from_roots = ctx.start_from_roots();
+-    ctx.write_coverage_report(&start_from_roots);
+-    ctx.write_callgraph();
++    {
++        let disambiguation = std::cell::LazyCell::new(|| ctx.name_disambiguation());
++        ctx.write_coverage_report(&start_from_roots, &disambiguation);
++        ctx.write_callgraph(&disambiguation);
++    }
+ 
+     // Return the context, dropping the hax state and rustc `tcx`.
+     Ok(TransformCtx {
+diff --git a/src/bin/charon-driver/translate/translate_meta.rs b/src/bin/charon-driver/translate/translate_meta.rs
+index 33b0464..b0a866e 100644
+--- a/src/bin/charon-driver/translate/translate_meta.rs
++++ b/src/bin/charon-driver/translate/translate_meta.rs
+@@ -5,12 +5,14 @@ use rustc_span::RemapPathScopeComponents;
+ use std::cmp::Ord;
+ use std::path::{Component, PathBuf};
+ 
++use super::resolve_exact::ExactResolver;
+ use super::translate_crate::RustcItem;
+ use super::translate_ctx::*;
+ use super::translate_generics::BindingLevel;
+ use crate::hax;
+ use crate::hax::{DefPathItem, SInto};
+ use charon_lib::ast::*;
++use charon_lib::name_matcher::Disambiguation;
+ 
+ // Spans
+ impl<'tcx> TranslateCtx<'tcx> {
+@@ -506,6 +508,29 @@ impl<'tcx> TranslateCtx<'tcx> {
+         Ok(name)
+     }
+ 
++    /// The identifiers that sibling definitions share in the names computed so far, for canonical
++    /// patterns (see `Disambiguation`). Computed from the rustc definitions rather than from the
++    /// translated items, so that the canonical pattern of an item does not depend on which other
++    /// items the run translates. The path elements Charon adds to the name of a definition
++    /// (`{vtable}`, closure methods, ...) have no siblings with the same identifier.
++    pub fn name_disambiguation(&self) -> Disambiguation {
++        let mut resolver = ExactResolver::new(self.tcx);
++        let mut disambiguation = Disambiguation::default();
++        for (item, name) in &self.cached_names {
++            let Some((PathElem::Ident(ident, _), prefix)) = name.name.split_last() else {
++                continue;
++            };
++            // `shares_ident` is false for the definitions that add no path element (e.g.
++            // constructors), whose name ends with the element of their parent.
++            if let Some(def_id) = item.def_id().as_rust_def_id()
++                && resolver.shares_ident(def_id)
++            {
++                disambiguation.insert(prefix, ident);
++            }
++        }
++        disambiguation
++    }
++
+     /// Remark: this **doesn't** register the def id (on purpose)
+     pub(crate) fn translate_trait_item_name(
+         &mut self,
+diff --git a/src/name_matcher/canonical.rs b/src/name_matcher/canonical.rs
+index f762604..ca7104e 100644
+--- a/src/name_matcher/canonical.rs
++++ b/src/name_matcher/canonical.rs
+@@ -6,52 +6,47 @@ use crate::ast::*;
+ 
+ /// The path elements whose canonical pattern spells out the disambiguator `#0`: plain `name`
+ /// matches every disambiguator, so it would also match a sibling `name#1` (e.g. the `__Field`
+-/// enums a derive macro generates in one function). Computed from a set of names.
++/// enums a derive macro generates in the arms of one function). The driver records the
++/// identifiers that sibling definitions share from the rustc definitions, not from the items a
++/// run translates, so that the canonical pattern of an item is the same whichever items are
++/// translated with it.
+ #[derive(Debug, Default)]
+ pub struct Disambiguation {
+-    ambiguous: HashSet<(Vec<PathElem>, String)>,
++    /// The shared identifiers, by the path they follow.
++    ambiguous: HashMap<Vec<PathElem>, HashSet<String>>,
+ }
+ 
+ impl Disambiguation {
+-    pub fn new<'a>(names: impl IntoIterator<Item = &'a Name>) -> Self {
+-        let mut seen: HashMap<(&'a [PathElem], &'a str), Disambiguator> = HashMap::new();
+-        let mut ambiguous = HashSet::new();
+-        for name in names {
+-            for (i, elem) in name.name.iter().enumerate() {
+-                if let PathElem::Ident(ident, d) = elem {
+-                    let key = (&name.name[..i], ident.as_str());
+-                    match seen.get(&key) {
+-                        Some(other) if other != d => {
+-                            ambiguous.insert((key.0.to_vec(), key.1.to_owned()));
+-                        }
+-                        Some(_) => {}
+-                        None => {
+-                            seen.insert(key, *d);
+-                        }
+-                    }
+-                }
+-            }
++    /// Records that several path elements named `ident` (with different disambiguators) follow
++    /// `prefix`.
++    pub fn insert(&mut self, prefix: &[PathElem], ident: &str) {
++        if let Some(idents) = self.ambiguous.get_mut(prefix) {
++            idents.insert(ident.to_owned());
++        } else {
++            self.ambiguous
++                .insert(prefix.to_vec(), HashSet::from([ident.to_owned()]));
+         }
+-        Self { ambiguous }
++    }
++
++    fn is_ambiguous(&self, prefix: &[PathElem], ident: &str) -> bool {
++        self.ambiguous
++            .get(prefix)
++            .is_some_and(|idents| idents.contains(ident))
+     }
+ }
+ 
+ impl Pattern {
+     /// The canonical pattern for this name: every path element spelled out, disambiguators where
+-    /// they distinguish siblings, impl blocks with their implemented trait (and its arguments) and
+-    /// self type, type parameters as `@`. Type arguments the syntax cannot express (function
+-    /// pointers, `dyn`, raw pointers, ...) become `_`, so a canonical pattern may match more than one name;
+-    /// callers that need exactness check it against the other names they know.
++    /// they distinguish siblings (nonzero ones, those of closures, anonymous constants and `_`
++    /// items, and `#0` where `disambiguation` says a sibling has the same identifier), impl blocks
++    /// with their implemented trait (and its arguments) and self type, type parameters as `@`.
++    /// Type arguments the syntax cannot express (function pointers, `dyn`, raw pointers, ...)
++    /// become `_`, so a canonical pattern may match more than one name; callers that need
++    /// exactness check it against the other names they know.
+     ///
+     /// Returns `None` for names that patterns cannot designate: monomorphized or target-specific
+     /// names, and names containing a trait impl that is not translated.
+-    pub fn canonical(ctx: &TranslatedCrate, name: &Name) -> Option<Pattern> {
+-        Self::canonical_with(ctx, &Disambiguation::default(), name)
+-    }
+-
+-    /// `canonical`, spelling out `#0` where `disambiguation` says a sibling has the same
+-    /// identifier.
+-    pub fn canonical_with(
++    pub fn canonical(
+         ctx: &TranslatedCrate,
+         disambiguation: &Disambiguation,
+         name: &Name,
+@@ -86,10 +81,7 @@ fn canonical_elem(cx: Cx<'_>, prefix: &[PathElem], elem: &PathElem) -> Option<Pa
+                 || name == "closure"
+                 || name == "_"
+                 || name.starts_with('{')
+-                || cx
+-                    .disambiguation
+-                    .ambiguous
+-                    .contains(&(prefix.to_vec(), name.clone()));
++                || cx.disambiguation.is_ambiguous(prefix, name);
+             PatElem::Ident {
+                 name: name.clone(),
+                 generics: Vec::new(),
+@@ -107,7 +99,7 @@ fn canonical_elem(cx: Cx<'_>, prefix: &[PathElem], elem: &PathElem) -> Option<Pa
+         PathElem::Impl(ImplElem::Trait(impl_id)) => {
+             let timpl = ctx.trait_impls.get(*impl_id)?;
+             let trait_name = ctx.item_name(timpl.impl_trait.id)?;
+-            let mut pat = Pattern::canonical_with(ctx, cx.disambiguation, trait_name)?;
++            let mut pat = Pattern::canonical(ctx, cx.disambiguation, trait_name)?;
+             let generics = canonical_args(cx, &timpl.impl_trait.generics)?;
+             // The first type argument is the self type.
+             if generics.is_empty() {
+@@ -160,7 +152,7 @@ fn with_generics(mut pat: Pattern, generics: Vec<PatTy>) -> Option<PatTy> {
+ 
+ fn canonical_ty(cx: Cx<'_>, ty: &Ty) -> Option<PatTy> {
+     let ctx = cx.ctx;
+-    let path = |name: &Name| Pattern::canonical_with(ctx, cx.disambiguation, name);
++    let path = |name: &Name| Pattern::canonical(ctx, cx.disambiguation, name);
+     Some(match ty.kind() {
+         TyKind::Adt(tref) => match tref.id {
+             TypeId::Adt(id) => {
+diff --git a/tests/callgraph.rs b/tests/callgraph.rs
+index f96d57b..f63c9dc 100644
+--- a/tests/callgraph.rs
++++ b/tests/callgraph.rs
+@@ -1,9 +1,10 @@
+ //! `CHARON_CALLGRAPH`: the canonical pattern of every dumped item selects exactly that item when
+-//! fed back to `--start-from-file`.
++//! fed back to `--start-from-file`, and every run prints that pattern for the item, whichever
++//! other items it translates.
+ use anyhow::{Context, Result, ensure};
+ use assert_cmd::prelude::{CommandCargoExt, OutputAssertExt};
+ use serde_json::Value;
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::path::Path;
+ use std::process::Command;
+ 
+@@ -41,6 +42,90 @@ pub fn user(v: &[u32]) -> u32 {
+ }
+ "#;
+ 
++/// The expansion of a serde-like derive (impls nested in functions inside an anonymous constant
++/// and in the methods of those impls, items with the same name in the arms of one function) and
++/// statics and constants that macro expansions make collide in one body.
++const NESTED_CODE: &str = r#"
++use std::marker::PhantomData;
++pub trait Deserialize<'de>: Sized {
++    fn deserialize(tag: u32) -> Option<Self>;
++}
++pub trait Visitor<'de> {
++    type Value;
++    fn visit_enum(self, tag: u32) -> Option<Self::Value>;
++}
++pub enum Expr {
++    Unit,
++    Pair { left: u32, right: u32 },
++    Triple { a: u32, b: u32, c: u32 },
++}
++const _: () = {
++    impl<'de> Deserialize<'de> for Expr {
++        fn deserialize(tag: u32) -> Option<Self> {
++            enum __Field { Unit, Pair, Triple }
++            struct __Visitor<'de> { marker: PhantomData<&'de ()> }
++            impl<'de> Visitor<'de> for __Visitor<'de> {
++                type Value = Expr;
++                fn visit_enum(self, tag: u32) -> Option<Expr> {
++                    let field = match tag {
++                        0 => __Field::Unit,
++                        1 => __Field::Pair,
++                        2 => __Field::Triple,
++                        _ => return None,
++                    };
++                    match field {
++                        __Field::Unit => Some(Expr::Unit),
++                        __Field::Pair => {
++                            enum __Field { Left, Right }
++                            struct __Visitor<'de> { marker: PhantomData<&'de ()> }
++                            impl<'de> Visitor<'de> for __Visitor<'de> {
++                                type Value = Expr;
++                                fn visit_enum(self, tag: u32) -> Option<Expr> {
++                                    let _ = [__Field::Left, __Field::Right];
++                                    Some(Expr::Pair { left: tag, right: tag })
++                                }
++                            }
++                            __Visitor { marker: PhantomData }.visit_enum(tag)
++                        }
++                        __Field::Triple => {
++                            enum __Field { A, B, C }
++                            struct __Visitor<'de> { marker: PhantomData<&'de ()> }
++                            impl<'de> Visitor<'de> for __Visitor<'de> {
++                                type Value = Expr;
++                                fn visit_enum(self, tag: u32) -> Option<Expr> {
++                                    let _ = [__Field::A, __Field::B, __Field::C];
++                                    Some(Expr::Triple { a: tag, b: tag, c: tag })
++                                }
++                            }
++                            __Visitor { marker: PhantomData }.visit_enum(tag)
++                        }
++                    }
++                }
++            }
++            __Visitor { marker: PhantomData }.visit_enum(tag)
++        }
++    }
++};
++pub struct Authority(pub u32);
++macro_rules! authority {
++    ($n:expr) => {{
++        static AUTHORITY: Authority = Authority($n);
++        &AUTHORITY
++    }};
++}
++pub fn receipt(strict: bool) -> &'static Authority {
++    if strict { authority!(1) } else { authority!(2) }
++}
++impl Authority {
++    pub fn lower(&self) -> u32 {
++        const LIMIT: u32 = 3;
++        let unique = authority!(4).0;
++        let shadowed = { const LIMIT: u32 = 5; LIMIT };
++        unique + shadowed + LIMIT + self.0
++    }
++}
++"#;
++
+ fn charon(dir: &Path, envs: &[(&str, &Path)], extra: &[&str]) -> Result<()> {
+     Command::cargo_bin("charon")?
+         .envs(envs.iter().copied())
+@@ -54,16 +139,84 @@ fn charon(dir: &Path, envs: &[(&str, &Path)], extra: &[&str]) -> Result<()> {
+     Ok(())
+ }
+ 
++/// The callgraph of the whole of `dir/test_crate.rs`.
++fn callgraph(dir: &Path) -> Result<Value> {
++    let graph_path = dir.join("graph.json");
++    charon(dir, &[("CHARON_CALLGRAPH", &graph_path)], &[])?;
++    let graph: Value = serde_json::from_str(&std::fs::read_to_string(&graph_path)?)?;
++    ensure!(graph["format"] == "charon-callgraph" && graph["version"] == 1);
++    Ok(graph)
++}
++
++/// The patterns of the callgraph items a start-from selection can name.
++fn selectable_patterns(graph: &Value) -> Result<Vec<String>> {
++    let mut patterns = Vec::new();
++    for item in graph["items"].as_array().context("items")? {
++        if item["source"] == "synthetic" || item["removed_by_passes"] == true {
++            continue;
++        }
++        let pattern = item["pattern"].as_str().with_context(|| {
++            format!("no pattern for {}: {}", item["name"], item["pattern_error"])
++        })?;
++        patterns.push(pattern.to_owned());
++    }
++    Ok(patterns)
++}
++
++/// Feeds `patterns` back to `--start-from-file` and checks that each selects exactly one declared
++/// item, whose canonical pattern in this run is the pattern itself. Returns the callgraph of the
++/// run.
++fn select_exactly(dir: &Path, run: &str, patterns: &[String]) -> Result<Value> {
++    let patterns_path = dir.join(format!("{run}.patterns"));
++    std::fs::write(&patterns_path, patterns.join("\n"))?;
++    let coverage_path = dir.join(format!("{run}.coverage.json"));
++    let graph_path = dir.join(format!("{run}.graph.json"));
++    charon(
++        dir,
++        &[
++            ("CHARON_COVERAGE_REPORT", &coverage_path),
++            ("CHARON_CALLGRAPH", &graph_path),
++        ],
++        &["--start-from-file", patterns_path.to_str().unwrap()],
++    )?;
++    let coverage: Value = serde_json::from_str(&std::fs::read_to_string(&coverage_path)?)?;
++    let declared: HashMap<&str, bool> = coverage["start_from"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .flat_map(|sel| sel["items"].as_array().unwrap())
++        .map(|item| (item["id"].as_str().unwrap(), item["declared"] == true))
++        .collect();
++    let selected = coverage["start_from_selected"].as_array().unwrap();
++    ensure!(selected.len() == patterns.len());
++    for (pattern, selection) in patterns.iter().zip(selected) {
++        ensure!(selection["pattern"] == pattern.as_str());
++        let items = selection["items"].as_array().unwrap();
++        ensure!(
++            items.len() == 1 && items[0]["pattern_spells_name"] == true,
++            "`{pattern}` selected {items:?}"
++        );
++        ensure!(
++            items[0]["pattern"] == pattern.as_str(),
++            "`{pattern}` selected an item whose canonical pattern is {}",
++            items[0]["pattern"]
++        );
++        ensure!(
++            declared[items[0]["id"].as_str().unwrap()],
++            "`{pattern}` selected an undeclared item"
++        );
++    }
++    let graph = std::fs::read_to_string(&graph_path)?;
++    Ok(serde_json::from_str(&graph)?)
++}
++
+ #[test]
+ fn callgraph_patterns_round_trip() -> Result<()> {
+     let dir = tempfile::TempDir::new()?;
+     let dir = dir.path();
+     std::fs::write(dir.join("test_crate.rs"), CODE)?;
+ 
+-    let graph_path = dir.join("graph.json");
+-    charon(dir, &[("CHARON_CALLGRAPH", &graph_path)], &[])?;
+-    let graph: Value = serde_json::from_str(&std::fs::read_to_string(&graph_path)?)?;
+-    ensure!(graph["format"] == "charon-callgraph" && graph["version"] == 1);
++    let graph = callgraph(dir)?;
+     let items = graph["items"].as_array().context("items")?;
+     let by_name: HashMap<&str, &Value> = items
+         .iter()
+@@ -99,46 +252,74 @@ fn callgraph_patterns_round_trip() -> Result<()> {
+     ));
+ 
+     // Feed every pattern back as a start-from selection.
+-    let mut expected = Vec::new();
+-    for item in items {
+-        if item["source"] == "synthetic" || item["removed_by_passes"] == true {
+-            continue;
+-        }
+-        let pattern = item["pattern"]
+-            .as_str()
+-            .with_context(|| format!("no pattern for {}: {}", item["name"], item["pattern_error"]))?;
+-        expected.push(pattern.to_owned());
++    let expected = selectable_patterns(&graph)?;
++    select_exactly(dir, "all", &expected)?;
++    ensure!(expected.len() > 60, "only {} patterns", expected.len());
++    Ok(())
++}
++
++/// Items that share their name with a sibling definition (serde's `__Field` and `__Visitor` in
++/// the arms of `visit_enum`, the statics and constants of one body) get `#0`/`#1`, also in the
++/// self types of nested impls. Selected alone, so that its siblings are not translated, each item
++/// keeps the pattern of the whole-crate callgraph, and so do the items translated with it.
++#[test]
++fn callgraph_patterns_round_trip_alone() -> Result<()> {
++    let dir = tempfile::TempDir::new()?;
++    let dir = dir.path();
++    std::fs::write(dir.join("test_crate.rs"), NESTED_CODE)?;
++
++    let graph = callgraph(dir)?;
++    // Pretty-printed names omit disambiguators: `__Visitor#0` and `__Visitor#1` share one.
++    let mut patterns_of: HashMap<&str, HashSet<Option<&str>>> = HashMap::new();
++    for item in graph["items"].as_array().context("items")? {
++        patterns_of
++            .entry(item["name"].as_str().unwrap())
++            .or_default()
++            .insert(item["pattern"].as_str());
+     }
+-    let patterns_path = dir.join("patterns.txt");
+-    std::fs::write(&patterns_path, expected.join("\n"))?;
+-    let coverage_path = dir.join("coverage.json");
+-    charon(
+-        dir,
+-        &[("CHARON_COVERAGE_REPORT", &coverage_path)],
+-        &["--start-from-file", patterns_path.to_str().unwrap()],
+-    )?;
+-    let coverage: Value = serde_json::from_str(&std::fs::read_to_string(&coverage_path)?)?;
+-    let declared: HashMap<&str, bool> = coverage["start_from"]
+-        .as_array()
+-        .unwrap()
+-        .iter()
+-        .flat_map(|sel| sel["items"].as_array().unwrap())
+-        .map(|item| (item["id"].as_str().unwrap(), item["declared"] == true))
+-        .collect();
+-    let selected = coverage["start_from_selected"].as_array().unwrap();
+-    ensure!(selected.len() == expected.len());
+-    for (pattern, selection) in expected.iter().zip(selected) {
+-        ensure!(selection["pattern"] == pattern.as_str());
+-        let items = selection["items"].as_array().unwrap();
++    let patterns = selectable_patterns(&graph)?;
++    let deserialize =
++        "test_crate::_#0::{impl test_crate::Deserialize for test_crate::Expr}::deserialize";
++    let visit_enum = format!(
++        "{deserialize}::{{impl test_crate::Visitor for {deserialize}::__Visitor}}::visit_enum"
++    );
++    for expected in [
++        format!("{deserialize}::__Field"),
++        format!("{visit_enum}::__Field#0"),
++        format!("{visit_enum}::__Field#1"),
++        format!("{visit_enum}::__Visitor#1"),
++        format!(
++            "{visit_enum}::{{impl test_crate::Visitor for {visit_enum}::__Visitor#0}}::visit_enum"
++        ),
++        "test_crate::receipt::AUTHORITY#0".to_owned(),
++        "test_crate::receipt::AUTHORITY#1".to_owned(),
++        "test_crate::{impl test_crate::Authority}::lower::AUTHORITY".to_owned(),
++        "test_crate::{impl test_crate::Authority}::lower::LIMIT#0".to_owned(),
++        "test_crate::{impl test_crate::Authority}::lower::LIMIT#1".to_owned(),
++    ] {
+         ensure!(
+-            items.len() == 1 && items[0]["pattern_spells_name"] == true,
+-            "`{pattern}` selected {items:?}"
+-        );
+-        ensure!(
+-            declared[items[0]["id"].as_str().unwrap()],
+-            "`{pattern}` selected an undeclared item"
++            patterns.contains(&expected),
++            "no item has the pattern `{expected}`"
+         );
+     }
+-    ensure!(expected.len() > 60, "only {} patterns", expected.len());
++
++    select_exactly(dir, "all", &patterns)?;
++    for (i, pattern) in patterns.iter().enumerate() {
++        if !pattern.starts_with("test_crate::") {
++            continue;
++        }
++        let graph = select_exactly(dir, &format!("alone{i}"), std::slice::from_ref(pattern))?;
++        for item in graph["items"].as_array().context("items")? {
++            let name = item["name"].as_str().unwrap();
++            ensure!(
++                patterns_of
++                    .get(name)
++                    .is_some_and(|patterns| patterns.contains(&item["pattern"].as_str())),
++                "selecting `{pattern}` alone, `{name}` has the pattern {} instead of one of {:?}",
++                item["pattern"],
++                patterns_of.get(name)
++            );
++        }
++    }
+     Ok(())
+ }

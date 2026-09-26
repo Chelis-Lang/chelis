@@ -1,0 +1,148 @@
+# charon integration step 14 after 546078ea5d: commit acbcbac50981150d909d4ae9279b1a1454909eca
+# first parent 72dd68680e0435993ebc47edd18378b2c1401bfe
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: CHARON_SIZE_REPORT size profile of the final LLBC
+
+diff --git a/src/bin/charon-driver/main.rs b/src/bin/charon-driver/main.rs
+index f2bcfa4..baea0fb 100644
+--- a/src/bin/charon-driver/main.rs
++++ b/src/bin/charon-driver/main.rs
+@@ -61,6 +61,7 @@ use charon_lib::{
+     },
+ };
+ use std::{fmt, panic};
++mod size_report;
+ 
+ pub enum CharonFailure {
+     /// The usize is the number of errors.
+@@ -144,6 +145,7 @@ fn run_charon() -> Result<usize, CharonFailure> {
+     }
+ 
+     let error_count = ctx.errors.borrow().error_count;
++    size_report::write(&ctx);
+ 
+     // # Final step: generate the files.
+     if !options.no_serialize {
+diff --git a/src/bin/charon-driver/size_report.rs b/src/bin/charon-driver/size_report.rs
+new file mode 100644
+index 0000000..1d55d28
+--- /dev/null
++++ b/src/bin/charon-driver/size_report.rs
+@@ -0,0 +1,116 @@
++//! Size profile of the final LLBC, for diagnosing oversized outputs.
++use charon_lib::ast::*;
++use charon_lib::pretty::formatter::IntoFormatter;
++use charon_lib::pretty::FmtWithCtx;
++use charon_lib::transform::TransformCtx;
++use serde_state::SerializeState;
++use std::collections::HashMap;
++use std::fmt::Write;
++
++fn serialized_bytes<T: SerializeState<HashConsDedupSerializer>>(x: &T) -> usize {
++    let mut out = Vec::new();
++    let state = HashConsDedupSerializer::default();
++    x.serialize_state(&state, &mut serde_json::Serializer::new(&mut out))
++        .expect("size report serialization failed");
++    out.len()
++}
++
++struct Row {
++    kind: &'static str,
++    name: String,
++    base: String,
++    instantiated: bool,
++    bytes: usize,
++    statements: usize,
++    types: usize,
++}
++
++/// When `CHARON_SIZE_REPORT` names a file, write a size profile of the final LLBC: item counts
++/// by kind, the largest items by serialized size (each serialized alone with its own hash-consing
++/// deduplication, which bounds its contribution to the crate file) and by statement count, and
++/// the base items whose partial-monomorphization copies weigh the most in total.
++pub fn write(ctx: &TransformCtx) {
++    let Some(path) = std::env::var_os("CHARON_SIZE_REPORT") else {
++        return;
++    };
++    let fmt = ctx.into_fmt();
++    let mut rows = Vec::new();
++    let mut row = |kind, meta: &ItemMeta, bytes, statements, types| {
++        let base = Name {
++            name: meta
++                .name
++                .name
++                .iter()
++                .filter(|e| !matches!(e, PathElem::Instantiated(_)))
++                .cloned()
++                .collect(),
++        };
++        rows.push(Row {
++            kind,
++            name: meta.name.with_ctx(&fmt).to_string(),
++            base: base.with_ctx(&fmt).to_string(),
++            instantiated: base.name.len() != meta.name.name.len(),
++            bytes,
++            statements,
++            types,
++        });
++    };
++    macro_rules! profile {
++        ($decls:expr, $kind:literal) => {
++            for decl in $decls.iter() {
++                let (mut statements, mut types) = (0, 0);
++                decl.dyn_visit(|_: &llbc_ast::Statement| statements += 1);
++                decl.dyn_visit(|_: &ullbc_ast::Statement| statements += 1);
++                decl.dyn_visit(|_: &Ty| types += 1);
++                row($kind, &decl.item_meta, serialized_bytes(decl), statements, types);
++            }
++        };
++    }
++    let translated = &ctx.translated;
++    profile!(translated.fun_decls, "fun");
++    profile!(translated.type_decls, "type");
++    profile!(translated.global_decls, "global");
++    profile!(translated.trait_decls, "trait_decl");
++    profile!(translated.trait_impls, "trait_impl");
++
++    let mut out = String::new();
++    let mut by_kind: HashMap<&str, (usize, usize, usize)> = HashMap::new();
++    for r in &rows {
++        let e = by_kind.entry(r.kind).or_default();
++        e.0 += 1;
++        e.1 += r.instantiated as usize;
++        e.2 += r.bytes;
++    }
++    let total: usize = rows.iter().map(|r| r.bytes).sum();
++    writeln!(out, "# items by kind: count, partially monomorphized, bytes (total {total})").unwrap();
++    let mut kinds: Vec<_> = by_kind.into_iter().collect();
++    kinds.sort();
++    for (kind, (count, inst, b)) in kinds {
++        writeln!(out, "{kind}\t{count}\t{inst}\t{b}").unwrap();
++    }
++    rows.sort_by(|a, b| b.bytes.cmp(&a.bytes));
++    writeln!(out, "\n# 50 largest items: bytes, statements, type nodes, kind, name").unwrap();
++    for r in rows.iter().take(50) {
++        writeln!(out, "{}\t{}\t{}\t{}\t{}", r.bytes, r.statements, r.types, r.kind, r.name).unwrap();
++    }
++    rows.sort_by(|a, b| b.statements.cmp(&a.statements));
++    writeln!(out, "\n# 50 largest bodies: statements, bytes, kind, name").unwrap();
++    for r in rows.iter().take(50) {
++        writeln!(out, "{}\t{}\t{}\t{}", r.statements, r.bytes, r.kind, r.name).unwrap();
++    }
++    let mut by_base: HashMap<&str, (usize, usize)> = HashMap::new();
++    for r in &rows {
++        let e = by_base.entry(&r.base).or_default();
++        e.0 += 1;
++        e.1 += r.bytes;
++    }
++    let mut bases: Vec<_> = by_base.into_iter().collect();
++    bases.sort_by(|a, b| b.1.1.cmp(&a.1.1));
++    writeln!(out, "\n# 50 heaviest base items with their instantiations: copies, bytes, name").unwrap();
++    for (base, (copies, b)) in bases.iter().take(50) {
++        writeln!(out, "{copies}\t{b}\t{base}").unwrap();
++    }
++    std::fs::write(&path, out).unwrap_or_else(|error| {
++        panic!("cannot write size report {}: {error}", path.to_string_lossy())
++    });
++}

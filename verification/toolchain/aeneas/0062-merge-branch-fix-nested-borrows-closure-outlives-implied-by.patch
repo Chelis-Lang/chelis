@@ -1,0 +1,3556 @@
+# aeneas integration step 62 after cba11f3beb: commit b90ec4f4fb0566471d5ea5153a4beb2dc3eec254
+# first parent 1e898b2fec502930a18baf671b5ec86d9f937e65, merged 8a964a4303a0a6727e242ec15bf63567093ea016
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (closure outlives implied by captures; levels absent from a value give back the value unchanged; symbolic tuples restricted to fields with positions)
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 385e785..795cbbc 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -3902,8 +3902,132 @@ let expand_char_switches (_crate : crate) (f : fun_decl) : fun_decl =
+         }
+   | _ -> f
+ 
++(** Closure types carry no outlives predicates, while rustc infers those of
++    the other structures from the types of their fields (for [struct W<'a, 'b>
++    { f : &'a mut C<'b> }]: ['b : 'a]). Well-formedness of a closure type
++    implies the same predicates for the types of its captured variables:
++    without them, the region of a borrow captured by a closure is not an
++    ancestor of the regions of the value it borrows, neither in the regions
++    hierarchy of a signature ([RegionsHierarchy]) nor in the outlive
++    projections of a value ([TypesAnalysis.compute_outlive_proj_ty]), so the
++    values borrowed through a captured borrow are never given back at their
++    level. We add them like rustc's inference: for every [&'r T] in the type
++    of a field, [T : 'r], and the (substituted) predicates of every ADT which
++    appears in the type of a field. A closure cannot capture itself, so the
++    recursion through the closures captured by a closure terminates.
++    Predicates which mention bound or erased regions are not added. *)
++let add_closure_implied_outlives (crate : crate) : crate =
++  let memo = ref TypeDeclId.Map.empty in
++  let supported_regions =
++    object
++      inherit [_] iter_ty
++
++      method! visit_region ok r =
++        match r with
++        | RVar (Free _) | RStatic -> ()
++        | _ -> ok := false
++    end
++  in
++  let is_supported (visit : bool ref -> unit) : bool =
++    let ok = ref true in
++    visit ok;
++    !ok
++  in
++  let rec predicates_of (id : TypeDeclId.id) : generic_params option =
++    match TypeDeclId.Map.find_opt id crate.type_decls with
++    | None -> None
++    | Some decl -> (
++        match (decl.src, decl.kind) with
++        | ClosureItem _, Struct fields -> (
++            match TypeDeclId.Map.find_opt id !memo with
++            | Some generics -> Some generics
++            | None ->
++                let generics = implied_generics decl.generics fields in
++                memo := TypeDeclId.Map.add id generics !memo;
++                Some generics)
++        | _ -> Some decl.generics)
++  and implied_generics (generics : generic_params) (fields : field list) :
++      generic_params =
++    let regions_outlive = ref (List.rev generics.regions_outlive) in
++    let types_outlive = ref (List.rev generics.types_outlive) in
++    let add_region_outlive (p : (region, region) outlives_pred) =
++      let r0, r1 = p in
++      let pred = { binder_regions = []; binder_value = p } in
++      if
++        is_supported (fun ok ->
++            supported_regions#visit_region ok r0;
++            supported_regions#visit_region ok r1)
++        && not (List.mem pred !regions_outlive)
++      then regions_outlive := pred :: !regions_outlive
++    in
++    let add_type_outlive (p : (ty, region) outlives_pred) =
++      let ty, r = p in
++      let pred = { binder_regions = []; binder_value = p } in
++      if
++        is_supported (fun ok ->
++            supported_regions#visit_ty ok ty;
++            supported_regions#visit_region ok r)
++        && not (List.mem pred !types_outlive)
++      then types_outlive := pred :: !types_outlive
++    in
++    let rec visit_ty (ty : ty) : unit =
++      match ty with
++      | TRef (r, pointee, _) ->
++          add_type_outlive (pointee, r);
++          visit_ty pointee
++      | TAdt { id; generics = args } ->
++          (match id with
++          | TAdtId id -> (
++              match
++                ( TypeDeclId.Map.find_opt id crate.type_decls,
++                  predicates_of id )
++              with
++              | Some decl, Some params ->
++                  let subst =
++                    [%add_loc] Substitute.make_subst_from_generics
++                      (Some decl.item_meta.span) decl.generics args Self
++                  in
++                  let params = Substitute.predicates_substitute subst params in
++                  List.iter
++                    (fun (p : _ region_binder) ->
++                      if p.binder_regions = [] then
++                        add_region_outlive p.binder_value)
++                    params.regions_outlive;
++                  List.iter
++                    (fun (p : _ region_binder) ->
++                      if p.binder_regions = [] then
++                        add_type_outlive p.binder_value)
++                    params.types_outlive
++              | _ -> ())
++          | TTuple | TBuiltin _ -> ());
++          List.iter visit_ty args.types
++      | TArray (ty, _) | TSlice ty | TRawPtr (ty, _) -> visit_ty ty
++      | TVar _ | TLiteral _ | TNever | TTraitType _ | TFnPtr _ | TFnDef _
++      | TDynTrait _ | TPtrMetadata _ | TError _ -> ()
++    in
++    List.iter (fun (f : field) -> visit_ty f.field_ty) fields;
++    {
++      generics with
++      regions_outlive = List.rev !regions_outlive;
++      types_outlive = List.rev !types_outlive;
++    }
++  in
++  let type_decls =
++    TypeDeclId.Map.map
++      (fun (decl : type_decl) ->
++        match (decl.src, decl.kind) with
++        | ClosureItem _, Struct _ -> (
++            match predicates_of decl.def_id with
++            | Some generics -> { decl with generics }
++            | None -> decl)
++        | _ -> decl)
++      crate.type_decls
++  in
++  { crate with type_decls }
++
+ let apply_passes (crate : crate) : crate =
+   (* Passes that apply to the whole crate *)
++  let crate = add_closure_implied_outlives crate in
+   let crate = normalize_modeled_trait_specializations crate in
+   (* Before [order_method_region_params]: an instance's shape binds the
+      parameters in their original order *)
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 377898e..e6b2f8c 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -197,6 +197,7 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       early_backward_inputs = RegionGroupId.Map.empty;
+       backward_outputs = Collections.IntMap.empty;
+       deferred_backward_outputs = Collections.IntMap.empty;
++      synth_ended = [];
+       (* Empty for now *)
+       calls;
+       loop_ids_map;
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index ce1fc9e..b25d05f 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -821,8 +821,12 @@ let ctx_get_reference (span : Meta.span option) (id : id) (ctx : extraction_ctx)
+       | FunId (FromLlbc (FunId (FRegular id), loop_id))
+         when PureUtils.FunLoopIdSet.mem (id, loop_id) ctx.local_function_refs ->
+           false
+-      | FunId (FromLlbc (FunId (FRegular id), _)) ->
+-          (FunDeclId.Map.find id ctx.trans_funs).f.builtin_info = None
++      | FunId (FromLlbc (FunId (FRegular id), _)) -> (
++          (* A function which could not be translated has no entry: [ctx_get]
++             already registered the error for this reference *)
++          match FunDeclId.Map.find_opt id ctx.trans_funs with
++          | Some f -> f.f.builtin_info = None
++          | None -> false)
+       | GlobalId id | GlobalPureValueId id ->
+           (GlobalDeclId.Map.find id ctx.trans_globals).builtin_info = None
+       | TerminationMeasureId _ | DecreasesProofId _ -> true
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 59e67e3..e6061ed 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -278,6 +278,13 @@ type bs_ctx = {
+           of this level, which may depend on inputs of lower levels, bound
+           later. We compute them upon returning, from the abstraction as it was
+           when the sub-abstraction ended. *)
++  synth_ended : (bool * (C.eval_ctx * V.abs)) list;
++      (** Nested borrows: the input abstraction ([true]) and the return
++          abstraction ([false]) of the backward function being synthesized, as
++          they were when their last level ended. A level of which no
++          sub-abstraction exists (the values hold no position of it, e.g.,
++          [None]) gives back the values themselves, unchanged (see
++          [SymbolicToPureValues.tavalue_to_padded]). *)
+   backward_outputs : fvar list AbsLevelMap.t;
+       (** The variables that the backward functions will output, corresponding
+           to the borrows they give back (don't include the backward state).
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 2982158..07b90d3 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1512,6 +1512,18 @@ and translate_end_abs (ectx : C.eval_ctx) (abs : V.abs)
+ and translate_synthesis_outputs (ectx : C.eval_ctx) (abs : V.abs) (e : S.expr)
+     (ctx : bs_ctx) (rg_id : T.RegionGroupId.id) (abs_level : V.abs_level) :
+     texpr =
++  let ctx =
++    let from_input =
++      match abs.kind with
++      | V.SynthRet _ -> false
++      | _ -> true
++    in
++    {
++      ctx with
++      synth_ended =
++        (from_input, (ectx, abs)) :: List.remove_assoc from_input ctx.synth_ended;
++    }
++  in
+   if abs_level > 0 then (
+     (* Nested borrows: the values consumed at this level may be given back to
+        the abstraction by its own lower levels, which are inputs of the
+@@ -1687,11 +1699,11 @@ and translate_end_abstraction_synth_input (ectx : C.eval_ctx) (abs : V.abs)
+           | _ -> ctx)
+         ctx (List.rev !carriers)
+     in
+-    (* Translate the next expression *)
+-    let next_e = translate_expr e ctx in
+-    (* Generate the assignemnts *)
+-    let monadic = false in
+-    mk_closed_checked_lets __FILE__ __LINE__ ctx monadic eqs next_e)
++    (* Generate the assignments, then translate the next expression. The
++       values given back to the tuples of nested levels are bound once the
++       values the backward function receives are (see
++       [SymbolicToPureValues.aproj_to_given_back_aux]). *)
++    emit_pure_lets ctx eqs (translate_expr e))
+   else
+     (* An ancestor input abstraction ended while synthesizing the backward
+        function of a descendant region group. At level 0 it only consumes values
+@@ -2350,8 +2362,28 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+       (* Each argument is one level's tuple, in the order specified by the
+          decomposed signature. Applying an earlier level must not evaluate the
+          lower-level body or repeat an already applied argument. *)
++      (* Nested borrows: the levels above [abs_level] whose inputs are still
++         pending never existed (the interpreter ends the deeper levels of an
++         abstraction before a level): the values hold no position of these
++         levels (e.g., [None] for [Option<&'a mut Frame<'b>>]) and supply
++         their unchanged values (see [abs_to_padded]). *)
++      let absent, pending_inputs =
++        List.partition (fun (level, _) -> level > abs_level) stage.pending_inputs
++      in
++      let absent_args =
++        List.map
++          (fun (level, tys) ->
++            let values = abs_to_padded ?sides ctx ectx abs level in
++            [%cassert] ctx.span
++              (List.map (fun (e : texpr) -> e.ty) values = List.map snd tys)
++              ("Nested borrows: the level " ^ string_of_int level
++             ^ " of a function call abstraction never existed, but its \
++                values do not supply the inputs of this level");
++            mk_simpl_tuple_texpr ctx.span values)
++          absent
++      in
+       let args, pending_inputs =
+-        match stage.pending_inputs with
++        match pending_inputs with
+         | (level, tys) :: rest when level = abs_level ->
+             [%sanity_check] ctx.span
+               (List.map (fun (e : texpr) -> e.ty) inputs = List.map snd tys);
+@@ -2363,9 +2395,15 @@ and translate_end_abstraction_fun_call_level (ectx : C.eval_ctx) (abs : V.abs)
+               (List.for_all (fun (level, _) -> level < abs_level) pending);
+             ([], pending)
+       in
++      let args = absent_args @ args in
+       let stage =
+         if args = [] then stage
+-        else { stage with supplied_inputs = abs_level :: stage.supplied_inputs }
++        else
++          {
++            stage with
++            supplied_inputs =
++              abs_level :: (List.map fst absent @ stage.supplied_inputs);
++          }
+       in
+       let nested_updates =
+         if inputs <> [] && args = [] then
+@@ -2667,6 +2705,18 @@ and translate_end_abstraction_synth_ret (ectx : C.eval_ctx) (abs : V.abs)
+        another region group is not supported";
+     translate_end_abstraction_synth_input ectx abs e ctx rg_id abs_level)
+   else begin
++  (* Nested borrows: the levels of the return abstraction of which no
++     sub-abstraction exists give back its unchanged values (see
++     [bs_ctx.synth_ended]) *)
++  let ctx =
++    if ctx.bid = Some rg_id then
++      {
++        ctx with
++        synth_ended =
++          (false, (ectx, abs)) :: List.remove_assoc false ctx.synth_ended;
++      }
++    else ctx
++  in
+   (* If we end the abstraction which consumed the return value of the function
+      we are synthesizing, we get back the borrows which were inside. Those borrows
+      are actually input arguments of the backward function we are synthesizing.
+@@ -3385,6 +3435,43 @@ and translate_forward_end (return_value : (C.eval_ctx * V.tvalue) option)
+                       ^ ")");
+                     Some (level, consumed))
+               (AbsLevelMap.to_list ctx.deferred_backward_outputs)
++            @ (* The declared levels of which no sub-abstraction exists: the
++                 values hold no position of them (e.g., [None]) and give back
++                 their unchanged values (see [tavalue_to_padded]) *)
++            List.filter_map
++              (fun (level, types) ->
++                if
++                  level = 0
++                  || AbsLevelMap.mem level ctx.deferred_backward_outputs
++                then None
++                else
++                  (* The outputs of an even level come from the inputs, the
++                     outputs of an odd level from the output (see
++                     [back_level_is_output]) *)
++                  let from_input = back_level_is_output ~from_input:true level in
++                  let ectx, abs =
++                    [%unwrap_with_span] ctx.span
++                      (List.assoc_opt from_input ctx.synth_ended)
++                      ("Nested borrows: missing outputs of level "
++                     ^ string_of_int level
++                     ^ " of a staged backward function whose abstraction \
++                        never ended")
++                  in
++                  let sides =
++                    match back_sg.early with
++                    | [] -> None
++                    | _ -> Some (staged_abs_sides ctx.span back_sg stage abs)
++                  in
++                  let values = abs_to_padded ?sides ctx ectx abs level in
++                  [%cassert] ctx.span
++                    (List.map (fun (value : texpr) -> value.ty) values
++                    = List.map snd types)
++                    ("Nested borrows: the level " ^ string_of_int level
++                   ^ " of the input or output abstraction of a backward \
++                      function never existed, but its values do not give back \
++                      the outputs of this level");
++                  Some (level, values))
++              declared
+           in
+           let mk_return ctx v =
+             [%sanity_check] ctx.span (v = None);
+diff --git a/src/symbolic/SymbolicToPureValues.ml b/src/symbolic/SymbolicToPureValues.ml
+index 75f6e72..d05e0d0 100644
+--- a/src/symbolic/SymbolicToPureValues.ml
++++ b/src/symbolic/SymbolicToPureValues.ml
+@@ -871,17 +871,29 @@ let recombine_consumed_projections ?(nested : bool = false) (ctx : bs_ctx)
+           symbolic_value_to_texpr ctx { sv_id = v.sv_id; sv_ty = v.proj_ty } ))
+       consumed
+   in
++  (* The original value is not available if it is not in scope, or if its
++     variable is promised (see [SymbolicToPureExpressions.emit_pure_lets]):
++     e.g., the value given back to an ancestor region group by a function call
++     whose stage receives the inputs of the ancestor's backward function,
++     which are not in scope here. *)
++  let original_available =
++    match V.SymbolicValueId.Map.find_opt original.sv_id ctx.sv_to_var with
++    | None -> false
++    | Some var -> not (FVarId.Set.mem var.id ctx.promised_fvars)
++  in
+   let original_expr =
+-    match (V.SymbolicValueId.Map.find_opt original.sv_id ctx.sv_to_var, updates) with
+-    | None, (update_ty, _, update) :: _
++    match (original_available, updates) with
++    | false, (update_ty, _, update) :: _
+       when nested
+            && TypesUtils.ty_erase_regions update_ty
+               = TypesUtils.ty_erase_regions original.sv_ty ->
+         (* Nested borrows: the original value may have been given back to an
+            ancestor abstraction, whose backward function receives it (it is not
+            in scope here). Only the positions owned by this abstraction are
+-           read from the value we build, and the update provides all of them:
+-           it can stand for the carrier. *)
++           read from the value we build (the consumers of the values given back
++           by a region group recombine them with the positions of this group
++           only), and the update provides all of them: it can stand for the
++           carrier. *)
+         update
+     | _ -> symbolic_value_to_texpr ctx original
+   in
+@@ -1313,6 +1325,143 @@ let consumed_nested_sides_to_translate (ctx : bs_ctx) ~(filter : bool)
+     let given_back_real = real (current_level + 1) given_back in
+     (real current_level child || not given_back_real, given_back_real)
+ 
++(** Nested borrows: the positions of a level in a symbolic value. The types of
++    the backward functions only keep the tuple fields which hold positions of
++    a level (see [SymbolicToPureTypes.translate_back_nested_ty]), while the
++    projectors over a symbolic value do not distinguish its fields: a symbolic
++    value is consumed or given back as a whole at a level (see
++    [aproj_to_consumed_aux] and [aproj_to_given_back_aux]). We restrict such a
++    value to the fields with positions at the boundaries of the backward
++    functions, and embed a restricted value into the original value. *)
++type nested_shape =
++  | NestedWhole  (** The whole value *)
++  | NestedFields of (T.ty * nested_shape option) list
++      (** A tuple, of which we keep the fields with a shape *)
++
++(** The shape of the positions at the relative [level] of a value of type [ty]
++    for the mutable borrows of [regions] (see [nested_shape]), mirroring
++    [SymbolicToPureTypes.translate_back_nested_ty]: [None] if it has none. *)
++let nested_value_shape (ctx : bs_ctx) (regions : T.RegionId.Set.t)
++    (level : abs_level) (ty : T.ty) : nested_shape option =
++  let keep_region = region_selected regions in
++  let has_mut = projection_selects_mutable ctx.decls_ctx regions in
++  let rec shape (current : abs_level) (ty : T.ty) : nested_shape option =
++    if level < current || not (has_mut ty) then None
++    else
++      match ty with
++      | T.TRef (r, _, RMut) when keep_region r ->
++          if current = level then Some NestedWhole else None
++      | T.TRef (_, rty, RMut) -> (
++          match (shape current rty, shape (current + 1) rty) with
++          | Some _, Some _ ->
++              [%craise] ctx.span
++                "Nested borrows: a symbolic value holds positions of the same \
++                 level in the value of an ignored mutable borrow and in the \
++                 value given back to it"
++          | Some s, None | None, Some s -> Some s
++          | None, None -> None)
++      | T.TRef (_, _, RShared) -> None
++      | T.TAdt { id = TTuple; generics } ->
++          let fields =
++            List.map (fun ty -> (ty, shape current ty)) generics.types
++          in
++          if List.for_all (fun (_, s) -> s = None) fields then None
++          else if List.for_all (fun (_, s) -> s = Some NestedWhole) fields then
++            Some NestedWhole
++          else Some (NestedFields fields)
++      | T.TAdt { id = TBuiltin TBox; generics = { types = [ ty ]; _ } } ->
++          shape current ty
++      | T.TAdt _ | T.TArray _ | T.TSlice _ -> (
++          (* One value of the ADT per view: a symbolic value is the value of
++             its single view (several views disagree with the signature) *)
++          match
++            back_adt_view_keys
++              (back_ty_paths_for_regions ctx.decls_ctx keep_region ty)
++              ~select:(fun _ -> true)
++              (level - current)
++          with
++          | [] -> None
++          | _ -> Some NestedWhole)
++      | _ -> None
++  in
++  shape 0 ty
++
++(** The pure type of the positions of [shape] in a value of type [ty] *)
++let rec nested_shape_ty (ctx : bs_ctx) (shape : nested_shape) (ty : T.ty) : ty
++    =
++  match shape with
++  | NestedWhole -> ctx_translate_fwd_ty ctx ty
++  | NestedFields fields ->
++      mk_simpl_tuple_ty
++        (List.filter_map
++           (fun (ty, shape) ->
++             Option.map (fun shape -> nested_shape_ty ctx shape ty) shape)
++           fields)
++
++(** The field [i] of a value [e] of a pure tuple type with the fields [tys] (a
++    tuple with a single field is the field itself) *)
++let nested_tuple_field (span : Meta.span) (tys : ty list) (e : texpr) (i : int)
++    : texpr =
++  match tys with
++  | [ _ ] -> e
++  | _ -> (
++      let head, args = destruct_apps e in
++      match head.e with
++      | Qualif { id = AdtCons { adt_id = TTuple; _ }; _ }
++        when List.length args = List.length tys ->
++          List.nth args i
++      | _ -> mk_adt_proj span e (T.FieldId.of_int i) (List.nth tys i))
++
++(** Restrict a whole value [e] to the positions of [shape] *)
++let rec restrict_nested_value (ctx : bs_ctx) (shape : nested_shape) (e : texpr)
++    : texpr =
++  match shape with
++  | NestedWhole -> e
++  | NestedFields fields ->
++      let tys = List.map (fun (ty, _) -> ctx_translate_fwd_ty ctx ty) fields in
++      mk_simpl_tuple_texpr ctx.span
++        (List.concat
++           (List.mapi
++              (fun i (_, shape) ->
++                match shape with
++                | None -> []
++                | Some shape ->
++                    [
++                      restrict_nested_value ctx shape
++                        (nested_tuple_field ctx.span tys e i);
++                    ])
++              fields))
++
++(** The inverse of [restrict_nested_value]: the whole value whose positions of
++    [shape] are those of [restricted] and whose other fields are those of
++    [original] (a value given back by a projector is the original value outside
++    of the projected regions) *)
++let rec embed_nested_value (ctx : bs_ctx) (shape : nested_shape)
++    (restricted : texpr) (original : texpr) : texpr =
++  match shape with
++  | NestedWhole -> restricted
++  | NestedFields fields ->
++      let tys = List.map (fun (ty, _) -> ctx_translate_fwd_ty ctx ty) fields in
++      let kept =
++        List.filter_map
++          (fun (ty, shape) ->
++            Option.map (fun shape -> nested_shape_ty ctx shape ty) shape)
++          fields
++      in
++      let _, values =
++        List.fold_left_map
++          (fun (i, k) (_, shape) ->
++            let original = nested_tuple_field ctx.span tys original i in
++            match shape with
++            | None -> ((i + 1, k), original)
++            | Some shape ->
++                let restricted = nested_tuple_field ctx.span kept restricted k in
++                ( (i + 1, k + 1),
++                  embed_nested_value ctx shape restricted original ))
++          (0, 0) fields
++      in
++      mk_simpl_tuple_texpr ctx.span values
++
+ (** Explore an abstraction value and convert it to a consumed value by
+     collecting all the meta-values from the ended *loans*. We assume the avalue
+     was generated by a loan projector.
+@@ -1345,8 +1494,8 @@ let rec tavalue_to_consumed_aux ~(filter : bool)
+           current_level bc
+     | ASymbolic (pm, aproj) ->
+         [%sanity_check] ctx.span (pm = PNone);
+-        aproj_to_consumed_aux ctx abs_regions abs_level current_level aproj
+-          av.ty
++        aproj_to_consumed_aux ~filter ctx abs_regions abs_level current_level
++          aproj av.ty
+     | AIgnored mv -> (
+         if filter then None
+         else
+@@ -1593,9 +1742,9 @@ and aborrow_content_to_consumed_aux ~(filter : bool)
+   | V.AEndedSharedBorrow | V.AProjSharedBorrow _ ->
+       [%craise] ctx.span "Unimplemented"
+ 
+-and aproj_to_consumed_aux (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+-    (abs_level : abs_level) (current_level : abs_level) (aproj : V.aproj)
+-    (ty : T.ty) : texpr option =
++and aproj_to_consumed_aux ~(filter : bool) (ctx : bs_ctx)
++    (abs_regions : T.RegionId.Set.t) (abs_level : abs_level)
++    (current_level : abs_level) (aproj : V.aproj) (ty : T.ty) : texpr option =
+   let values =
+     fold_aproj_at_level abs_level current_level
+       (fun values aproj ty ->
+@@ -1611,6 +1760,21 @@ and aproj_to_consumed_aux (ctx : bs_ctx) (abs_regions : T.RegionId.Set.t)
+                   recombine_consumed_projections ~nested:(abs_level > 0) ctx
+                     abs_regions original (List.map fst consumed)
+             in
++            (* Nested borrows: outside of an ADT, the backward function only
++               receives the tuple fields with positions of this level (the
++               children of the projector have its type, see
++               [fold_aproj_at_level]) *)
++            let value =
++              match
++                if filter && abs_level > 0 then
++                  nested_value_shape ctx abs_regions
++                    (abs_level - current_level)
++                    ty
++                else None
++              with
++              | Some shape -> restrict_nested_value ctx shape value
++              | None -> value
++            in
+             value :: values
+         | AEndedProjBorrows _ | AProjBorrows _ | AEmpty -> values
+         | APendingLoans _ ->
+@@ -2002,6 +2166,73 @@ let tavalue_to_consumed ?(side : back_side = BothSides)
+         "the value doesn't contains mutable loan projectors (ignoring it)"];
+       None
+ 
++(** Nested borrows: the value at level [abs_level] of an abstraction value
++    whose type has positions at this level while the value holds none, e.g.
++    [None] for [Option<&'a mut Frame<'b>>] at the level of the value given back
++    to ['a]: no loan or borrow of this level ever exists, and the value at
++    this level is the value itself, unchanged. We follow the positions of the
++    type: at an ended ignored mutable loan or borrow, exactly one of the
++    borrowed value and the value given back holds positions of the level; the
++    fields which hold none are carriers (their meta-values; tuples drop them,
++    like [SymbolicToPureTypes.translate_back_nested_ty]). Returns [None] if the
++    type of the value has no position at this level, and raises an error if
++    the value holds a loan, borrow or projector on the way. *)
++let tavalue_to_padded (ctx : bs_ctx) (ectx : C.eval_ctx)
++    (abs_regions : T.RegionId.Set.t) (abs_level : abs_level) (av : V.tavalue) :
++    texpr option =
++  let keep_region (r : T.region) =
++    match r with
++    | T.RVar (Free rid) -> T.RegionId.Set.mem rid abs_regions
++    | _ -> false
++  in
++  let has_positions (level : abs_level) (ty : T.ty) =
++    level >= 0
++    && List.exists
++         (fun path -> SymbolicToPureTypes.back_path_level path = level)
++         (SymbolicToPureTypes.back_ty_paths_for_regions ctx.decls_ctx
++            keep_region ty)
++  in
++  let error () =
++    [%craise] ctx.span
++      ("Nested borrows: a value whose type has positions at level "
++      ^ string_of_int abs_level
++      ^ " of an abstraction of which no sub-abstraction of this level exists \
++         holds a loan, a borrow or a projector on these positions")
++  in
++  let rec pad (level : abs_level) (av : V.tavalue) : texpr =
++    match av.value with
++    | AIgnored (Some mv) when not (has_positions level av.ty) ->
++        tvalue_to_texpr ctx ectx mv
++    | AAdt adt -> (
++        match av.ty with
++        | T.TAdt { id = TTuple; _ } ->
++            mk_simpl_tuple_texpr ctx.span
++              (List.filter_map
++                 (fun (field : V.tavalue) ->
++                   if has_positions level field.ty then Some (pad level field)
++                   else None)
++                 adt.fields)
++        | T.TAdt { id = TBuiltin TBox; _ } -> (
++            match adt.fields with
++            | [ field ] -> pad level field
++            | _ -> error ())
++        | T.TAdt { id = TAdtId _; _ } ->
++            let ty = translate_fwd_ty (Some ctx.span) ctx.decls_ctx av.ty in
++            mk_adt_texpr ctx.span ty adt.variant_id
++              (List.map (pad level) adt.fields)
++        | _ -> error ())
++    | ALoan (AEndedIgnoredMutLoan { child; given_back; _ })
++    | ABorrow (AEndedIgnoredMutBorrow { child; given_back; _ }) -> (
++        match
++          (has_positions level child.ty, has_positions (level - 1) given_back.ty)
++        with
++        | true, false -> pad level child
++        | false, true -> pad (level - 1) given_back
++        | _ -> error ())
++    | _ -> error ()
++  in
++  if has_positions abs_level av.ty then Some (pad abs_level av) else None
++
+ (** The sides selected for each value of an abstraction (see
+     [select_back_side]); [None] ignores the value. *)
+ let abs_back_sides (abs : V.abs) (sides : back_side option list option) :
+@@ -2065,6 +2296,21 @@ let abs_to_consumed ?(sides : back_side option list option) (ctx : bs_ctx)
+     (fun (_, value, _) -> value)
+     (abs_to_consumed_dropped ?sides ctx ectx abs abs_level)
+ 
++(** Nested borrows: the values consumed at a level [abs_level] of an
++    abstraction of which no sub-abstraction exists because the values hold no
++    position of this level (see [tavalue_to_padded]): every selected value
++    with positions of this level supplies its unchanged value. *)
++let abs_to_padded ?(sides : back_side option list option) (ctx : bs_ctx)
++    (ectx : C.eval_ctx) (abs : V.abs) (abs_level : abs_level) : texpr list =
++  List.filter_map
++    (fun (side, av) ->
++      match side with
++      | None -> None
++      | Some side ->
++          tavalue_to_padded ctx ectx abs.regions.owned abs_level
++            (select_back_side ctx abs.regions.owned side abs_level av))
++    (abs_back_sides abs sides)
++
+ (** Staged backward functions: whether the values consumed at [abs_level] on
+     the selected positions of an abstraction (see [abs_back_sides]) are all
+     available, that is, no loan of this level on these positions is still
+@@ -2245,8 +2491,8 @@ let rec tavalue_to_given_back_aux ~(filter : bool)
+               ctx.type_ctx.type_infos abs_regions abs_level current_level av
+           with
+           | BorrowProj BMut ->
+-              aproj_to_given_back_aux abs_regions abs_level current_level mp
+-                aproj av.ty ctx
++              aproj_to_given_back_aux ~filter abs_regions abs_level
++                current_level mp aproj av.ty ctx
+           | BorrowProj BShared | LoanProj _ | UnknownProj ->
+               if filter then (ctx, None)
+               else (ctx, Some (mk_ignored_pat (ctx_translate_fwd_ty ctx av.ty)))
+@@ -2389,16 +2635,29 @@ and ended_nested_to_given_back ~(filter : bool)
+           (current_level, child_av, child)
+           (current_level + 1, given_back_av, given_back) )
+ 
+-and aproj_to_given_back_aux (abs_regions : T.RegionId.Set.t)
++and aproj_to_given_back_aux ~(filter : bool) (abs_regions : T.RegionId.Set.t)
+     (abs_level : abs_level) (current_level : abs_level) (mp : mplace option)
+     (aproj : V.aproj) (ty : T.ty) (ctx : bs_ctx) : bs_ctx * tpat option =
+   let has_mut_region =
+     TypesUtils.ty_has_mut_borrow_for_region_in_set ctx.type_ctx.type_infos
+       abs_regions
+   in
++  (* Nested borrows: outside of an ADT, the backward functions only give back
++     (or receive) the tuple fields with positions of this level (see
++     [nested_shape]; the children of the projector have its type, see
++     [fold_aproj_at_level]) *)
++  let restricted_shape ty =
++    if filter && abs_level > 0 then
++      match
++        nested_value_shape ctx abs_regions (abs_level - current_level) ty
++      with
++      | Some (NestedFields _ as shape) -> Some shape
++      | Some NestedWhole | None -> None
++    else None
++  in
+   let ctx, pats =
+     fold_aproj_at_level abs_level current_level
+-      (fun (ctx, pats) aproj _ty ->
++      (fun (ctx, pats) aproj ty ->
+         match aproj with
+         | AEndedProjBorrows { mvalues = mv; loans = [] }
+           when mv.consumed = mv.given_back.sv_id
+@@ -2408,9 +2667,14 @@ and aproj_to_given_back_aux (abs_regions : T.RegionId.Set.t)
+                projector otherwise always gives back a fresh value), except by
+                a stage before the last one, whose output on these positions
+                a later stage receives (see [bs_ctx.dropped_twin_scope]) *)
++            let ignored_ty =
++              match restricted_shape ty with
++              | Some shape -> nested_shape_ty ctx shape ty
++              | None -> ctx_translate_fwd_ty ctx mv.given_back.sv_ty
++            in
+             let ty = ctx_translate_fwd_ty ctx mv.given_back.sv_ty in
+             (match ctx.dropped_twin_scope with
+-            | None -> (ctx, ({ pat = PIgnored; ty } : tpat) :: pats)
++            | None -> (ctx, ({ pat = PIgnored; ty = ignored_ty } : tpat) :: pats)
+             | Some scope -> (
+                 let bind ctx (var : fvar) =
+                   [%cassert] ctx.span (var.ty = ty)
+@@ -2426,7 +2690,7 @@ and aproj_to_given_back_aux (abs_regions : T.RegionId.Set.t)
+                 in
+                 match List.assoc_opt mv.consumed scope with
+                 | Some (_, true) ->
+-                    (ctx, ({ pat = PIgnored; ty } : tpat) :: pats)
++                    (ctx, ({ pat = PIgnored; ty = ignored_ty } : tpat) :: pats)
+                 | Some (var, false) -> bind ctx var
+                 | None ->
+                     let ctx, var =
+@@ -2456,6 +2720,46 @@ and aproj_to_given_back_aux (abs_regions : T.RegionId.Set.t)
+                       ctx.var_id_to_default;
+                 }
+             in
++            let ctx, pat =
++              match restricted_shape ty with
++              | None -> (ctx, pat)
++              | Some shape ->
++                  (* The value given back is the original value, except on the
++                     positions of this level: bind the restricted value, then
++                     the whole value (once the restricted value is bound, see
++                     [SymbolicToPureExpressions.emit_pure_lets]) *)
++                  let original =
++                    match
++                      V.SymbolicValueId.Map.find_opt sv.sv_id ctx.sv_to_var
++                    with
++                    | Some original
++                      when not (FVarId.Set.mem original.id ctx.promised_fvars)
++                      ->
++                        mk_texpr_from_fvar original
++                    | _ ->
++                        [%craise] ctx.span
++                          "Nested borrows: the value given back to a tuple at \
++                           a nested level only holds the fields with positions \
++                           of this level, and the original value which holds \
++                           the other fields is not in scope"
++                  in
++                  let ctx, restricted =
++                    fresh_var var.basename (nested_shape_ty ctx shape ty) ctx
++                  in
++                  let whole =
++                    embed_nested_value ctx shape
++                      (mk_texpr_from_fvar restricted)
++                      original
++                  in
++                  [%sanity_check] ctx.span (whole.ty = var.ty);
++                  ( {
++                      ctx with
++                      deferred_lets = ctx.deferred_lets @ [ (pat, whole) ];
++                      promised_fvars =
++                        FVarId.Set.add restricted.id ctx.promised_fvars;
++                    },
++                    mk_tpat_from_fvar None restricted )
++            in
+             (ctx, pat :: pats)
+         | AProjBorrows { proj; _ } when has_mut_region proj.proj_ty ->
+             [%craise] ctx.span
+diff --git a/tests/lean/NestedBorrowsAbsentLevel.lean b/tests/lean/NestedBorrowsAbsentLevel.lean
+new file mode 100644
+index 0000000..0d06bd6
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAbsentLevel.lean
+@@ -0,0 +1 @@
++import NestedBorrowsAbsentLevel.Checks
+diff --git a/tests/lean/NestedBorrowsAbsentLevel/Checks.lean b/tests/lean/NestedBorrowsAbsentLevel/Checks.lean
+new file mode 100644
+index 0000000..7fd2a12
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAbsentLevel/Checks.lean
+@@ -0,0 +1,40 @@
++import NestedBorrowsAbsentLevel.NestedBorrowsAbsentLevel
++
++/-! Evaluate the model of `tests/src/nested-borrows-absent-level.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_absent_level.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def u8 (x : Nat) : U8 := ⟨BitVec.ofNat _ x⟩
++
++def triple : Result (U32 × U32 × U32) → Option (Nat × Nat × Nat)
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++def pair : Result (U32 × U32) → Option (Nat × Nat)
++  | ok (a, b) => some (a.val, b.val)
++  | _ => none
++
++def quad : Result (U32 × U32 × U32 × U32) → Option (Nat × Nat × Nat × Nat)
++  | ok (a, b, c, d) => some (a.val, b.val, c.val, d.val)
++  | _ => none
++
++def count (n : Nat) (s : Bool) := triple (drive_count (u n) s)
++def none1 (n : Nat) := pair (drive_none (u n))
++def two (n w : Nat) := quad (drive_two (u n) (u8 w))
++
++#guard count 3 false == some (3, 1, 105)
++#guard count 3 true == some (6, 2, 108)
++#guard count 7 true == some (14, 2, 112)
++
++#guard none1 0 == some (3, 7)
++#guard none1 4 == some (3, 11)
++
++#guard two 1 0 == some (3, 1, 2, 14)
++#guard two 1 1 == some (4, 2, 2, 15)
++#guard two 1 2 == some (5, 1, 3, 16)
++#guard two 6 3 == some (26, 2, 3, 27)
++
++end nested_borrows_absent_level.checks
+diff --git a/tests/lean/NestedBorrowsAbsentLevel/NestedBorrowsAbsentLevel.lean b/tests/lean/NestedBorrowsAbsentLevel/NestedBorrowsAbsentLevel.lean
+new file mode 100644
+index 0000000..cfe3326
+--- /dev/null
++++ b/tests/lean/NestedBorrowsAbsentLevel/NestedBorrowsAbsentLevel.lean
+@@ -0,0 +1,296 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_absent_level]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_absent_level
++
++/-- [nested_borrows_absent_level::Frame]
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 12:0-15:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.U32
++  id : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_absent_level::bump]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 16:0-20:1 -/
++def bump
++  (frame : _root_.nested_borrows_absent_level.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_absent_level.Frame ×
++    (_root_.nested_borrows_absent_level.Frame →
++    _root_.nested_borrows_absent_level.Frame))
++  := do
++  let i ← lift (core.num.U32.wrapping_add frame.steps n)
++  let i1 ← lift (core.num.U32.wrapping_add frame.id 1#u32)
++  let i2 ← lift (core.num.U32.wrapping_mul n 2#u32)
++  let back :=
++    (fun frame1 => { frame with steps := frame1.steps } :
++      _root_.nested_borrows_absent_level.Frame →
++      _root_.nested_borrows_absent_level.Frame)
++  _root_.Aeneas.Std.Result.ok (i2, { steps := i, id := i1 }, back)
++
++/-- [nested_borrows_absent_level::count_into]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 21:0-26:1
++    Visibility: public -/
++def count_into
++  (execution : _root_.Option _root_.nested_borrows_absent_level.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame) × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame → _root_.Option
++    _root_.nested_borrows_absent_level.Frame))
++  := do
++  match execution with
++  | none =>
++    let back :=
++      (fun execution1 =>
++         let o :=
++           match (none : _root_.Option
++             _root_.nested_borrows_absent_level.Frame) with
++           | none => none
++           | some f =>
++             match execution1 with
++             | some f1 => some { f with steps := f1.steps }
++             | _ => none
++         match execution with
++         | none => none
++         | some f =>
++           match o with
++           | some f1 => some { f with steps := f1.steps }
++           | _ => some f : _root_.Option
++        _root_.nested_borrows_absent_level.Frame → _root_.Option
++        _root_.nested_borrows_absent_level.Frame)
++    _root_.Aeneas.Std.Result.ok (n, none, back)
++  | some f =>
++    let (n1, f1, bump_back) ← _root_.nested_borrows_absent_level.bump f n
++    let back :=
++      (fun execution1 =>
++         let f2 :=
++           match execution1 with
++           | some f3 => { f1 with steps := f3.steps }
++           | _ => f1
++         let f3 := bump_back { f1 with steps := f2.steps }
++         match execution with
++         | none => none
++         | some f4 =>
++           match some { f with steps := f3.steps } with
++           | some f5 => some { f4 with steps := f5.steps }
++           | _ => some f4 : _root_.Option
++        _root_.nested_borrows_absent_level.Frame → _root_.Option
++        _root_.nested_borrows_absent_level.Frame)
++    _root_.Aeneas.Std.Result.ok (n1, some f1, back)
++
++/-- [nested_borrows_absent_level::drive_count]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 27:0-34:1
++    Visibility: public -/
++def drive_count
++  (n : _root_.Aeneas.Std.U32) (some1 : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (f, r, back) ←
++    if some1
++    then
++      do
++      let (r1, o, count_into_back) ←
++        _root_.nested_borrows_absent_level.count_into (some
++          { steps := 5#u32, id := 1#u32 }) n
++      let f1 :=
++        match o with
++        | some f2 => f2
++        | _ =>
++          ({ steps := 5#u32, id := 1#u32 } :
++            _root_.nested_borrows_absent_level.Frame)
++      _root_.Aeneas.Std.Result.ok (f1, r1,
++        (fun f2 =>
++           match count_into_back (some f2) with
++           | some (_root_.nested_borrows_absent_level.Frame.mk i _) => i
++           | _ => r1 : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32))
++    else
++      do
++      let (r1, _, _) ← _root_.nested_borrows_absent_level.count_into none n
++      _root_.Aeneas.Std.Result.ok (({ steps := 5#u32, id := 1#u32 } :
++        _root_.nested_borrows_absent_level.Frame), r1,
++        (fun f1 => let ⟨ i, _ ⟩ := f1
++                   i : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32))
++  let i ← lift (core.num.U32.wrapping_add f.steps 100#u32)
++  let s := back { f with steps := i }
++  _root_.Aeneas.Std.Result.ok (r, f.id, s)
++
++/-- [nested_borrows_absent_level::drive_none]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 35:0-42:1
++    Visibility: public -/
++def drive_none
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, _, _) ← _root_.nested_borrows_absent_level.count_into none n
++  let s ← lift (core.num.U32.wrapping_add 7#u32 r)
++  _root_.Aeneas.Std.Result.ok (3#u32, s)
++
++/-- [nested_borrows_absent_level::count_two]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 43:0-47:1
++    Visibility: public -/
++def count_two
++  (a : _root_.Option _root_.nested_borrows_absent_level.Frame)
++  (b : _root_.Option _root_.nested_borrows_absent_level.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame) × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame → _root_.Option
++    _root_.nested_borrows_absent_level.Frame) × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame) × (_root_.Option
++    _root_.nested_borrows_absent_level.Frame → _root_.Option
++    _root_.nested_borrows_absent_level.Frame))
++  := do
++  let (x, a1, count_into_back) ←
++    _root_.nested_borrows_absent_level.count_into a n
++  let i ← lift (core.num.U32.wrapping_add n 1#u32)
++  let (y, b1, count_into_back1) ←
++    _root_.nested_borrows_absent_level.count_into b i
++  let i1 ← lift (core.num.U32.wrapping_add x y)
++  let back :=
++    (fun a2 =>
++       let o :=
++         count_into_back
++           (match a1 with
++            | none => none
++            | some f =>
++              match a2 with
++              | some f1 => some { f with steps := f1.steps }
++              | _ => a1)
++       match a with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with steps := f1.steps }
++         | _ => a : _root_.Option _root_.nested_borrows_absent_level.Frame →
++      _root_.Option _root_.nested_borrows_absent_level.Frame)
++  let back1 :=
++    (fun b2 =>
++       let o :=
++         count_into_back1
++           (match b1 with
++            | none => none
++            | some f =>
++              match b2 with
++              | some f1 => some { f with steps := f1.steps }
++              | _ => b1)
++       match b with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with steps := f1.steps }
++         | _ => b : _root_.Option _root_.nested_borrows_absent_level.Frame →
++      _root_.Option _root_.nested_borrows_absent_level.Frame)
++  _root_.Aeneas.Std.Result.ok (i1, a1, back, b1, back1)
++
++/-- [nested_borrows_absent_level::drive_two]:
++    Source: 'tests/src/nested-borrows-absent-level.rs', lines 48:0-61:1
++    Visibility: public -/
++def drive_two
++  (n : _root_.Aeneas.Std.U32) (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (f, g, r, back, back1) ←
++    match which with
++    | 0#uscalar =>
++      do
++      let (r1, _, _, _, _) ←
++        _root_.nested_borrows_absent_level.count_two none none n
++      _root_.Aeneas.Std.Result.ok (({ steps := 5#u32, id := 1#u32 } :
++        _root_.nested_borrows_absent_level.Frame),
++        ({ steps := 9#u32, id := 2#u32 } :
++        _root_.nested_borrows_absent_level.Frame), r1,
++        (fun f1 => let ⟨ i, _ ⟩ := f1
++                   i : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32), (fun f1 => let ⟨ i, _ ⟩ := f1
++                                           i :
++        _root_.nested_borrows_absent_level.Frame → _root_.Aeneas.Std.U32))
++    | 1#uscalar =>
++      do
++      let (r1, o, count_two_back, _, _) ←
++        _root_.nested_borrows_absent_level.count_two (some
++          { steps := 5#u32, id := 1#u32 }) none n
++      let f1 :=
++        match o with
++        | some f2 => f2
++        | _ =>
++          ({ steps := 5#u32, id := 1#u32 } :
++            _root_.nested_borrows_absent_level.Frame)
++      _root_.Aeneas.Std.Result.ok (f1, ({ steps := 9#u32, id := 2#u32 } :
++        _root_.nested_borrows_absent_level.Frame), r1,
++        (fun f2 => let ⟨ i, _ ⟩ := f2
++                   i : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32),
++        (fun f2 =>
++           match count_two_back (some f2) with
++           | some (_root_.nested_borrows_absent_level.Frame.mk i _) => i
++           | _ => r1 : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32))
++    | 2#uscalar =>
++      do
++      let (r1, _, _, o, count_two_back) ←
++        _root_.nested_borrows_absent_level.count_two none (some
++          { steps := 9#u32, id := 2#u32 }) n
++      let g1 :=
++        match o with
++        | some f1 => f1
++        | _ =>
++          ({ steps := 9#u32, id := 2#u32 } :
++            _root_.nested_borrows_absent_level.Frame)
++      _root_.Aeneas.Std.Result.ok (({ steps := 5#u32, id := 1#u32 } :
++        _root_.nested_borrows_absent_level.Frame), g1, r1,
++        (fun f1 =>
++           match count_two_back (some f1) with
++           | some (_root_.nested_borrows_absent_level.Frame.mk i _) => i
++           | _ => r1 : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32), (fun f1 => let ⟨ i, _ ⟩ := f1
++                                           i :
++        _root_.nested_borrows_absent_level.Frame → _root_.Aeneas.Std.U32))
++    | _ =>
++      do
++      let (r1, o, count_two_back, o1, count_two_back1) ←
++        _root_.nested_borrows_absent_level.count_two (some
++          { steps := 5#u32, id := 1#u32 }) (some
++          { steps := 9#u32, id := 2#u32 }) n
++      let g1 :=
++        match o1 with
++        | some f1 => f1
++        | _ =>
++          ({ steps := 9#u32, id := 2#u32 } :
++            _root_.nested_borrows_absent_level.Frame)
++      let f1 :=
++        match o with
++        | some f2 => f2
++        | _ =>
++          ({ steps := 5#u32, id := 1#u32 } :
++            _root_.nested_borrows_absent_level.Frame)
++      _root_.Aeneas.Std.Result.ok (f1, g1, r1,
++        (fun f2 =>
++           match count_two_back1 (some f2) with
++           | some (_root_.nested_borrows_absent_level.Frame.mk i _) => i
++           | _ => r1 : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32),
++        (fun f2 =>
++           match count_two_back (some f2) with
++           | some (_root_.nested_borrows_absent_level.Frame.mk i _) => i
++           | _ => r1 : _root_.nested_borrows_absent_level.Frame →
++        _root_.Aeneas.Std.U32))
++  let s := back1 f
++  let t := back g
++  let i ← lift (core.num.U32.wrapping_add s t)
++  _root_.Aeneas.Std.Result.ok (r, f.id, g.id, i)
++
++end nested_borrows_absent_level
+diff --git a/tests/lean/NestedBorrowsClosureOutlives.lean b/tests/lean/NestedBorrowsClosureOutlives.lean
+new file mode 100644
+index 0000000..7e7514f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOutlives.lean
+@@ -0,0 +1 @@
++import NestedBorrowsClosureOutlives.Checks
+diff --git a/tests/lean/NestedBorrowsClosureOutlives/Checks.lean b/tests/lean/NestedBorrowsClosureOutlives/Checks.lean
+new file mode 100644
+index 0000000..c1251ea
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOutlives/Checks.lean
+@@ -0,0 +1,30 @@
++import NestedBorrowsClosureOutlives.NestedBorrowsClosureOutlives
++
++/-! Evaluate the model of `tests/src/nested-borrows-closure-outlives.rs` on the
++    inputs of its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_closure_outlives.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def quad : Result (U32 × U32 × U32 × U32) → Option (Nat × Nat × Nat × Nat)
++  | ok (a, b, c, d) => some (a.val, b.val, c.val, d.val)
++  | _ => none
++
++def pair : Result (U32 × U32) → Option (Nat × Nat)
++  | ok (a, b) => some (a.val, b.val)
++  | _ => none
++
++def map (k v : Nat) (fail : Bool) := quad (drive_map (u k) (u v) fail)
++def call (x k : Nat) := pair (drive_call (u x) (u k))
++
++#guard map 4 9 false == some (3033, 9, 0, 208)
++#guard map 3 1 false == some (1022, 1004, 0, 208)
++#guard map 4 9 true == some (0, 0, 4, 8)
++
++#guard call 1 1 == some (4, 1012)
++#guard call 5 6 == some (13, 1012)
++#guard call 3 9 == some (6, 1012)
++
++end nested_borrows_closure_outlives.checks
+diff --git a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+new file mode 100644
+index 0000000..777bce7
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+@@ -0,0 +1,1733 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_closure_outlives]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_closure_outlives
++
++/-- [nested_borrows_closure_outlives::map_node::closure]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def map_node.closure {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E)) :=
++  T1
++
++/-- [nested_borrows_closure_outlives::bind_node::closure]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 69:24-78:5 -/
++def bind_node.closure :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_outlives::node_call::closure]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def node_call.closure {T0 : Type} (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32) :=
++  T0
++
++/-- [nested_borrows_closure_outlives::drive_call::closure]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 109:30-112:5 -/
++def drive_call.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_outlives::map_node::closure::<0, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962 {T0
++  : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0)) :=
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++
++/-- [nested_borrows_closure_outlives::node_call::closure::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32) :=
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++
++/-- [nested_borrows_closure_outlives::D]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 15:0-19:1
++    Visibility: public -/
++@[discriminant isize]
++inductive D where
++| C : _root_.Aeneas.Std.U32 → D
++| S : _root_.Aeneas.Std.U32 → D
++| M : D → D → D
++
++/-- [nested_borrows_closure_outlives::{core::clone::Clone for nested_borrows_closure_outlives::D}::clone]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 14:9-14:14
++    Visibility: public -/
++def D.Insts.CoreCloneClone.clone
++  (self : _root_.nested_borrows_closure_outlives.D) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_closure_outlives.D
++  := do
++  match self with
++  | _root_.nested_borrows_closure_outlives.D.C __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_borrows_closure_outlives.D.C i)
++  | _root_.nested_borrows_closure_outlives.D.S __self_0 =>
++    let i ← lift (core.clone.impls.CloneU32.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.nested_borrows_closure_outlives.D.S i)
++  | _root_.nested_borrows_closure_outlives.D.M __self_0 __self_1 =>
++    let d ← D.Insts.CoreCloneClone.clone __self_0
++    let d1 ← D.Insts.CoreCloneClone.clone __self_1
++    _root_.Aeneas.Std.Result.ok (_root_.nested_borrows_closure_outlives.D.M d
++      d1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [nested_borrows_closure_outlives::{core::clone::Clone for nested_borrows_closure_outlives::D}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 14:9-14:14 -/
++@[reducible]
++def D.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_borrows_closure_outlives.D := {
++  clone := _root_.nested_borrows_closure_outlives.D.Insts.CoreCloneClone.clone
++}
++
++/-- [nested_borrows_closure_outlives::{nested_borrows_closure_outlives::D}::map_symbols]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 22:4-37:5 -/
++def D.map_symbols
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1TupleU32ResultOptionU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.U32)
++  E)) (self : _root_.nested_borrows_closure_outlives.D) (resolve : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_outlives.D E) × T1)
++  := do
++  match self with
++  | _root_.nested_borrows_closure_outlives.D.C _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok self,
++      resolve)
++  | _root_.nested_borrows_closure_outlives.D.S name1 =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutT1TupleU32ResultOptionU32EInst.call_mut resolve name1
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      match val with
++      | none =>
++        let d ←
++          _root_.nested_borrows_closure_outlives.D.Insts.CoreCloneClone.clone
++            self
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok d,
++          model_state1)
++      | some x =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.C x), model_state1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame E) residual
++      _root_.Aeneas.Std.Result.ok (r, model_state1)
++  | _root_.nested_borrows_closure_outlives.D.M l r =>
++    let (r1, resolve1) ←
++      D.map_symbols coreopsfunctionFnMutT1TupleU32ResultOptionU32EInst l
++        resolve
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let (r2, resolve2) ←
++        D.map_symbols coreopsfunctionFnMutT1TupleU32ResultOptionU32EInst r
++          resolve1
++      let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++      match cf1 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.M val val1), resolve2)
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r3 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.nested_borrows_closure_outlives.D
++            (_root_.Aeneas.Std.core.convert.FromSame E) residual
++        _root_.Aeneas.Std.Result.ok (r3, resolve2)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r2 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame E) residual
++      _root_.Aeneas.Std.Result.ok (r2, resolve1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_borrows_closure_outlives::{nested_borrows_closure_outlives::D}::map_symbols::<0, 1, T0, nested_borrows_closure_outlives::map_node::closure<2, T1, T2>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 22:4-37:5 -/
++def D.map_symbols01T0closure_specialized_7980a074f7d412058de1b408222df57f
++  {T0 : Type} {T1 : Type} {T2 : Type}
++  (coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T2 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) T1))
++  (coreopsfunctionFnMutclosureTupleU32ResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst) _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.U32)
++  T0)) (self : _root_.nested_borrows_closure_outlives.D)
++  (resolve : _root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_outlives.D T0) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst))
++  := do
++  match self with
++  | _root_.nested_borrows_closure_outlives.D.C _ =>
++    let back :=
++      (fun resolve1 => resolve1 :
++        _root_.nested_borrows_closure_outlives.map_node.closure
++        coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++        _root_.nested_borrows_closure_outlives.map_node.closure
++        coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok self,
++      resolve, back)
++  | _root_.nested_borrows_closure_outlives.D.S name1 =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutclosureTupleU32ResultOptionU32T0Inst.call_mut resolve
++        name1
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      match val with
++      | none =>
++        let d ←
++          _root_.nested_borrows_closure_outlives.D.Insts.CoreCloneClone.clone
++            self
++        let back :=
++          (fun resolve1 => resolve1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok d,
++          model_state1, back)
++      | some x =>
++        let back :=
++          (fun resolve1 => resolve1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.C x), model_state1, back)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun resolve1 => resolve1 :
++          _root_.nested_borrows_closure_outlives.map_node.closure
++          coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure
++          coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++      _root_.Aeneas.Std.Result.ok (r, model_state1, back)
++  | _root_.nested_borrows_closure_outlives.D.M l r =>
++    let (r1, resolve1, map_symbols_back) ←
++      D.map_symbols01T0closure_specialized_7980a074f7d412058de1b408222df57f
++        coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst
++        coreopsfunctionFnMutclosureTupleU32ResultOptionU32T0Inst l resolve
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let (r2, resolve2, map_symbols_back1) ←
++        D.map_symbols01T0closure_specialized_7980a074f7d412058de1b408222df57f
++          coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst
++          coreopsfunctionFnMutclosureTupleU32ResultOptionU32T0Inst r resolve1
++      let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++      match cf1 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++        let back :=
++          (fun resolve3 =>
++             let c := map_symbols_back1 resolve3
++             let c1 := map_symbols_back c
++             c1 : _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.M val val1), resolve2,
++          back)
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r3 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.nested_borrows_closure_outlives.D
++            (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++        let back :=
++          (fun resolve3 =>
++             let c := map_symbols_back1 resolve3
++             let c1 := map_symbols_back c
++             c1 : _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure
++            coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++        _root_.Aeneas.Std.Result.ok (r3, resolve2, back)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r2 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun resolve2 => let c := map_symbols_back resolve2
++                         c :
++          _root_.nested_borrows_closure_outlives.map_node.closure
++          coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure
++          coreopsfunctionFnMutT2PairU32BoolResultOptionU32T1Inst)
++      _root_.Aeneas.Std.Result.ok (r2, resolve1, back)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_borrows_closure_outlives::{nested_borrows_closure_outlives::D}::map_symbols::<0, 1, T0, nested_borrows_closure_outlives::map_node::closure::<0, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>><2, 3, 4, 5, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 22:4-37:5 -/
++def
++  D.map_symbols01T0closure2T1closure_specialized_658af4abd9c661a8d55b810098c5bc2b
++  {T0 : Type} {T1 : Type}
++  (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T1))
++  (coreopsfunctionFnMutclosure2T1closureTupleU32ResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) T0)) (self : _root_.nested_borrows_closure_outlives.D)
++  (resolve :
++  _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_borrows_closure_outlives.D T0) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++    ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst))))
++  := do
++  let (_, i, i1) := resolve
++  match self with
++  | _root_.nested_borrows_closure_outlives.D.C _ =>
++    let back :=
++      (fun resolve1 => resolve1 :
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++    let back1 :=
++      (fun resolve1 => ((resolve1.#0, resolve.#1, resolve.#2),
++         fun resolve2 => let (i2, _, _) := resolve2
++                         (i2, i, i1)) :
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++        ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++        (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok self,
++      resolve, back, back1)
++  | _root_.nested_borrows_closure_outlives.D.S name1 =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutclosure2T1closureTupleU32ResultOptionU32T0Inst.call_mut
++        resolve name1
++    let call_mut_back :=
++      (fun state_back => (state_back, fun state_back1 => state_back1) :
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++        ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++        (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      match val with
++      | none =>
++        let d ←
++          _root_.nested_borrows_closure_outlives.D.Insts.CoreCloneClone.clone
++            self
++        let back :=
++          (fun resolve1 => resolve1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++        let back1 :=
++          (fun resolve1 =>
++             let (c, back2) :=
++               call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++             ((c.#0, c.#1, c.#2),
++               fun resolve2 =>
++                 let c1 :=
++                   back2 (resolve2.#0, model_state1.#1, model_state1.#2)
++                 let (i2, _, _) := c1
++                 (i2, i, i1)) :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++            (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok d,
++          model_state1, back, back1)
++      | some x =>
++        let back :=
++          (fun resolve1 => resolve1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++        let back1 :=
++          (fun resolve1 =>
++             let (c, back2) :=
++               call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++             ((c.#0, c.#1, c.#2),
++               fun resolve2 =>
++                 let c1 :=
++                   back2 (resolve2.#0, model_state1.#1, model_state1.#2)
++                 let (i2, _, _) := c1
++                 (i2, i, i1)) :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++            (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.C x), model_state1, back,
++          back1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun resolve1 => resolve1 :
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++      let back1 :=
++        (fun resolve1 =>
++           let (c, back2) :=
++             call_mut_back (resolve1.#0, resolve.#1, resolve.#2)
++           ((c.#0, c.#1, c.#2),
++             fun resolve2 =>
++               let c1 := back2 (resolve2.#0, model_state1.#1, model_state1.#2)
++               let (i2, _, _) := c1
++               (i2, i, i1)) :
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++          (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (r, model_state1, back, back1)
++  | _root_.nested_borrows_closure_outlives.D.M l r =>
++    let (r1, resolve1, map_symbols_back, map_symbols_back1) ←
++      D.map_symbols01T0closure2T1closure_specialized_658af4abd9c661a8d55b810098c5bc2b
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst
++        coreopsfunctionFnMutclosure2T1closureTupleU32ResultOptionU32T0Inst l
++        resolve
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let (_, i2, i3) := resolve1
++      let (r2, resolve2, map_symbols_back2, map_symbols_back3) ←
++        D.map_symbols01T0closure2T1closure_specialized_658af4abd9c661a8d55b810098c5bc2b
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst
++          coreopsfunctionFnMutclosure2T1closureTupleU32ResultOptionU32T0Inst r
++          resolve1
++      let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++      match cf1 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++        let back :=
++          (fun resolve3 =>
++             let c := map_symbols_back2 resolve3
++             let c1 := map_symbols_back c
++             c1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++        let back1 :=
++          (fun resolve3 =>
++             let (c, back2) :=
++               map_symbols_back1 (resolve3.#0, resolve.#1, resolve.#2)
++             let (c1, _) := map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++             ((c1.#0, c1.#1, c1.#2),
++               fun resolve4 =>
++                 let (_, back3) :=
++                   map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++                 let c2 := back3 (resolve4.#0, resolve2.#1, resolve2.#2)
++                 let (i4, _, _) := c2
++                 let c3 := back2 (i4, i2, i3)
++                 let (i5, _, _) := c3
++                 (i5, i, i1)) :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++            (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_borrows_closure_outlives.D.M val val1), resolve2,
++          back, back1)
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r3 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.nested_borrows_closure_outlives.D
++            (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++        let back :=
++          (fun resolve3 =>
++             let c := map_symbols_back2 resolve3
++             let c1 := map_symbols_back c
++             c1 :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++        let back1 :=
++          (fun resolve3 =>
++             let (c, back2) :=
++               map_symbols_back1 (resolve3.#0, resolve.#1, resolve.#2)
++             let (c1, _) := map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++             ((c1.#0, c1.#1, c1.#2),
++               fun resolve4 =>
++                 let (_, back3) :=
++                   map_symbols_back3 (c.#0, resolve1.#1, resolve1.#2)
++                 let c2 := back3 (resolve4.#0, resolve2.#1, resolve2.#2)
++                 let (i4, _, _) := c2
++                 let c3 := back2 (i4, i2, i3)
++                 let (i5, _, _) := c3
++                 (i5, i, i1)) :
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++            (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++            _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++            coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++        _root_.Aeneas.Std.Result.ok (r3, resolve2, back, back1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r2 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.nested_borrows_closure_outlives.D
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let back :=
++        (fun resolve2 => let c := map_symbols_back resolve2
++                         c :
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)
++      let back1 :=
++        (fun resolve2 =>
++           let (c, back2) :=
++             map_symbols_back1 (resolve2.#0, resolve.#1, resolve.#2)
++           ((c.#0, c.#1, c.#2),
++             fun resolve3 =>
++               let c1 := back2 (resolve3.#0, resolve1.#1, resolve1.#2)
++               let (i2, _, _) := c1
++               (i2, i, i1)) :
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst) ×
++          (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst →
++          _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T1Inst)))
++      _root_.Aeneas.Std.Result.ok (r2, resolve1, back, back1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_borrows_closure_outlives::{nested_borrows_closure_outlives::D}::checksum]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 39:4-45:5 -/
++def D.checksum
++  (self : _root_.nested_borrows_closure_outlives.D) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match self with
++  | _root_.nested_borrows_closure_outlives.D.C v =>
++    _root_.Aeneas.Std.Result.ok v
++  | _root_.nested_borrows_closure_outlives.D.S name1 =>
++    _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add name1 1000#u32)
++  | _root_.nested_borrows_closure_outlives.D.M l r =>
++    let i ← D.checksum l
++    let i1 ← lift (core.num.U32.wrapping_mul i 3#u32)
++    let i2 ← D.checksum r
++    _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 i2)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_borrows_closure_outlives::map_node::{core::ops::function::FnMut<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++def
++  map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E.call_mut
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++  : _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E))
++  (c : _root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) E) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst →
++    _root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst.call_mut c
++      (tupled_args, true)
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_closure_outlives.map_node.closure
++      coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst →
++      _root_.nested_borrows_closure_outlives.map_node.closure
++      coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [nested_borrows_closure_outlives::map_node::{core::ops::function::FnOnce<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++def
++  map_node.closure.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32E.call_once
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++  : _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E))
++  (c : _root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) E) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst))
++  := do
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E.call_mut
++      coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (r, c2)
++
++/-- Trait implementation: [nested_borrows_closure_outlives::map_node::{core::ops::function::FnOnce<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def map_node.closure.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32E {E :
++  Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E)) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst) _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.U32)
++  E) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32E.call_once
++          coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::map_node::{core::ops::function::FnMut<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E {E :
++  Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E)) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.map_node.closure
++  coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst) _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.core.result.Result (_root_.Option _root_.Aeneas.Std.U32)
++  E) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32E
++    coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E.call_mut
++          coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_outlives::map_node]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 51:0-64:1 -/
++def map_node
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++  : _root_.Aeneas.Std.core.ops.function.FnMut T1 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) E)) (a : _root_.nested_borrows_closure_outlives.D)
++  (b : _root_.nested_borrows_closure_outlives.D) (resolve : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.nested_borrows_closure_outlives.D ×
++    _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32) E) ×
++    T1)
++  := do
++  let (r, strict, map_symbols_back) ←
++    _root_.nested_borrows_closure_outlives.D.map_symbols01T0closure_specialized_7980a074f7d412058de1b408222df57f
++      coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++      (_root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E
++      coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst) a resolve
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (r1, strict1, map_symbols_back1) ←
++      _root_.nested_borrows_closure_outlives.D.map_symbols01T0closure_specialized_7980a074f7d412058de1b408222df57f
++        coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst
++        (_root_.nested_borrows_closure_outlives.map_node.closure.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32E
++        coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst) b strict
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let c := map_symbols_back1 strict1
++      let c1 := map_symbols_back c
++      let (model_state, model_state1) ←
++        coreopsfunctionFnMutT1PairU32BoolResultOptionU32EInst.call_mut c1
++          (7#u32, false)
++      let cf2 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++      match cf2 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val2 =>
++        match val2 with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (val, val1, 0#u32), model_state1)
++        | some x =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (val, val1, x), model_state1)
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r2 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            (_root_.nested_borrows_closure_outlives.D ×
++            _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++            (_root_.Aeneas.Std.core.convert.FromSame E) residual
++        _root_.Aeneas.Std.Result.ok (r2, model_state1)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r2 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          (_root_.nested_borrows_closure_outlives.D ×
++          _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++          (_root_.Aeneas.Std.core.convert.FromSame E) residual
++      let c := map_symbols_back1 strict1
++      let c1 := map_symbols_back c
++      _root_.Aeneas.Std.Result.ok (r2, c1)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r1 ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        (_root_.nested_borrows_closure_outlives.D ×
++        _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++        (_root_.Aeneas.Std.core.convert.FromSame E) residual
++    let c := map_symbols_back strict
++    _root_.Aeneas.Std.Result.ok (r1, c)
++
++/-- [nested_borrows_closure_outlives::map_node::{core::ops::function::FnMut<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::call_mut::<0, 4, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++def
++  map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8.call_mut_specialized_68e409463a5045638ffabbffb106b84b
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0))
++  (c :
++  _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) T0) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++    ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst))))
++  := do
++  let (_, i, i1) := c
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst.call_mut c
++      (tupled_args, true)
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  let back1 :=
++    (fun c1 => (c1,
++       fun c2 =>
++         let (i2, _, _) := (c2.#0, model_state1.#1, model_state1.#2)
++         (i2, i, i1)) :
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++      ((_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) ×
++      (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)))
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back, back1)
++
++/-- [nested_borrows_closure_outlives::map_node::{core::ops::function::FnOnce<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::call_once::<0, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++def
++  map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32T0_specialized_b29195c2ad3b86f03465d26a9532614f.call_once_specialized_04eb4b56c7eba3c39e81489965d603f8
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0))
++  (c :
++  _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) T0) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) ×
++    (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst))
++  := do
++  let (_, i1, i2) := c
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8.call_mut_specialized_68e409463a5045638ffabbffb106b84b
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1, c2.#2).#0, c.#1, c.#2)
++       let c5 := back1 c4
++       let (i3, _, _) := c5
++       (i3, i1, i2) :
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst →
++      _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_closure_outlives::map_node::{core::ops::function::FnOnce<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32T0_specialized_b29195c2ad3b86f03465d26a9532614f
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0)) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) T0) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32T0_specialized_b29195c2ad3b86f03465d26a9532614f.call_once_specialized_04eb4b56c7eba3c39e81489965d603f8
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1, capture_state.#2))
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::map_node::{core::ops::function::FnMut<(u32), core::result::Result<core::option::Option<u32>, E>> for nested_borrows_closure_outlives::map_node::closure<0, E, T1>[TraitClause@0]}::<0, T0, nested_borrows_closure_outlives::bind_node::closure<1, 2, 3>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 56:21-56:52 -/
++@[reducible]
++def
++  map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0)) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962
++  coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst)
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result (_root_.Option
++  _root_.Aeneas.Std.U32) T0) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnOnceTupleU32ResultOptionU32T0_specialized_b29195c2ad3b86f03465d26a9532614f
++    coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8.call_mut_specialized_68e409463a5045638ffabbffb106b84b
++          coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1, capture_state.#2))
++}
++
++/-- [nested_borrows_closure_outlives::map_node::<0, 1, 2, T0, nested_borrows_closure_outlives::bind_node::closure<3, 4, 5>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 51:0-64:1 -/
++def map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
++  {T0 : Type} (coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) T0))
++  (a : _root_.nested_borrows_closure_outlives.D)
++  (b : _root_.nested_borrows_closure_outlives.D)
++  (resolve : _root_.nested_borrows_closure_outlives.bind_node.closure) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.nested_borrows_closure_outlives.D ×
++    _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32) T0) ×
++    _root_.nested_borrows_closure_outlives.bind_node.closure ×
++    (_root_.nested_borrows_closure_outlives.bind_node.closure →
++    _root_.nested_borrows_closure_outlives.bind_node.closure))
++  := do
++  let (_, i, i1) := resolve
++  let (r, strict, map_symbols_back, map_symbols_back1) ←
++    _root_.nested_borrows_closure_outlives.D.map_symbols01T0closure2T1closure_specialized_658af4abd9c661a8d55b810098c5bc2b
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst
++      (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8
++      coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) a resolve
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (_, i2, i3) := strict
++    let (r1, strict1, map_symbols_back2, map_symbols_back3) ←
++      _root_.nested_borrows_closure_outlives.D.map_symbols01T0closure2T1closure_specialized_658af4abd9c661a8d55b810098c5bc2b
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst
++        (_root_.nested_borrows_closure_outlives.map_node.closure0T0closure_specialized_6a379b690b209ddad2e3e51a19734962.Insts.CoreOpsFunctionFnMutTupleU32ResultOptionU32T0_specialized_c0f6279706cb5e280669ceea3be87ac8
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst) b strict
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
++      let c := map_symbols_back2 strict1
++      let c1 := map_symbols_back c
++      let (_, i4, i5) := c1
++      let (model_state, model_state1) ←
++        coreopsfunctionFnMutclosurePairU32BoolResultOptionU32T0Inst.call_mut c1
++          (7#u32, false)
++      let cf2 ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++      match cf2 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val2 =>
++        match val2 with
++        | none =>
++          let back :=
++            (fun resolve1 =>
++               let (i6, _, _) :=
++                 (resolve1.#0, model_state1.#1, model_state1.#2)
++               let (c2, back1) :=
++                 map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
++               let (c3, back2) :=
++                 map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1,
++                   strict.#2)
++               let c4 := back2 c3
++               let (i7, _, _) := c4
++               let c5 := back1 (i7, i2, i3)
++               let (i8, _, _) := c5
++               (i8, i, i1) :
++              _root_.nested_borrows_closure_outlives.bind_node.closure →
++              _root_.nested_borrows_closure_outlives.bind_node.closure)
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (val, val1, 0#u32), model_state1, back)
++        | some x =>
++          let back :=
++            (fun resolve1 =>
++               let (i6, _, _) :=
++                 (resolve1.#0, model_state1.#1, model_state1.#2)
++               let (c2, back1) :=
++                 map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
++               let (c3, back2) :=
++                 map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1,
++                   strict.#2)
++               let c4 := back2 c3
++               let (i7, _, _) := c4
++               let c5 := back1 (i7, i2, i3)
++               let (i8, _, _) := c5
++               (i8, i, i1) :
++              _root_.nested_borrows_closure_outlives.bind_node.closure →
++              _root_.nested_borrows_closure_outlives.bind_node.closure)
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++            (val, val1, x), model_state1, back)
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r2 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            (_root_.nested_borrows_closure_outlives.D ×
++            _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++            (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++        let back :=
++          (fun resolve1 =>
++             let (i6, _, _) := (resolve1.#0, model_state1.#1, model_state1.#2)
++             let (c2, back1) :=
++               map_symbols_back1 ((i6, i4, i5).#0, resolve.#1, resolve.#2)
++             let (c3, back2) :=
++               map_symbols_back3 ((c2.#0, c.#1, c.#2).#0, strict.#1, strict.#2)
++             let c4 := back2 c3
++             let (i7, _, _) := c4
++             let c5 := back1 (i7, i2, i3)
++             let (i8, _, _) := c5
++             (i8, i, i1) :
++            _root_.nested_borrows_closure_outlives.bind_node.closure →
++            _root_.nested_borrows_closure_outlives.bind_node.closure)
++        _root_.Aeneas.Std.Result.ok (r2, model_state1, back)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r2 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          (_root_.nested_borrows_closure_outlives.D ×
++          _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++          (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let (_, i4, i5) := strict1
++      let c := map_symbols_back2 strict1
++      let c1 := map_symbols_back c
++      let back :=
++        (fun resolve1 =>
++           let c2 := map_symbols_back c
++           let (c3, back1) :=
++             map_symbols_back1 ((resolve1.#0, c2.#1, c2.#2).#0, resolve.#1,
++               resolve.#2)
++           let (c4, back2) :=
++             map_symbols_back3 ((c3.#0, c.#1, c.#2).#0, strict.#1, strict.#2)
++           let (i6, _, _) := c4
++           let c5 := back2 (i6, i4, i5)
++           let (i7, _, _) := c5
++           let c6 := back1 (i7, i2, i3)
++           let (i8, _, _) := c6
++           (i8, i, i1) :
++          _root_.nested_borrows_closure_outlives.bind_node.closure →
++          _root_.nested_borrows_closure_outlives.bind_node.closure)
++      _root_.Aeneas.Std.Result.ok (r2, c1, back)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r1 ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        (_root_.nested_borrows_closure_outlives.D ×
++        _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++        (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++    let (_, i2, i3) := strict
++    let c := map_symbols_back strict
++    let back :=
++      (fun resolve1 =>
++         let (c1, back1) :=
++           map_symbols_back1 ((resolve1.#0, c.#1, c.#2).#0, resolve.#1,
++             resolve.#2)
++         let (i4, _, _) := c1
++         let c2 := back1 (i4, i2, i3)
++         let (i5, _, _) := c2
++         (i5, i, i1) : _root_.nested_borrows_closure_outlives.bind_node.closure
++        → _root_.nested_borrows_closure_outlives.bind_node.closure)
++    _root_.Aeneas.Std.Result.ok (r1, c, back)
++
++/-- [nested_borrows_closure_outlives::bind_node::{core::ops::function::FnMut<(u32, bool), core::result::Result<core::option::Option<u32>, u32>> for nested_borrows_closure_outlives::bind_node::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 69:24-78:5 -/
++def
++  bind_node.closure.Insts.CoreOpsFunctionFnMutPairU32BoolResultOptionU32U32.call_mut
++  (c : _root_.nested_borrows_closure_outlives.bind_node.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Bool)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_closure_outlives.bind_node.closure ×
++    (_root_.nested_borrows_closure_outlives.bind_node.closure →
++    _root_.nested_borrows_closure_outlives.bind_node.closure))
++  := do
++  let (i, i1, i2) := c
++  let (s, strict) := tupled_args
++  let i3 ←
++    if strict
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 100#u32
++  let i4 ← lift (core.num.U32.wrapping_add i i3)
++  if s = 0#u32
++  then
++    let back :=
++      (fun c1 => let (i5, _, _) := c1
++                 (i5, i1, i2) :
++        _root_.nested_borrows_closure_outlives.bind_node.closure →
++        _root_.nested_borrows_closure_outlives.bind_node.closure)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err i4,
++      (i4, i1, i2), back)
++  else
++    if s = i1
++    then
++      let back :=
++        (fun c1 => let (i5, _, _) := c1
++                   (i5, i1, i2) :
++          _root_.nested_borrows_closure_outlives.bind_node.closure →
++          _root_.nested_borrows_closure_outlives.bind_node.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        (some i2), (i4, i1, i2), back)
++    else
++      let back :=
++        (fun c1 => let (i5, _, _) := c1
++                   (i5, i1, i2) :
++          _root_.nested_borrows_closure_outlives.bind_node.closure →
++          _root_.nested_borrows_closure_outlives.bind_node.closure)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        none, (i4, i1, i2), back)
++
++/-- [nested_borrows_closure_outlives::bind_node::{core::ops::function::FnOnce<(u32, bool), core::result::Result<core::option::Option<u32>, u32>> for nested_borrows_closure_outlives::bind_node::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 69:24-78:5 -/
++def
++  bind_node.closure.Insts.CoreOpsFunctionFnOncePairU32BoolResultOptionU32U32.call_once
++  (c : _root_.nested_borrows_closure_outlives.bind_node.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Bool)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_closure_outlives.bind_node.closure)
++  := do
++  let (_, i, i1) := c
++  let (r, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_outlives.bind_node.closure.Insts.CoreOpsFunctionFnMutPairU32BoolResultOptionU32U32.call_mut
++      c p
++  let c2 := call_mut_back c1
++  let (i2, _, _) := c2
++  _root_.Aeneas.Std.Result.ok (r, (i2, i, i1))
++
++/-- Trait implementation: [nested_borrows_closure_outlives::bind_node::{core::ops::function::FnOnce<(u32, bool), core::result::Result<core::option::Option<u32>, u32>> for nested_borrows_closure_outlives::bind_node::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 69:24-78:5 -/
++@[reducible]
++def bind_node.closure.Insts.CoreOpsFunctionFnOncePairU32BoolResultOptionU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_outlives.bind_node.closure.Insts.CoreOpsFunctionFnOncePairU32BoolResultOptionU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1, arg.#2))
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::bind_node::{core::ops::function::FnMut<(u32, bool), core::result::Result<core::option::Option<u32>, u32>> for nested_borrows_closure_outlives::bind_node::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 69:24-78:5 -/
++@[reducible]
++def bind_node.closure.Insts.CoreOpsFunctionFnMutPairU32BoolResultOptionU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.bind_node.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) (_root_.Aeneas.Std.core.result.Result
++  (_root_.Option _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.bind_node.closure.Insts.CoreOpsFunctionFnOncePairU32BoolResultOptionU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.bind_node.closure.Insts.CoreOpsFunctionFnMutPairU32BoolResultOptionU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1,
++        captured.#2))
++}
++
++/-- [nested_borrows_closure_outlives::bind_node]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 68:0-79:1 -/
++def bind_node
++  (a : _root_.nested_borrows_closure_outlives.D)
++  (b : _root_.nested_borrows_closure_outlives.D) (k : _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.U32) (uses : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    (_root_.nested_borrows_closure_outlives.D ×
++    _root_.nested_borrows_closure_outlives.D × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, map_node_back) ←
++    _root_.nested_borrows_closure_outlives.map_node012T0closure_specialized_89a0d0ace20edad1f34016c6162c0dc6
++      _root_.nested_borrows_closure_outlives.bind_node.closure.Insts.CoreOpsFunctionFnMutPairU32BoolResultOptionU32U32
++      a b (uses, k, v)
++  let c1 := map_node_back c
++  let (uses1, _, _) := c1
++  _root_.Aeneas.Std.Result.ok (r, uses1)
++
++/-- [nested_borrows_closure_outlives::drive_map]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 81:0-92:1
++    Visibility: public -/
++def drive_map
++  (k : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) (fail : _root_.Bool)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let i ←
++    if fail
++    then _root_.Aeneas.Std.Result.ok 0#u32
++    else _root_.Aeneas.Std.Result.ok 4#u32
++  let (r, uses) ←
++    _root_.nested_borrows_closure_outlives.bind_node
++      (_root_.nested_borrows_closure_outlives.D.M
++      (_root_.nested_borrows_closure_outlives.D.S 3#u32)
++      (_root_.nested_borrows_closure_outlives.D.M
++      (_root_.nested_borrows_closure_outlives.D.C 5#u32)
++      (_root_.nested_borrows_closure_outlives.D.S 4#u32)))
++      (_root_.nested_borrows_closure_outlives.D.S i) k v 1#u32
++  let uses1 ← lift (core.num.U32.wrapping_mul uses 2#u32)
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok t =>
++    let (a, b, extra) := t
++    let i1 ← _root_.nested_borrows_closure_outlives.D.checksum a
++    let i2 ← _root_.nested_borrows_closure_outlives.D.checksum b
++    _root_.Aeneas.Std.Result.ok (i1, i2, extra, uses1)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    _root_.Aeneas.Std.Result.ok (0#u32, 0#u32, e, uses1)
++
++/-- [nested_borrows_closure_outlives::m_call]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 95:0-97:1 -/
++def m_call
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) (resolve : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T0)
++  := do
++  coreopsfunctionFnMutT0TupleU32U32Inst.call_mut resolve x
++
++/-- [nested_borrows_closure_outlives::m_call::<0, nested_borrows_closure_outlives::node_call::closure<1, T0>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 95:0-97:1 -/
++def m_call0closure_specialized_c09416768a4a51e42e01620c37dc7297
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosureTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (resolve : _root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosureTupleU32U32Inst.call_mut resolve x
++  let back :=
++    (fun resolve1 => resolve1 :
++      _root_.nested_borrows_closure_outlives.node_call.closure
++      coreopsfunctionFnMutT0PairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure
++      coreopsfunctionFnMutT0PairU32BoolU32Inst)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [nested_borrows_closure_outlives::m_call::<0, nested_borrows_closure_outlives::node_call::closure::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>><1, 2, 3>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 95:0-97:1 -/
++def m_call0closure1closure_specialized_2c554342b9cd6edaaec283111724a252
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32)
++  (coreopsfunctionFnMutclosure1closureTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (resolve :
++  _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    ((_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst))))
++  := do
++  let (_, i) := resolve
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosure1closureTupleU32U32Inst.call_mut resolve x
++  let call_mut_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      ((_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++      (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)))
++  let back :=
++    (fun resolve1 => resolve1 :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)
++  let back1 :=
++    (fun resolve1 =>
++       let (c, back2) := call_mut_back (resolve1.#0, resolve.#1)
++       ((c.#0, c.#1),
++         fun resolve2 =>
++           let c1 := back2 (resolve2.#0, model_state1.#1)
++           let (i1, _) := c1
++           (i1, i)) :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      ((_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++      (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)))
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back, back1)
++
++/-- [nested_borrows_closure_outlives::node_call::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++def node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT0PairU32BoolU32Inst.call_mut c (tupled_args, true)
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_closure_outlives.node_call.closure
++      coreopsfunctionFnMutT0PairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure
++      coreopsfunctionFnMutT0PairU32BoolU32Inst)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [nested_borrows_closure_outlives::node_call::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++def node_call.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure
++    coreopsfunctionFnMutT0PairU32BoolU32Inst))
++  := do
++  let (i1, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++      coreopsfunctionFnMutT0PairU32BoolU32Inst c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i1, c2)
++
++/-- Trait implementation: [nested_borrows_closure_outlives::node_call::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def node_call.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32 {T0 : Type}
++  (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32.call_once
++          coreopsfunctionFnMutT0PairU32BoolU32Inst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::node_call::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32 {T0 : Type}
++  (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.node_call.closure
++  coreopsfunctionFnMutT0PairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnOnceTupleU32U32
++    coreopsfunctionFnMutT0PairU32BoolU32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32.call_mut
++          coreopsfunctionFnMutT0PairU32BoolU32Inst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [nested_borrows_closure_outlives::node_call]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 99:0-105:1 -/
++def node_call
++  {T0 : Type} (coreopsfunctionFnMutT0PairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 (_root_.Aeneas.Std.U32 ×
++  _root_.Bool) _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32)
++  (resolve : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × T0)
++  := do
++  let (a, strict, m_call_back) ←
++    _root_.nested_borrows_closure_outlives.m_call0closure_specialized_c09416768a4a51e42e01620c37dc7297
++      coreopsfunctionFnMutT0PairU32BoolU32Inst
++      (_root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++      coreopsfunctionFnMutT0PairU32BoolU32Inst) x resolve
++  let (b, strict1, m_call_back1) ←
++    _root_.nested_borrows_closure_outlives.m_call0closure_specialized_c09416768a4a51e42e01620c37dc7297
++      coreopsfunctionFnMutT0PairU32BoolU32Inst
++      (_root_.nested_borrows_closure_outlives.node_call.closure.Insts.CoreOpsFunctionFnMutTupleU32U32
++      coreopsfunctionFnMutT0PairU32BoolU32Inst) a strict
++  let c := m_call_back1 strict1
++  let c1 := m_call_back c
++  coreopsfunctionFnMutT0PairU32BoolU32Inst.call_mut c1 (b, false)
++
++/-- [nested_borrows_closure_outlives::node_call::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::call_mut::<0, 3, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++def
++  node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504.call_mut_specialized_901134120b3e9d034bd294f2242c0236
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32)
++  (c :
++  _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    ((_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst))))
++  := do
++  let (_, i) := c
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst.call_mut c (tupled_args,
++      true)
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let (i1, _) := (c2.#0, model_state1.#1)
++                              (i1, i)) :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      ((_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++      (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)))
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back, back1)
++
++/-- [nested_borrows_closure_outlives::node_call::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::call_once::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++def
++  node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnOnceTupleU32U32_specialized_b26278894283a6d5bf68a3ec99fcf67d.call_once_specialized_4ee993a5fb04228bab75714e9ef64be7
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32)
++  (c :
++  _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst) ×
++    (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst))
++  := do
++  let (_, i1) := c
++  let (i2, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504.call_mut_specialized_901134120b3e9d034bd294f2242c0236
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 ((c3.#0, c2.#1).#0, c.#1)
++       let c5 := back1 c4
++       let (i3, _) := c5
++       (i3, i1) :
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst →
++      _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst)
++  _root_.Aeneas.Std.Result.ok (i2, c2, back)
++
++/-- Trait implementation: [nested_borrows_closure_outlives::node_call::{core::ops::function::FnOnce<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def
++  node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnOnceTupleU32U32_specialized_b26278894283a6d5bf68a3ec99fcf67d
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnOnceTupleU32U32_specialized_b26278894283a6d5bf68a3ec99fcf67d.call_once_specialized_4ee993a5fb04228bab75714e9ef64be7
++          coreopsfunctionFnMutclosurePairU32BoolU32Inst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::node_call::{core::ops::function::FnMut<(u32), u32> for nested_borrows_closure_outlives::node_call::closure<0, T0>[TraitClause@0]}::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 100:21-100:52 -/
++@[reducible]
++def
++  node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e
++  coreopsfunctionFnMutclosurePairU32BoolU32Inst) _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnOnceTupleU32U32_specialized_b26278894283a6d5bf68a3ec99fcf67d
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504.call_mut_specialized_901134120b3e9d034bd294f2242c0236
++          coreopsfunctionFnMutclosurePairU32BoolU32Inst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state1.#0,
++        capture_state.#1))
++}
++
++/-- [nested_borrows_closure_outlives::node_call::<0, nested_borrows_closure_outlives::drive_call::closure<1, 2>>]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 99:0-105:1 -/
++def node_call0closure_specialized_0c829648cef67f3c42a88db7d78dbd71
++  (coreopsfunctionFnMutclosurePairU32BoolU32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32)
++  (resolve : _root_.nested_borrows_closure_outlives.drive_call.closure) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_outlives.drive_call.closure ×
++    (_root_.nested_borrows_closure_outlives.drive_call.closure →
++    _root_.nested_borrows_closure_outlives.drive_call.closure))
++  := do
++  let (_, i) := resolve
++  let (a, strict, m_call_back, m_call_back1) ←
++    _root_.nested_borrows_closure_outlives.m_call0closure1closure_specialized_2c554342b9cd6edaaec283111724a252
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst
++      (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst) x resolve
++  let (_, i1) := strict
++  let (b, strict1, m_call_back2, m_call_back3) ←
++    _root_.nested_borrows_closure_outlives.m_call0closure1closure_specialized_2c554342b9cd6edaaec283111724a252
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst
++      (_root_.nested_borrows_closure_outlives.node_call.closure0closure_specialized_147092dfb95baa4f0cd4d58b237a982e.Insts.CoreOpsFunctionFnMutTupleU32U32_specialized_cd5065d16adec5dc243b09893a1c8504
++      coreopsfunctionFnMutclosurePairU32BoolU32Inst) a strict
++  let c := m_call_back2 strict1
++  let c1 := m_call_back c
++  let (_, i2) := c1
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosurePairU32BoolU32Inst.call_mut c1 (b, false)
++  let back :=
++    (fun resolve1 =>
++       let (i3, _) := (resolve1.#0, model_state1.#1)
++       let (c2, back1) := m_call_back1 ((i3, i2).#0, resolve.#1)
++       let (c3, back2) := m_call_back3 ((c2.#0, c.#1).#0, strict.#1)
++       let c4 := back2 c3
++       let (i4, _) := c4
++       let c5 := back1 (i4, i1)
++       let (i5, _) := c5
++       (i5, i) : _root_.nested_borrows_closure_outlives.drive_call.closure →
++      _root_.nested_borrows_closure_outlives.drive_call.closure)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [nested_borrows_closure_outlives::drive_call::{core::ops::function::FnMut<(u32, bool), u32> for nested_borrows_closure_outlives::drive_call::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 109:30-112:5 -/
++def drive_call.closure.Insts.CoreOpsFunctionFnMutPairU32BoolU32.call_mut
++  (c : _root_.nested_borrows_closure_outlives.drive_call.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Bool)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_outlives.drive_call.closure ×
++    (_root_.nested_borrows_closure_outlives.drive_call.closure →
++    _root_.nested_borrows_closure_outlives.drive_call.closure))
++  := do
++  let (i, i1) := c
++  let (s, strict) := tupled_args
++  let i2 ←
++    if strict
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 10#u32
++  let i3 ← lift (core.num.U32.wrapping_add i i2)
++  if s = i1
++  then
++    let i4 ← lift (core.num.U32.wrapping_mul s 2#u32)
++    let back :=
++      (fun c1 => let (i5, _) := c1
++                 (i5, i1) :
++        _root_.nested_borrows_closure_outlives.drive_call.closure →
++        _root_.nested_borrows_closure_outlives.drive_call.closure)
++    _root_.Aeneas.Std.Result.ok (i4, (i3, i1), back)
++  else
++    let i4 ← lift (core.num.U32.wrapping_add s 1#u32)
++    let back :=
++      (fun c1 => let (i5, _) := c1
++                 (i5, i1) :
++        _root_.nested_borrows_closure_outlives.drive_call.closure →
++        _root_.nested_borrows_closure_outlives.drive_call.closure)
++    _root_.Aeneas.Std.Result.ok (i4, (i3, i1), back)
++
++/-- [nested_borrows_closure_outlives::drive_call::{core::ops::function::FnOnce<(u32, bool), u32> for nested_borrows_closure_outlives::drive_call::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 109:30-112:5 -/
++def drive_call.closure.Insts.CoreOpsFunctionFnOncePairU32BoolU32.call_once
++  (c : _root_.nested_borrows_closure_outlives.drive_call.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Bool)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_outlives.drive_call.closure)
++  := do
++  let (_, i) := c
++  let (i1, c1, call_mut_back) ←
++    _root_.nested_borrows_closure_outlives.drive_call.closure.Insts.CoreOpsFunctionFnMutPairU32BoolU32.call_mut
++      c p
++  let c2 := call_mut_back c1
++  let (i2, _) := c2
++  _root_.Aeneas.Std.Result.ok (i1, (i2, i))
++
++/-- Trait implementation: [nested_borrows_closure_outlives::drive_call::{core::ops::function::FnOnce<(u32, bool), u32> for nested_borrows_closure_outlives::drive_call::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 109:30-112:5 -/
++@[reducible]
++def drive_call.closure.Insts.CoreOpsFunctionFnOncePairU32BoolU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_closure_outlives.drive_call.closure.Insts.CoreOpsFunctionFnOncePairU32BoolU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_outlives::drive_call::{core::ops::function::FnMut<(u32, bool), u32> for nested_borrows_closure_outlives::drive_call::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 109:30-112:5 -/
++@[reducible]
++def drive_call.closure.Insts.CoreOpsFunctionFnMutPairU32BoolU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_outlives.drive_call.closure
++  (_root_.Aeneas.Std.U32 × _root_.Bool) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_outlives.drive_call.closure.Insts.CoreOpsFunctionFnOncePairU32BoolU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_outlives.drive_call.closure.Insts.CoreOpsFunctionFnMutPairU32BoolU32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1))
++}
++
++/-- [nested_borrows_closure_outlives::drive_call]:
++    Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 107:0-115:1
++    Visibility: public -/
++def drive_call
++  (x : _root_.Aeneas.Std.U32) (k : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, c, node_call_back) ←
++    _root_.nested_borrows_closure_outlives.node_call0closure_specialized_0c829648cef67f3c42a88db7d78dbd71
++      _root_.nested_borrows_closure_outlives.drive_call.closure.Insts.CoreOpsFunctionFnMutPairU32BoolU32
++      x (0#u32, k)
++  let c1 := node_call_back c
++  let (uses, _) := c1
++  let uses1 ← lift (core.num.U32.wrapping_add uses 1000#u32)
++  _root_.Aeneas.Std.Result.ok (r, uses1)
++
++end nested_borrows_closure_outlives
+diff --git a/tests/lean/NestedBorrowsTuple.lean b/tests/lean/NestedBorrowsTuple.lean
+new file mode 100644
+index 0000000..d7d988c
+--- /dev/null
++++ b/tests/lean/NestedBorrowsTuple.lean
+@@ -0,0 +1 @@
++import NestedBorrowsTuple.Checks
+diff --git a/tests/lean/NestedBorrowsTuple/Checks.lean b/tests/lean/NestedBorrowsTuple/Checks.lean
+new file mode 100644
+index 0000000..731cb96
+--- /dev/null
++++ b/tests/lean/NestedBorrowsTuple/Checks.lean
+@@ -0,0 +1,33 @@
++import NestedBorrowsTuple.NestedBorrowsTuple
++
++/-! Evaluate the model of `tests/src/nested-borrows-tuple.rs` on the inputs of
++    its `native` test module and compare with the native results. -/
++
++namespace nested_borrows_tuple.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def triple : Result (U32 × U32 × U32) → Option (Nat × Nat × Nat)
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++def max := 4294967295
++
++#guard triple (use_g2 (u 0) (u 0)) == some (1, 1, 101)
++#guard triple (use_g2 (u 5) (u 7)) == some (6, 8, 106)
++#guard triple (use_g2 (u max) (u 3)) == some (0, 4, 100)
++
++#guard triple (use_h2 (u 0) (u 0)) == some (0, 3, 0)
++#guard triple (use_h2 (u 5) (u 7)) == some (12, 3, 12)
++#guard triple (use_h2 (u max) (u 3)) == some (2, 3, 2)
++
++#guard triple (use_g (u 0) (u 0)) == some (1, 1, 10)
++#guard triple (use_g (u 5) (u 7)) == some (6, 6, 17)
++#guard triple (use_g (u max) (u 3)) == some (0, 0, 13)
++
++#guard triple (use1 (u 0) (u 0)) == some (1, 1, 10)
++#guard triple (use1 (u 5) (u 7)) == some (6, 6, 17)
++#guard triple (use1 (u max) (u 3)) == some (0, 0, 13)
++
++end nested_borrows_tuple.checks
+diff --git a/tests/lean/NestedBorrowsTuple/NestedBorrowsTuple.lean b/tests/lean/NestedBorrowsTuple/NestedBorrowsTuple.lean
+new file mode 100644
+index 0000000..4345b7f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsTuple/NestedBorrowsTuple.lean
+@@ -0,0 +1,233 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_tuple]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_tuple
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2)), @T3>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2)), @T3>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  call_once : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × (T1 × T2)
++    × (T1 → T1) × (T2 → T2))
++
++/-- [nested_borrows_tuple::g2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 12:0-16:1
++    Visibility: public -/
++def g2
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1) := s
++  let i2 ← lift (core.num.U32.wrapping_add i 1#u32)
++  let i3 ← lift (core.num.U32.wrapping_add i1 1#u32)
++  _root_.Aeneas.Std.Result.ok (i2, (i2, i3), fun s1 => s1)
++
++/-- [nested_borrows_tuple::call_g2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 17:0-19:1
++    Visibility: public -/
++def call_g2
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, s1, g2_back) ← _root_.nested_borrows_tuple.g2 s
++  let back :=
++    (fun s2 => g2_back (s2, s1.#1).#0 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  _root_.Aeneas.Std.Result.ok (i, s1, back)
++
++/-- [nested_borrows_tuple::use_g2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 20:0-27:1
++    Visibility: public -/
++def use_g2
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, t, call_g2_back) ← _root_.nested_borrows_tuple.call_g2 (a, b)
++  let (i, t1) := t
++  let i1 ← lift (core.num.U32.wrapping_add i 100#u32)
++  let a1 := call_g2_back i1
++  _root_.Aeneas.Std.Result.ok (r, t1, a1)
++
++/-- [nested_borrows_tuple::h2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 28:0-32:1
++    Visibility: public -/
++def h2
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1) := s
++  let i2 ← lift (core.num.U32.wrapping_add i1 i)
++  _root_.Aeneas.Std.Result.ok (i2, (3#u32, i2), fun s1 => s1)
++
++/-- [nested_borrows_tuple::call_h2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 33:0-35:1
++    Visibility: public -/
++def call_h2
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.U32))
++  := do
++  let (i, s1, h2_back) ← _root_.nested_borrows_tuple.h2 s
++  let back :=
++    (fun s2 => h2_back (s1.#0, s2).#1 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  _root_.Aeneas.Std.Result.ok (i, s1, back)
++
++/-- [nested_borrows_tuple::use_h2]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 36:0-42:1
++    Visibility: public -/
++def use_h2
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, t, call_h2_back) ← _root_.nested_borrows_tuple.call_h2 (a, b)
++  let (t0, i) := t
++  let b1 := call_h2_back i
++  _root_.Aeneas.Std.Result.ok (r, t0, b1)
++
++/-- [nested_borrows_tuple::g]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 43:0-47:1
++    Visibility: public -/
++def g
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  let (i, i1) := s
++  let i2 ← lift (core.num.U32.wrapping_add i 1#u32)
++  let i3 ← lift (core.num.U32.wrapping_add i1 10#u32)
++  _root_.Aeneas.Std.Result.ok (i2, (i2, i3), fun s1 => s1, fun s1 => s1)
++
++/-- [nested_borrows_tuple::call_g]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 48:0-50:1
++    Visibility: public -/
++def call_g
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  let (i, s1, g_back, g_back1) ← _root_.nested_borrows_tuple.g s
++  let back :=
++    (fun s2 => g_back (s2, s1.#1).#0 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  let back1 :=
++    (fun s2 => g_back1 (s1.#0, s2).#1 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  _root_.Aeneas.Std.Result.ok (i, s1, back, back1)
++
++/-- [nested_borrows_tuple::use_g]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 51:0-55:1
++    Visibility: public -/
++def use_g
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, p, call_g_back, call_g_back1) ←
++    _root_.nested_borrows_tuple.call_g (a, b)
++  let (i, i1) := p
++  let a1 := call_g_back i
++  let b1 := call_g_back1 i1
++  _root_.Aeneas.Std.Result.ok (r, a1, b1)
++
++/-- [nested_borrows_tuple::call1]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 56:0-58:1
++    Visibility: public -/
++def call1
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0PairMut1U32Mut2U32R_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
++  :
++  _root_.nested_borrows_tuple.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  T1 _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 R)
++  (s : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) (f : T1) :
++  _root_.Aeneas.Std.Result (R × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  let (t, s1, call_once_back, call_once_back1) ←
++    coreopsfunctionFnOnceT1TupleMut0PairMut1U32Mut2U32R_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst.call_once
++      f s
++  let back :=
++    (fun s2 => call_once_back (s2, s1.#1).#0 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  let back1 :=
++    (fun s2 => call_once_back1 (s1.#0, s2).#1 : _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32)
++  _root_.Aeneas.Std.Result.ok (t, s1, back, back1)
++
++/-- [nested_borrows_tuple::use1::closure]
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 61:41-65:5 -/
++@[reducible]
++def use1.closure := _root_.Unit
++
++/-- [nested_borrows_tuple::use1::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u32, u32> for nested_borrows_tuple::use1::closure}::call_once]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 61:41-65:5 -/
++def
++  use1.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU32U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++  (c : _root_.nested_borrows_tuple.use1.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  let (x, y) := tupled_args
++  let x1 ← lift (core.num.U32.wrapping_add x 1#u32)
++  let y1 ← lift (core.num.U32.wrapping_add y 10#u32)
++  _root_.Aeneas.Std.Result.ok (x1, (x1, y1), fun tupled_args1 => tupled_args1,
++    fun tupled_args1 => tupled_args1)
++
++/-- Trait implementation: [nested_borrows_tuple::use1::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u32, u32> for nested_borrows_tuple::use1::closure}]
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 61:41-65:5 -/
++@[reducible]
++def
++  use1.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU32U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  :
++  _root_.nested_borrows_tuple.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  _root_.nested_borrows_tuple.use1.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.nested_borrows_tuple.use1.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU32U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++}
++
++/-- [nested_borrows_tuple::use1]:
++    Source: 'tests/src/nested-borrows-tuple.rs', lines 59:0-67:1
++    Visibility: public -/
++def use1
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let (r, p, call1_back, call1_back1) ←
++    _root_.nested_borrows_tuple.call1
++      _root_.nested_borrows_tuple.use1.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU32U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++      (a, b) ()
++  let (i, i1) := p
++  let a1 := call1_back i
++  let b1 := call1_back1 i1
++  _root_.Aeneas.Std.Result.ok (r, a1, b1)
++
++end nested_borrows_tuple
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 04cdbc6..7eab08f 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -35,6 +35,9 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsDropped
+ @[default_target] lean_lib NestedBorrowsAudit
+ @[default_target] lean_lib NestedBorrowsReturned
++@[default_target] lean_lib NestedBorrowsClosureOutlives
++@[default_target] lean_lib NestedBorrowsAbsentLevel
++@[default_target] lean_lib NestedBorrowsTuple
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib CollectFlatten
+diff --git a/tests/src/nested-borrows-absent-level.rs b/tests/src/nested-borrows-absent-level.rs
+new file mode 100644
+index 0000000..1408a2e
+--- /dev/null
++++ b/tests/src/nested-borrows-absent-level.rs
+@@ -0,0 +1,87 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsAbsentLevel
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Nested borrows whose positions are absent from a value: `count_into(None,
++//! n)` passes `Option<&'2 mut Frame<'3>>`, whose type has positions of `'3`
++//! at level 1 (the frame given back to `'2`), but `None` holds none, so the
++//! call abstraction has no sub-abstraction of level 1 and ends at level 0
++//! with the level-1 inputs of the backward function of `'3` still pending.
++//! They are the value itself, unchanged (`none`).
++
++pub struct Frame<'a> {
++    pub steps: &'a mut u32,
++    pub id: u32,
++}
++fn bump(frame: &mut Frame<'_>, n: u32) -> u32 {
++    *frame.steps = frame.steps.wrapping_add(n);
++    frame.id = frame.id.wrapping_add(1);
++    n.wrapping_mul(2)
++}
++pub fn count_into(execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    match execution {
++        Some(frame) => bump(frame, n),
++        None => n,
++    }
++}
++pub fn drive_count(n: u32, some: bool) -> (u32, u32, u32) {
++    let mut s = 5u32;
++    let mut f = Frame { steps: &mut s, id: 1 };
++    let r = if some { count_into(Some(&mut f), n) } else { count_into(None, n) };
++    let id = f.id;
++    *f.steps = f.steps.wrapping_add(100);
++    (r, id, s)
++}
++pub fn drive_none(n: u32) -> (u32, u32) {
++    let mut s = 7u32;
++    let mut f = Frame { steps: &mut s, id: 3 };
++    let r = count_into(None, n);
++    *f.steps = f.steps.wrapping_add(r);
++    let id = f.id;
++    (id, s)
++}
++pub fn count_two(a: Option<&mut Frame<'_>>, b: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let x = count_into(a, n);
++    let y = count_into(b, n.wrapping_add(1));
++    x.wrapping_add(y)
++}
++pub fn drive_two(n: u32, which: u8) -> (u32, u32, u32, u32) {
++    let mut s = 5u32;
++    let mut t = 9u32;
++    let mut f = Frame { steps: &mut s, id: 1 };
++    let mut g = Frame { steps: &mut t, id: 2 };
++    let r = match which {
++        0 => count_two(None, None, n),
++        1 => count_two(Some(&mut f), None, n),
++        2 => count_two(None, Some(&mut g), n),
++        _ => count_two(Some(&mut f), Some(&mut g), n),
++    };
++    let (fi, gi) = (f.id, g.id);
++    (r, fi, gi, s.wrapping_add(t))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drive_count_native() {
++        assert_eq!(drive_count(3, false), (3, 1, 105));
++        assert_eq!(drive_count(3, true), (6, 2, 108));
++        assert_eq!(drive_count(7, true), (14, 2, 112));
++    }
++
++    #[test]
++    fn drive_none_native() {
++        assert_eq!(drive_none(0), (3, 7));
++        assert_eq!(drive_none(4), (3, 11));
++    }
++
++    #[test]
++    fn drive_two_native() {
++        assert_eq!(drive_two(1, 0), (3, 1, 2, 14));
++        assert_eq!(drive_two(1, 1), (4, 2, 2, 15));
++        assert_eq!(drive_two(1, 2), (5, 1, 3, 16));
++        assert_eq!(drive_two(6, 3), (26, 2, 3, 27));
++    }
++}
+diff --git a/tests/src/nested-borrows-closure-outlives.rs b/tests/src/nested-borrows-closure-outlives.rs
+new file mode 100644
+index 0000000..78e5731
+--- /dev/null
++++ b/tests/src/nested-borrows-closure-outlives.rs
+@@ -0,0 +1,134 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsClosureOutlives
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A closure capturing a mutable borrow of a closure which captures mutable
++//! borrows (the `DimExpr::map_symbols` shapes of chelis-ir `dag.rs`): the
++//! callee receives `&'r mut Strict<'0, 'u, 'k> { resolve: &'0 mut Bind<'u, 'k> }`
++//! and the region `'u` of the innermost captured borrow is nested under two
++//! ignored mutable borrows. Closure types carry no outlives predicates: the
++//! ones implied by the types of their captured variables (`'u : '0`) are
++//! added before the translation, so that `'u` is a descendant of `'0` in the
++//! regions hierarchy and in the outlive projections of the values given back.
++
++#[derive(Clone)]
++pub enum D {
++    C(u32),
++    S(u32),
++    M(Box<D>, Box<D>),
++}
++
++impl D {
++    fn map_symbols<E>(
++        &self,
++        resolve: &mut impl FnMut(u32) -> Result<Option<u32>, E>,
++    ) -> Result<D, E> {
++        match self {
++            D::C(v) => Ok(D::C(*v)),
++            D::S(name) => Ok(match resolve(*name)? {
++                Some(x) => D::C(x),
++                None => self.clone(),
++            }),
++            D::M(l, r) => Ok(D::M(
++                Box::new(l.map_symbols(resolve)?),
++                Box::new(r.map_symbols(resolve)?),
++            )),
++        }
++    }
++
++    fn checksum(&self) -> u32 {
++        match self {
++            D::C(v) => *v,
++            D::S(name) => name.wrapping_add(1000),
++            D::M(l, r) => l.checksum().wrapping_mul(3).wrapping_add(r.checksum()),
++        }
++    }
++}
++
++/// `dag.rs` `BlasMatmul`: a closure forwarding to the caller's closure, passed
++/// by mutable reference to several calls, then the caller's closure is used
++/// again directly (the lender of the closure's captured borrow is reused).
++fn map_node<E>(
++    a: &D,
++    b: &D,
++    resolve: &mut impl FnMut(u32, bool) -> Result<Option<u32>, E>,
++) -> Result<(D, D, u32), E> {
++    let mut strict = |name: u32| resolve(name, true);
++    let a = a.map_symbols(&mut strict)?;
++    let b = b.map_symbols(&mut strict)?;
++    let extra = match resolve(7, false)? {
++        Some(x) => x,
++        None => 0,
++    };
++    Ok((a, b, extra))
++}
++
++/// The closure captures a mutable borrow (`uses`) and shared borrows
++/// (`k`, `v`): the shared captures are carriers of the values given back.
++fn bind_node(a: &D, b: &D, k: u32, v: u32, uses: &mut u32) -> Result<(D, D, u32), u32> {
++    map_node(a, b, &mut |s, strict| {
++        *uses = uses.wrapping_add(if strict { 1 } else { 100 });
++        if s == 0 {
++            Err(*uses)
++        } else if s == k {
++            Ok(Some(v))
++        } else {
++            Ok(None)
++        }
++    })
++}
++
++pub fn drive_map(k: u32, v: u32, fail: bool) -> (u32, u32, u32, u32) {
++    let a = D::M(Box::new(D::S(3)), Box::new(D::M(Box::new(D::C(5)), Box::new(D::S(4)))));
++    let b = if fail { D::S(0) } else { D::S(4) };
++    let mut uses = 1;
++    let r = bind_node(&a, &b, k, v, &mut uses);
++    // The lender of the closure's captured borrow is used after the call
++    uses = uses.wrapping_mul(2);
++    match r {
++        Ok((a, b, extra)) => (a.checksum(), b.checksum(), extra, uses),
++        Err(e) => (0, 0, e, uses),
++    }
++}
++
++/// The smallest shape: one call through a closure over a closure.
++fn m_call(x: u32, resolve: &mut impl FnMut(u32) -> u32) -> u32 {
++    resolve(x)
++}
++
++fn node_call(x: u32, resolve: &mut impl FnMut(u32, bool) -> u32) -> u32 {
++    let mut strict = |name: u32| resolve(name, true);
++    let a = m_call(x, &mut strict);
++    let b = m_call(a, &mut strict);
++    // The lender of `strict`'s captured borrow, used again
++    resolve(b, false)
++}
++
++pub fn drive_call(x: u32, k: u32) -> (u32, u32) {
++    let mut uses = 0u32;
++    let r = node_call(x, &mut |s, strict| {
++        uses = uses.wrapping_add(if strict { 1 } else { 10 });
++        if s == k { s.wrapping_mul(2) } else { s.wrapping_add(1) }
++    });
++    uses = uses.wrapping_add(1000);
++    (r, uses)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drive_map_native() {
++        assert_eq!(drive_map(4, 9, false), (3033, 9, 0, 208));
++        assert_eq!(drive_map(3, 1, false), (1022, 1004, 0, 208));
++        assert_eq!(drive_map(4, 9, true), (0, 0, 4, 8));
++    }
++
++    #[test]
++    fn drive_call_native() {
++        assert_eq!(drive_call(1, 1), (4, 1012));
++        assert_eq!(drive_call(5, 6), (13, 1012));
++        assert_eq!(drive_call(3, 9), (6, 1012));
++    }
++}
+diff --git a/tests/src/nested-borrows-tuple.rs b/tests/src/nested-borrows-tuple.rs
+new file mode 100644
+index 0000000..ae746be
+--- /dev/null
++++ b/tests/src/nested-borrows-tuple.rs
+@@ -0,0 +1,100 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsTuple
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Nested borrows through tuples: a tuple under a mutable borrow holds
++//! positions of a region group at a nested level in some fields only, e.g.
++//! `&'a mut (&'b mut u32, u32)` at the level of the value given back to `'a`
++//! for `'b`. The backward functions only receive and give back those fields,
++//! while a symbolic tuple (e.g., an input passed on to another function) is a
++//! single value.
++
++pub fn g2(s: &mut (&mut u32, u32)) -> u32 {
++    *s.0 = s.0.wrapping_add(1);
++    s.1 = s.1.wrapping_add(1);
++    *s.0
++}
++pub fn call_g2(s: &mut (&mut u32, u32)) -> u32 {
++    g2(s)
++}
++pub fn use_g2(a: u32, b: u32) -> (u32, u32, u32) {
++    let mut a = a;
++    let mut t = (&mut a, b);
++    let r = call_g2(&mut t);
++    *t.0 = t.0.wrapping_add(100);
++    let t1 = t.1;
++    (r, t1, a)
++}
++pub fn h2(s: &mut (u32, &mut u32)) -> u32 {
++    *s.1 = s.1.wrapping_add(s.0);
++    s.0 = 3;
++    *s.1
++}
++pub fn call_h2(s: &mut (u32, &mut u32)) -> u32 {
++    h2(s)
++}
++pub fn use_h2(a: u32, b: u32) -> (u32, u32, u32) {
++    let mut b = b;
++    let mut t = (a, &mut b);
++    let r = call_h2(&mut t);
++    let t0 = t.0;
++    (r, t0, b)
++}
++pub fn g(s: &mut (&mut u32, &mut u32)) -> u32 {
++    *s.0 = s.0.wrapping_add(1);
++    *s.1 = s.1.wrapping_add(10);
++    *s.0
++}
++pub fn call_g(s: &mut (&mut u32, &mut u32)) -> u32 {
++    g(s)
++}
++pub fn use_g(a: u32, b: u32) -> (u32, u32, u32) {
++    let (mut a, mut b) = (a, b);
++    let r = call_g(&mut (&mut a, &mut b));
++    (r, a, b)
++}
++pub fn call1<R>(s: &mut (&mut u32, &mut u32), f: impl FnOnce(&mut (&mut u32, &mut u32)) -> R) -> R {
++    f(s)
++}
++pub fn use1(a: u32, b: u32) -> (u32, u32, u32) {
++    let (mut a, mut b) = (a, b);
++    let r = call1(&mut (&mut a, &mut b), |(x, y)| {
++        **x = x.wrapping_add(1);
++        **y = y.wrapping_add(10);
++        **x
++    });
++    (r, a, b)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn use_g2_native() {
++        assert_eq!(use_g2(0, 0), (1, 1, 101));
++        assert_eq!(use_g2(5, 7), (6, 8, 106));
++        assert_eq!(use_g2(u32::MAX, 3), (0, 4, 100));
++    }
++
++    #[test]
++    fn use_h2_native() {
++        assert_eq!(use_h2(0, 0), (0, 3, 0));
++        assert_eq!(use_h2(5, 7), (12, 3, 12));
++        assert_eq!(use_h2(u32::MAX, 3), (2, 3, 2));
++    }
++
++    #[test]
++    fn use_g_native() {
++        assert_eq!(use_g(0, 0), (1, 1, 10));
++        assert_eq!(use_g(5, 7), (6, 6, 17));
++        assert_eq!(use_g(u32::MAX, 3), (0, 0, 13));
++    }
++
++    #[test]
++    fn use1_native() {
++        assert_eq!(use1(0, 0), (1, 1, 10));
++        assert_eq!(use1(5, 7), (6, 6, 17));
++        assert_eq!(use1(u32::MAX, 3), (0, 0, 13));
++    }
++}

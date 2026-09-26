@@ -1,0 +1,1075 @@
+# aeneas integration step 42 after cba11f3beb: commit 1cff58e19898271ba3a98757f5d7e6d86059d17f
+# first parent 1eafb5684d8f1ce6b84890c2bed38437abc35726, merged 3ea72aebb5c8f0986155f4fd173deedd700034e5
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch fix/nested-collections-2 (well-typed simplified lets; per-function nested-carrier errors)
+
+diff --git a/src/pure/PureMicroPassesGeneral.ml b/src/pure/PureMicroPassesGeneral.ml
+index 7ca43cc..9d41af2 100644
+--- a/src/pure/PureMicroPassesGeneral.ml
++++ b/src/pure/PureMicroPassesGeneral.ml
+@@ -936,6 +936,19 @@ let inline_useless_var_assignments ~inline_named ~inline_const ~inline_pure
+        ~inline_pure ~inline_identity ~inline_loop_back_calls)
+     empty_inline_env
+ 
++(** Apply a constructor of [Result] or of the loop results ([ok], [fail],
++    [break], [continue]), whose outputs were filtered, at the type [ty]: its
++    type arguments are those of [ty]. *)
++let mk_filtered_cons_apps span (f : qualif) (args : texpr list) (ty : ty) :
++    texpr =
++  let f =
++    match (f.id, ty) with
++    | AdtCons { adt_id; _ }, TAdt (adt_id', generics) when adt_id = adt_id' ->
++        { f with generics }
++    | _ -> f
++  in
++  [%add_loc] mk_qualif_apps span f args ty
++
+ (** Simplify let-bindings which bind tuples and which contain ignored patterns.
+ 
+     Ex.:
+@@ -989,7 +1002,7 @@ let simplify_let_tuple span (ctx : ctx) (monadic : bool) (pat : tpat)
+           if is_result_fail e || is_loop_result_fail_break_continue e then (
+             [%ldebug "expression is a fail, break or a continue"];
+             let f, args = destruct_qualif_apps e in
+-            [%add_loc] mk_qualif_apps span f args new_ty)
++            mk_filtered_cons_apps span f args new_ty)
+           else if is_result_ok e then (
+             (* If this is an [ok] we update the inner expression *)
+             [%ldebug "expression is an ok"];
+@@ -997,7 +1010,7 @@ let simplify_let_tuple span (ctx : ctx) (monadic : bool) (pat : tpat)
+             match args with
+             | [ x ] ->
+                 let x = update x in
+-                [%add_loc] mk_qualif_apps span f [ x ] new_ty
++                mk_filtered_cons_apps span f [ x ] new_ty
+             | _ -> [%internal_error] span
+             (* If this is a tuple we filter the arguments *))
+           else if tuple_size = Some num_nonfiltered_pats then (
+@@ -1412,11 +1425,12 @@ let simplify_let_branching (ctx : ctx) (def : fun_decl) =
+       ^ String.concat ",\n\n"
+           (List.map (Print.option_to_string (texpr_to_string ctx)) outputs)];
+ 
++    (* The type of the outputs which are kept *)
+     let new_ty =
+       mk_simpl_tuple_ty
+-        (List.map
+-           (fun (e : texpr) -> e.ty)
+-           (List.filter_map (fun x -> x) outputs))
++        (List.filter_map
++           (fun (keep, (pat : tpat)) -> if keep then Some pat.ty else None)
++           (List.combine keep pats))
+     in
+     let new_ty = if monadic then mk_result_ty new_ty else new_ty in
+ 
+@@ -1438,7 +1452,7 @@ let simplify_let_branching (ctx : ctx) (def : fun_decl) =
+           if is_result_fail e || is_loop_result_fail_break_continue e then (
+             [%ldebug "is fail, break or continue"];
+             let f, args = destruct_qualif_apps e in
+-            [%add_loc] mk_qualif_apps span f args new_ty)
++            mk_filtered_cons_apps span f args new_ty)
+           else if is_result_ok e then (
+             [%ldebug "is ok"];
+             let _, args = destruct_apps e in
+diff --git a/src/pure/PureNestedCollections.ml b/src/pure/PureNestedCollections.ml
+index 09c875a..0916945 100644
+--- a/src/pure/PureNestedCollections.ml
++++ b/src/pure/PureNestedCollections.ml
+@@ -259,6 +259,7 @@ type ctx = {
+   new_decls : type_decl TypeDeclId.Map.t;
+       (** The updated declarations (only those which changed) *)
+   fresh_fvar_id : unit -> fvar_id;
++  fmt : PrintPure.fmt_env;  (** To print the types in the error messages *)
+ }
+ 
+ (** Original and updated types of the fields of a variant, if the variant has
+@@ -348,7 +349,10 @@ and convert_adt (ctx : ctx) (ty : ty) (e : texpr) : texpr =
+     [%craise] span
+       ("Unsupported conversion of a collection nested in a recursive type: \
+         can not convert a value of type '"
+-      ^ show_ty e.ty ^ "' to type '" ^ show_ty ty ^ "'")
++      ^ PrintPure.ty_to_string ctx.fmt false e.ty
++      ^ "' to type '"
++      ^ PrintPure.ty_to_string ctx.fmt false ty
++      ^ "'")
+   in
+   match (e.ty, ty) with
+   | TAdt (src_id, src_generics), TAdt (tgt_id, tgt_generics)
+@@ -626,6 +630,7 @@ let apply (trans_ctx : trans_ctx) (type_decls : type_decl list)
+     let all_decls =
+       TypeDeclId.Map.union (fun _ d _ -> Some d) new_decls type_decls_map
+     in
++    let fmt = trans_ctx_to_pure_fmt_env trans_ctx in
+     let update_fun (f : fun_decl) : fun_decl =
+       match f.body with
+       | None -> f
+@@ -633,7 +638,7 @@ let apply (trans_ctx : trans_ctx) (type_decls : type_decl list)
+           let span = f.item_meta.span in
+           let _, fresh_fvar_id = FVarId.fresh_stateful_generator () in
+           let _, opened = open_all_fun_body fresh_fvar_id span body in
+-          let ctx = { span; info; new_decls; fresh_fvar_id } in
++          let ctx = { span; info; new_decls; fresh_fvar_id; fmt } in
+           let inputs, bindings =
+             List.split (List.map (update_pat ctx) opened.inputs)
+           in
+@@ -654,16 +659,42 @@ let apply (trans_ctx : trans_ctx) (type_decls : type_decl list)
+               type_check_fun_body trans_ctx all_decls span f.signature updated;
+             { f with body = Some (close_all_fun_body span updated) })
+     in
+-    let funs =
+-      List.map
+-        (fun (t : pure_fun_translation) ->
+-          {
+-            f = update_fun t.f;
+-            loops = List.map update_fun t.loops;
+-            bodies = List.map update_fun t.bodies;
+-          })
+-        funs
++    (* An error in a body (an unsupported shape, or an updated body which does
++       not type-check) is registered for its function, whose body is then
++       ignored (as when the symbolic execution of a body fails), together with
++       the bodies of its loops and auxiliary functions. The error is saved, not
++       raised: the other functions are still translated, and Aeneas fails at
++       the end. *)
++    let update_translation (t : pure_fun_translation) : pure_fun_translation =
++      try
++        {
++          f = update_fun t.f;
++          loops = List.map update_fun t.loops;
++          bodies = List.map update_fun t.bodies;
++        }
++      with Errors.CFailure error ->
++        let name = name_to_string trans_ctx t.f.item_meta.name in
++        let name_pattern =
++          try
++            name_to_pattern_string (Some t.f.item_meta.span) trans_ctx
++              t.f.item_meta.name
++          with Errors.CFailure _ ->
++            "(could not compute the name pattern due to a different error)"
++        in
++        [%save_error_opt_span] error.span
++          ("Ignoring the body of function '" ^ name
++         ^ "' because of previous error: could not use carriers for the \
++            collections nested in recursive types in it\n\
++            Name pattern: '" ^ name_pattern ^ "'\nDefinition span: "
++          ^ Errors.raw_span_to_string t.f.item_meta.span);
++        let ignore_body (f : fun_decl) = { f with body = None } in
++        {
++          f = ignore_body t.f;
++          loops = List.map ignore_body t.loops;
++          bodies = List.map ignore_body t.bodies;
++        }
+     in
++    let funs = List.map update_translation funs in
+     let type_decls =
+       List.map
+         (fun (d : type_decl) ->
+diff --git a/src/pure/PureTypeCheck.ml b/src/pure/PureTypeCheck.ml
+index ec18943..cb41d40 100644
+--- a/src/pure/PureTypeCheck.ml
++++ b/src/pure/PureTypeCheck.ml
+@@ -98,15 +98,10 @@ let ty_to_string (ctx : tc_ctx) (x : ty) : string =
+   let fmt = PrintPure.decls_ctx_to_fmt_env ctx.decls_ctx in
+   PrintPure.ty_to_string fmt false x
+ 
+-let check_literal (span : Meta.span) (v : literal) (ty : literal_type) : unit =
+-  match (ty, v) with
+-  | TInt int_ty, VScalar (SignedScalar (ty, _)) ->
+-      [%sanity_check] span (int_ty = ty)
+-  | TUInt int_ty, VScalar (UnsignedScalar (ty, _)) ->
+-      [%sanity_check] span (int_ty = ty)
+-  | TBool, VBool _ | TChar, VChar _ -> ()
+-  | TFloat float_ty, VFloat fv when float_ty = fv.float_ty -> ()
+-  | _ -> [%craise] span "Inconsistent type"
++(** Check the type of a literal (string literals have the type [Str], which is
++    not a literal type) *)
++let check_literal (span : Meta.span) (v : literal) (ty : ty) : unit =
++  [%pure_type_check] span (compute_literal_type v = ty)
+ 
+ let tc_ctx_start_pbenv (ctx : tc_ctx) : tc_ctx =
+   assert (ctx.pbenv = None);
+@@ -130,7 +125,7 @@ let rec check_tpat_aux (span : Meta.span) (ctx : tc_ctx) (v : tpat) : tc_ctx =
+   [%ltrace tpat_to_string ctx v];
+   match v.pat with
+   | PConstant cv ->
+-      check_literal span cv (ty_as_literal span v.ty);
++      check_literal span cv v.ty;
+       ctx
+   | PIgnored -> ctx
+   | PBound (var, _) ->
+@@ -182,7 +177,7 @@ let rec check_texpr (span : Meta.span) (ctx : tc_ctx) (e : texpr) : unit =
+   | CVar cg_id ->
+       let ty = T.ConstGenericVarId.Map.find cg_id ctx.const_generics in
+       [%pure_type_check] span (ty = e.ty)
+-  | Const cv -> check_literal span cv (ty_as_literal span e.ty)
++  | Const cv -> check_literal span cv e.ty
+   | App (app, arg) ->
+       let input_ty, output_ty = destruct_arrow span app.ty in
+       [%pure_type_check] span (input_ty = arg.ty);
+diff --git a/tests/lean/NestedCollections/Checks.lean b/tests/lean/NestedCollections/Checks.lean
+index ca249b4..48404aa 100644
+--- a/tests/lean/NestedCollections/Checks.lean
++++ b/tests/lean/NestedCollections/Checks.lean
+@@ -25,6 +25,9 @@ def okI64 : Result I64 → Option Int
+ #guard okU32 (doc_scenario 5#u32) == some 2206
+ #guard okU32 (doc_scenario 0#u32) == some 2156
+ 
++#guard okU32 (binder_scenario 4#u32) == some 11001
++#guard okU32 (binder_scenario 3#u32) == some 1000
++
+ /-! The conversions between the collections and their carriers are erased by
+     `simp`. -/
+ example (v : alloc.vec.Vec Tree) : width (Tree.Node v.toNested) = ok (alloc.vec.Vec.len v) := by
+diff --git a/tests/lean/NestedCollections/NestedCollections.lean b/tests/lean/NestedCollections/NestedCollections.lean
+index b850839..dde0003 100644
+--- a/tests/lean/NestedCollections/NestedCollections.lean
++++ b/tests/lean/NestedCollections/NestedCollections.lean
+@@ -12,7 +12,7 @@ set_option maxHeartbeats 1000000
+ namespace nested_collections
+ 
+ /-- [nested_collections::Tree]
+-    Source: 'tests/src/nested-collections.rs', lines 17:0-25:1
++    Source: 'tests/src/nested-collections.rs', lines 18:0-26:1
+     Visibility: public -/
+ @[discriminant isize]
+ inductive Tree where
+@@ -27,7 +27,7 @@ inductive Tree where
+   Tree
+ 
+ /-- [nested_collections::leaf]:
+-    Source: 'tests/src/nested-collections.rs', lines 27:0-29:1
++    Source: 'tests/src/nested-collections.rs', lines 28:0-30:1
+     Visibility: public -/
+ def leaf
+   (n : _root_.Aeneas.Std.U32) :
+@@ -36,7 +36,7 @@ def leaf
+   _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Leaf n)
+ 
+ /-- [nested_collections::node]:
+-    Source: 'tests/src/nested-collections.rs', lines 31:0-33:1
++    Source: 'tests/src/nested-collections.rs', lines 32:0-34:1
+     Visibility: public -/
+ def node
+   (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
+@@ -46,7 +46,7 @@ def node
+     (_root_.Aeneas.Std.alloc.vec.Vec.toNested children))
+ 
+ /-- [nested_collections::node2]:
+-    Source: 'tests/src/nested-collections.rs', lines 35:0-40:1
++    Source: 'tests/src/nested-collections.rs', lines 36:0-41:1
+     Visibility: public -/
+ def node2
+   (a : _root_.nested_collections.Tree) (b : _root_.nested_collections.Tree) :
+@@ -60,7 +60,7 @@ def node2
+     (_root_.Aeneas.Std.alloc.vec.Vec.toNested children1))
+ 
+ /-- [nested_collections::named]:
+-    Source: 'tests/src/nested-collections.rs', lines 42:0-46:1
++    Source: 'tests/src/nested-collections.rs', lines 43:0-47:1
+     Visibility: public -/
+ def named
+   (name1 : _root_.String) (t : _root_.nested_collections.Tree) :
+@@ -73,7 +73,7 @@ def named
+     (_root_.Aeneas.Std.alloc.vec.Vec.toNested entries))
+ 
+ /-- [nested_collections::boxed]:
+-    Source: 'tests/src/nested-collections.rs', lines 48:0-50:1
++    Source: 'tests/src/nested-collections.rs', lines 49:0-51:1
+     Visibility: public -/
+ def boxed
+   (children : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
+@@ -84,7 +84,7 @@ def boxed
+     (_root_.Aeneas.Std.Slice.toNested s))
+ 
+ /-- [nested_collections::pair]:
+-    Source: 'tests/src/nested-collections.rs', lines 52:0-54:1
++    Source: 'tests/src/nested-collections.rs', lines 53:0-55:1
+     Visibility: public -/
+ def pair
+   (a : _root_.nested_collections.Tree) (b : _root_.nested_collections.Tree) :
+@@ -95,7 +95,7 @@ def pair
+     (_root_.Aeneas.Std.Array.make 2#usize [ a, b ])))
+ 
+ /-- [nested_collections::opt]:
+-    Source: 'tests/src/nested-collections.rs', lines 56:0-61:1
++    Source: 'tests/src/nested-collections.rs', lines 57:0-62:1
+     Visibility: public -/
+ def opt
+   (t : _root_.Option _root_.nested_collections.Tree) :
+@@ -108,7 +108,7 @@ def opt
+     _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Tree.Opt t)
+ 
+ /-- [nested_collections::grid]:
+-    Source: 'tests/src/nested-collections.rs', lines 63:0-67:1
++    Source: 'tests/src/nested-collections.rs', lines 64:0-68:1
+     Visibility: public -/
+ def grid
+   (row : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Tree) :
+@@ -125,7 +125,7 @@ def grid
+ mutual
+ 
+ /-- [nested_collections::sum_slice]: loop 0:
+-    Source: 'tests/src/nested-collections.rs', lines 72:4-75:5
++    Source: 'tests/src/nested-collections.rs', lines 73:4-76:5
+     Visibility: public -/
+ @[rust_loop]
+ def sum_slice_loop
+@@ -142,7 +142,7 @@ def sum_slice_loop
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum_slice]: loop body 0:
+-    Source: 'tests/src/nested-collections.rs', lines 72:4-75:5
++    Source: 'tests/src/nested-collections.rs', lines 73:4-76:5
+     Visibility: public -/
+ @[rust_loop_body]
+ def sum_slice_loop.body
+@@ -163,7 +163,7 @@ def sum_slice_loop.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum_slice]:
+-    Source: 'tests/src/nested-collections.rs', lines 69:0-77:1
++    Source: 'tests/src/nested-collections.rs', lines 70:0-78:1
+     Visibility: public -/
+ @[reducible]
+ def sum_slice
+@@ -174,7 +174,7 @@ def sum_slice
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum]: loop 0:
+-    Source: 'tests/src/nested-collections.rs', lines 85:12-87:13
++    Source: 'tests/src/nested-collections.rs', lines 86:12-88:13
+     Visibility: public -/
+ @[rust_loop]
+ def sum_loop0
+@@ -194,7 +194,7 @@ def sum_loop0
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum]: loop 1:
+-    Source: 'tests/src/nested-collections.rs', lines 97:12-100:13
++    Source: 'tests/src/nested-collections.rs', lines 98:12-101:13
+     Visibility: public -/
+ @[rust_loop]
+ def sum_loop1
+@@ -212,7 +212,7 @@ def sum_loop1
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum]: loop body 0:
+-    Source: 'tests/src/nested-collections.rs', lines 85:12-87:13
++    Source: 'tests/src/nested-collections.rs', lines 86:12-88:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def sum_loop0.body
+@@ -236,7 +236,7 @@ def sum_loop0.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum]: loop body 1:
+-    Source: 'tests/src/nested-collections.rs', lines 97:12-100:13
++    Source: 'tests/src/nested-collections.rs', lines 98:12-101:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def sum_loop1.body
+@@ -263,7 +263,7 @@ def sum_loop1.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::sum]:
+-    Source: 'tests/src/nested-collections.rs', lines 79:0-104:1
++    Source: 'tests/src/nested-collections.rs', lines 80:0-105:1
+     Visibility: public -/
+ def sum
+   (t : _root_.nested_collections.Tree) :
+@@ -304,7 +304,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- [nested_collections::width]:
+-    Source: 'tests/src/nested-collections.rs', lines 107:0-123:1
++    Source: 'tests/src/nested-collections.rs', lines 108:0-124:1
+     Visibility: public -/
+ def width
+   (t : _root_.nested_collections.Tree) :
+@@ -336,7 +336,7 @@ def width
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.len rows1)
+ 
+ /-- [nested_collections::push_child]:
+-    Source: 'tests/src/nested-collections.rs', lines 125:0-133:1
++    Source: 'tests/src/nested-collections.rs', lines 126:0-134:1
+     Visibility: public -/
+ def push_child
+   (t : _root_.nested_collections.Tree) (c : _root_.nested_collections.Tree) :
+@@ -382,7 +382,7 @@ def push_child
+   | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
+ 
+ /-- [nested_collections::pop_child]:
+-    Source: 'tests/src/nested-collections.rs', lines 135:0-140:1
++    Source: 'tests/src/nested-collections.rs', lines 136:0-141:1
+     Visibility: public -/
+ def pop_child
+   (t : _root_.nested_collections.Tree) :
+@@ -429,7 +429,7 @@ def pop_child
+   | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
+ 
+ /-- [nested_collections::set_leaf]:
+-    Source: 'tests/src/nested-collections.rs', lines 142:0-148:1
++    Source: 'tests/src/nested-collections.rs', lines 143:0-149:1
+     Visibility: public -/
+ def set_leaf
+   (t : _root_.nested_collections.Tree) (i : _root_.Aeneas.Std.Usize)
+@@ -483,7 +483,7 @@ def set_leaf
+ mutual
+ 
+ /-- [nested_collections::bump]: loop 0:
+-    Source: 'tests/src/nested-collections.rs', lines 156:12-159:13
++    Source: 'tests/src/nested-collections.rs', lines 157:12-160:13
+     Visibility: public -/
+ @[rust_loop]
+ def bump_loop
+@@ -505,7 +505,7 @@ def bump_loop
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::bump]: loop body 0:
+-    Source: 'tests/src/nested-collections.rs', lines 156:12-159:13
++    Source: 'tests/src/nested-collections.rs', lines 157:12-160:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def bump_loop.body
+@@ -535,7 +535,7 @@ def bump_loop.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::bump]:
+-    Source: 'tests/src/nested-collections.rs', lines 151:0-167:1
++    Source: 'tests/src/nested-collections.rs', lines 152:0-168:1
+     Visibility: public -/
+ def bump
+   (t : _root_.nested_collections.Tree) :
+@@ -592,7 +592,7 @@ end
+ mutual
+ 
+ /-- [nested_collections::Expr]
+-    Source: 'tests/src/nested-collections.rs', lines 170:0-174:1
++    Source: 'tests/src/nested-collections.rs', lines 171:0-175:1
+     Visibility: public -/
+ @[discriminant isize]
+ inductive Expr where
+@@ -601,13 +601,13 @@ inductive Expr where
+ | Call : _root_.String → _root_.Aeneas.Std.NestedVec Expr → Expr
+ 
+ /-- [nested_collections::Metadata]
+-    Source: 'tests/src/nested-collections.rs', lines 176:0-179:1
++    Source: 'tests/src/nested-collections.rs', lines 177:0-180:1
+     Visibility: public -/
+ inductive Metadata where
+ | mk : _root_.Option Storage → _root_.Aeneas.Std.U32 → Metadata
+ 
+ /-- [nested_collections::Storage]
+-    Source: 'tests/src/nested-collections.rs', lines 181:0-183:1
++    Source: 'tests/src/nested-collections.rs', lines 182:0-184:1
+     Visibility: public -/
+ inductive Storage where
+ | mk :
+@@ -644,7 +644,7 @@ theorem Storage.entries._simpLemma_ (entries :
+   (_root_.nested_collections.Storage.mk entries).entries = entries := by rfl
+ 
+ /-- [nested_collections::plain]:
+-    Source: 'tests/src/nested-collections.rs', lines 185:0-190:1
++    Source: 'tests/src/nested-collections.rs', lines 186:0-191:1
+     Visibility: public -/
+ def plain
+   (line1 : _root_.Aeneas.Std.U32) :
+@@ -654,7 +654,7 @@ def plain
+     line1)
+ 
+ /-- [nested_collections::with_entry]:
+-    Source: 'tests/src/nested-collections.rs', lines 192:0-199:1
++    Source: 'tests/src/nested-collections.rs', lines 193:0-200:1
+     Visibility: public -/
+ def with_entry
+   (key : _root_.Aeneas.Std.U32) (e : _root_.nested_collections.Expr)
+@@ -671,7 +671,7 @@ def with_entry
+     (_root_.nested_collections.Storage.mk entries1)) line1)
+ 
+ /-- [nested_collections::line]:
+-    Source: 'tests/src/nested-collections.rs', lines 203:0-205:1
++    Source: 'tests/src/nested-collections.rs', lines 204:0-206:1
+     Visibility: public -/
+ def line
+   (meta1 : _root_.nested_collections.Metadata) :
+@@ -680,7 +680,7 @@ def line
+   _root_.Aeneas.Std.Result.ok meta1.line
+ 
+ /-- [nested_collections::list]:
+-    Source: 'tests/src/nested-collections.rs', lines 207:0-209:1
++    Source: 'tests/src/nested-collections.rs', lines 208:0-210:1
+     Visibility: public -/
+ def list
+   (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections.Expr)
+@@ -691,7 +691,7 @@ def list
+     (_root_.Aeneas.Std.alloc.vec.Vec.toNested items) meta1)
+ 
+ /-- [nested_collections::call]:
+-    Source: 'tests/src/nested-collections.rs', lines 211:0-213:1
++    Source: 'tests/src/nested-collections.rs', lines 212:0-214:1
+     Visibility: public -/
+ def call
+   (name1 : _root_.String)
+@@ -704,7 +704,7 @@ def call
+ mutual
+ 
+ /-- [nested_collections::eval]: loop 0:
+-    Source: 'tests/src/nested-collections.rs', lines 221:12-224:13
++    Source: 'tests/src/nested-collections.rs', lines 222:12-225:13
+     Visibility: public -/
+ @[rust_loop]
+ def eval_loop
+@@ -722,7 +722,7 @@ def eval_loop
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::eval]: loop body 0:
+-    Source: 'tests/src/nested-collections.rs', lines 221:12-224:13
++    Source: 'tests/src/nested-collections.rs', lines 222:12-225:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def eval_loop.body
+@@ -747,7 +747,7 @@ def eval_loop.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::eval]:
+-    Source: 'tests/src/nested-collections.rs', lines 215:0-235:1
++    Source: 'tests/src/nested-collections.rs', lines 216:0-236:1
+     Visibility: public -/
+ def eval
+   (e : _root_.nested_collections.Expr) (key : _root_.Aeneas.Std.U32) :
+@@ -781,7 +781,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- [nested_collections::append]:
+-    Source: 'tests/src/nested-collections.rs', lines 237:0-243:1
++    Source: 'tests/src/nested-collections.rs', lines 238:0-244:1
+     Visibility: public -/
+ def append
+   (e : _root_.nested_collections.Expr) (x : _root_.nested_collections.Expr) :
+@@ -801,14 +801,14 @@ def append
+       (_root_.Aeneas.Std.alloc.vec.Vec.toNested args2))
+ 
+ /-- [nested_collections::Wrapper]
+-    Source: 'tests/src/nested-collections.rs', lines 247:0-250:1
++    Source: 'tests/src/nested-collections.rs', lines 248:0-251:1
+     Visibility: public -/
+ structure Wrapper (T : Type) where
+   items : _root_.Aeneas.Std.NestedVec T
+   tag : _root_.Aeneas.Std.U32
+ 
+ /-- [nested_collections::Doc]
+-    Source: 'tests/src/nested-collections.rs', lines 252:0-255:1
++    Source: 'tests/src/nested-collections.rs', lines 253:0-256:1
+     Visibility: public -/
+ @[discriminant isize]
+ inductive Doc where
+@@ -816,7 +816,7 @@ inductive Doc where
+ | Block : _root_.nested_collections.Wrapper Doc → Doc
+ 
+ /-- [nested_collections::text]:
+-    Source: 'tests/src/nested-collections.rs', lines 257:0-259:1
++    Source: 'tests/src/nested-collections.rs', lines 258:0-260:1
+     Visibility: public -/
+ def text
+   (n : _root_.Aeneas.Std.U32) :
+@@ -825,7 +825,7 @@ def text
+   _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Doc.Text n)
+ 
+ /-- [nested_collections::block]:
+-    Source: 'tests/src/nested-collections.rs', lines 261:0-266:1
++    Source: 'tests/src/nested-collections.rs', lines 262:0-267:1
+     Visibility: public -/
+ def block
+   (tag : _root_.Aeneas.Std.U32) :
+@@ -841,7 +841,7 @@ def block
+     })
+ 
+ /-- [nested_collections::add]:
+-    Source: 'tests/src/nested-collections.rs', lines 268:0-277:1
++    Source: 'tests/src/nested-collections.rs', lines 269:0-278:1
+     Visibility: public -/
+ def add
+   (d : _root_.nested_collections.Doc) (child : _root_.nested_collections.Doc) :
+@@ -859,7 +859,7 @@ def add
+       { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested v), tag := i })
+ 
+ /-- [nested_collections::take_last]:
+-    Source: 'tests/src/nested-collections.rs', lines 279:0-284:1
++    Source: 'tests/src/nested-collections.rs', lines 280:0-285:1
+     Visibility: public -/
+ def take_last
+   (d : _root_.nested_collections.Doc) :
+@@ -879,7 +879,7 @@ def take_last
+ mutual
+ 
+ /-- [nested_collections::doc_size]: loop 0:
+-    Source: 'tests/src/nested-collections.rs', lines 292:12-295:13
++    Source: 'tests/src/nested-collections.rs', lines 293:12-296:13
+     Visibility: public -/
+ @[rust_loop]
+ def doc_size_loop
+@@ -896,7 +896,7 @@ def doc_size_loop
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::doc_size]: loop body 0:
+-    Source: 'tests/src/nested-collections.rs', lines 292:12-295:13
++    Source: 'tests/src/nested-collections.rs', lines 293:12-296:13
+     Visibility: public -/
+ @[rust_loop_body]
+ def doc_size_loop.body
+@@ -920,7 +920,7 @@ def doc_size_loop.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [nested_collections::doc_size]:
+-    Source: 'tests/src/nested-collections.rs', lines 286:0-299:1
++    Source: 'tests/src/nested-collections.rs', lines 287:0-300:1
+     Visibility: public -/
+ def doc_size
+   (d : _root_.nested_collections.Doc) :
+@@ -935,7 +935,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- [nested_collections::wrap_nums]:
+-    Source: 'tests/src/nested-collections.rs', lines 302:0-304:1
++    Source: 'tests/src/nested-collections.rs', lines 303:0-305:1
+     Visibility: public -/
+ def wrap_nums
+   (items : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
+@@ -947,7 +947,7 @@ def wrap_nums
+     { items := (_root_.Aeneas.Std.alloc.vec.Vec.toNested items), tag }
+ 
+ /-- [nested_collections::wrapper_len]:
+-    Source: 'tests/src/nested-collections.rs', lines 306:0-308:1
++    Source: 'tests/src/nested-collections.rs', lines 307:0-309:1
+     Visibility: public -/
+ def wrapper_len
+   {T : Type} (w : _root_.nested_collections.Wrapper T) :
+@@ -957,7 +957,7 @@ def wrapper_len
+     (_root_.Aeneas.Std.NestedVec.toVec w.items))
+ 
+ /-- [nested_collections::retag]:
+-    Source: 'tests/src/nested-collections.rs', lines 310:0-312:1
++    Source: 'tests/src/nested-collections.rs', lines 311:0-313:1
+     Visibility: public -/
+ def retag
+   {T : Type} (w : _root_.nested_collections.Wrapper T)
+@@ -967,7 +967,7 @@ def retag
+   _root_.Aeneas.Std.Result.ok { w with tag }
+ 
+ /-- [nested_collections::wrapper_first]:
+-    Source: 'tests/src/nested-collections.rs', lines 314:0-320:1
++    Source: 'tests/src/nested-collections.rs', lines 315:0-321:1
+     Visibility: public -/
+ def wrapper_first
+   (w : _root_.nested_collections.Wrapper _root_.Aeneas.Std.U32) :
+@@ -984,8 +984,173 @@ def wrapper_first
+       0#usize
+   else _root_.Aeneas.Std.Result.ok w.tag
+ 
++/-- [nested_collections::Raw]
++    Source: 'tests/src/nested-collections.rs', lines 328:0-336:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Raw where
++| Sym : _root_.Aeneas.Std.U32 → Raw
++| Items : _root_.Aeneas.Std.NestedVec Raw → Raw
++| Meta :
++  _root_.Aeneas.Std.NestedVec (_root_.String × Raw) →
++  Raw →
++  _root_.Aeneas.Std.U32 →
++  Raw
++
++/-- [nested_collections::RawView]
++    Source: 'tests/src/nested-collections.rs', lines 339:0-342:1
++    Visibility: public -/
++@[discriminant isize]
++inductive RawView where
++| Raw : _root_.nested_collections.Raw → RawView
++| Name : _root_.Aeneas.Std.U32 → RawView
++
++/-- [nested_collections::{core::clone::Clone for nested_collections::RawView<'a>}::clone]:
++    Source: 'tests/src/nested-collections.rs', lines 338:9-338:14
++    Visibility: public -/
++def RawView.Insts.CoreCloneClone.clone
++  (self : _root_.nested_collections.RawView) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.RawView
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [nested_collections::{core::clone::Clone for nested_collections::RawView<'a>}]
++    Source: 'tests/src/nested-collections.rs', lines 338:9-338:14 -/
++@[reducible]
++def RawView.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_collections.RawView := {
++  clone := _root_.nested_collections.RawView.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_collections::{core::marker::Copy for nested_collections::RawView<'a>}]
++    Source: 'tests/src/nested-collections.rs', lines 338:16-338:20 -/
++@[reducible]
++def RawView.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.nested_collections.RawView := {
++  cloneInst := _root_.nested_collections.RawView.Insts.CoreCloneClone
++}
++
++/-- [nested_collections::raw_meta]:
++    Source: 'tests/src/nested-collections.rs', lines 344:0-352:1
++    Visibility: public -/
++def raw_meta
++  (key : _root_.String) (value : _root_.nested_collections.Raw)
++  (expr : _root_.nested_collections.Raw) :
++  _root_.Aeneas.Std.Result _root_.nested_collections.Raw
++  := do
++  let entries ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      (_root_.String × _root_.nested_collections.Raw)) (key, value)
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Raw.Meta
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested entries) expr 0#u32)
++
++/-- [nested_collections::is_named]:
++    Source: 'tests/src/nested-collections.rs', lines 354:0-356:1
++    Visibility: public -/
++def is_named
++  (e : _root_.nested_collections.Raw) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let joined ←
++    match e with
++    | _root_.nested_collections.Raw.Sym _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++        _root_.nested_collections.Raw _root_.Bool)
++    | _root_.nested_collections.Raw.Items _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++        _root_.nested_collections.Raw _root_.Bool)
++    | _root_.nested_collections.Raw.Meta _ expr _ =>
++      do
++      let joined1 ←
++        match expr with
++        | _root_.nested_collections.Raw.Sym _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (expr, true) : _root_.Sum
++            _root_.nested_collections.Raw (_root_.nested_collections.Raw ×
++            _root_.Bool))
++        | _root_.nested_collections.Raw.Items _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl expr : _root_.Sum
++            _root_.nested_collections.Raw (_root_.nested_collections.Raw ×
++            _root_.Bool))
++        | _root_.nested_collections.Raw.Meta _ _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl expr : _root_.Sum
++            _root_.nested_collections.Raw (_root_.nested_collections.Raw ×
++            _root_.Bool))
++      let b ←
++        match joined1 with
++        | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++        | _root_.Sum.inr (_, exit) => _root_.Aeneas.Std.Result.ok exit
++      if b
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++          _root_.nested_collections.Raw _root_.Bool)
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr false : _root_.Sum
++          _root_.nested_collections.Raw _root_.Bool)
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [nested_collections::is_binder]:
++    Source: 'tests/src/nested-collections.rs', lines 358:0-361:1
++    Visibility: public -/
++def is_binder
++  (v : _root_.nested_collections.RawView) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let b ←
++    match v with
++    | _root_.nested_collections.RawView.Raw _ =>
++      _root_.Aeneas.Std.Result.ok false
++    | _root_.nested_collections.RawView.Name _ =>
++      _root_.Aeneas.Std.Result.ok true
++  if b
++  then _root_.Aeneas.Std.Result.ok true
++  else
++    match v with
++    | _root_.nested_collections.RawView.Raw r =>
++      let joined ←
++        match r with
++        | _root_.nested_collections.Raw.Sym _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl r : _root_.Sum
++            _root_.nested_collections.Raw _root_.Bool)
++        | _root_.nested_collections.Raw.Items _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl r : _root_.Sum
++            _root_.nested_collections.Raw _root_.Bool)
++        | _root_.nested_collections.Raw.Meta _ expr _ =>
++          do
++          let joined1 ←
++            match expr with
++            | _root_.nested_collections.Raw.Sym _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (expr, true) :
++                _root_.Sum _root_.nested_collections.Raw
++                (_root_.nested_collections.Raw × _root_.Bool))
++            | _root_.nested_collections.Raw.Items _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl expr : _root_.Sum
++                _root_.nested_collections.Raw (_root_.nested_collections.Raw ×
++                _root_.Bool))
++            | _root_.nested_collections.Raw.Meta _ _ _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl expr : _root_.Sum
++                _root_.nested_collections.Raw (_root_.nested_collections.Raw ×
++                _root_.Bool))
++          let b1 ←
++            match joined1 with
++            | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++            | _root_.Sum.inr (_, exit) => _root_.Aeneas.Std.Result.ok exit
++          if b1
++          then
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr true : _root_.Sum
++              _root_.nested_collections.Raw _root_.Bool)
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr false : _root_.Sum
++              _root_.nested_collections.Raw _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok false
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.nested_collections.RawView.Name _ =>
++      _root_.Aeneas.Std.Result.ok false
++
+ /-- [nested_collections::tree_scenario]:
+-    Source: 'tests/src/nested-collections.rs', lines 323:0-338:1
++    Source: 'tests/src/nested-collections.rs', lines 364:0-379:1
+     Visibility: public -/
+ def tree_scenario
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1027,7 +1192,7 @@ def tree_scenario
+   _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i1 w)
+ 
+ /-- [nested_collections::tree_pop_scenario]:
+-    Source: 'tests/src/nested-collections.rs', lines 340:0-353:1
++    Source: 'tests/src/nested-collections.rs', lines 381:0-394:1
+     Visibility: public -/
+ def tree_pop_scenario
+   (a : _root_.Aeneas.Std.U32) :
+@@ -1059,7 +1224,7 @@ def tree_pop_scenario
+   i4 + i5
+ 
+ /-- [nested_collections::expr_scenario]:
+-    Source: 'tests/src/nested-collections.rs', lines 355:0-366:1
++    Source: 'tests/src/nested-collections.rs', lines 396:0-407:1
+     Visibility: public -/
+ def expr_scenario
+   (key : _root_.Aeneas.Std.U32) :
+@@ -1093,7 +1258,7 @@ def expr_scenario
+   _root_.nested_collections.eval e3 key
+ 
+ /-- [nested_collections::doc_scenario]:
+-    Source: 'tests/src/nested-collections.rs', lines 368:0-385:1
++    Source: 'tests/src/nested-collections.rs', lines 409:0-426:1
+     Visibility: public -/
+ def doc_scenario
+   (n : _root_.Aeneas.Std.U32) :
+@@ -1126,4 +1291,59 @@ def doc_scenario
+   let i6 ← lift (UScalar.cast .U32 i5)
+   _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add i4 i6)
+ 
++/-- [nested_collections::binder_scenario]:
++    Source: 'tests/src/nested-collections.rs', lines 428:0-454:1
++    Visibility: public -/
++def binder_scenario
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← n % 2#u32
++  let inner ←
++    if i = 0#u32
++    then _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Raw.Sym n)
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.nested_collections.Raw.Items
++        (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++        (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.nested_collections.Raw)))
++  let s ←
++    _root_.Aeneas.Std.alloc.string.FromStrString.from_ (_root_.Aeneas.Std.toStr
++      "k")
++  let a ←
++    _root_.nested_collections.raw_meta s (_root_.nested_collections.Raw.Sym
++      1#u32) inner
++  let b ←
++    _root_.nested_collections.raw_meta s (_root_.nested_collections.Raw.Sym
++      1#u32) (_root_.nested_collections.Raw.Items
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.nested_collections.Raw)))
++  let b1 ←
++    _root_.nested_collections.is_binder (_root_.nested_collections.RawView.Raw
++      a)
++  let s1 ← if b1
++             then 0#u32 + 1#u32
++             else _root_.Aeneas.Std.Result.ok 0#u32
++  let b2 ←
++    _root_.nested_collections.is_binder (_root_.nested_collections.RawView.Raw
++      b)
++  let s2 ← if b2
++             then s1 + 10#u32
++             else _root_.Aeneas.Std.Result.ok s1
++  let b3 ←
++    _root_.nested_collections.is_binder (_root_.nested_collections.RawView.Raw
++      (_root_.nested_collections.Raw.Sym n))
++  let s3 ← if b3
++             then s2 + 100#u32
++             else _root_.Aeneas.Std.Result.ok s2
++  let b4 ←
++    _root_.nested_collections.is_binder (_root_.nested_collections.RawView.Name
++      n)
++  let s4 ← if b4
++             then s3 + 1000#u32
++             else _root_.Aeneas.Std.Result.ok s3
++  let b5 ← _root_.nested_collections.is_named a
++  if b5
++  then s4 + 10000#u32
++  else _root_.Aeneas.Std.Result.ok s4
++
+ end nested_collections
+diff --git a/tests/src/nested-collections-unsupported.lean.out b/tests/src/nested-collections-unsupported.lean.out
+new file mode 100644
+index 0000000..49bc97f
+--- /dev/null
++++ b/tests/src/nested-collections-unsupported.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/nested_collections_unsupported.llbc
++[[91mError[39m] Unsupported conversion of a collection nested in a recursive type: can not convert a value of type 'nested_collections_unsupported::L (alloc::vec::Vec nested_collections_unsupported::D)' to type 'nested_collections_unsupported::L (NestedVec nested_collections_unsupported::D)'
++Source: 'tests/src/nested-collections-unsupported.rs', lines 21:0-23:1
++Compiler source: pure/PureNestedCollections.ml, line 349
++
+diff --git a/tests/src/nested-collections-unsupported.rs b/tests/src/nested-collections-unsupported.rs
+new file mode 100644
+index 0000000..39fce9c
+--- /dev/null
++++ b/tests/src/nested-collections-unsupported.rs
+@@ -0,0 +1,23 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A collection nested in a recursive type through the parameter of another
++//! recursive type: the field of `D::Node` has the carrier type
++//! `L<NestedVec<D>>`, and converting a value of type `L<Vec<D>>` to it would
++//! need a recursive function. The Lean backend rejects the constructor with an
++//! explicit error naming the two types, at the span of the function.
++
++pub enum L<T> {
++    Nil,
++    Cons(T, Box<L<T>>),
++}
++
++pub enum D {
++    Leaf(u32),
++    Node(L<Vec<D>>),
++}
++
++pub fn node(l: L<Vec<D>>) -> D {
++    D::Node(l)
++}
+diff --git a/tests/src/nested-collections.rs b/tests/src/nested-collections.rs
+index 4546dd9..ebd71de 100644
+--- a/tests/src/nested-collections.rs
++++ b/tests/src/nested-collections.rs
+@@ -7,8 +7,9 @@
+ //! elements), so the Lean backend stores those fields in nested carriers and
+ //! converts at every use of the fields. Also covered: `Vec<(String, Self)>`,
+ //! `Vec<Vec<Self>>`, `Option<Box<Self>>`, a mutual group through `BTreeMap`
+-//! and `Option`, and a generic wrapper whose `Vec<T>` field is instantiated
+-//! with a type of a recursive group.
++//! and `Option`, a generic wrapper whose `Vec<T>` field is instantiated
++//! with a type of a recursive group, and match guards on a boxed field of a
++//! variant with a carrier.
+ //! `NestedCollections/Checks.lean` evaluates the model on the inputs of the
+ //! `native` test module below and compares with the native results.
+ 
+@@ -319,6 +320,46 @@ pub fn wrapper_first(w: &Wrapper<u32>) -> u32 {
+     }
+ }
+ 
++/// Match guards which inspect the boxed field of a variant whose other field
++/// is stored in a carrier (the shape of `chelis_deep::metadata::binder`). The
++/// joins of such guards are simplified into let-bindings which drop some of
++/// their outputs; the simplified bindings must stay well-typed, as the bodies
++/// in which the pass updates patterns are type-checked.
++pub enum Raw {
++    Sym(u32),
++    Items(Vec<Raw>),
++    Meta {
++        entries: Vec<(String, Raw)>,
++        expr: Box<Raw>,
++        span: u32,
++    },
++}
++
++#[derive(Clone, Copy)]
++pub enum RawView<'a> {
++    Raw(&'a Raw),
++    Name(u32),
++}
++
++pub fn raw_meta(key: String, value: Raw, expr: Raw) -> Raw {
++    let mut entries = Vec::new();
++    entries.push((key, value));
++    Raw::Meta {
++        entries,
++        expr: Box::new(expr),
++        span: 0,
++    }
++}
++
++pub fn is_named(e: &Raw) -> bool {
++    matches!(e, Raw::Meta { expr, .. } if matches!(&**expr, Raw::Sym(_)))
++}
++
++pub fn is_binder(v: RawView<'_>) -> bool {
++    matches!(v, RawView::Name(_))
++        || matches!(v, RawView::Raw(Raw::Meta { expr, .. }) if matches!(&**expr, Raw::Sym(_)))
++}
++
+ /// End-to-end scenarios
+ pub fn tree_scenario(a: u32, b: u32) -> u32 {
+     let mut t = node2(leaf(a), pair(leaf(b), leaf(1)));
+@@ -384,6 +425,34 @@ pub fn doc_scenario(n: u32) -> u32 {
+         .wrapping_add(wrapper_len(&w) as u32)
+ }
+ 
++pub fn binder_scenario(n: u32) -> u32 {
++    let inner = if n % 2 == 0 {
++        Raw::Sym(n)
++    } else {
++        Raw::Items(Vec::new())
++    };
++    let a = raw_meta(String::from("k"), Raw::Sym(1), inner);
++    let b = raw_meta(String::from("k"), Raw::Sym(1), Raw::Items(Vec::new()));
++    let c = Raw::Sym(n);
++    let mut s = 0;
++    if is_binder(RawView::Raw(&a)) {
++        s += 1;
++    }
++    if is_binder(RawView::Raw(&b)) {
++        s += 10;
++    }
++    if is_binder(RawView::Raw(&c)) {
++        s += 100;
++    }
++    if is_binder(RawView::Name(n)) {
++        s += 1000;
++    }
++    if is_named(&a) {
++        s += 10000;
++    }
++    s
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -407,4 +476,10 @@ mod native {
+         assert_eq!(doc_scenario(5), 2206);
+         assert_eq!(doc_scenario(0), 2156);
+     }
++
++    #[test]
++    fn binders() {
++        assert_eq!(binder_scenario(4), 11001);
++        assert_eq!(binder_scenario(3), 1000);
++    }
+ }

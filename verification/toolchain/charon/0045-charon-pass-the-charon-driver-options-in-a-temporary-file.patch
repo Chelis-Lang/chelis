@@ -1,0 +1,273 @@
+# charon integration step 45 after 546078ea5d: commit 63d559c859aac68dbfb692e9a46c51789d7d1f74
+# first parent 1fbb31c2138208421a1ddbff61cf6c413cbe2467
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: pass the charon-driver options in a temporary file (CHARON_ARGS_FILE), not the environment
+#
+# Large option sets (the patterns of --opaque-file, --start-from-file and --opaque-hard-file)
+# exceeded ARG_MAX when serialized into CHARON_ARGS and CHARON_OPAQUE_HARD, so spawning cargo or
+# charon-driver failed with ArgumentListTooLong. charon now writes the serialized options and the
+# --opaque-hard patterns to a fresh temporary file, removed once the child exits, and passes its
+# path in CHARON_ARGS_FILE; charon-driver fails on a missing, unreadable or malformed file. The
+# serialized options (which the llbc records) are unchanged.
+
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index 9639851..21cda78 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -136,25 +136,34 @@ pub fn run_rustc_driver() -> Result<Option<(TransformCtx, CliOpts)>, CharonFailu
+     } else {
+         let mut error_ctx = ErrorCtx::new();
+ 
+-        // Retrieve the Charon options by deserializing them from the environment variable
+-        // (cargo-charon serialized the arguments and stored them in a specific environment
+-        // variable before calling cargo with RUSTC_WRAPPER=charon-driver).
+-        let mut options: options::CliOpts = match env::var(options::CHARON_ARGS) {
+-            Ok(opts) => serde_json::from_str(opts.as_str()).unwrap(),
+-            Err(_) => {
++        // Retrieve the Charon options from the file that cargo-charon wrote them to (see
++        // `CHARON_ARGS_FILE`) before calling cargo with RUSTC_WRAPPER=charon-driver.
++        let Some(path) = env::var_os(options::CHARON_ARGS_FILE) else {
++            register_error!(
++                error_ctx,
++                no_crate,
++                "environment variable `CHARON_ARGS_FILE` not set; \
++                don't call `charon-driver` directly, call `charon rustc` instead"
++            );
++            return Err(CharonFailure::CharonError(1));
++        };
++        let parsed = std::fs::read(&path)
++            .map_err(|err| err.to_string())
++            .and_then(|bytes| {
++                options::CliOpts::from_driver_args(&bytes).map_err(|err| err.to_string())
++            });
++        let mut options = match parsed {
++            Ok(options) => options,
++            Err(err) => {
++                let path = std::path::Path::new(&path).display();
+                 register_error!(
+                     error_ctx,
+                     no_crate,
+-                    "environment variable `CHARON_ARGS` not set; \
+-                    don't call `charon-driver` directly, call `charon rustc` instead"
++                    "cannot read the options file `{path}` (`CHARON_ARGS_FILE`): {err}"
+                 );
+                 return Err(CharonFailure::CharonError(1));
+             }
+         };
+-        // `--opaque-hard` is not serialized with the other options (see `CHARON_OPAQUE_HARD`).
+-        if let Ok(patterns) = env::var(options::CHARON_OPAQUE_HARD) {
+-            options.opaque_hard = serde_json::from_str(patterns.as_str()).unwrap();
+-        }
+         options.apply_preset();
+ 
+         error_ctx.continue_on_failure = !options.abort_on_error;
+diff --git a/src/bin/charon/cli.rs b/src/bin/charon/cli.rs
+index ee98968..488b40b 100644
+--- a/src/bin/charon/cli.rs
++++ b/src/bin/charon/cli.rs
+@@ -52,8 +52,8 @@ pub struct PatternFiles {
+ 
+ impl PatternFiles {
+     /// Append the patterns of the files to `options`, then the `--opaque-hard` patterns to
+-    /// `--opaque`: the serialized options record them there, and charon-driver receives them in
+-    /// `CHARON_OPAQUE_HARD`.
++    /// `--opaque`: the serialized options record them there, and charon-driver receives them
++    /// separately (see `CliOpts::to_driver_args`).
+     pub fn apply(&self, options: &mut CliOpts) -> anyhow::Result<()> {
+         use anyhow::Context;
+         let read = |path: &PathBuf, dest: &mut Vec<String>| -> anyhow::Result<()> {
+diff --git a/src/bin/charon/main.rs b/src/bin/charon/main.rs
+index b0f821f..14ce022 100644
+--- a/src/bin/charon/main.rs
++++ b/src/bin/charon/main.rs
+@@ -25,21 +25,21 @@
+ //! Upon being called, charon-driver (see `charon_driver`) will simply call
+ //! Rustc with the arguments it was provided (and a few minor modifications).
+ //! Also, in order to transmit options from cargo-charon (this file)
+-//! to charon-driver (`charon-driver`), we serialize those options and store
+-//! them in a specific environment variable, so that charon-driver can
+-//! deserialize them later and use them to guide the extraction in the
+-//! callbacks.
++//! to charon-driver (`charon-driver`), we serialize those options into a
++//! temporary file, whose path we store in a specific environment variable, so
++//! that charon-driver can deserialize them later and use them to guide the
++//! extraction in the callbacks.
+ use anyhow::{Context, Result};
+ use charon_lib::{
+     common::arg_value,
+     export::{CrateData, multi_target},
+     logger,
+-    options::{CHARON_ARGS, CHARON_OPAQUE_HARD, CliOpts},
++    options::{CHARON_ARGS_FILE, CliOpts},
+ };
+ use clap::Parser;
+ use cli::{Charon, Cli};
+ use itertools::Itertools;
+-use std::{env, process::ExitStatus};
++use std::{env, io::Write, process::ExitStatus};
+ use toolchain::toolchain_path;
+ 
+ #[macro_use]
+@@ -184,7 +184,8 @@ fn translate_with_cargo(
+     cmd.env("RUSTC_WRAPPER", toolchain::driver_path());
+     cmd.env("CHARON_USING_CARGO", "1");
+     cmd.env_remove("CARGO_PRIMARY_PACKAGE");
+-    set_driver_options(&mut cmd, &options);
++    // Keep the options file until cargo exits.
++    let _options_file = set_driver_options(&mut cmd, &options)?;
+     cmd.arg("build");
+     if arg_value(&cargo_args, "--target").is_none() {
+         // Make sure the build target is explicitly set. This is needed to detect which crates are
+@@ -216,7 +217,7 @@ fn translate_without_cargo(mut options: CliOpts) -> anyhow::Result<ExitStatus> {
+         cmd.arg(&get_rustc_version()?.host);
+     }
+     cmd.args(std::mem::take(&mut options.rustc_args));
+-    set_driver_options(&mut cmd, &options);
++    let _options_file = set_driver_options(&mut cmd, &options)?;
+     Ok(cmd
+         .spawn()
+         .expect("could not run charon-driver")
+@@ -224,13 +225,22 @@ fn translate_without_cargo(mut options: CliOpts) -> anyhow::Result<ExitStatus> {
+         .expect("failed to wait for charon-driver?"))
+ }
+ 
+-/// Pass the options to charon-driver.
+-fn set_driver_options(cmd: &mut std::process::Command, options: &CliOpts) {
+-    cmd.env(CHARON_ARGS, serde_json::to_string(options).unwrap());
+-    cmd.env(
+-        CHARON_OPAQUE_HARD,
+-        serde_json::to_string(&options.opaque_hard).unwrap(),
+-    );
++/// Pass the options to charon-driver, in a fresh temporary file whose path `cmd` passes in
++/// `CHARON_ARGS_FILE`. The file must outlive `cmd`: dropping the returned handle removes it.
++fn set_driver_options(
++    cmd: &mut std::process::Command,
++    options: &CliOpts,
++) -> anyhow::Result<tempfile::NamedTempFile> {
++    let mut file = tempfile::Builder::new()
++        .prefix("charon-args-")
++        .suffix(".json")
++        .tempfile()
++        .context("failed to create the charon-driver options file")?;
++    let bytes = options.to_driver_args()?;
++    file.write_all(&bytes)
++        .with_context(|| format!("failed to write {}", file.path().display()))?;
++    cmd.env(CHARON_ARGS_FILE, std::path::absolute(file.path())?);
++    Ok(file)
+ }
+ 
+ fn get_rustc_version() -> anyhow::Result<rustc_version::VersionMeta> {
+diff --git a/src/options.rs b/src/options.rs
+index d4da273..9695d47 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -14,14 +14,11 @@ use crate::{
+     raise_error, register_error,
+ };
+ 
+-/// The name of the environment variable we use to save the serialized Cli options
+-/// when calling charon-driver from cargo-charon.
+-pub const CHARON_ARGS: &str = "CHARON_ARGS";
+-
+-/// The name of the environment variable in which the `charon` binary passes `--opaque-hard`
+-/// (a JSON list of patterns) to charon-driver. It is not part of `CHARON_ARGS`, so that the
+-/// serialized options (which the llbc contains) stay the same.
+-pub const CHARON_OPAQUE_HARD: &str = "CHARON_OPAQUE_HARD";
++/// The name of the environment variable in which the `charon` binary passes charon-driver the
++/// path of a file that holds the options (see `CliOpts::to_driver_args`). A file, so that large
++/// option sets (e.g. the patterns of `--opaque-file`) don't exceed the size limits of the
++/// environment of the cargo or charon-driver process.
++pub const CHARON_ARGS_FILE: &str = "CHARON_ARGS_FILE";
+ 
+ // This structure is used to store the command-line instructions.
+ // We automatically derive a command-line parser based on this structure.
+@@ -472,6 +469,19 @@ impl CliOpts {
+             }
+         }
+     }
++
++    /// Serialize the options for charon-driver: a JSON pair of the serialized options and of the
++    /// `--opaque-hard` patterns, which the serialized options (which the llbc contains) omit.
++    pub fn to_driver_args(&self) -> serde_json::Result<Vec<u8>> {
++        serde_json::to_vec(&(self, &self.opaque_hard))
++    }
++
++    /// Deserialize the options serialized by `to_driver_args`.
++    pub fn from_driver_args(bytes: &[u8]) -> serde_json::Result<Self> {
++        let (mut options, opaque_hard): (Self, Vec<String>) = serde_json::from_slice(bytes)?;
++        options.opaque_hard = opaque_hard;
++        Ok(options)
++    }
+ }
+ 
+ /// Split a comma-separated list of patterns, ignoring the commas inside brackets (as in
+diff --git a/tests/cli.rs b/tests/cli.rs
+index bfb2b32..eb469ec 100644
+--- a/tests/cli.rs
++++ b/tests/cli.rs
+@@ -200,6 +200,64 @@ fn charon_rustc() -> Result<()> {
+     })
+ }
+ 
++/// Pattern files can hold more patterns than fit in the arguments and environment of a process
++/// (`ARG_MAX`: 1 MiB in total on macOS; 128 KiB per string on Linux). Charon still passes them all
++/// to charon-driver, directly or through cargo, and records them in the options of the llbc.
++#[test]
++fn charon_large_pattern_files() -> Result<()> {
++    use charon_lib::{ast::Body, export::CrateData};
++    let dir = tempfile::TempDir::new()?;
++    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
++    // 2 * 30k patterns of 48 bytes that select nothing, and one per crate that selects its function.
++    let absent =
++        |kind| (0..30_000).map(move |i| format!("crate2::absent_{kind}_{i:08}_{:_<16}", ""));
++    let opaque = absent("opaque")
++        .chain(["crate1::random_number", "crate2::extra_random_number"].map(str::to_owned))
++        .collect_vec();
++    let opaque_hard = absent("hard").collect_vec();
++    let (opaque_file, hard_file) = (path("opaque.txt"), path("hard.txt"));
++    std::fs::write(&opaque_file, opaque.join("\n"))?;
++    std::fs::write(&hard_file, opaque_hard.join("\n"))?;
++    let patterns = [
++        "--opaque-file",
++        &opaque_file,
++        "--opaque-hard-file",
++        &hard_file,
++    ];
++
++    let check = |llbc: &str, fun: &str| -> Result<()> {
++        let krate = CrateData::deserialize_from_file(llbc.as_ref())?.translated;
++        let recorded = &krate.options.opaque;
++        ensure!(
++            recorded.iter().eq(opaque.iter().chain(&opaque_hard)),
++            "{llbc} records {} opaque patterns instead of the {} of the files",
++            recorded.len(),
++            opaque.len() + opaque_hard.len()
++        );
++        let decl = krate
++            .fun_decls
++            .iter()
++            .find(|decl| repr_name(&krate, &decl.item_meta.name) == fun)
++            .with_context(|| format!("{llbc} has no {fun}"))?;
++        ensure!(matches!(decl.body, Body::Opaque), "{fun} is not opaque");
++        Ok(())
++    };
++
++    let input = std::fs::canonicalize("tests/cargo/workspace/crate1/src/lib.rs")?;
++    let input = input.to_str().unwrap();
++    let llbc = path("crate1.llbc");
++    let rustc = ["--", "--crate-type=lib", "--crate-name=crate1", input];
++    let args = [&["rustc", "--dest-file", &llbc][..], &patterns, &rustc].concat();
++    charon(&args, ".", |_, _| Ok(()))?;
++    check(&llbc, "crate1::random_number")?;
++
++    let llbc = path("crate2.llbc");
++    let cargo = ["--", "-p", "crate2", "--quiet"];
++    let args = [&["cargo", "--dest-file", &llbc][..], &patterns, &cargo].concat();
++    charon(&args, "tests/cargo/workspace", |_, _| Ok(()))?;
++    check(&llbc, "crate2::extra_random_number")
++}
++
+ #[test]
+ fn put_options_after_subcommand() -> Result<()> {
+     let path = "tests/cargo/workspace/crate1/src/lib.rs";

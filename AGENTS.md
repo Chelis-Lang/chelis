@@ -10,7 +10,7 @@ This branch contains the existing production semantic core, not the Chelis produ
 
 ## Toolchains and checks
 
-`rust-toolchain.toml` preserves the production Rust compiler pin. `flake.lock` pins the native development environment and the compatible Charon/Aeneas pair. `verification/toolchain.json` records the Rust source and Lean reference revisions. Charon uses its own matching compiler, independently of the native Rust pin.
+`rust-toolchain.toml` preserves the production Rust compiler pin. `flake.lock` pins the native development environment and the compatible Charon/Aeneas pair. `verification/toolchain.json` records the Rust source and Lean reference revisions and the Charon/Aeneas integration commits that the patch series in `verification/toolchain/` reproduce (`python3 verification/toolchain/series.py check`). Charon uses its own matching compiler, independently of the native Rust pin.
 
 ```text
 nix develop --command cargo test --workspace --locked --features chelis-pipeline-core/lowering-trace --jobs 2

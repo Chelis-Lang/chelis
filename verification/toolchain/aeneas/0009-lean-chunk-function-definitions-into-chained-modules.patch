@@ -1,0 +1,265 @@
+# aeneas integration step 9 after cba11f3beb: commit 112880c2ad9adee9c003edf0139dc088c2505af1
+# first parent dc8d0e6862320ffd4508c1320a7b8975ed8ddab9
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# lean: chunk function definitions into chained modules
+
+diff --git a/src/Config.ml b/src/Config.ml
+index 6242802..10c5063 100644
+--- a/src/Config.ml
++++ b/src/Config.ml
+@@ -220,6 +220,15 @@ let use_fuel = ref false
+     for the types, clauses and functions, or if we group them in one file. *)
+ let split_files = ref false
+ 
++(** Only for Lean with [split_files]: when positive, the function definitions
++    are written to a chain of modules [FunsPart1], [FunsPart2], ... each
++    importing its predecessor, starting a new module at a declaration-group
++    boundary once the current one exceeds this many bytes. [Funs] then imports
++    the last part, so importers are unchanged. Declaration groups are emitted
++    in dependency order and are never split, so every module only refers to
++    definitions of earlier modules. *)
++let lean_funs_chunk_bytes = ref 0
++
+ (** Only for Lean: generate the library entry point, if the crate is split
+     between different files. The entry point is simply a file with the name of
+     the crate and which includes all the other files. *)
+diff --git a/src/Main.ml b/src/Main.ml
+index 3a55a12..1d1d88b 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -117,6 +117,11 @@ let () =
+         Arg.Set split_files,
+         " Split the definitions between different files for types, functions, \
+          etc." );
++      ( "-funs-chunk-bytes",
++        Arg.Set_int lean_funs_chunk_bytes,
++        " Lean with -split-files: write function definitions to a chain of \
++         modules FunsPart<i>, starting a new one at a declaration-group \
++         boundary after this many bytes (0 = one Funs module)." );
+       ( "-checks",
+         Arg.Set sanity_checks,
+         " Activate extensive sanity checks (warning: causes a ~100 times slow \
+@@ -434,6 +439,12 @@ let () =
+     "-decreases-clauses";
+   check_arg_implies !generate_lib_entry_point "-gen-lib-entry" !split_files
+     "-split-files";
++  check_arg_implies (!lean_funs_chunk_bytes > 0) "-funs-chunk-bytes"
++    !split_files "-split-files";
++  if !lean_funs_chunk_bytes < 0 then
++    fail_with_error "The -funs-chunk-bytes option must not be negative";
++  if !lean_funs_chunk_bytes > 0 && not (backend () = Lean) then
++    fail_with_error "The -funs-chunk-bytes option is valid only for Lean";
+   check_arg_not !generate_lib_entry_point "-gen-lib-entry"
+     (Option.is_some !subdir) "-subdir";
+   if !lean_gen_lakefile && not (backend () = Lean) then
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 64550d4..bd50416 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -1055,8 +1055,8 @@ let export_trait_impl (fmt : Format.formatter) (_config : gen_config)
+ (** A generic utility to generate the extracted definitions: as we may want to
+     split the definitions between different files (or not), we can control what
+     is precisely extracted. *)
+-let extract_definitions (fmt : Format.formatter) (config : gen_config)
+-    (ctx : gen_ctx) : unit =
++let extract_definitions ?(on_group_done : unit -> unit = fun () -> ())
++    (fmt : Format.formatter) (config : gen_config) (ctx : gen_ctx) : unit =
+   (* Export the definition groups to the file, in the proper order.
+      - [extract_decl]: extract the type declaration (if not filtered)
+      - [extract_extra_info]: extra the extra type information (e.g.,
+@@ -1242,10 +1242,11 @@ let extract_definitions (fmt : Format.formatter) (config : gen_config)
+ 
+   List.iter
+     (fun g ->
+-      try export_decl_group g
+-      with CFailure _ ->
+-        (* An exception was raised: ignore it *)
+-        ())
++      (try export_decl_group g
++       with CFailure _ ->
++         (* An exception was raised: ignore it *)
++         ());
++      on_group_done ())
+     ctx.crate.declarations
+ 
+ type extract_file_info = {
+@@ -1264,11 +1265,8 @@ type extract_file_info = {
+           of the file *)
+ }
+ 
+-let extract_file (config : gen_config) (ctx : gen_ctx) (fi : extract_file_info)
+-    : unit =
+-  (* Open the file and create the formatter *)
+-  let out = open_out fi.filename in
+-  let fmt = Format.formatter_of_out_channel out in
++(** Print the module header: imports, options and the opened namespace. *)
++let write_file_header (out : out_channel) (fi : extract_file_info) : unit =
+ 
+   (* Print the headers.
+    * Note that we don't use the OCaml formatter for purpose: we want to control
+@@ -1378,28 +1376,17 @@ let extract_file (config : gen_config) (ctx : gen_ctx) (fi : extract_file_info)
+       else Printf.fprintf out "\n";
+       (* Initialize the theory *)
+       Printf.fprintf out "val _ = new_theory \"%s\"\n\n" fi.module_name);
+-  (* From now onwards, we use the formatter *)
+-  (* Set the margin *)
+-  Format.pp_set_margin fmt 80;
+-
+-  (* Create a vertical box *)
+-  Format.pp_open_vbox fmt 0;
++  ()
+ 
+-  (* Extract the definitions *)
+-  extract_definitions fmt config ctx;
+-
+-  (* Close the box and end the formatting *)
+-  Format.pp_close_box fmt ();
+-  Format.pp_print_newline fmt ();
+-
+-  (* Close the module *)
+-  (match Config.backend () with
++(** Close the namespace or module opened by [write_file_header]. *)
++let write_file_footer (out : out_channel) (fi : extract_file_info) : unit =
++  match Config.backend () with
+   | FStar -> ()
+   | Lean -> if fi.in_namespace then Printf.fprintf out "end %s\n" fi.namespace
+   | HOL4 -> Printf.fprintf out "val _ = export_theory ()\n"
+-  | Coq -> Printf.fprintf out "End %s.\n" fi.module_name);
++  | Coq -> Printf.fprintf out "End %s.\n" fi.module_name
+ 
+-  (* Some logging *)
++let log_generated (filename : string) : unit =
+   if !Errors.error_list <> [] then
+     log#linfo
+       (lazy
+@@ -1407,12 +1394,111 @@ let extract_file (config : gen_config) (ctx : gen_ctx) (fi : extract_file_info)
+         ^ string_of_int (List.length !Errors.error_list)
+         ^ " errors, including "
+         ^ string_of_int (Errors.FileLineMap.cardinal !Errors.unique_errors)
+-        ^ " unique errors): " ^ fi.filename))
+-  else log#linfo (lazy ("Generated: " ^ fi.filename));
++        ^ " unique errors): " ^ filename))
++  else log#linfo (lazy ("Generated: " ^ filename))
+ 
++let extract_file (config : gen_config) (ctx : gen_ctx) (fi : extract_file_info)
++    : unit =
++  (* Open the file and create the formatter *)
++  let out = open_out fi.filename in
++  let fmt = Format.formatter_of_out_channel out in
++  (* The header is printed without the formatter: some instructions like
++     [open MODULE] must be printed on one line. This is ok as long as the header
++     ends with a line break, so that the formatter's internal count is
++     consistent with the state of the file. *)
++  write_file_header out fi;
++  (* From now onwards, we use the formatter *)
++  Format.pp_set_margin fmt 80;
++  (* Create a vertical box *)
++  Format.pp_open_vbox fmt 0;
++  (* Extract the definitions *)
++  extract_definitions fmt config ctx;
++  (* Close the box and end the formatting *)
++  Format.pp_close_box fmt ();
++  Format.pp_print_newline fmt ();
++  write_file_footer out fi;
++  log_generated fi.filename;
+   (* Flush and close the file *)
+   close_out out
+ 
++(** Like [extract_file], but write the definitions to a chain of modules
++    [part 1], [part 2], ... each importing its predecessor (the first one
++    imports [fi]'s includes). A new module starts at a declaration-group
++    boundary once the current one holds more than [chunk_bytes] bytes, so no
++    group is split and every module only depends on earlier ones. Finally
++    [fi.filename] is written as a module that imports the last part, so the
++    importers of [fi.module_name] are unaffected. *)
++let extract_file_chunked (config : gen_config) (ctx : gen_ctx)
++    (fi : extract_file_info) ~(chunk_bytes : int)
++    ~(part : int -> string * string) : unit =
++  let current : out_channel option ref = ref None in
++  let current_info : extract_file_info option ref = ref None in
++  let written = ref 0 in
++  let index = ref 0 in
++  let output s pos len =
++    match !current with
++    | Some out ->
++        output_substring out s pos len;
++        written := !written + len
++    | None -> [%craise_opt_span] None "chunked extraction: no open module"
++  in
++  let flush () = Option.iter flush !current in
++  let fmt = Format.make_formatter output flush in
++  Format.pp_set_margin fmt 80;
++  (* Every part holds one top-level vertical box that is closed (by a flush)
++     at each declaration-group boundary and reopened afterwards. *)
++  let open_part () =
++    incr index;
++    let filename, module_name = part !index in
++    let custom_includes =
++      if !index = 1 then fi.custom_includes else [ snd (part (!index - 1)) ]
++    in
++    let info = { fi with filename; module_name; custom_includes } in
++    let out = open_out filename in
++    write_file_header out info;
++    current := Some out;
++    current_info := Some info;
++    written := 0
++  in
++  (* Requires the formatter to be flushed. *)
++  let finish_part () =
++    match (!current, !current_info) with
++    | Some out, Some info ->
++        write_file_footer out info;
++        log_generated info.filename;
++        close_out out;
++        current := None;
++        current_info := None
++    | _ -> [%craise_opt_span] None "chunked extraction: no open module"
++  in
++  open_part ();
++  Format.pp_open_vbox fmt 0;
++  let on_group_done () =
++    (* The pending formatter content belongs to the group just exported. *)
++    Format.pp_print_flush fmt ();
++    if !written > chunk_bytes then (
++      finish_part ();
++      open_part ());
++    Format.pp_open_vbox fmt 0
++  in
++  extract_definitions ~on_group_done fmt config ctx;
++  Format.pp_close_box fmt ();
++  Format.pp_print_newline fmt ();
++  Format.pp_print_flush fmt ();
++  finish_part ();
++  (* The entry module only re-exports the last part. *)
++  let out = open_out fi.filename in
++  write_file_header out
++    {
++      fi with
++      custom_includes = [ snd (part !index) ];
++      in_namespace = false;
++      open_namespace = false;
++      noncomputable = false;
++    };
++  log_generated fi.filename;
++  close_out out
++
+ let extract_translated_crate (filename : string) (dest_dir : string)
+     (subdir : string option) (crate : crate) (trans_ctx : trans_ctx)
+     (trans_crate : translated_crate) (extracted_opaque : bool ref) : unit =
+@@ -2055,7 +2141,14 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+          noncomputable = has_opaque && not !Config.all_computable;
+        }
+      in
+-     extract_file fun_config ctx file_info)
++     if Config.backend () = Lean && !Config.lean_funs_chunk_bytes > 0 then
++       let part i =
++         let suffix = "FunsPart" ^ string_of_int i in
++         (extract_filebasename ^ suffix ^ ext, import_prefix ^ suffix)
++       in
++       extract_file_chunked fun_config ctx file_info
++         ~chunk_bytes:!Config.lean_funs_chunk_bytes ~part
++     else extract_file fun_config ctx file_info)
+    else
+      let gen_config =
+        {

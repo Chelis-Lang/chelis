@@ -1,0 +1,1387 @@
+# aeneas integration step 58 after cba11f3beb: commit 3ab919eea5cd314105932b3b59d882879eb59246
+# first parent b6da30e8ffa7a737b5840aacaf35ea5c75699701, merged 62915adec56836019c20c824cbf72cf64c255841
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/collection-contracts' (Flatten collectors, option::IntoIter, &BTreeSet IntoIterator; obligation propositions by full declaration name)
+#
+# # Conflicts:
+# #	src/extract/ExtractBuiltinLean.ml
+
+diff --git a/backends/lean/Aeneas/Std/BTreeSet.lean b/backends/lean/Aeneas/Std/BTreeSet.lean
+index 34f82cb..a9158d2 100644
+--- a/backends/lean/Aeneas/Std/BTreeSet.lean
++++ b/backends/lean/Aeneas/Std/BTreeSet.lean
+@@ -189,4 +189,24 @@ def core.iter.traits.iterator.IteratorBTreeSetIter (T : Type) :
+   fused := true
+ }
+ 
++/-- set.rs `impl IntoIterator for &'a BTreeSet<T, A>`: `self.iter()`. The
++borrowed set is not changed: recovery returns it whatever the iterator state. -/
++@[rust_fun "alloc::collections::btree::set::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>}::into_iter"
++  (keepParams := [true, false]) (keepTraitClauses := [false])]
++def alloc.collections.btree.set.IntoIteratorSharedBTreeSet.into_iter {T : Type}
++    (set : alloc.collections.btree.set.BTreeSet T) :
++    Result (alloc.collections.btree.set.Iter T ×
++      (alloc.collections.btree.set.Iter T → alloc.collections.btree.set.BTreeSet T)) := do
++  let iterator ← alloc.collections.btree.set.BTreeSet.iter set
++  .ok (iterator, fun _ => set)
++
++@[reducible, rust_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>"
++  (keepParams := [true, false]) (keepTraitClauses := [false])]
++def core.iter.traits.collect.IntoIteratorSharedBTreeSet (T : Type) :
++    core.iter.traits.collect.IntoIterator (alloc.collections.btree.set.BTreeSet T) T
++      (alloc.collections.btree.set.Iter T) := {
++  iteratorInst := core.iter.traits.iterator.IteratorBTreeSetIter T
++  into_iter := alloc.collections.btree.set.IntoIteratorSharedBTreeSet.into_iter
++}
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/FlatMap.lean b/backends/lean/Aeneas/Std/FlatMap.lean
+index 640f771..f2cd5f0 100644
+--- a/backends/lean/Aeneas/Std/FlatMap.lean
++++ b/backends/lean/Aeneas/Std/FlatMap.lean
+@@ -380,4 +380,200 @@ def core.iter.traits.iterator.IteratorFlatMap
+   fused := iterInst.fused
+ }
+ 
++/-! `Flatten<I> { inner: FlattenCompat<I, <I::Item as IntoIterator>::IntoIter> }`
++    and `FlatMap<I, U, F> { inner: FlattenCompat<Map<I, F>, U::IntoIter> }`
++    (core flatten.rs, rustc 1.95) delegate every method to the same
++    FlattenCompat, whose outer is `Fuse<I>` for Flatten and `Fuse<Map<I, F>>` for
++    FlatMap. FlattenCompat calls on its outer only `next`, `size_hint`, `fold`,
++    `try_fold` and, in the OneShot `advance_by(0)`, `advance_by`, which neither
++    `Fuse` nor `Map` overrides (the inherited `advance_by(0)` returns at once);
++    `Map` forwards `next`, `size_hint`, `fold` and `try_fold` to `I` with `f`
++    applied to each item, and is `FusedIterator` exactly when `I` is. So
++    `Flatten<I>` is observationally `FlatMap<I, I::Item, id>`: the model runs
++    the FlatMap model (general and OneShot/ConstSizeIntoIterator
++    specializations, including its `size_hint`) with an identity mapper whose
++    state is `Unit`. Neither model has `next_back`, so `backiter` stays `None`
++    and a `rev` of either is not modeled. -/
++
++-- Charon lifts Flatten's parameters as I, I::Item, <I::Item as IntoIterator>::Item,
++-- and the inner IntoIter. Only I and IntoIter occur in this representation.
++structure core.iter.adapters.flatten.Flatten (I IntoIter : Type) where
++  iter : I
++  outerDone : Bool
++  inner : Option IntoIter
++  innerActive : Bool
++
++def core.iter.adapters.flatten.Flatten.recombine {I IntoIter : Type}
++    (mergeI : I → I → I)
++    (original current : core.iter.adapters.flatten.Flatten I IntoIter) :
++    core.iter.adapters.flatten.Flatten I IntoIter :=
++  { original with iter := mergeI original.iter current.iter }
++
++attribute [rust_type "core::iter::adapters::flatten::Flatten"
++  (keepParams := [true, false, false, true]) (body := .opaque)
++  (stateMerge := some ("Aeneas.Std.core.iter.adapters.flatten.Flatten.recombine", [0]))]
++  core.iter.adapters.flatten.Flatten
++
++namespace core.iter.adapters.flatten.Flatten
++
++def toFlatMap {I IntoIter : Type} (self : core.iter.adapters.flatten.Flatten I IntoIter) :
++    core.iter.adapters.flatten.FlatMap I Unit IntoIter :=
++  ⟨self.iter, (), self.outerDone, self.inner, self.innerActive⟩
++
++def ofFlatMap {I IntoIter : Type} (self : core.iter.adapters.flatten.FlatMap I Unit IntoIter) :
++    core.iter.adapters.flatten.Flatten I IntoIter :=
++  ⟨self.iter, self.outerDone, self.inner, self.innerActive⟩
++
++/-- The mapper of `Map<I, id>`: returns its argument, no state. -/
++def identity (T : Type) : core.ops.function.FnMut Unit T T := {
++  FnOnceInst := { call_once := fun _ item => ok (item, ()) }
++  call_mut := fun _ item => ok (item, ())
++}
++
++end core.iter.adapters.flatten.Flatten
++
++-- Lifted Rust parameters: Self, Self::Item, and the item and iterator of its
++-- IntoIterator. The outer iterator is restored from the adapter's final state.
++@[rust_fun "core::iter::traits::iterator::Iterator::flatten"]
++def core.iter.traits.iterator.Iterator.flatten.default
++  {Self OuterItem Item IntoIter : Type}
++  (_iterInst : core.iter.traits.iterator.Iterator Self OuterItem)
++  (_intoInst : core.iter.traits.collect.IntoIterator OuterItem Item IntoIter)
++  (self : Self) :
++  Result (core.iter.adapters.flatten.Flatten Self IntoIter ×
++    (core.iter.adapters.flatten.Flatten Self IntoIter → Self)) :=
++  ok (⟨self, false, none, false⟩, (·.iter))
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::next"]
++def core.iter.adapters.flatten.IteratorFlatten.next
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (self : core.iter.adapters.flatten.Flatten I U) :
++  Result (Option Item × core.iter.adapters.flatten.Flatten I U) := do
++  let (item, self) ← core.iter.adapters.flatten.IteratorFlatMap.next iterInst intoInst
++    (core.iter.adapters.flatten.Flatten.identity OuterItem) self.toFlatMap
++  ok (item, core.iter.adapters.flatten.Flatten.ofFlatMap self)
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::size_hint"]
++def core.iter.adapters.flatten.IteratorFlatten.size_hint
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (self : core.iter.adapters.flatten.Flatten I U) :
++  Result (Usize × Option Usize) :=
++  core.iter.adapters.flatten.IteratorFlatMap.size_hint iterInst intoInst
++    (core.iter.adapters.flatten.Flatten.identity OuterItem) self.toFlatMap
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::fold"]
++def core.iter.adapters.flatten.IteratorFlatten.fold
++  {I U B G OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (foldInst : core.ops.function.FnMut G (B × Item) B)
++  (self : core.iter.adapters.flatten.Flatten I U) (init : B) (g : G) :
++  Result (B × core.iter.adapters.flatten.Flatten I U × G) := do
++  let (acc, self, g) ← core.iter.adapters.flatten.IteratorFlatMap.fold iterInst intoInst
++    (core.iter.adapters.flatten.Flatten.identity OuterItem) foldInst self.toFlatMap init g
++  ok (acc, core.iter.adapters.flatten.Flatten.ofFlatMap self, g)
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::try_fold"]
++def core.iter.adapters.flatten.IteratorFlatten.try_fold
++  {I U B G R OuterItem Item Residual : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (foldInst : core.ops.function.FnMut G (B × Item) R)
++  (tryInst : core.ops.try_trait.Try R B Residual)
++  (self : core.iter.adapters.flatten.Flatten I U) (init : B) (g : G) :
++  Result (R × core.iter.adapters.flatten.Flatten I U × G) := do
++  let (result, self, g) ← core.iter.adapters.flatten.IteratorFlatMap.try_fold iterInst
++    intoInst (core.iter.adapters.flatten.Flatten.identity OuterItem) foldInst tryInst
++    self.toFlatMap init g
++  ok (result, core.iter.adapters.flatten.Flatten.ofFlatMap self, g)
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::count"]
++def core.iter.adapters.flatten.IteratorFlatten.count
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (self : core.iter.adapters.flatten.Flatten I U) :
++  Result (Usize × core.iter.adapters.flatten.Flatten I U) := do
++  let (count, self) ← core.iter.adapters.flatten.IteratorFlatMap.count iterInst intoInst
++    (core.iter.adapters.flatten.Flatten.identity OuterItem) self.toFlatMap
++  ok (count, core.iter.adapters.flatten.Flatten.ofFlatMap self)
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::advance_by"]
++def core.iter.adapters.flatten.IteratorFlatten.advance_by
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (_innerInst : core.iter.traits.iterator.Iterator U Item)
++  (self : core.iter.adapters.flatten.Flatten I U) (n : Usize) :
++  Result (core.result.Result Unit (core.num.nonzero.NonZero Usize) ×
++    core.iter.adapters.flatten.Flatten I U) := do
++  let (result, self) ← core.iter.adapters.flatten.IteratorFlatMap.advance_by iterInst intoInst
++    (core.iter.adapters.flatten.Flatten.identity OuterItem) self.toFlatMap n
++  ok (result, core.iter.adapters.flatten.Flatten.ofFlatMap self)
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::nth"]
++def core.iter.adapters.flatten.IteratorFlatten.nth
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (innerInst : core.iter.traits.iterator.Iterator U Item)
++  (self : core.iter.adapters.flatten.Flatten I U) (n : Usize) :
++  Result (Option Item × core.iter.adapters.flatten.Flatten I U) := do
++  let (result, self) ←
++    core.iter.adapters.flatten.IteratorFlatten.advance_by iterInst intoInst innerInst self n
++  match result with
++  | .Err _ => ok (none, self)
++  | .Ok _ => core.iter.adapters.flatten.IteratorFlatten.next iterInst intoInst innerInst self
++
++@[rust_fun
++  "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::any"]
++def core.iter.adapters.flatten.IteratorFlatten.any
++  {I U G OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (innerInst : core.iter.traits.iterator.Iterator U Item)
++  (predInst : core.ops.function.FnMut G Item Bool)
++  (self : core.iter.adapters.flatten.Flatten I U) (predicate : G) :
++  Result (Bool × core.iter.adapters.flatten.Flatten I U × G) :=
++  core.iter.traits.iterator.anyFromTryFold
++    (fun {B G R Residual} => core.iter.adapters.flatten.IteratorFlatten.try_fold
++      (B := B) (G := G) (R := R) (Residual := Residual) iterInst intoInst innerInst)
++    predInst self predicate
++
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>"]
++def core.iter.traits.iterator.IteratorFlatten
++  {I U OuterItem Item : Type}
++  (iterInst : core.iter.traits.iterator.Iterator I OuterItem)
++  (intoInst : core.iter.traits.collect.IntoIterator OuterItem Item U)
++  (innerInst : core.iter.traits.iterator.Iterator U Item) :
++  core.iter.traits.iterator.Iterator (core.iter.adapters.flatten.Flatten I U) Item := {
++  next := core.iter.adapters.flatten.IteratorFlatten.next iterInst intoInst innerInst
++  advance_by := core.iter.adapters.flatten.IteratorFlatten.advance_by iterInst intoInst innerInst
++  nth := core.iter.adapters.flatten.IteratorFlatten.nth iterInst intoInst innerInst
++  fold := core.iter.adapters.flatten.IteratorFlatten.fold iterInst intoInst innerInst
++  try_fold := core.iter.adapters.flatten.IteratorFlatten.try_fold iterInst intoInst innerInst
++  count := core.iter.adapters.flatten.IteratorFlatten.count iterInst intoInst innerInst
++  any := core.iter.adapters.flatten.IteratorFlatten.any iterInst intoInst innerInst
++  size_hint := core.iter.adapters.flatten.IteratorFlatten.size_hint iterInst intoInst innerInst
++  trusted_len := iterInst.trusted_len && intoInst.const_size.isSome
++  fused := iterInst.fused
++}
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/IteratorSources.lean b/backends/lean/Aeneas/Std/IteratorSources.lean
+index 1654138..38336b9 100644
+--- a/backends/lean/Aeneas/Std/IteratorSources.lean
++++ b/backends/lean/Aeneas/Std/IteratorSources.lean
+@@ -417,4 +417,53 @@ def core.iter.traits.iterator.IteratorOptionIter (A : Type) :
+   fused := true
+ }
+ 
++/-- `option::IntoIter<A> { inner: Item<A> }` with `Item<A> { opt: Option<A> }`
++    (core/src/option.rs). Like `option::Iter`, its `Iterator` impl defines only
++    `next` (`self.inner.next()`, i.e. `opt.take()`) and the exact `size_hint`
++    `(len, Some(len))`; it is `TrustedLen`, `FusedIterator` and flatten's
++    `OneShot`, and not `TrustedRandomAccess`. -/
++@[rust_type "core::option::IntoIter" (body := .opaque)]
++structure core.option.IntoIter (A : Type) where
++  opt : Option A
++
++/-- `IntoIterator for Option<T>`: `IntoIter { inner: Item { opt: self } }`. The
++    source is moved into the iterator; recovery returns the remaining option. -/
++@[rust_fun
++  "core::option::{core::iter::traits::collect::IntoIterator<core::option::Option<@T>, @T, core::option::IntoIter<@T>>}::into_iter"]
++def core.option.IntoIteratorOption.into_iter {T : Type} (self : Option T) :
++    Result (core.option.IntoIter T × (core.option.IntoIter T → Option T)) :=
++  ok (⟨self⟩, fun it => it.opt)
++
++@[rust_fun
++  "core::option::{core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>}::next"]
++def core.option.IteratorIntoIter.next {A : Type} (self : core.option.IntoIter A) :
++  Result (Option A × core.option.IntoIter A) :=
++  ok (self.opt, ⟨none⟩)
++
++@[rust_fun
++  "core::option::{core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>}::size_hint"]
++def core.option.IteratorIntoIter.size_hint {A : Type} (self : core.option.IntoIter A) :
++  Result (Usize × Option Usize) :=
++  let len := if self.opt.isSome then 1#usize else 0#usize
++  ok (len, some len)
++
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>"]
++def core.iter.traits.iterator.IteratorOptionIntoIter (A : Type) :
++  core.iter.traits.iterator.Iterator (core.option.IntoIter A) A := {
++  next := core.option.IteratorIntoIter.next
++  size_hint := core.option.IteratorIntoIter.size_hint
++  trusted_len := true
++  one_shot := true
++  fused := true
++}
++
++@[reducible, rust_trait_impl
++  "core::iter::traits::collect::IntoIterator<core::option::Option<@T>, @T, core::option::IntoIter<@T>>"]
++def core.iter.traits.collect.IntoIteratorOption (T : Type) :
++  core.iter.traits.collect.IntoIterator (Option T) T (core.option.IntoIter T) := {
++  iteratorInst := core.iter.traits.iterator.IteratorOptionIntoIter T
++  into_iter := core.option.IntoIteratorOption.into_iter
++}
++
+ end Aeneas.Std
+diff --git a/src/Translate.ml b/src/Translate.ml
+index e76113c..4ca18c3 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -2124,10 +2124,17 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+   (match !Config.emit_collection_obligations with
+   | None -> ()
+   | Some file ->
++      (* The proposition is named by its declaration's full Lean name (as
++         [Name.toString] prints it, e.g. for a closure audit), not by the
++         [_root_]-escaped reference syntax of the generated code. *)
+       let obligation id =
+         let impl = TraitImplId.Map.find id crate.trait_impls in
+         let prop =
+-          ExtractBase.ctx_get_trait_impl impl.item_meta.span id ctx
++          (match ExtractBase.extraction_namespace ctx with
++          | Some namespace -> namespace ^ "."
++          | None -> "")
++          ^ ExtractBase.ctx_get_trait_impl ~as_reference:false
++              impl.item_meta.span id ctx
+           ^ ".size_hint_total"
+         in
+         `Assoc
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 59a6543..9efd1f8 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -78,6 +78,8 @@ let lean_builtin_types = [
+   mk_type "core::iter::adapters::filter_map::FilterMap" "_root_.Aeneas.Std.core.iter.adapters.filter_map.FilterMap" ~kind:(KStruct [("iter", Some "iter"); ("f", Some "f")]);
+   (* file: "Aeneas/Std/FlatMap.lean", line: 24 *)
+   mk_type "core::iter::adapters::flatten::FlatMap" "_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap" ~keep_params:(Some [true; false; true; false; true]) ~state_merge:(Some ("Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine", [0; 2]));
++  (* file: "Aeneas/Std/FlatMap.lean", line: 412 *)
++  mk_type "core::iter::adapters::flatten::Flatten" "_root_.Aeneas.Std.core.iter.adapters.flatten.Flatten" ~keep_params:(Some [true; false; false; true]) ~state_merge:(Some ("Aeneas.Std.core.iter.adapters.flatten.Flatten.recombine", [0]));
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 1523 *)
+   mk_type "core::iter::adapters::map::Map" "_root_.Aeneas.Std.core.iter.adapters.map.Map" ~kind:(KStruct [("iter", Some "iter"); ("f", Some "f")]);
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 86 *)
+@@ -132,6 +134,8 @@ let lean_builtin_types = [
+   mk_type "core::ops::range::RangeInclusive" "_root_.Aeneas.Std.core.ops.range.RangeInclusive";
+   (* file: "Aeneas/Std/Range.lean", line: 20 *)
+   mk_type "core::ops::range::RangeTo" "_root_.Aeneas.Std.core.ops.range.RangeTo" ~kind:(KStruct [("end", Some "«end»")]);
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 425 *)
++  mk_type "core::option::IntoIter" "_root_.Aeneas.Std.core.option.IntoIter";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 387 *)
+   mk_type "core::option::Iter" "_root_.Aeneas.Std.core.option.Iter";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 12 *)
+@@ -342,6 +346,8 @@ let lean_builtin_funs = [
+   mk_fun "alloc::collections::btree::set::{core::iter::traits::collect::Extend<alloc::collections::btree::set::BTreeSet<@T, @A>, @T>}::extend" "_root_.Aeneas.Std.alloc.collections.btree.set.ExtendBTreeSet.extend" ~keep_params:(Some [true; false; true; true]) ~keep_trait_clauses:(Some [true; false; true]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 131 *)
+   mk_fun "alloc::collections::btree::set::{core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>}::from_iter" "_root_.Aeneas.Std.alloc.collections.btree.set.FromIteratorBTreeSet.from_iter";
++  (* file: "Aeneas/Std/BTreeSet.lean", line: 194 *)
++  mk_fun "alloc::collections::btree::set::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.set.IntoIteratorSharedBTreeSet.into_iter" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 119 *)
+   mk_fun "alloc::collections::btree::set::{core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.set.IntoIteratorBTreeSet.into_iter" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 104 *)
+@@ -946,6 +952,22 @@ let lean_builtin_funs = [
+   mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::FlatMap<@I, @U, @F, @Clause1_Item, @Clause1_IntoIter>, @Clause1_Item>}::size_hint" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatMap.size_hint";
+   (* file: "Aeneas/Std/FlatMap.lean", line: 206 *)
+   mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::FlatMap<@I, @U, @F, @Clause1_Item, @Clause1_IntoIter>, @Clause1_Item>}::try_fold" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatMap.try_fold";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 515 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::advance_by" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.advance_by";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 544 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::any" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.any";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 502 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::count" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.count";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 472 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::fold" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.fold";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 447 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::next" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 529 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::nth" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.nth";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 460 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::size_hint" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 486 *)
++  mk_fun "core::iter::adapters::flatten::{core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>}::try_fold" "_root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.try_fold";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 409 *)
+   mk_fun "core::iter::adapters::map::{core::iter::traits::iterator::Iterator<core::iter::adapters::map::Map<@I, @F>, @B>}::any" "_root_.Aeneas.Std.core.iter.adapters.map.IteratorMap.any";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 397 *)
+@@ -1158,6 +1180,8 @@ let lean_builtin_funs = [
+   mk_fun "core::iter::traits::iterator::Iterator::filter" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default";
+   (* file: "Aeneas/Std/FlatMap.lean", line: 48 *)
+   mk_fun "core::iter::traits::iterator::Iterator::flat_map" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 437 *)
++  mk_fun "core::iter::traits::iterator::Iterator::flatten" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 305 *)
+   mk_fun "core::iter::traits::iterator::Iterator::map" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 730 *)
+@@ -1272,6 +1296,12 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq" "_root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 149 *)
+   mk_fun "core::option::{core::fmt::Debug<core::option::Option<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugOption.fmt";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 431 *)
++  mk_fun "core::option::{core::iter::traits::collect::IntoIterator<core::option::Option<@T>, @T, core::option::IntoIter<@T>>}::into_iter" "_root_.Aeneas.Std.core.option.IntoIteratorOption.into_iter";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 437 *)
++  mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>}::next" "_root_.Aeneas.Std.core.option.IteratorIntoIter.next";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 443 *)
++  mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>}::size_hint" "_root_.Aeneas.Std.core.option.IteratorIntoIter.size_hint";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 396 *)
+   mk_fun "core::option::{core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>}::next" "_root_.Aeneas.Std.core.option.IteratorIter.next";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 402 *)
+@@ -2160,6 +2190,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 474 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
++  (* file: "Aeneas/Std/BTreeSet.lean", line: 203 *)
++  mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 164 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::vec::Vec<@T>, &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 782 *)
+@@ -2174,6 +2206,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 126 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::vec::Vec<@T>, @T, alloc::vec::into_iter::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 461 *)
++  mk_trait_impl "core::iter::traits::collect::IntoIterator<core::option::Option<@T>, @T, core::option::IntoIter<@T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 177 *)
+   mk_trait_impl "core::iter::traits::double_ended::DoubleEndedIterator<core::iter::adapters::rev::Rev<@I>, @Clause0_Clause0_Item>" "_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorRev";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 1495 *)
+@@ -2222,6 +2256,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::iter::adapters::filter_map::FilterMap<@I, @F>, @B>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilterMap";
+   (* file: "Aeneas/Std/FlatMap.lean", line: 362 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::FlatMap<@I, @U, @F, @Clause1_Item, @Clause1_IntoIter>, @Clause1_Item>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap";
++  (* file: "Aeneas/Std/FlatMap.lean", line: 559 *)
++  mk_trait_impl "core::iter::traits::iterator::Iterator<core::iter::adapters::flatten::Flatten<@I, @Clause0_Item, @Clause2_Item, @U>, @Clause2_Item>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 420 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::iter::adapters::map::Map<@I, @F>, @B>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 95 *)
+@@ -2240,6 +2276,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::ops::range::Range<@A>, @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 255 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::ops::range::RangeInclusive<@A>, @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRangeInclusive";
++  (* file: "Aeneas/Std/IteratorSources.lean", line: 450 *)
++  mk_trait_impl "core::iter::traits::iterator::Iterator<core::option::IntoIter<@A>, @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 409 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::option::Iter<'a, @A>, &'a @A>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 517 *)
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 9421c58..34604df 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -276,16 +276,17 @@ let check ~(evidence : crate) (crate : crate) : crate =
+          LinesMap, with the default size_hint (0, None) and next-driven fold.
+          BTree Keys/Values (alloc btree/map.rs) project Iter's next and forward
+          its exact size_hint; their fold is the next-driven default.
+-         option::Iter (core option.rs) defines only next (Item::next is
+-         opt.take()) and the exact size_hint (len, Some(len)); it is TrustedLen
+-         but not TrustedRandomAccess, so the collectors' TrustedLen path folds
+-         it with the next-driven default. *)
++         option::Iter and option::IntoIter (core option.rs) define only next
++         (Item::next is opt.take()) and the exact size_hint (len, Some(len));
++         they are TrustedLen but not TrustedRandomAccess, so the collectors'
++         TrustedLen path folds them with the next-driven default. *)
+       | Some name when
+           List.mem name
+             (List.map (( ^ ) iterator)
+                [ "SliceIter"; "ArrayIntoIter"; "VecIntoIter"; "BTreeIter";
+                  "BTreeIntoIter"; "BTreeSetIntoIter"; "BTreeSetIter"; "Chunks"; "ChunksExact"; "Windows";
+-                 "Once"; "Chars"; "Lines"; "BTreeKeys"; "BTreeValues"; "OptionIter" ]) -> ()
++                 "Once"; "Chars"; "Lines"; "BTreeKeys"; "BTreeValues"; "OptionIter";
++                 "OptionIntoIter" ]) -> ()
+       | Some name when
+           List.mem name
+             (List.map (( ^ ) iterator)
+@@ -315,6 +316,22 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       | Some name when name = iterator ^ "FlatMap" ->
+           check_iterator span seen (one span iterator args);
+           check_into span seen (one span into_iterator args)
++      (* Flatten<I> is FlattenCompat<I, U> with the outer Fuse<I> (core
++         flatten.rs): next, fold, try_fold, count and advance_by exhaust the
++         front inner, then convert each outer item with into_iter and exhaust
++         it; size_hint combines the front inner's hint with the outer's (an
++         upper bound only once the outer is exhausted, unless the inner has a
++         constant size), OneShot inners (option::IntoIter, ...) pull one item
++         each. It is FlatMap with an identity mapper (modeled in FlatMap.lean).
++         Its clauses are the outer Iterator, the outer item's IntoIterator and
++         that IntoIterator's own iterator: check the outer and the inner. *)
++      | Some name when name = iterator ^ "Flatten" -> (
++          match List.filter (fun tr -> ref_name tr = Some iterator) args with
++          | [ outer; inner ] ->
++              check_iterator span seen outer;
++              check_into span seen (one span into_iterator args);
++              check_iterator span seen inner
++          | _ -> reject span "missing or ambiguous Flatten iterator evidence")
+       | Some name when name = iterator ^ "Range" ->
+           let step_ref = one span step args in
+           let step_impl, _, _ = resolve span step_ref in
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 0484f67..f366856 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -37,7 +37,7 @@ let trait_contract (name : string) (method_name : string) : contract option =
+       Some Constructor
+   | ( "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator",
+       ("chain" | "zip" | "flat_map") ) -> Some (ConstructorWithState [ 0; 1 ])
+-  | "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator", "skip" ->
++  | "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator", ("skip" | "flatten") ->
+       Some (ConstructorWithState [ 0 ])
+   | "_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator", "into_iter" ->
+       Some IntoIterator
+diff --git a/tests/lean/CollectFlatten.lean b/tests/lean/CollectFlatten.lean
+new file mode 100644
+index 0000000..9b00438
+--- /dev/null
++++ b/tests/lean/CollectFlatten.lean
+@@ -0,0 +1 @@
++import CollectFlatten.Checks
+diff --git a/tests/lean/CollectFlatten/Checks.lean b/tests/lean/CollectFlatten/Checks.lean
+new file mode 100644
+index 0000000..8d67412
+--- /dev/null
++++ b/tests/lean/CollectFlatten/Checks.lean
+@@ -0,0 +1,51 @@
++import CollectFlatten.CollectFlatten
++
++/-! Evaluate the model of `tests/src/collect-flatten.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_flatten.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def uv (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def sl {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice α := ⟨xs, h⟩
++def arr2 (x y : Nat) : Array U32 2#usize := ⟨[u x, u y], by simp⟩
++def nats (r : Result (alloc.vec.Vec U32)) : Option (List Nat) :=
++  match r with | ok v => some (v.val.map (·.val)) | _ => none
++/-- Sorted, duplicate-free entries, as the native BTreeMap/BTreeSet hold them. -/
++def succ (entries : List (Nat × List Nat)) :
++    alloc.collections.btree.map.BTreeMap U32 (alloc.collections.btree.set.BTreeSet U32) :=
++  ⟨entries.map fun (k, vs) => (u k, ⟨⟨vs.map fun v => (u v, ())⟩⟩)⟩
++def hint (h : Usize × Option Usize) : Nat × Option Nat := (h.1.val, h.2.map (·.val))
++def hints (r : Result ((Usize × Option Usize) × (Usize × Option Usize) × (Usize × Option Usize))) :
++    Option ((Nat × Option Nat) × (Nat × Option Nat) × (Nat × Option Nat)) :=
++  match r with | ok (a, b, c) => some (hint a, hint b, hint c) | _ => none
++
++-- collectors
++def s := succ [(1, [2, 3]), (2, [])]
++#guard nats (extend_successors (uv [9]) s (u 1)) == some [9, 2, 3]
++#guard nats (extend_successors (uv [9, 2, 3]) s (u 2)) == some [9, 2, 3]
++#guard nats (extend_successors (uv [9, 2, 3]) s (u 7)) == some [9, 2, 3]
++#guard nats (extend_optional (uv []) (some (uv [4, 5]))) == some [4, 5]
++#guard nats (extend_optional (uv [4, 5]) none) == some [4, 5]
++#guard nats (flatten_groups (sl [uv [1, 2], uv [], uv [3]])) == some [1, 2, 3]
++#guard nats (flatten_groups (sl [])) == some []
++#guard nats (flatten_owned (vec [uv [], uv [1], uv [2, 3]])) == some [1, 2, 3]
++#guard nats (flatten_options (vec [some (u 1), none, some (u 3)])) == some [1, 3]
++#guard nats (flatten_arrays (vec [arr2 1 2, arr2 3 4])) == some [1, 2, 3, 4]
++#guard (match count_groups (sl [uv [1, 2], uv [], uv [3]]) with | ok n => some n.val | _ => none)
++  == some 3
++#guard (match sum_groups (sl [uv [1, 2], uv [], uv [3]]) with | ok n => some n.val | _ => none)
++  == some 6
++
++-- size hints
++#guard hints (hints_groups (sl [uv [1, 2, 3]])) == some ((0, none), (2, some 2), (1, some 1))
++#guard hints (hints_groups (sl [uv [1, 2], uv [3]])) == some ((0, none), (1, none), (0, none))
++#guard hints (hints_groups (sl [])) == some ((0, some 0), (0, some 0), (0, some 0))
++#guard hints (hints_optional (some (uv [1, 2]))) == some ((0, none), (1, some 1), (0, some 0))
++#guard hints (hints_optional none) == some ((0, some 0), (0, some 0), (0, some 0))
++#guard hints (hints_options (vec [some (u 1), none, some (u 3)]))
++  == some ((0, some 3), (0, some 2), (0, some 0))
++#guard hints (hints_arrays (vec [arr2 1 2, arr2 3 4, arr2 5 6]))
++  == some ((6, some 6), (5, some 5), (4, some 4))
++end collect_flatten.checks
+diff --git a/tests/lean/CollectFlatten/CollectFlatten.lean b/tests/lean/CollectFlatten/CollectFlatten.lean
+new file mode 100644
+index 0000000..c03b6ae
+--- /dev/null
++++ b/tests/lean/CollectFlatten/CollectFlatten.lean
+@@ -0,0 +1,611 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_flatten]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_flatten
++
++/-- [collect_flatten::extend_successors]:
++    Source: 'tests/src/collect-flatten.rs', lines 14:0-20:1
++    Visibility: public -/
++def extend_successors
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (successors : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32)) (point : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let o ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get
++      (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++      core.cmp.OrdU32 core.cmp.OrdU32 successors point
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.option.IntoIteratorOption.into_iter o
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet
++      _root_.Aeneas.Std.U32) model_state
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIter
++      _root_.Aeneas.Std.U32)) model_state1
++  let (_, model_state2, _) ←
++    _root_.Aeneas.Std.alloc.vec.ExtendVec.extend
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32)) pending c
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_flatten::extend_optional]:
++    Source: 'tests/src/collect-flatten.rs', lines 22:0-24:1
++    Visibility: public -/
++def extend_optional
++  (pending : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (group : _root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.option.IntoIteratorOption.into_iter group
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) model_state
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) model_state1
++  let (_, model_state2, _) ←
++    _root_.Aeneas.Std.alloc.vec.ExtendVec.extend
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32)) pending c
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_flatten::flatten_groups]:
++    Source: 'tests/src/collect-flatten.rs', lines 26:0-28:1
++    Visibility: public -/
++def flatten_groups
++  (groups : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter groups
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) i
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) c
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_flatten::flatten_owned]:
++    Source: 'tests/src/collect-flatten.rs', lines 30:0-32:1
++    Visibility: public -/
++def flatten_owned
++  (groups : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter groups
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_flatten::flatten_options]:
++    Source: 'tests/src/collect-flatten.rs', lines 35:0-37:1
++    Visibility: public -/
++def flatten_options
++  (items : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter items
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32) model_state
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_flatten::flatten_arrays]:
++    Source: 'tests/src/collect-flatten.rs', lines 40:0-42:1
++    Visibility: public -/
++def flatten_arrays
++  (items : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Array
++  _root_.Aeneas.Std.U32 2#usize)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter items
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize) model_state
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatten
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_flatten::hints_groups]:
++    Source: 'tests/src/collect-flatten.rs', lines 47:0-54:1
++    Visibility: public -/
++def hints_groups
++  (groups : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter groups
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) i
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state
++  let (_, model_state2) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state
++  let model_state3 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state2
++  let (_, model_state4) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state2
++  let model_state5 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state4
++  _root_.Aeneas.Std.Result.ok (model_state1, model_state3, model_state5)
++
++/-- [collect_flatten::hints_optional]:
++    Source: 'tests/src/collect-flatten.rs', lines 56:0-63:1
++    Visibility: public -/
++def hints_optional
++  (group : _root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.option.IntoIteratorOption.into_iter group
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) model_state
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state1
++  let (_, model_state3) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state1
++  let model_state4 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state3
++  let (_, model_state5) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state3
++  let model_state6 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state5
++  _root_.Aeneas.Std.Result.ok (model_state2, model_state4, model_state6)
++
++/-- [collect_flatten::hints_options]:
++    Source: 'tests/src/collect-flatten.rs', lines 65:0-72:1
++    Visibility: public -/
++def hints_options
++  (items : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter items
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32) model_state
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32) model_state1
++  let (_, model_state3) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32) model_state1
++  let model_state4 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32) model_state3
++  let (_, model_state5) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32) model_state3
++  let model_state6 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Option _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOptionIntoIter
++      _root_.Aeneas.Std.U32) model_state5
++  _root_.Aeneas.Std.Result.ok (model_state2, model_state4, model_state6)
++
++/-- [collect_flatten::hints_arrays]:
++    Source: 'tests/src/collect-flatten.rs', lines 74:0-81:1
++    Visibility: public -/
++def hints_arrays
++  (items : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Array
++  _root_.Aeneas.Std.U32 2#usize)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter items
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize) model_state
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize) model_state1
++  let (_, model_state3) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize) model_state1
++  let model_state4 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize) model_state3
++  let (_, model_state5) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize) model_state3
++  let model_state6 ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray
++      _root_.Aeneas.Std.U32 2#usize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorArrayIntoIter
++      _root_.Aeneas.Std.U32 2#usize) model_state5
++  _root_.Aeneas.Std.Result.ok (model_state2, model_state4, model_state6)
++
++/-- [collect_flatten::count_groups]:
++    Source: 'tests/src/collect-flatten.rs', lines 83:0-85:1
++    Visibility: public -/
++def count_groups
++  (groups : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter groups
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) i
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.count
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_flatten::sum_groups::closure]
++    Source: 'tests/src/collect-flatten.rs', lines 88:36-88:53 -/
++@[reducible]
++def sum_groups.closure := _root_.Unit
++
++/-- [collect_flatten::sum_groups::{core::ops::function::FnMut<(u32, &'_ (u32)), u32> for collect_flatten::sum_groups::closure}::call_mut]:
++    Source: 'tests/src/collect-flatten.rs', lines 88:36-88:53 -/
++def sum_groups.closure.Insts.CoreOpsFunctionFnMutPairU32SharedU32U32.call_mut
++  (c : _root_.collect_flatten.sum_groups.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.collect_flatten.sum_groups.closure)
++  := do
++  let (acc, x) := tupled_args
++  let i ← acc + x
++  _root_.Aeneas.Std.Result.ok (i, c)
++
++/-- [collect_flatten::sum_groups::{core::ops::function::FnOnce<(u32, &'_ (u32)), u32> for collect_flatten::sum_groups::closure}::call_once]:
++    Source: 'tests/src/collect-flatten.rs', lines 88:36-88:53 -/
++def sum_groups.closure.Insts.CoreOpsFunctionFnOncePairU32SharedU32U32.call_once
++  (c : _root_.collect_flatten.sum_groups.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.collect_flatten.sum_groups.closure.Insts.CoreOpsFunctionFnMutPairU32SharedU32U32.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [collect_flatten::sum_groups::{core::ops::function::FnOnce<(u32, &'_ (u32)), u32> for collect_flatten::sum_groups::closure}]
++    Source: 'tests/src/collect-flatten.rs', lines 88:36-88:53 -/
++@[reducible]
++def sum_groups.closure.Insts.CoreOpsFunctionFnOncePairU32SharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_flatten.sum_groups.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_flatten.sum_groups.closure.Insts.CoreOpsFunctionFnOncePairU32SharedU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_flatten::sum_groups::{core::ops::function::FnMut<(u32, &'_ (u32)), u32> for collect_flatten::sum_groups::closure}]
++    Source: 'tests/src/collect-flatten.rs', lines 88:36-88:53 -/
++@[reducible]
++def sum_groups.closure.Insts.CoreOpsFunctionFnMutPairU32SharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_flatten.sum_groups.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.collect_flatten.sum_groups.closure.Insts.CoreOpsFunctionFnOncePairU32SharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_flatten.sum_groups.closure.Insts.CoreOpsFunctionFnMutPairU32SharedU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_flatten::sum_groups]:
++    Source: 'tests/src/collect-flatten.rs', lines 87:0-89:1
++    Visibility: public -/
++def sum_groups
++  (groups : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter groups
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flatten.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32) i
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.adapters.flatten.IteratorFlatten.fold
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedVec
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_flatten.sum_groups.closure.Insts.CoreOpsFunctionFnMutPairU32SharedU32U32
++      model_state 0#u32 ()
++  _root_.Aeneas.Std.Result.ok model_state1
++
++end collect_flatten
+diff --git a/tests/lean/CollectUserIteratorHint/Checks.lean b/tests/lean/CollectUserIteratorHint/Checks.lean
+index 3d7183a..4d3a290 100644
+--- a/tests/lean/CollectUserIteratorHint/Checks.lean
++++ b/tests/lean/CollectUserIteratorHint/Checks.lean
+@@ -39,3 +39,26 @@ theorem successors_size_hint_total :
+       simp [Successors.Insts.CoreIterTraitsIteratorIterator.size_hint,
+         core.option.Option.is_some, lift, hz]⟩
+ end collect_user_iterator_hint.checks
++
++/-! The obligations file names each proposition by the full name of its Prop
++    declaration, as `Name.toString` prints it (the acceptance closure audit
++    compares them verbatim): exactly the `size_hint_total` declarations of the
++    generated module. -/
++open Lean Elab Command in
++#eval show CommandElabM Unit from do
++  let dir := (System.FilePath.mk (← getFileName)).parent.getD "."
++  let json ← IO.ofExcept (Json.parse (← IO.FS.readFile (dir / "obligations.json")))
++  let entries ← IO.ofExcept (json.getObjValAs? (Array Json) "obligations")
++  let listed ← entries.mapM fun entry => IO.ofExcept (entry.getObjValAs? String "proposition")
++  let env ← getEnv
++  let declared := env.constants.fold (init := (#[] : Array String)) fun acc n info =>
++    match n with
++    | .str _ "size_hint_total" =>
++      if (`collect_user_iterator_hint).isPrefixOf n && info.type == .sort .zero then
++        acc.push n.toString
++      else acc
++    | _ => acc
++  let listed := listed.qsort (· < ·)
++  let declared := declared.qsort (· < ·)
++  unless listed == declared && listed.size == 2 do
++    throwError "obligation names {listed} differ from the Prop declarations {declared}"
+diff --git a/tests/lean/CollectUserIteratorHint/obligations.json b/tests/lean/CollectUserIteratorHint/obligations.json
+index 0f62e30..930f5ee 100644
+--- a/tests/lean/CollectUserIteratorHint/obligations.json
++++ b/tests/lean/CollectUserIteratorHint/obligations.json
+@@ -1 +1 @@
+-{"version":1,"obligations":[{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}","proposition":"_root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total"},{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}","proposition":"_root_.collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator.size_hint_total"}]}
++{"version":1,"obligations":[{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<u32> for collect_user_iterator_hint::Countdown}","proposition":"collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32.size_hint_total"},{"kind":"iterator_size_hint_total","impl":"collect_user_iterator_hint::{core::iter::traits::iterator::Iterator<E> for collect_user_iterator_hint::Successors<E, A>}","proposition":"collect_user_iterator_hint.Successors.Insts.CoreIterTraitsIteratorIterator.size_hint_total"}]}
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index a66d018..6d6f3b3 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -37,6 +37,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsReturned
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
++@[default_target] lean_lib CollectFlatten
+ @[default_target] lean_lib CollectGenericClosure
+ @[default_target] lean_lib CollectUserIterator
+ @[default_target] lean_lib CollectUserIteratorHint
+diff --git a/tests/src/collect-flatten.rs b/tests/src/collect-flatten.rs
+new file mode 100644
+index 0000000..e62efd7
+--- /dev/null
++++ b/tests/src/collect-flatten.rs
+@@ -0,0 +1,151 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectFlatten
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::copied::Copied
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Collectors over Flatten (admitted by CollectionContracts) and the std
++//! size_hint of Flatten: front inner, fused outer, constant-size inner
++//! (arrays) and one-shot inner (Option) specializations.
++//! CollectFlatten/Checks.lean compares the model with the native results
++//! asserted in the native test module.
++use std::collections::{BTreeMap, BTreeSet};
++
++/// chelis-ir ownership/last_use.rs: `Copied<Flatten<option::IntoIter<&BTreeSet>>>`
++/// extending a Vec.
++pub fn extend_successors(
++    pending: &mut Vec<u32>,
++    successors: &BTreeMap<u32, BTreeSet<u32>>,
++    point: u32,
++) {
++    pending.extend(successors.get(&point).into_iter().flatten().copied());
++}
++
++pub fn extend_optional(pending: &mut Vec<u32>, group: Option<&Vec<u32>>) {
++    pending.extend(group.into_iter().flatten().copied());
++}
++
++pub fn flatten_groups(groups: &[Vec<u32>]) -> Vec<u32> {
++    groups.iter().flatten().copied().collect()
++}
++
++pub fn flatten_owned(groups: Vec<Vec<u32>>) -> Vec<u32> {
++    groups.into_iter().flatten().collect()
++}
++
++/// Option inners are OneShot: next pulls one item from each inner directly.
++pub fn flatten_options(items: Vec<Option<u32>>) -> Vec<u32> {
++    items.into_iter().flatten().collect()
++}
++
++/// Array inners have a constant size (ConstSizeIntoIterator).
++pub fn flatten_arrays(items: Vec<[u32; 2]>) -> Vec<u32> {
++    items.into_iter().flatten().collect()
++}
++
++pub type Hint = (usize, Option<usize>);
++
++/// Hints before the first next, after it, and after the second.
++pub fn hints_groups(groups: &[Vec<u32>]) -> (Hint, Hint, Hint) {
++    let mut iter = groups.iter().flatten();
++    let first = iter.size_hint();
++    let _ = iter.next();
++    let second = iter.size_hint();
++    let _ = iter.next();
++    (first, second, iter.size_hint())
++}
++
++pub fn hints_optional(group: Option<&Vec<u32>>) -> (Hint, Hint, Hint) {
++    let mut iter = group.into_iter().flatten();
++    let first = iter.size_hint();
++    let _ = iter.next();
++    let second = iter.size_hint();
++    let _ = iter.next();
++    (first, second, iter.size_hint())
++}
++
++pub fn hints_options(items: Vec<Option<u32>>) -> (Hint, Hint, Hint) {
++    let mut iter = items.into_iter().flatten();
++    let first = iter.size_hint();
++    let _ = iter.next();
++    let second = iter.size_hint();
++    let _ = iter.next();
++    (first, second, iter.size_hint())
++}
++
++pub fn hints_arrays(items: Vec<[u32; 2]>) -> (Hint, Hint, Hint) {
++    let mut iter = items.into_iter().flatten();
++    let first = iter.size_hint();
++    let _ = iter.next();
++    let second = iter.size_hint();
++    let _ = iter.next();
++    (first, second, iter.size_hint())
++}
++
++pub fn count_groups(groups: &[Vec<u32>]) -> usize {
++    groups.iter().flatten().count()
++}
++
++pub fn sum_groups(groups: &[Vec<u32>]) -> u32 {
++    groups.iter().flatten().fold(0, |acc, x| acc + *x)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn map(entries: &[(u32, &[u32])]) -> BTreeMap<u32, BTreeSet<u32>> {
++        entries.iter().map(|(k, vs)| (*k, vs.iter().copied().collect())).collect()
++    }
++
++    #[test]
++    fn collectors() {
++        let successors = map(&[(1, &[3, 2]), (2, &[])]);
++        let mut pending = vec![9];
++        extend_successors(&mut pending, &successors, 1);
++        assert_eq!(pending, vec![9, 2, 3]);
++        extend_successors(&mut pending, &successors, 2);
++        assert_eq!(pending, vec![9, 2, 3]);
++        extend_successors(&mut pending, &successors, 7);
++        assert_eq!(pending, vec![9, 2, 3]);
++        let mut pending = vec![];
++        extend_optional(&mut pending, Some(&vec![4, 5]));
++        assert_eq!(pending, vec![4, 5]);
++        extend_optional(&mut pending, None);
++        assert_eq!(pending, vec![4, 5]);
++        assert_eq!(flatten_groups(&[vec![1, 2], vec![], vec![3]]), vec![1, 2, 3]);
++        assert_eq!(flatten_groups(&[]), Vec::<u32>::new());
++        assert_eq!(flatten_owned(vec![vec![], vec![1], vec![2, 3]]), vec![1, 2, 3]);
++        assert_eq!(flatten_options(vec![Some(1), None, Some(3)]), vec![1, 3]);
++        assert_eq!(flatten_arrays(vec![[1, 2], [3, 4]]), vec![1, 2, 3, 4]);
++        assert_eq!(count_groups(&[vec![1, 2], vec![], vec![3]]), 3);
++        assert_eq!(sum_groups(&[vec![1, 2], vec![], vec![3]]), 6);
++    }
++
++    #[test]
++    fn hints() {
++        // General inner: no upper bound while the outer may yield more inners.
++        assert_eq!(
++            hints_groups(&[vec![1, 2, 3]]),
++            ((0, None), (2, Some(2)), (1, Some(1)))
++        );
++        assert_eq!(
++            hints_groups(&[vec![1, 2], vec![3]]),
++            ((0, None), (1, None), (0, None))
++        );
++        assert_eq!(hints_groups(&[]), ((0, Some(0)), (0, Some(0)), (0, Some(0))));
++        assert_eq!(
++            hints_optional(Some(&vec![1, 2])),
++            ((0, None), (1, Some(1)), (0, Some(0)))
++        );
++        assert_eq!(hints_optional(None), ((0, Some(0)), (0, Some(0)), (0, Some(0))));
++        // OneShot inner: (0, outer upper).
++        assert_eq!(
++            hints_options(vec![Some(1), None, Some(3)]),
++            ((0, Some(3)), (0, Some(2)), (0, Some(0)))
++        );
++        // Constant-size inner: exact.
++        assert_eq!(
++            hints_arrays(vec![[1, 2], [3, 4], [5, 6]]),
++            ((6, Some(6)), (5, Some(5)), (4, Some(4)))
++        );
++    }
++}

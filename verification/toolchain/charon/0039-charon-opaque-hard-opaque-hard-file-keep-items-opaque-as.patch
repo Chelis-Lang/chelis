@@ -1,0 +1,559 @@
+# charon integration step 39 after 546078ea5d: commit 9b4eec39818095d046fa64a02af3420147e16cf3
+# first parent c6b2825aac2708f682b9e8b71ea61dde2eb70ba7
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: --opaque-hard/--opaque-hard-file keep items opaque as #[charon::opaque] does
+#
+# Partial monomorphization instantiates the generic items that --opaque makes opaque with their
+# contents (c6b2825), so that a separately translated chunk can instantiate the items of earlier
+# chunks. The native shell of a code base (e.g. primitives that a Lean model replaces) has no
+# translation at all, and its generic items' bodies may not be translatable (dyn Any, thread
+# locals). --opaque-hard <pattern> and --opaque-hard-file <file> make the matched items (and the
+# items nested in them) opaque as if they were annotated with #[charon::opaque]: no body, also
+# under --monomorphize-mut, where the generic item stays one signature-only declaration and each
+# instance partial monomorphization creates is one signature-only declaration named
+# `<generic name>::<shape>`. --exclude still takes precedence; --opaque is unchanged.
+#
+# The charon binary adds the patterns to --opaque, which the llbc records, and passes them to
+# charon-driver in CHARON_OPAQUE_HARD: the CliOpts field is #[serde(skip)] and #[charon::opaque],
+# so the serialized options (and charon-ml) are unchanged. UI test monomorphize-mut-opaque-hard;
+# help output updated.
+
+diff --git a/src/bin/charon-driver/driver.rs b/src/bin/charon-driver/driver.rs
+index 0ab9f68..9639851 100644
+--- a/src/bin/charon-driver/driver.rs
++++ b/src/bin/charon-driver/driver.rs
+@@ -151,6 +151,10 @@ pub fn run_rustc_driver() -> Result<Option<(TransformCtx, CliOpts)>, CharonFailu
+                 return Err(CharonFailure::CharonError(1));
+             }
+         };
++        // `--opaque-hard` is not serialized with the other options (see `CHARON_OPAQUE_HARD`).
++        if let Ok(patterns) = env::var(options::CHARON_OPAQUE_HARD) {
++            options.opaque_hard = serde_json::from_str(patterns.as_str()).unwrap();
++        }
+         options.apply_preset();
+ 
+         error_ctx.continue_on_failure = !options.abort_on_error;
+diff --git a/src/bin/charon-driver/translate/translate_items.rs b/src/bin/charon-driver/translate/translate_items.rs
+index da8a03a..af36917 100644
+--- a/src/bin/charon-driver/translate/translate_items.rs
++++ b/src/bin/charon-driver/translate/translate_items.rs
+@@ -542,16 +542,14 @@ impl ItemTransCtx<'_, '_> {
+     /// contents: partial monomorphization instantiates it for the `&mut` arguments used here, and
+     /// these instances need its body (or fields). The partial monomorphization pass makes the item
+     /// itself opaque again once the instances exist (see `TransformCtx::mono_templates`).
+-    /// `#[charon::opaque]` items stay opaque.
++    /// `#[charon::opaque]` and `--opaque-hard` items stay opaque.
+     pub(crate) fn keeps_contents_for_mono(&self, item_meta: &ItemMeta) -> bool {
+         self.t_ctx.options.monomorphize_mut.is_some()
+             && item_meta.opacity == ItemOpacity::Opaque
+             && self.t_ctx.opacity_for_name(&item_meta.name) == ItemOpacity::Opaque
+-            && !item_meta
+-                .attr_info
+-                .attributes
+-                .iter()
+-                .any(|attr| attr.is_opaque())
++            && !self
++                .t_ctx
++                .is_opaque_hard(&item_meta.name, &item_meta.attr_info)
+             && !self.outermost_generics().types.is_empty()
+     }
+ 
+diff --git a/src/bin/charon-driver/translate/translate_meta.rs b/src/bin/charon-driver/translate/translate_meta.rs
+index 794ec11..33b0464 100644
+--- a/src/bin/charon-driver/translate/translate_meta.rs
++++ b/src/bin/charon-driver/translate/translate_meta.rs
+@@ -536,6 +536,13 @@ impl<'tcx> TranslateCtx<'tcx> {
+     pub(crate) fn opacity_for_name(&self, name: &Name) -> ItemOpacity {
+         self.options.opacity_for_name(&self.translated, name)
+     }
++
++    /// Whether this item is opaque by `#[charon::opaque]` or by an `--opaque-hard` pattern, which
++    /// means it gets no body in any case.
++    pub(crate) fn is_opaque_hard(&self, name: &Name, attr_info: &AttrInfo) -> bool {
++        attr_info.attributes.iter().any(|attr| attr.is_opaque())
++            || self.options.is_opaque_hard(&self.translated, name)
++    }
+ }
+ 
+ // Attributes
+@@ -781,9 +788,7 @@ impl<'tcx> TranslateCtx<'tcx> {
+ 
+         let opacity = if attr_info.attributes.iter().any(|attr| attr.is_exclude()) {
+             ItemOpacity::Invisible.max(name_opacity)
+-        } else if self.is_extern_item(def)
+-            || attr_info.attributes.iter().any(|attr| attr.is_opaque())
+-        {
++        } else if self.is_extern_item(def) || self.is_opaque_hard(&name, &attr_info) {
+             // Force opaque in these cases.
+             ItemOpacity::Opaque.max(name_opacity)
+         } else {
+diff --git a/src/bin/charon/cli.rs b/src/bin/charon/cli.rs
+index edcf980..ee98968 100644
+--- a/src/bin/charon/cli.rs
++++ b/src/bin/charon/cli.rs
+@@ -31,7 +31,8 @@ pub struct PrettyPrintArgs {
+ }
+ 
+ /// Options that read name patterns from files. They are handled by this binary, which appends the
+-/// patterns to `--start-from`/`--opaque`, so that they don't change the serialized options.
++/// patterns to `--start-from`/`--opaque`/`--opaque-hard`, so that they don't change the serialized
++/// options.
+ #[derive(clap::Args, Debug)]
+ pub struct PatternFiles {
+     /// Same as `--start-from` for each line of the file (one pattern per line; blank lines and
+@@ -43,10 +44,16 @@ pub struct PatternFiles {
+     /// starting with `#` are ignored).
+     #[clap(long, value_name("FILE"))]
+     pub opaque_file: Vec<PathBuf>,
++    /// Same as `--opaque-hard` for each line of the file (one pattern per line; blank lines and
++    /// lines starting with `#` are ignored).
++    #[clap(long, value_name("FILE"))]
++    pub opaque_hard_file: Vec<PathBuf>,
+ }
+ 
+ impl PatternFiles {
+-    /// Append the patterns of the files to `options`.
++    /// Append the patterns of the files to `options`, then the `--opaque-hard` patterns to
++    /// `--opaque`: the serialized options record them there, and charon-driver receives them in
++    /// `CHARON_OPAQUE_HARD`.
+     pub fn apply(&self, options: &mut CliOpts) -> anyhow::Result<()> {
+         use anyhow::Context;
+         let read = |path: &PathBuf, dest: &mut Vec<String>| -> anyhow::Result<()> {
+@@ -66,6 +73,10 @@ impl PatternFiles {
+         for path in &self.opaque_file {
+             read(path, &mut options.opaque)?;
+         }
++        for path in &self.opaque_hard_file {
++            read(path, &mut options.opaque_hard)?;
++        }
++        options.opaque.extend(options.opaque_hard.iter().cloned());
+         Ok(())
+     }
+ }
+diff --git a/src/bin/charon/main.rs b/src/bin/charon/main.rs
+index b05bf0b..b0f821f 100644
+--- a/src/bin/charon/main.rs
++++ b/src/bin/charon/main.rs
+@@ -34,7 +34,7 @@ use charon_lib::{
+     common::arg_value,
+     export::{CrateData, multi_target},
+     logger,
+-    options::{CHARON_ARGS, CliOpts},
++    options::{CHARON_ARGS, CHARON_OPAQUE_HARD, CliOpts},
+ };
+ use clap::Parser;
+ use cli::{Charon, Cli};
+@@ -184,7 +184,7 @@ fn translate_with_cargo(
+     cmd.env("RUSTC_WRAPPER", toolchain::driver_path());
+     cmd.env("CHARON_USING_CARGO", "1");
+     cmd.env_remove("CARGO_PRIMARY_PACKAGE");
+-    cmd.env(CHARON_ARGS, serde_json::to_string(&options).unwrap());
++    set_driver_options(&mut cmd, &options);
+     cmd.arg("build");
+     if arg_value(&cargo_args, "--target").is_none() {
+         // Make sure the build target is explicitly set. This is needed to detect which crates are
+@@ -216,7 +216,7 @@ fn translate_without_cargo(mut options: CliOpts) -> anyhow::Result<ExitStatus> {
+         cmd.arg(&get_rustc_version()?.host);
+     }
+     cmd.args(std::mem::take(&mut options.rustc_args));
+-    cmd.env(CHARON_ARGS, serde_json::to_string(&options).unwrap());
++    set_driver_options(&mut cmd, &options);
+     Ok(cmd
+         .spawn()
+         .expect("could not run charon-driver")
+@@ -224,6 +224,15 @@ fn translate_without_cargo(mut options: CliOpts) -> anyhow::Result<ExitStatus> {
+         .expect("failed to wait for charon-driver?"))
+ }
+ 
++/// Pass the options to charon-driver.
++fn set_driver_options(cmd: &mut std::process::Command, options: &CliOpts) {
++    cmd.env(CHARON_ARGS, serde_json::to_string(options).unwrap());
++    cmd.env(
++        CHARON_OPAQUE_HARD,
++        serde_json::to_string(&options.opaque_hard).unwrap(),
++    );
++}
++
+ fn get_rustc_version() -> anyhow::Result<rustc_version::VersionMeta> {
+     let cmd = toolchain::driver_cmd()?;
+     let rustc_version = rustc_version::VersionMeta::for_command(cmd).unwrap_or_else(|err| {
+diff --git a/src/options.rs b/src/options.rs
+index 723c627..649b464 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -18,6 +18,11 @@ use crate::{
+ /// when calling charon-driver from cargo-charon.
+ pub const CHARON_ARGS: &str = "CHARON_ARGS";
+ 
++/// The name of the environment variable in which the `charon` binary passes `--opaque-hard`
++/// (a JSON list of patterns) to charon-driver. It is not part of `CHARON_ARGS`, so that the
++/// serialized options (which the llbc contains) stay the same.
++pub const CHARON_OPAQUE_HARD: &str = "CHARON_OPAQUE_HARD";
++
+ // This structure is used to store the command-line instructions.
+ // We automatically derive a command-line parser based on this structure.
+ // Note that the doc comments are used to generate the help message when using
+@@ -144,6 +149,16 @@ pub struct CliOpts {
+     #[clap(long)]
+     #[serde(default)]
+     pub opaque: Vec<String>,
++    /// Items to keep opaque as if they were annotated with `#[charon::opaque]`: their bodies are
++    /// never translated, including under `--monomorphize-mut`, whose instances of such generic
++    /// items are signature-only too. `--opaque` items instead keep their contents for these
++    /// instances (a separately translated part of the code base defines them); this is for items
++    /// with no translation at all, e.g. the native code a model replaces. Takes the same patterns
++    /// as `--include`, and adds them to `--opaque`; `--exclude` still takes precedence.
++    #[clap(long)]
++    #[serde(skip)]
++    #[charon::opaque]
++    pub opaque_hard: Vec<String>,
+     /// Blacklist of items to not translate at all. Works just like `--include`, see the doc there.
+     #[clap(long)]
+     #[serde(default)]
+@@ -558,6 +573,9 @@ pub struct TranslateOptions {
+     /// List of patterns to assign a given opacity to. Same as the corresponding `TranslateOptions`
+     /// field.
+     pub item_opacities: PatternIndex<ItemOpacity>,
++    /// The `--opaque-hard` patterns: the items they match are opaque as if annotated with
++    /// `#[charon::opaque]`.
++    pub opaque_hard: PatternIndex<()>,
+     /// List of traits for which we transform associated types to type parameters.
+     pub lift_associated_types: Vec<NamePattern>,
+     /// Skip the typecheck passes.
+@@ -677,6 +695,12 @@ impl TranslateOptions {
+                 .collect()
+         };
+ 
++        let opaque_hard = options
++            .opaque_hard
++            .iter()
++            .filter_map(|s| parse_pattern(s).ok().map(|pat| (pat, ())))
++            .collect();
++
+         let lift_associated_types = options
+             .lift_associated_types
+             .iter()
+@@ -698,6 +722,7 @@ impl TranslateOptions {
+             index_to_function_calls: options.index_to_function_calls,
+             print_built_llbc: options.print_built_llbc,
+             item_opacities,
++            opaque_hard,
+             treat_box_as_builtin: options.treat_box_as_builtin,
+             raw_consts: options.raw_consts,
+             unsized_strings: options.unsized_strings,
+@@ -749,6 +774,11 @@ impl TranslateOptions {
+         *opacity
+     }
+ 
++    /// Whether an `--opaque-hard` pattern matches this name.
++    pub fn is_opaque_hard(&self, krate: &TranslatedCrate, name: &Name) -> bool {
++        self.opaque_hard.matches(krate, name).next().is_some()
++    }
++
+     /// Whether a start-from pattern, attribute or `pub` selection matches this item.
+     pub fn start_from_matches(&self, krate: &TranslatedCrate, item_meta: &ItemMeta) -> bool {
+         self.start_from_patterns
+diff --git a/tests/help-output.txt b/tests/help-output.txt
+index 69dc479..7dff608 100644
+--- a/tests/help-output.txt
++++ b/tests/help-output.txt
+@@ -83,6 +83,9 @@ Options:
+       --opaque <OPAQUE>
+           Blacklist of items to keep opaque. Works just like `--include`, see the doc there
+ 
++      --opaque-hard <OPAQUE_HARD>
++          Items to keep opaque as if they were annotated with `#[charon::opaque]`: their bodies are never translated, including under `--monomorphize-mut`, whose instances of such generic items are signature-only too. `--opaque` items instead keep their contents for these instances (a separately translated part of the code base defines them); this is for items with no translation at all, e.g. the native code a model replaces. Takes the same patterns as `--include`, and adds them to `--opaque`; `--exclude` still takes precedence
++
+       --exclude <EXCLUDE>
+           Blacklist of items to not translate at all. Works just like `--include`, see the doc there
+ 
+@@ -191,5 +194,8 @@ Options:
+       --opaque-file <FILE>
+           Same as `--opaque` for each line of the file (one pattern per line; blank lines and lines starting with `#` are ignored)
+ 
++      --opaque-hard-file <FILE>
++          Same as `--opaque-hard` for each line of the file (one pattern per line; blank lines and lines starting with `#` are ignored)
++
+   -h, --help
+           Print help (see a summary with '-h')
+diff --git a/tests/ui/monomorphize-mut-opaque-hard.out b/tests/ui/monomorphize-mut-opaque-hard.out
+new file mode 100644
+index 0000000..93fab14
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-opaque-hard.out
+@@ -0,0 +1,219 @@
++# Final LLBC before serialization:
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args, Self_Output>
++{
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args, Self_Output>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self_Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnOnce<Self, Args, Self_Clause0_Output>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args, Self_Clause0_Output>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self_Clause0_Output>
++}
++
++#[lang_item("fn_once")]
++pub trait core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++{
++    fn call_once = core::ops::function::FnOnce::call_once::<_, (&_ mut _,), _><'_0, T0, T1, T2>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<(&'_0 mut T1,), T2>
++}
++
++#[lang_item("fn_mut")]
++pub trait core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++{
++    parent_clause0 : [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0_1, '_0, T0, T1, T2>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<(&'_0 mut T1,), T2>
++}
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
++where
++    [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnMut::call_mut::<_, _, (&_ mut _,), _><'_0, '_1, T0, T1, T2>(_1: &'_0 mut T0, _2: (&'_1 mut T1,)) -> T2
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T0, T1, T2>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
++where
++    [@TraitClause0]: FnOnce<Self, Args, Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once::<_, (&_ mut _,), _><'_0, T0, T1, T2>(_1: T0, _2: (&'_0 mut T1,)) -> T2
++where
++    [@TraitClause0]: core::ops::function::FnOnce::<_, (&_ mut _,), _><'_0, T0, T1, T2>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++pub fn test_crate::native::<&_ mut _, _><'_0, T0, T1>(_1: &'_0 mut T0, _2: T1)
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T1, T0, ()>,
++= <opaque>
++
++struct test_crate::external::closure::<_, &_ mut _, _><'_0, '_1, T0, T1>
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_1, T1, T0, ()>,
++{
++  &'_0 mut T1,
++}
++
++// Full name: test_crate::external::closure
++opaque type closure<'_0, T, T1>
++where
++    [@TraitClause0]: FnMut<T1, (T,), ()>,
++
++fn test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'_0, '_1, '_2, T0, T1>(_1: &'_1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0], tupled_args_2: (&'_2 mut T0,))
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_2, T1, T0, ()>,
++{
++    let _0: (); // return
++    let _1: &'1 mut test_crate::external::closure::<_, &_ mut _, _><'_0, '_2, T0, T1>[@TraitClause0]; // arg #1
++    let tupled_args_2: (&'_2 mut T0,); // arg #2
++    let y_3: &'_2 mut T0; // local
++    let _4: &'3 mut T1; // anonymous local
++    let _5: (&'_2 mut T0,); // anonymous local
++    let _6: &'_2 mut T0; // anonymous local
++
++    storage_live(y_3)
++    _0 = ()
++    y_3 = move tupled_args_2.0
++    storage_live(_4)
++    _4 = &mut (*((*_1)).0)
++    storage_live(_5)
++    storage_live(_6)
++    _6 = move y_3
++    _5 = (move _6,)
++    _0 = @TraitClause0::call_mut<'6>(move _4, move _5)
++    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] _6
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(_4)
++    conditional_drop[{built_in impl Destruct for &'_2 mut T0}] y_3
++    return
++}
++
++pub fn test_crate::external::<&_ mut _, _><'_0, T0, T1>(x_1: &'_0 mut T0, f_2: T1)
++where
++    [@TraitClause0]: core::ops::function::FnMut::<_, (&_ mut _,), _><'_0, T1, T0, ()>,
++{
++    let _0: (); // return
++    let x_1: &'_0 mut T0; // arg #1
++    let f_2: T1; // arg #2
++    let g_3: test_crate::external::closure::<_, &_ mut _, _><'1, '_0, T0, T1>[@TraitClause0]; // local
++    let _4: &'3 mut T1; // anonymous local
++    let _5: &'6 mut test_crate::external::closure::<_, &_ mut _, _><'7, '_0, T0, T1>[@TraitClause0]; // anonymous local
++    let _6: (&'_0 mut T0,); // anonymous local
++    let _7: &'_0 mut T0; // anonymous local
++
++    _0 = ()
++    storage_live(g_3)
++    storage_live(_4)
++    _4 = &mut f_2
++    g_3 = test_crate::external::closure::<_, &_ mut _, _> { 0: move _4 }
++    storage_dead(_4)
++    storage_live(_5)
++    _5 = &mut g_3
++    storage_live(_6)
++    storage_live(_7)
++    _7 = move x_1
++    _6 = (move _7,)
++    _0 = test_crate::external::{impl core::ops::function::FnMut::<closure<_, _, _>[@TraitClause0], _, _><'_0, T1, (T,), ()>[@TraitClause0] for T}::call_mut::<_, _, &_ mut _, _><'12, '13, '_0, T0, T1>[@TraitClause0](move _5, move _6)
++    conditional_drop[{built_in impl Destruct for &'_0 mut T0}] _7
++    storage_dead(_7)
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_dead(g_3)
++    conditional_drop[{built_in impl Destruct for T1}] f_2
++    conditional_drop[{built_in impl Destruct for &'_0 mut T0}] x_1
++    return
++}
++
++// Full name: test_crate::Runtime
++pub struct Runtime {}
++
++pub fn test_crate::{Runtime}::observe::<_, &_ mut _><'_0, '_1, T0>(_1: &'_0 mut Runtime, _2: &'_1 mut T0) -> &'_1 mut T0
++= <opaque>
++
++// Full name: test_crate::bump
++fn bump<'_0>(r_1: &'_0 mut u32)
++{
++    let _0: (); // return
++    let r_1: &'1 mut u32; // arg #1
++    let _2: u32; // anonymous local
++
++    storage_live(_2)
++    _0 = ()
++    _2 = copy (*r_1) panic.+ const 1 : u32
++    (*r_1) = move _2
++    _0 = ()
++    return
++}
++
++// Full name: test_crate::user
++pub fn user<'_0, '_1>(runtime_1: &'_0 mut Runtime, v_2: &'_1 mut u32) -> u32
++{
++    let _0: u32; // return
++    let runtime_1: &'1 mut Runtime; // arg #1
++    let v_2: &'3 mut u32; // arg #2
++    let _3: (); // anonymous local
++    let _4: &'4 mut u32; // anonymous local
++    let _5: (); // anonymous local
++    let _6: &'5 mut u32; // anonymous local
++    let _7: (); // anonymous local
++    let _8: &'6 mut u32; // anonymous local
++    let r_9: &'7 mut u32; // local
++    let _10: &'8 mut Runtime; // anonymous local
++    let _11: &'9 mut u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_4)
++    _4 = &mut (*v_2)
++    _3 = test_crate::native::<&_ mut _, _><'10, u32, for<'_0_1> bump<'_0_1>>[{built_in impl core::ops::function::FnMut::<_, (&_ mut _,), _><'10, u32, ()> for for<'_0_2> bump<'_0_2>}](move _4, const bump<'21>)
++    storage_dead(_4)
++    storage_dead(_3)
++    storage_live(_5)
++    storage_live(_6)
++    _6 = &mut (*v_2)
++    _5 = test_crate::native::<&_ mut _, _><'22, u32, for<'_0_1> bump<'_0_1>>[{built_in impl core::ops::function::FnMut::<_, (&_ mut _,), _><'22, u32, ()> for for<'_0_2> bump<'_0_2>}](move _6, const bump<'32>)
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_live(_7)
++    storage_live(_8)
++    _8 = &mut (*v_2)
++    _7 = test_crate::external::<&_ mut _, _><'33, u32, for<'_0_1> bump<'_0_1>>[{built_in impl core::ops::function::FnMut::<_, (&_ mut _,), _><'33, u32, ()> for for<'_0_2> bump<'_0_2>}](move _8, const bump<'43>)
++    storage_dead(_8)
++    storage_dead(_7)
++    storage_live(r_9)
++    storage_live(_10)
++    _10 = &two-phase-mut (*runtime_1)
++    storage_live(_11)
++    _11 = move v_2
++    r_9 = test_crate::{Runtime}::observe::<_, &_ mut _><'46, '44, u32>(move _10, move _11)
++    storage_dead(_11)
++    storage_dead(_10)
++    _0 = copy (*r_9)
++    storage_dead(r_9)
++    return
++}
++
++
++
+diff --git a/tests/ui/monomorphize-mut-opaque-hard.patterns b/tests/ui/monomorphize-mut-opaque-hard.patterns
+new file mode 100644
+index 0000000..854edba
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-opaque-hard.patterns
+@@ -0,0 +1,2 @@
++# The native method of `Runtime`.
++test_crate::{impl test_crate::Runtime}::observe
+diff --git a/tests/ui/monomorphize-mut-opaque-hard.rs b/tests/ui/monomorphize-mut-opaque-hard.rs
+new file mode 100644
+index 0000000..a65b29b
+--- /dev/null
++++ b/tests/ui/monomorphize-mut-opaque-hard.rs
+@@ -0,0 +1,41 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=*
++//@ charon-arg=--opaque-hard=test_crate::native
++//@ charon-arg=--opaque-hard-file=tests/ui/monomorphize-mut-opaque-hard.patterns
++//@ charon-arg=--opaque=test_crate::external
++//@ charon-arg=--start-from=test_crate::user
++// `--opaque-hard` (and `--opaque-hard-file`) items are opaque as if annotated with
++// `#[charon::opaque]`: under `--monomorphize-mut`, a generic one keeps no body, neither does the one
++// instance partial monomorphization creates for the `&mut` arguments used here (called twice), and
++// its closures are not translated. The `--opaque` generic item (`external`) still keeps its
++// contents for its instance.
++pub fn native<T>(x: T, mut f: impl FnMut(T)) {
++    let mut g = |y: T| f(y);
++    g(x)
++}
++
++pub fn external<T>(x: T, mut f: impl FnMut(T)) {
++    let mut g = |y: T| f(y);
++    g(x)
++}
++
++pub struct Runtime;
++
++impl Runtime {
++    pub fn observe<P>(&mut self, payload: P) -> P {
++        let echo = |p: P| p;
++        echo(payload)
++    }
++}
++
++fn bump(r: &mut u32) {
++    *r += 1;
++}
++
++pub fn user(runtime: &mut Runtime, v: &mut u32) -> u32 {
++    native(&mut *v, bump);
++    native(&mut *v, bump);
++    external(&mut *v, bump);
++    let r = runtime.observe(v);
++    *r
++}

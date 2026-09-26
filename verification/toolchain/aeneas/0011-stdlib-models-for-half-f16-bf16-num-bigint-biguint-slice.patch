@@ -1,0 +1,1382 @@
+# aeneas integration step 11 after cba11f3beb: commit fac649a3805c66c921876872afcea4e5c3d4baf4
+# first parent a59626a33c219a4ff120e1d75c79e80bef24a91c
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# stdlib: models for half f16/bf16, num-bigint BigUint, Slice.last, Vec.pop
+#
+# half 2.7.1: transliterations of the crate's software conversions (the host
+# FCVT results are checked equal exhaustively), its PartialEq/PartialOrd impls
+# with proofs that they agree with BinaryFloat.eq/lt/le/partialCmp, is_nan,
+# From<f16|bf16> for f64 and the associated consts. num-bigint 0.4.6 BigUint
+# is Nat with exact arithmetic, panicking on zero divisors like the crate.
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 640ffdf..9499347 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -3,11 +3,13 @@ import Aeneas.Std.Array
+ import Aeneas.Std.ArrayIter
+ import Aeneas.Std.BTreeMap
+ import Aeneas.Std.BTreeSet
++import Aeneas.Std.BigUint
+ import Aeneas.Std.Core
+ import Aeneas.Std.Core.Borrow
+ import Aeneas.Std.Float
+ import Aeneas.Std.FloatFmt
+ import Aeneas.Std.FlatMap
++import Aeneas.Std.Half
+ import Aeneas.Std.IteratorAdapters
+ import Aeneas.Std.IteratorCombinators
+ import Aeneas.Std.IteratorSources
+diff --git a/backends/lean/Aeneas/Std/BigUint.lean b/backends/lean/Aeneas/Std/BigUint.lean
+new file mode 100644
+index 0000000..670232c
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/BigUint.lean
+@@ -0,0 +1,140 @@
++import Aeneas.Std.Core.Cmp
++import Aeneas.Std.Core.Convert
++import Aeneas.Std.Scalar.Core
++
++/-!
++# Models of `num-bigint` 0.4.6 `BigUint`
++
++A `BigUint` is a normalized little-endian digit vector; its value is a natural
++number, and every operation modeled here is exact on that value. The model type
++is `Nat` itself. Operations panic exactly where the crate does: division and
++remainder by zero (`div_rem_ref`/`rem_digit`: `panic!("attempt to divide by
++zero")`). Everything else is total (allocation failure aborts rather than
++panicking and is outside the model, as for `Vec`).
++-/
++
++namespace Aeneas.Std
++
++@[rust_type "num_bigint::biguint::BigUint"]
++abbrev num_bigint.BigUint := Nat
++
++/-- `TryFromBigIntError<T>` carries the rejected original value. -/
++@[rust_type "num_bigint::TryFromBigIntError"]
++structure num_bigint.TryFromBigIntError (T : Type) where
++  original : T
++
++namespace num_bigint.BigUint
++
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u8>}::from"]
++def FromU8.from_ (n : U8) : Result BigUint := .ok n.val
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u16>}::from"]
++def FromU16.from_ (n : U16) : Result BigUint := .ok n.val
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u32>}::from"]
++def FromU32.from_ (n : U32) : Result BigUint := .ok n.val
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u64>}::from"]
++def FromU64.from_ (n : U64) : Result BigUint := .ok n.val
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, usize>}::from"]
++def FromUsize.from_ (n : Usize) : Result BigUint := .ok n.val
++@[rust_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u128>}::from"]
++def FromU128.from_ (n : U128) : Result BigUint := .ok n.val
++
++/-- `impl TryFrom<BigUint> for u64`: `to_u64` succeeds exactly on values below `2^64`;
++    otherwise the error returns the original value. -/
++@[rust_fun "num_bigint::biguint::convert::{core::convert::TryFrom<u64, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>}::try_from"]
++def TryFromU64.try_from (value : BigUint) :
++    Result (core.result.Result U64 (TryFromBigIntError BigUint)) :=
++  if value ≤ U64.max then .ok (.Ok ⟨BitVec.ofNat 64 value⟩) else .ok (.Err ⟨value⟩)
++
++/-- `impl TryFrom<BigUint> for usize` (64-bit targets, as `Usize` in the models). -/
++@[rust_fun "num_bigint::biguint::convert::{core::convert::TryFrom<usize, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>}::try_from"]
++def TryFromUsize.try_from (value : BigUint) :
++    Result (core.result.Result Usize (TryFromBigIntError BigUint)) :=
++  if value ≤ Usize.max then .ok (.Ok ⟨BitVec.ofNat _ value⟩) else .ok (.Err ⟨value⟩)
++
++@[rust_fun "num_bigint::biguint::multiplication::{core::ops::arith::Mul<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::mul"]
++def MulBigUint.mul (x y : BigUint) : Result BigUint := .ok (x * y)
++@[rust_fun "num_bigint::biguint::multiplication::{core::ops::arith::Mul<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::mul"]
++def MulShared.mul (x y : BigUint) : Result BigUint := .ok (x * y)
++
++/-- `&a / &b`: `div_rem_ref` panics on a zero divisor. -/
++@[rust_fun "num_bigint::biguint::division::{core::ops::arith::Div<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::div"]
++def DivShared.div (x y : BigUint) : Result BigUint :=
++  if y = 0 then .fail .panic else .ok (x / y)
++@[rust_fun "num_bigint::biguint::division::{core::ops::arith::Div<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::div"]
++def DivBigUint.div (x y : BigUint) : Result BigUint :=
++  if y = 0 then .fail .panic else .ok (x / y)
++
++/-- `&a % &b`: both the `u32` fast path (`rem_digit`) and `div_rem_ref` panic on
++    a zero divisor. -/
++@[rust_fun "num_bigint::biguint::division::{core::ops::arith::Rem<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::rem"]
++def RemShared.rem (x y : BigUint) : Result BigUint :=
++  if y = 0 then .fail .panic else .ok (x % y)
++@[rust_fun "num_bigint::biguint::division::{core::ops::arith::Rem<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::rem"]
++def RemBigUint.rem (x y : BigUint) : Result BigUint :=
++  if y = 0 then .fail .panic else .ok (x % y)
++
++@[rust_fun "num_bigint::biguint::{core::clone::Clone<num_bigint::biguint::BigUint>}::clone"]
++def CloneBigUint.clone (x : BigUint) : Result BigUint := .ok x
++
++/-- Digit vectors are normalized, so structural equality is value equality. -/
++@[rust_fun "num_bigint::biguint::{core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::eq"]
++def PartialEqBigUint.eq (x y : BigUint) : Result Bool := .ok (x == y)
++
++/-- `cmp`: fewer normalized digits is smaller, otherwise `cmp_slice` compares from
++    the most significant digit: numeric order. -/
++@[rust_fun "num_bigint::biguint::{core::cmp::Ord<num_bigint::biguint::BigUint>}::cmp"]
++def OrdBigUint.cmp (x y : BigUint) : Result Ordering := .ok (compare x y)
++
++/-- `partial_cmp` is `Some(self.cmp(other))`. -/
++@[rust_fun "num_bigint::biguint::{core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::partial_cmp"]
++def PartialOrdBigUint.partial_cmp (x y : BigUint) : Result (Option Ordering) :=
++  .ok (some (compare x y))
++
++end num_bigint.BigUint
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::clone::Clone<num_bigint::biguint::BigUint>"]
++def num_bigint.CloneBigUint : core.clone.Clone BigUint := { clone := BigUint.CloneBigUint.clone }
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>"]
++def num_bigint.PartialEqBigUint : core.cmp.PartialEq BigUint BigUint := {
++  eq := BigUint.PartialEqBigUint.eq
++}
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::cmp::Eq<num_bigint::biguint::BigUint>"]
++def num_bigint.EqBigUint : core.cmp.Eq BigUint := { partialEqInst := PartialEqBigUint }
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>"]
++def num_bigint.PartialOrdBigUint : core.cmp.PartialOrd BigUint BigUint := {
++  partialEqInst := PartialEqBigUint
++  partial_cmp := BigUint.PartialOrdBigUint.partial_cmp
++}
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::cmp::Ord<num_bigint::biguint::BigUint>"]
++def num_bigint.OrdBigUint : core.cmp.Ord BigUint := {
++  eqInst := EqBigUint
++  partialOrdInst := PartialOrdBigUint
++  cmp := BigUint.OrdBigUint.cmp
++}
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::convert::From<num_bigint::biguint::BigUint, u8>"]
++def num_bigint.FromBigUintU8 : core.convert.From BigUint U8 := { from_ := BigUint.FromU8.from_ }
++open num_bigint in
++@[reducible, rust_trait_impl "core::convert::From<num_bigint::biguint::BigUint, u64>"]
++def num_bigint.FromBigUintU64 : core.convert.From BigUint U64 := { from_ := BigUint.FromU64.from_ }
++open num_bigint in
++@[reducible, rust_trait_impl "core::convert::From<num_bigint::biguint::BigUint, usize>"]
++def num_bigint.FromBigUintUsize : core.convert.From BigUint Usize :=
++  { from_ := BigUint.FromUsize.from_ }
++
++open num_bigint in
++@[reducible, rust_trait_impl "core::convert::TryFrom<u64, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>"]
++def num_bigint.TryFromU64BigUint : core.convert.TryFrom U64 BigUint (TryFromBigIntError BigUint) :=
++  { try_from := BigUint.TryFromU64.try_from }
++
++end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Half.lean b/backends/lean/Aeneas/Std/Half.lean
+new file mode 100644
+index 0000000..d8d68ee
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/Half.lean
+@@ -0,0 +1,610 @@
++import Aeneas.Std.Core.Core
++import Aeneas.Std.Float
++
++/-!
++# Models of the `half` 2.7.1 crate
++
++Every conversion below is a transliteration of the crate's software algorithm
++on raw bits (`src/binary16/arch.rs` `*_fallback`, `src/bfloat/convert.rs`),
++including its NaN payload rules and `bf16::from_f64`'s truncation of the low
++32 bits of the `f64` encoding. `Nat` arithmetic stands for the crate's `u32`/
++`u64` arithmetic: no intermediate value of these algorithms leaves the Rust
++integer range, and every `as u16` narrowing is written as `% 2 ^ 16`.
++
++On aarch64 targets with `fp16` (the Chelis build hosts), `f16::from_f32`,
++`f16::to_f32` and `f16::to_f64` dispatch to `FCVT`; the fixture
++`verification/crate_model_oracle` checks exhaustively that the hardware results
++equal these software algorithms bit for bit.
++
++The comparison impls are the crate's bit-level algorithms; the lemmas at the end
++of this file prove that they coincide with `BinaryFloat.eq/lt/le/partialCmp`.
++-/
++
++namespace Aeneas.Std
++
++namespace Half
++
++/-- `u16::leading_zeros` (half's `leading_zeros_u16`). -/
++def leadingZerosU16 (x : Nat) : Nat := if x = 0 then 16 else 15 - x.log2
++
++/-- `binary16/arch.rs::f32_to_f16_fallback`, from `u32` bits to `u16` bits. -/
++def f32ToF16 (x : Nat) : Nat :=
++  let sign := x &&& 0x8000_0000
++  let exp := x &&& 0x7F80_0000
++  let man := x &&& 0x007F_FFFF
++  if exp == 0x7F80_0000 then
++    let nanBit := if man == 0 then 0 else 0x0200
++    ((sign >>> 16) ||| 0x7C00 ||| nanBit ||| (man >>> 13)) % 2 ^ 16
++  else
++    let halfSign := sign >>> 16
++    let unbiasedExp : Int := ((exp >>> 23 : Nat) : Int) - 127
++    let halfExp := unbiasedExp + 15
++    if halfExp ≥ 0x1F then (halfSign ||| 0x7C00) % 2 ^ 16
++    else if halfExp ≤ 0 then
++      if 14 - halfExp > 24 then halfSign % 2 ^ 16
++      else
++        let man := man ||| 0x0080_0000
++        let halfMan := man >>> (14 - halfExp).toNat
++        let roundBit := 1 <<< (13 - halfExp).toNat
++        let halfMan :=
++          if man &&& roundBit != 0 && man &&& (3 * roundBit - 1) != 0 then halfMan + 1
++          else halfMan
++        (halfSign ||| halfMan) % 2 ^ 16
++    else
++      let halfExp := halfExp.toNat <<< 10
++      let halfMan := man >>> 13
++      let roundBit := 0x0000_1000
++      if man &&& roundBit != 0 && man &&& (3 * roundBit - 1) != 0 then
++        ((halfSign ||| halfExp ||| halfMan) + 1) % 2 ^ 16
++      else (halfSign ||| halfExp ||| halfMan) % 2 ^ 16
++
++/-- `binary16/arch.rs::f16_to_f32_fallback`, from `u16` bits to `u32` bits. -/
++def f16ToF32 (i : Nat) : Nat :=
++  if i &&& 0x7FFF == 0 then i <<< 16
++  else
++    let halfSign := i &&& 0x8000
++    let halfExp := i &&& 0x7C00
++    let halfMan := i &&& 0x03FF
++    if halfExp == 0x7C00 then
++      if halfMan == 0 then (halfSign <<< 16) ||| 0x7F80_0000
++      else (halfSign <<< 16) ||| 0x7FC0_0000 ||| (halfMan <<< 13)
++    else
++      let sign := halfSign <<< 16
++      let unbiasedExp : Int := ((halfExp >>> 10 : Nat) : Int) - 15
++      if halfExp == 0 then
++        let e := leadingZerosU16 halfMan - 6
++        let exp := (127 - 15 - e) <<< 23
++        let man := (halfMan <<< (14 + e)) &&& 0x7F_FFFF
++        sign ||| exp ||| man
++      else
++        let exp := (unbiasedExp + 127).toNat <<< 23
++        let man := (halfMan &&& 0x03FF) <<< 13
++        sign ||| exp ||| man
++
++/-- `binary16/arch.rs::f16_to_f64_fallback`, from `u16` bits to `u64` bits. -/
++def f16ToF64 (i : Nat) : Nat :=
++  if i &&& 0x7FFF == 0 then i <<< 48
++  else
++    let halfSign := i &&& 0x8000
++    let halfExp := i &&& 0x7C00
++    let halfMan := i &&& 0x03FF
++    if halfExp == 0x7C00 then
++      if halfMan == 0 then (halfSign <<< 48) ||| 0x7FF0_0000_0000_0000
++      else (halfSign <<< 48) ||| 0x7FF8_0000_0000_0000 ||| (halfMan <<< 42)
++    else
++      let sign := halfSign <<< 48
++      let unbiasedExp : Int := ((halfExp >>> 10 : Nat) : Int) - 15
++      if halfExp == 0 then
++        let e := leadingZerosU16 halfMan - 6
++        let exp := (1023 - 15 - e) <<< 52
++        let man := (halfMan <<< (43 + e)) &&& 0xF_FFFF_FFFF_FFFF
++        sign ||| exp ||| man
++      else
++        let exp := (unbiasedExp + 1023).toNat <<< 52
++        let man := (halfMan &&& 0x03FF) <<< 42
++        sign ||| exp ||| man
++
++/-- `bfloat/convert.rs::f32_to_bf16`, from `u32` bits to `u16` bits. The final
++    `u16` increment cannot overflow: a carry out of `0xFFFF` would need the NaN
++    encodings excluded by the first branch. -/
++def f32ToBf16 (x : Nat) : Nat :=
++  if x &&& 0x7FFF_FFFF > 0x7F80_0000 then ((x >>> 16) ||| 0x0040) % 2 ^ 16
++  else
++    let roundBit := 0x0000_8000
++    if x &&& roundBit != 0 && x &&& (3 * roundBit - 1) != 0 then (x >>> 16) % 2 ^ 16 + 1
++    else (x >>> 16) % 2 ^ 16
++
++/-- `bfloat/convert.rs::f64_to_bf16`, from `u64` bits to `u16` bits. Only the
++    high 32 bits take part in rounding; the low 32 bits only decide NaN-ness. -/
++def f64ToBf16 (val : Nat) : Nat :=
++  let x := (val >>> 32) % 2 ^ 32
++  let sign := x &&& 0x8000_0000
++  let exp := x &&& 0x7FF0_0000
++  let man := x &&& 0x000F_FFFF
++  if exp == 0x7FF0_0000 then
++    let nanBit := if man == 0 && val % 2 ^ 32 == 0 then 0 else 0x0040
++    ((sign >>> 16) ||| 0x7F80 ||| nanBit ||| (man >>> 13)) % 2 ^ 16
++  else
++    let halfSign := sign >>> 16
++    let unbiasedExp : Int := ((exp >>> 20 : Nat) : Int) - 1023
++    let halfExp := unbiasedExp + 127
++    if halfExp ≥ 0xFF then (halfSign ||| 0x7F80) % 2 ^ 16
++    else if halfExp ≤ 0 then
++      if 7 - halfExp > 21 then halfSign % 2 ^ 16
++      else
++        let man := man ||| 0x0010_0000
++        let halfMan := man >>> (14 - halfExp).toNat
++        let roundBit := 1 <<< (13 - halfExp).toNat
++        let halfMan :=
++          if man &&& roundBit != 0 && man &&& (3 * roundBit - 1) != 0 then halfMan + 1
++          else halfMan
++        (halfSign ||| halfMan) % 2 ^ 16
++    else
++      let halfExp := halfExp.toNat <<< 7
++      let halfMan := man >>> 13
++      let roundBit := 0x0000_1000
++      if man &&& roundBit != 0 && man &&& (3 * roundBit - 1) != 0 then
++        ((halfSign ||| halfExp ||| halfMan) + 1) % 2 ^ 16
++      else (halfSign ||| halfExp ||| halfMan) % 2 ^ 16
++
++/-- `bfloat/convert.rs::bf16_to_f32`, from `u16` bits to `u32` bits. -/
++def bf16ToF32 (i : Nat) : Nat :=
++  if i &&& 0x7FFF > 0x7F80 then (i ||| 0x0040) <<< 16 else i <<< 16
++
++/-- `bfloat/convert.rs::bf16_to_f64`, from `u16` bits to `u64` bits. -/
++def bf16ToF64 (i : Nat) : Nat :=
++  if i &&& 0x7FFF == 0 then i <<< 48
++  else
++    let halfSign := i &&& 0x8000
++    let halfExp := i &&& 0x7F80
++    let halfMan := i &&& 0x007F
++    if halfExp == 0x7F80 then
++      if halfMan == 0 then (halfSign <<< 48) ||| 0x7FF0_0000_0000_0000
++      else (halfSign <<< 48) ||| 0x7FF8_0000_0000_0000 ||| (halfMan <<< 45)
++    else
++      let sign := halfSign <<< 48
++      let unbiasedExp : Int := ((halfExp >>> 7 : Nat) : Int) - 127
++      if halfExp == 0 then
++        let e := leadingZerosU16 halfMan - 9
++        let exp := (1023 - 127 - e) <<< 52
++        let man := (halfMan <<< (46 + e)) &&& 0xF_FFFF_FFFF_FFFF
++        sign ||| exp ||| man
++      else
++        let exp := (unbiasedExp + 1023).toNat <<< 52
++        let man := (halfMan &&& 0x007F) <<< 45
++        sign ||| exp ||| man
++
++/-! The `PartialEq`/`PartialOrd` impls of `f16` and `bf16` are textually the
++same bit algorithm; only `is_nan`'s infinity encoding `inf` differs
++(`0x7C00` for `f16`, `0x7F80` for `bf16`). -/
++
++/-- `is_nan`: `self.0 & 0x7FFF > inf`. -/
++def isNaN (inf a : Nat) : Bool := a &&& 0x7FFF > inf
++
++/-- `PartialEq::eq`. -/
++def eq (inf a b : Nat) : Bool :=
++  if isNaN inf a || isNaN inf b then false
++  else a == b || (a ||| b) &&& 0x7FFF == 0
++
++/-- `PartialOrd::partial_cmp`. -/
++def partialCmp (inf a b : Nat) : Option Ordering :=
++  if isNaN inf a || isNaN inf b then none
++  else
++    let neg := a &&& 0x8000 != 0
++    let otherNeg := b &&& 0x8000 != 0
++    match neg, otherNeg with
++    | false, false => some (compare a b)
++    | false, true => if (a ||| b) &&& 0x7FFF == 0 then some .eq else some .gt
++    | true, false => if (a ||| b) &&& 0x7FFF == 0 then some .eq else some .lt
++    | true, true => some (compare b a)
++
++/-- `PartialOrd::lt`. -/
++def lt (inf a b : Nat) : Bool :=
++  if isNaN inf a || isNaN inf b then false
++  else
++    let neg := a &&& 0x8000 != 0
++    let otherNeg := b &&& 0x8000 != 0
++    match neg, otherNeg with
++    | false, false => a < b
++    | false, true => false
++    | true, false => (a ||| b) &&& 0x7FFF != 0
++    | true, true => a > b
++
++/-- `PartialOrd::le`. -/
++def le (inf a b : Nat) : Bool :=
++  if isNaN inf a || isNaN inf b then false
++  else
++    let neg := a &&& 0x8000 != 0
++    let otherNeg := b &&& 0x8000 != 0
++    match neg, otherNeg with
++    | false, false => a ≤ b
++    | false, true => (a ||| b) &&& 0x7FFF == 0
++    | true, false => true
++    | true, true => a ≥ b
++
++/-- `PartialOrd::gt`. -/
++def gt (inf a b : Nat) : Bool :=
++  if isNaN inf a || isNaN inf b then false
++  else
++    let neg := a &&& 0x8000 != 0
++    let otherNeg := b &&& 0x8000 != 0
++    match neg, otherNeg with
++    | false, false => a > b
++    | false, true => (a ||| b) &&& 0x7FFF != 0
++    | true, false => false
++    | true, true => a < b
++
++/-- `PartialOrd::ge`. -/
++def ge (inf a b : Nat) : Bool :=
++  if isNaN inf a || isNaN inf b then false
++  else
++    let neg := a &&& 0x8000 != 0
++    let otherNeg := b &&& 0x8000 != 0
++    match neg, otherNeg with
++    | false, false => a ≥ b
++    | false, true => true
++    | true, false => (a ||| b) &&& 0x7FFF == 0
++    | true, true => a ≤ b
++
++end Half
++
++/-! ## `half::binary16::f16` -/
++
++namespace F16
++
++/-- The infinity encoding used by `f16::is_nan`. -/
++def infBits : Nat := 0x7C00
++
++@[rust_fun "half::binary16::{half::binary16::f16}::from_f32"]
++def from_f32 (x : F32) : Result F16 := .ok (BinaryFloat.ofNat _ (Half.f32ToF16 x.bits.toNat))
++@[rust_fun "half::binary16::{half::binary16::f16}::to_f32"]
++def to_f32 (x : F16) : Result F32 := .ok (BinaryFloat.ofNat _ (Half.f16ToF32 x.bits.toNat))
++@[rust_fun "half::binary16::{half::binary16::f16}::to_f64"]
++def to_f64 (x : F16) : Result F64 := .ok (BinaryFloat.ofNat _ (Half.f16ToF64 x.bits.toNat))
++@[rust_fun "half::binary16::{half::binary16::f16}::is_nan"]
++def is_nan (x : F16) : Result Bool := .ok (Half.isNaN infBits x.bits.toNat)
++
++@[rust_const "half::binary16::{half::binary16::f16}::ZERO"]
++def ZERO : F16 := BinaryFloat.ofNat _ 0x0000
++@[rust_const "half::binary16::{half::binary16::f16}::NEG_ZERO"]
++def NEG_ZERO : F16 := BinaryFloat.ofNat _ 0x8000
++@[rust_const "half::binary16::{half::binary16::f16}::ONE"]
++def ONE : F16 := BinaryFloat.ofNat _ 0x3C00
++@[rust_const "half::binary16::{half::binary16::f16}::INFINITY"]
++def INFINITY : F16 := BinaryFloat.ofNat _ 0x7C00
++@[rust_const "half::binary16::{half::binary16::f16}::NAN"]
++def NAN : F16 := BinaryFloat.ofNat _ 0x7E00
++@[rust_const "half::binary16::{half::binary16::f16}::MAX"]
++def MAX : F16 := BinaryFloat.ofNat _ 0x7BFF
++
++end F16
++
++@[rust_fun "half::binary16::{core::convert::From<f64, half::binary16::f16>}::from"]
++def half.binary16.FromF64F16.from_ (x : F16) : Result F64 := F16.to_f64 x
++@[reducible, rust_trait_impl "core::convert::From<f64, half::binary16::f16>"]
++def half.binary16.FromF64F16 : core.convert.From F64 F16 := { from_ := half.binary16.FromF64F16.from_ }
++
++@[rust_fun "half::binary16::{core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>}::eq"]
++def half.binary16.PartialEqF16.eq (x y : F16) : Result Bool :=
++  .ok (Half.eq F16.infBits x.bits.toNat y.bits.toNat)
++@[reducible, rust_trait_impl "core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>"]
++def half.binary16.PartialEqF16 : core.cmp.PartialEq F16 F16 := {
++  eq := half.binary16.PartialEqF16.eq
++}
++@[rust_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::partial_cmp"]
++def half.binary16.PartialOrdF16.partial_cmp (x y : F16) : Result (Option Ordering) :=
++  .ok (Half.partialCmp F16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::lt"]
++def half.binary16.PartialOrdF16.lt (x y : F16) : Result Bool :=
++  .ok (Half.lt F16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::le"]
++def half.binary16.PartialOrdF16.le (x y : F16) : Result Bool :=
++  .ok (Half.le F16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::gt"]
++def half.binary16.PartialOrdF16.gt (x y : F16) : Result Bool :=
++  .ok (Half.gt F16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::ge"]
++def half.binary16.PartialOrdF16.ge (x y : F16) : Result Bool :=
++  .ok (Half.ge F16.infBits x.bits.toNat y.bits.toNat)
++@[reducible, rust_trait_impl "core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>"]
++def half.binary16.PartialOrdF16 : core.cmp.PartialOrd F16 F16 := {
++  partialEqInst := half.binary16.PartialEqF16
++  partial_cmp := half.binary16.PartialOrdF16.partial_cmp
++  lt := half.binary16.PartialOrdF16.lt
++  le := half.binary16.PartialOrdF16.le
++  gt := half.binary16.PartialOrdF16.gt
++  ge := half.binary16.PartialOrdF16.ge
++}
++
++/-! ## `half::bfloat::bf16` -/
++
++namespace BF16
++
++/-- The infinity encoding used by `bf16::is_nan`. -/
++def infBits : Nat := 0x7F80
++
++@[rust_fun "half::bfloat::{half::bfloat::bf16}::from_f32"]
++def from_f32 (x : F32) : Result BF16 := .ok (BinaryFloat.ofNat _ (Half.f32ToBf16 x.bits.toNat))
++@[rust_fun "half::bfloat::{half::bfloat::bf16}::from_f64"]
++def from_f64 (x : F64) : Result BF16 := .ok (BinaryFloat.ofNat _ (Half.f64ToBf16 x.bits.toNat))
++@[rust_fun "half::bfloat::{half::bfloat::bf16}::to_f32"]
++def to_f32 (x : BF16) : Result F32 := .ok (BinaryFloat.ofNat _ (Half.bf16ToF32 x.bits.toNat))
++@[rust_fun "half::bfloat::{half::bfloat::bf16}::to_f64"]
++def to_f64 (x : BF16) : Result F64 := .ok (BinaryFloat.ofNat _ (Half.bf16ToF64 x.bits.toNat))
++@[rust_fun "half::bfloat::{half::bfloat::bf16}::is_nan"]
++def is_nan (x : BF16) : Result Bool := .ok (Half.isNaN infBits x.bits.toNat)
++
++@[rust_const "half::bfloat::{half::bfloat::bf16}::ZERO"]
++def ZERO : BF16 := BinaryFloat.ofNat _ 0x0000
++@[rust_const "half::bfloat::{half::bfloat::bf16}::NEG_ZERO"]
++def NEG_ZERO : BF16 := BinaryFloat.ofNat _ 0x8000
++@[rust_const "half::bfloat::{half::bfloat::bf16}::ONE"]
++def ONE : BF16 := BinaryFloat.ofNat _ 0x3F80
++@[rust_const "half::bfloat::{half::bfloat::bf16}::INFINITY"]
++def INFINITY : BF16 := BinaryFloat.ofNat _ 0x7F80
++@[rust_const "half::bfloat::{half::bfloat::bf16}::NAN"]
++def NAN : BF16 := BinaryFloat.ofNat _ 0x7FC0
++@[rust_const "half::bfloat::{half::bfloat::bf16}::MAX"]
++def MAX : BF16 := BinaryFloat.ofNat _ 0x7F7F
++
++end BF16
++
++@[rust_fun "half::bfloat::{core::convert::From<f64, half::bfloat::bf16>}::from"]
++def half.bfloat.FromF64BF16.from_ (x : BF16) : Result F64 := BF16.to_f64 x
++@[reducible, rust_trait_impl "core::convert::From<f64, half::bfloat::bf16>"]
++def half.bfloat.FromF64BF16 : core.convert.From F64 BF16 := { from_ := half.bfloat.FromF64BF16.from_ }
++
++@[rust_fun "half::bfloat::{core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>}::eq"]
++def half.bfloat.PartialEqBF16.eq (x y : BF16) : Result Bool :=
++  .ok (Half.eq BF16.infBits x.bits.toNat y.bits.toNat)
++@[reducible, rust_trait_impl "core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>"]
++def half.bfloat.PartialEqBF16 : core.cmp.PartialEq BF16 BF16 := {
++  eq := half.bfloat.PartialEqBF16.eq
++}
++@[rust_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::partial_cmp"]
++def half.bfloat.PartialOrdBF16.partial_cmp (x y : BF16) : Result (Option Ordering) :=
++  .ok (Half.partialCmp BF16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::lt"]
++def half.bfloat.PartialOrdBF16.lt (x y : BF16) : Result Bool :=
++  .ok (Half.lt BF16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::le"]
++def half.bfloat.PartialOrdBF16.le (x y : BF16) : Result Bool :=
++  .ok (Half.le BF16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::gt"]
++def half.bfloat.PartialOrdBF16.gt (x y : BF16) : Result Bool :=
++  .ok (Half.gt BF16.infBits x.bits.toNat y.bits.toNat)
++@[rust_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::ge"]
++def half.bfloat.PartialOrdBF16.ge (x y : BF16) : Result Bool :=
++  .ok (Half.ge BF16.infBits x.bits.toNat y.bits.toNat)
++@[reducible, rust_trait_impl "core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>"]
++def half.bfloat.PartialOrdBF16 : core.cmp.PartialOrd BF16 BF16 := {
++  partialEqInst := half.bfloat.PartialEqBF16
++  partial_cmp := half.bfloat.PartialOrdBF16.partial_cmp
++  lt := half.bfloat.PartialOrdBF16.lt
++  le := half.bfloat.PartialOrdBF16.le
++  gt := half.bfloat.PartialOrdBF16.gt
++  ge := half.bfloat.PartialOrdBF16.ge
++}
++
++/-! ## Agreement of the comparison impls with IEEE comparison (`BinaryFloat`) -/
++
++namespace Half
++
++theorem and_7fff (a : Nat) : a &&& 0x7FFF = a % 32768 :=
++  Nat.and_two_pow_sub_one_eq_mod a 15
++
++theorem or_eq_zero (x y : Nat) : x ||| y = 0 ↔ x = 0 ∧ y = 0 := by
++  constructor
++  · intro h
++    constructor <;> apply Nat.eq_of_testBit_eq <;> intro i
++    · have := congrArg (fun n => n.testBit i) h
++      simp only [Nat.testBit_or, Nat.zero_testBit, Bool.or_eq_false_iff] at this
++      simp [this.1]
++    · have := congrArg (fun n => n.testBit i) h
++      simp only [Nat.testBit_or, Nat.zero_testBit, Bool.or_eq_false_iff] at this
++      simp [this.2]
++  · rintro ⟨rfl, rfl⟩; rfl
++
++theorem or_and_7fff (a b : Nat) :
++    ((a ||| b) &&& 0x7FFF == 0) = (a % 32768 == 0 && b % 32768 == 0) := by
++  rw [Nat.and_or_distrib_right, and_7fff, and_7fff]
++  apply Bool.eq_iff_iff.mpr
++  simp only [beq_iff_eq, Bool.and_eq_true, or_eq_zero]
++
++theorem and_8000 (a : Nat) : (a &&& 0x8000 != 0) = (a / 32768 % 2 == 1) := by
++  have key : a &&& 0x8000 = if a / 32768 % 2 = 1 then 32768 else 0 := by
++    apply Nat.eq_of_testBit_eq; intro i
++    rw [Nat.testBit_and, show (0x8000 : Nat) = 2 ^ 15 from rfl, Nat.testBit_two_pow]
++    by_cases hi : i = 15
++    · subst hi
++      split <;> simp_all [Nat.testBit_eq_decide_div_mod_eq]
++    · have : decide (15 = i) = false := by simp; omega
++      rw [this, Bool.and_false]
++      split
++      · rw [Nat.testBit_two_pow]; simp; omega
++      · simp
++  rw [key]; split <;> simp_all
++
++theorem sign_bit {a : Nat} (h : a < 65536) : (a / 32768 % 2 == 1) = decide (a ≥ 32768) := by
++  apply Bool.eq_iff_iff.mpr; simp only [beq_iff_eq, decide_eq_true_eq]; omega
++
++theorem compare_nat (a b : Nat) :
++    compare a b = if a < b then .lt else if a = b then .eq else .gt := by
++  simp only [compare, compareOfLessAndEq]
++
++/-- Common closing step: the arithmetic facts are all in terms of `a`, `b`. -/
++theorem cmp_facts {a : Nat} (h : a < 65536) :
++    (a &&& 0x8000 != 0) = decide (a ≥ 32768) := by rw [and_8000, sign_bit h]
++
++end Half
++
++section
++variable {f : BinaryFormat}
++
++theorem BinaryFloat.bits_beq (x y : BinaryFloat f) :
++    (x.bits == y.bits) = (x.bits.toNat == y.bits.toNat) := by
++  apply Bool.eq_iff_iff.mpr; simp [BitVec.toNat_eq]
++end
++
++/-- Facts shared by both 16-bit formats. -/
++theorem F16.magnitude_eq (x : F16) : x.magnitude = x.bits.toNat % 32768 := rfl
++theorem F16.sign_eq (x : F16) : x.sign = decide (x.bits.toNat ≥ 32768) := rfl
++theorem F16.isZero_eq (x : F16) : x.isZero = (x.bits.toNat % 32768 == 0) := rfl
++theorem BF16.magnitude_eq (x : BF16) : x.magnitude = x.bits.toNat % 32768 := rfl
++theorem BF16.sign_eq (x : BF16) : x.sign = decide (x.bits.toNat ≥ 32768) := rfl
++theorem BF16.isZero_eq (x : BF16) : x.isZero = (x.bits.toNat % 32768 == 0) := rfl
++
++theorem F16.isNaN_eq (x : F16) :
++    Half.isNaN 0x7C00 x.bits.toNat = BinaryFloat.isNaN x := by
++  have := x.bits.isLt
++  simp only [Half.isNaN, Half.and_7fff, BinaryFloat.isNaN, BinaryFloat.exponent,
++    BinaryFloat.fraction, F16.magnitude_eq]
++  generalize x.bits.toNat = a at *
++  apply Bool.eq_iff_iff.mpr
++  simp only [BinaryFormat.maxExponent, BinaryFormat.exponentBits, BinaryFormat.fractionBits,
++    Nat.reducePow, Nat.reduceSub, decide_eq_true_eq, Bool.and_eq_true, beq_iff_eq, bne_iff_ne,
++    ne_eq]
++  omega
++
++theorem BF16.isNaN_eq (x : BF16) :
++    Half.isNaN 0x7F80 x.bits.toNat = BinaryFloat.isNaN x := by
++  have := x.bits.isLt
++  simp only [Half.isNaN, Half.and_7fff, BinaryFloat.isNaN, BinaryFloat.exponent,
++    BinaryFloat.fraction, BF16.magnitude_eq]
++  generalize x.bits.toNat = a at *
++  apply Bool.eq_iff_iff.mpr
++  simp only [BinaryFormat.maxExponent, BinaryFormat.exponentBits, BinaryFormat.fractionBits,
++    Nat.reducePow, Nat.reduceSub, decide_eq_true_eq, Bool.and_eq_true, beq_iff_eq, bne_iff_ne,
++    ne_eq]
++  omega
++
++theorem Half.or_and_7fff_ne (a b : Nat) :
++    ((a ||| b) &&& 0x7FFF != 0) = !(a % 32768 == 0 && b % 32768 == 0) := by
++  simp only [bne, Half.or_and_7fff]
++
++set_option hygiene false in
++/-- Reduce a comparison goal about two 16-bit encodings to arithmetic on their bits. -/
++macro "half_cmp" nanX:ident nanY:ident magX:ident magY:ident signX:ident signY:ident
++    zeroX:ident zeroY:ident : tactic => `(tactic| (
++  have hx : x.bits.toNat < 65536 := x.bits.isLt
++  have hy : y.bits.toNat < 65536 := y.bits.isLt
++  simp only [Half.eq, Half.lt, Half.le, Half.gt, Half.ge, Half.partialCmp, $nanX:ident, $nanY:ident,
++    Half.cmp_facts hx, Half.cmp_facts hy, Half.or_and_7fff, Half.or_and_7fff_ne, BinaryFloat.eq,
++    BinaryFloat.lt, BinaryFloat.le, BinaryFloat.partialCmp, $magX:ident, $magY:ident,
++    $signX:ident, $signY:ident, $zeroX:ident, $zeroY:ident, BinaryFloat.bits_beq,
++    Half.compare_nat]
++  cases x.isNaN <;> cases y.isNaN <;>
++  by_cases ha : x.bits.toNat ≥ 32768 <;> by_cases hb : y.bits.toNat ≥ 32768 <;>
++  simp [ha, hb] <;>
++  first
++  | (apply Bool.eq_iff_iff.mpr; simp <;> omega)
++  | ((repeat' split) <;> simp_all <;> omega)))
++
++theorem F16.eq_eq (x y : F16) :
++    Half.eq 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.eq x y := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem F16.lt_eq (x y : F16) :
++    Half.lt 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.lt x y := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem F16.le_eq (x y : F16) :
++    Half.le 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.le x y := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem F16.gt_eq (x y : F16) :
++    Half.gt 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.lt y x := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem F16.ge_eq (x y : F16) :
++    Half.ge 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.le y x := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem F16.partialCmp_eq (x y : F16) :
++    Half.partialCmp 0x7C00 x.bits.toNat y.bits.toNat = BinaryFloat.partialCmp x y := by
++  half_cmp F16.isNaN_eq F16.isNaN_eq F16.magnitude_eq F16.magnitude_eq F16.sign_eq F16.sign_eq
++    F16.isZero_eq F16.isZero_eq
++
++theorem BF16.eq_eq (x y : BF16) :
++    Half.eq 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.eq x y := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++theorem BF16.lt_eq (x y : BF16) :
++    Half.lt 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.lt x y := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++theorem BF16.le_eq (x y : BF16) :
++    Half.le 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.le x y := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++theorem BF16.gt_eq (x y : BF16) :
++    Half.gt 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.lt y x := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++theorem BF16.ge_eq (x y : BF16) :
++    Half.ge 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.le y x := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++theorem BF16.partialCmp_eq (x y : BF16) :
++    Half.partialCmp 0x7F80 x.bits.toNat y.bits.toNat = BinaryFloat.partialCmp x y := by
++  half_cmp BF16.isNaN_eq BF16.isNaN_eq BF16.magnitude_eq BF16.magnitude_eq BF16.sign_eq BF16.sign_eq
++    BF16.isZero_eq BF16.isZero_eq
++
++
++/-! The registered `rust_fun` comparison models, restated over `BinaryFloat`. -/
++
++theorem half.binary16.PartialEqF16.eq_spec (x y : F16) :
++    half.binary16.PartialEqF16.eq x y = .ok (BinaryFloat.eq x y) := by
++  simp only [half.binary16.PartialEqF16.eq, F16.infBits, F16.eq_eq]
++theorem half.binary16.PartialOrdF16.partial_cmp_spec (x y : F16) :
++    half.binary16.PartialOrdF16.partial_cmp x y = .ok (BinaryFloat.partialCmp x y) := by
++  simp only [half.binary16.PartialOrdF16.partial_cmp, F16.infBits, F16.partialCmp_eq]
++theorem half.binary16.PartialOrdF16.lt_spec (x y : F16) :
++    half.binary16.PartialOrdF16.lt x y = .ok (BinaryFloat.lt x y) := by
++  simp only [half.binary16.PartialOrdF16.lt, F16.infBits, F16.lt_eq]
++theorem half.binary16.PartialOrdF16.le_spec (x y : F16) :
++    half.binary16.PartialOrdF16.le x y = .ok (BinaryFloat.le x y) := by
++  simp only [half.binary16.PartialOrdF16.le, F16.infBits, F16.le_eq]
++theorem half.binary16.PartialOrdF16.gt_spec (x y : F16) :
++    half.binary16.PartialOrdF16.gt x y = .ok (BinaryFloat.lt y x) := by
++  simp only [half.binary16.PartialOrdF16.gt, F16.infBits, F16.gt_eq]
++theorem half.binary16.PartialOrdF16.ge_spec (x y : F16) :
++    half.binary16.PartialOrdF16.ge x y = .ok (BinaryFloat.le y x) := by
++  simp only [half.binary16.PartialOrdF16.ge, F16.infBits, F16.ge_eq]
++theorem F16.is_nan_spec (x : F16) : F16.is_nan x = .ok (BinaryFloat.isNaN x) := by
++  simp only [F16.is_nan, F16.infBits, F16.isNaN_eq]
++
++/-! The registered `rust_fun` comparison models, restated over `BinaryFloat`. -/
++
++theorem half.bfloat.PartialEqBF16.eq_spec (x y : BF16) :
++    half.bfloat.PartialEqBF16.eq x y = .ok (BinaryFloat.eq x y) := by
++  simp only [half.bfloat.PartialEqBF16.eq, BF16.infBits, BF16.eq_eq]
++theorem half.bfloat.PartialOrdBF16.partial_cmp_spec (x y : BF16) :
++    half.bfloat.PartialOrdBF16.partial_cmp x y = .ok (BinaryFloat.partialCmp x y) := by
++  simp only [half.bfloat.PartialOrdBF16.partial_cmp, BF16.infBits, BF16.partialCmp_eq]
++theorem half.bfloat.PartialOrdBF16.lt_spec (x y : BF16) :
++    half.bfloat.PartialOrdBF16.lt x y = .ok (BinaryFloat.lt x y) := by
++  simp only [half.bfloat.PartialOrdBF16.lt, BF16.infBits, BF16.lt_eq]
++theorem half.bfloat.PartialOrdBF16.le_spec (x y : BF16) :
++    half.bfloat.PartialOrdBF16.le x y = .ok (BinaryFloat.le x y) := by
++  simp only [half.bfloat.PartialOrdBF16.le, BF16.infBits, BF16.le_eq]
++theorem half.bfloat.PartialOrdBF16.gt_spec (x y : BF16) :
++    half.bfloat.PartialOrdBF16.gt x y = .ok (BinaryFloat.lt y x) := by
++  simp only [half.bfloat.PartialOrdBF16.gt, BF16.infBits, BF16.gt_eq]
++theorem half.bfloat.PartialOrdBF16.ge_spec (x y : BF16) :
++    half.bfloat.PartialOrdBF16.ge x y = .ok (BinaryFloat.le y x) := by
++  simp only [half.bfloat.PartialOrdBF16.ge, BF16.infBits, BF16.ge_eq]
++theorem BF16.is_nan_spec (x : BF16) : BF16.is_nan x = .ok (BinaryFloat.isNaN x) := by
++  simp only [BF16.is_nan, BF16.infBits, BF16.isNaN_eq]
++
++end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Slice.lean b/backends/lean/Aeneas/Std/Slice.lean
+index 9e9ec0a..643033c 100644
+--- a/backends/lean/Aeneas/Std/Slice.lean
++++ b/backends/lean/Aeneas/Std/Slice.lean
+@@ -122,6 +122,10 @@ theorem core.slice.Slice.is_empty_spec {T : Type} (s : Slice T) :
+ def core.slice.Slice.first {T : Type} (s : Slice T) : Result (Option T) :=
+   ok (s.get? 0)
+ 
++@[rust_fun "core::slice::{[@T]}::last", simp]
++def core.slice.Slice.last {T : Type} (s : Slice T) : Result (Option T) :=
++  ok s.val.getLast?
++
+ @[step]
+ theorem Slice.index_usize_spec {α : Type u} [Inhabited α] (v: Slice α) (i: Usize)
+   (hbound : i.val < v.length) :
+diff --git a/backends/lean/Aeneas/Std/Vec.lean b/backends/lean/Aeneas/Std/Vec.lean
+index 55272d5..09c8f22 100644
+--- a/backends/lean/Aeneas/Std/Vec.lean
++++ b/backends/lean/Aeneas/Std/Vec.lean
+@@ -176,6 +176,13 @@ theorem Vec.push_spec {α : Type u} (v : Vec α) (x : α) (h : v.val.length < Us
+   v1.val = v.val ++ [x] ⦄ := by
+   unfold push; grind
+ 
++/-- `Vec::pop`: removes and returns the last element, `None` on an empty vector. -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::pop" (keepParams := [true, false])]
++def Vec.pop {T : Type} (v : Vec T) : Result (Option T × Vec T) :=
++  match v.val.getLast? with
++  | none => ok (none, v)
++  | some x => ok (some x, ⟨v.val.dropLast, by have := v.property; simp only [List.length_dropLast]; omega⟩)
++
+ @[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::insert" (keepParams := [true, false])]
+ def Vec.insert {α : Type u} (v: Vec α) (i: Usize) (x: α) : Result (Vec α) :=
+   if i.val < v.length then
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 2b091b7..940d49a 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -150,9 +150,37 @@ let lean_builtin_types = [
+   mk_type "half::bfloat::bf16" "_root_.Aeneas.Std.BF16";
+   (* file: "Aeneas/Std/Float.lean", line: 33 *)
+   mk_type "half::binary16::f16" "_root_.Aeneas.Std.F16";
++  (* file: "Aeneas/Std/BigUint.lean", line: 22 *)
++  mk_type "num_bigint::TryFromBigIntError" "_root_.Aeneas.Std.num_bigint.TryFromBigIntError" ~kind:(KStruct [("original", Some "original")]);
++  (* file: "Aeneas/Std/BigUint.lean", line: 18 *)
++  mk_type "num_bigint::biguint::BigUint" "_root_.Aeneas.Std.num_bigint.BigUint";
+ ]
+ 
+ let lean_builtin_consts = [
++  (* file: "Aeneas/Std/Half.lean", line: 343 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::INFINITY" "_root_.Aeneas.Std.BF16.INFINITY" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 347 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::MAX" "_root_.Aeneas.Std.BF16.MAX" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 345 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::NAN" "_root_.Aeneas.Std.BF16.NAN" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 339 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::NEG_ZERO" "_root_.Aeneas.Std.BF16.NEG_ZERO" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 341 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::ONE" "_root_.Aeneas.Std.BF16.ONE" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 337 *)
++  mk_global "half::bfloat::{half::bfloat::bf16}::ZERO" "_root_.Aeneas.Std.BF16.ZERO" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 273 *)
++  mk_global "half::binary16::{half::binary16::f16}::INFINITY" "_root_.Aeneas.Std.F16.INFINITY" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 277 *)
++  mk_global "half::binary16::{half::binary16::f16}::MAX" "_root_.Aeneas.Std.F16.MAX" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 275 *)
++  mk_global "half::binary16::{half::binary16::f16}::NAN" "_root_.Aeneas.Std.F16.NAN" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 269 *)
++  mk_global "half::binary16::{half::binary16::f16}::NEG_ZERO" "_root_.Aeneas.Std.F16.NEG_ZERO" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 271 *)
++  mk_global "half::binary16::{half::binary16::f16}::ONE" "_root_.Aeneas.Std.F16.ONE" ~can_fail:false;
++  (* file: "Aeneas/Std/Half.lean", line: 267 *)
++  mk_global "half::binary16::{half::binary16::f16}::ZERO" "_root_.Aeneas.Std.F16.ZERO" ~can_fail:false;
+ ]
+ 
+ let lean_builtin_funs = [
+@@ -238,7 +266,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::rc::{core::default::Default<alloc::rc::Rc<@T>>}::default" "_root_.Aeneas.Std.alloc.rc.DefaultRc.default" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 73 *)
+   mk_fun "alloc::rc::{core::ops::deref::Deref<alloc::rc::Rc<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.rc.DerefRc.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 372 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 379 *)
+   mk_fun "alloc::slice::{[@T]}::into_vec" "_root_.Aeneas.Std.alloc.slice.Slice.into_vec" ~keep_params:(Some [true; false]) ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/StringJoin.lean", line: 9 *)
+   mk_fun "alloc::slice::{[@T]}::join" "_root_.Aeneas.Std.alloc.slice.Slice.join";
+@@ -246,7 +274,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::slice::{[@T]}::sort" "_root_.Aeneas.Std.alloc.slice.Slice.sort";
+   (* file: "Aeneas/Std/Sort.lean", line: 73 *)
+   mk_fun "alloc::slice::{[@T]}::sort_by_key" "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key";
+-  (* file: "Aeneas/Std/Vec.lean", line: 360 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 367 *)
+   mk_fun "alloc::slice::{[@T]}::to_vec" "_root_.Aeneas.Std.alloc.slice.Slice.to_vec";
+   (* file: "Aeneas/Std/String.lean", line: 189 *)
+   mk_fun "alloc::str::{alloc::borrow::ToOwned<str, alloc::string::String>}::to_owned" "_root_.Aeneas.Std.alloc.str.ToOwnedStr.to_owned";
+@@ -294,7 +322,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::sync::{core::fmt::Debug<alloc::sync::Arc<@T>>}::fmt" "_root_.Aeneas.Std.alloc.sync.DebugArc.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 63 *)
+   mk_fun "alloc::sync::{core::ops::deref::Deref<alloc::sync::Arc<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.sync.DerefArc.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 376 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 383 *)
+   mk_fun "alloc::vec::from_elem" "_root_.Aeneas.Std.alloc.vec.from_elem";
+   (* file: "Aeneas/Std/VecIter.lean", line: 59 *)
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::advance_by" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.advance_by" ~keep_params:(Some [true; false]);
+@@ -316,17 +344,17 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::take" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.take" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 86 *)
+   mk_fun "alloc::vec::into_iter::{core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>}::try_fold" "_root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.try_fold" ~keep_params:(Some [true; false; true; true; true; true]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 524 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 531 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::eq" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.eq" ~keep_params:(Some [true; true; false; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 534 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 541 *)
+   mk_fun "alloc::vec::partial_eq::{core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>}::ne" "_root_.Aeneas.Std.alloc.vec.partial_eq.PartialEqVec.ne" ~keep_params:(Some [true; true; false; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 412 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 419 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::as_slice" "_root_.Aeneas.Std.alloc.vec.Vec.as_slice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 52 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::clear" "_root_.Aeneas.Std.alloc.vec.Vec.clear" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 396 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 403 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::extend_from_slice" "_root_.Aeneas.Std.alloc.vec.Vec.extend_from_slice" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 179 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 186 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::insert" "_root_.Aeneas.Std.alloc.vec.Vec.insert" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 48 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::is_empty" "_root_.Aeneas.Std.alloc.vec.Vec.is_empty" ~keep_params:(Some [true; false]) ~can_fail:false ~lift:false;
+@@ -334,23 +362,25 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::len" "_root_.Aeneas.Std.alloc.vec.Vec.len" ~keep_params:(Some [true; false]) ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/Vec.lean", line: 45 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::new" "_root_.Aeneas.Std.alloc.vec.Vec.new" ~can_fail:false ~lift:false;
++  (* file: "Aeneas/Std/Vec.lean", line: 180 *)
++  mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::pop" "_root_.Aeneas.Std.alloc.vec.Vec.pop" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 164 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::push" "_root_.Aeneas.Std.alloc.vec.Vec.push" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 56 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::remove" "_root_.Aeneas.Std.alloc.vec.Vec.remove" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 434 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 441 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::resize" "_root_.Aeneas.Std.alloc.vec.Vec.resize" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 393 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 400 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::with_capacity" "_root_.Aeneas.Std.alloc.vec.Vec.with_capacity" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 511 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 518 *)
+   mk_fun "alloc::vec::{core::clone::Clone<alloc::vec::Vec<@T>>}::clone" "_root_.Aeneas.Std.alloc.vec.CloneVec.clone" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 474 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 481 *)
+   mk_fun "alloc::vec::{core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>}::from" "_root_.Aeneas.Std.alloc.vec.FromBoxSliceVec.from" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 460 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 467 *)
+   mk_fun "alloc::vec::{core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>}::from" "_root_.Aeneas.Std.alloc.vec.FromVecArray.from";
+   (* file: "Aeneas/Std/Vec.lean", line: 67 *)
+   mk_fun "alloc::vec::{core::default::Default<alloc::vec::Vec<@T>>}::default" "_root_.Aeneas.Std.alloc.vec.DefaultVec.default";
+-  (* file: "Aeneas/Std/Vec.lean", line: 555 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 562 *)
+   mk_fun "alloc::vec::{core::fmt::Debug<alloc::vec::Vec<@T>>}::fmt" "_root_.Aeneas.Std.alloc.vec.DebugVec.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 89 *)
+   mk_fun "alloc::vec::{core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>}::extend" "_root_.Aeneas.Std.alloc.vec.ExtendVec.extend" ~keep_params:(Some [true; false; true; true]);
+@@ -362,13 +392,13 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{core::iter::traits::collect::IntoIterator<&'a mut alloc::vec::Vec<@T>, &'a mut @T, core::slice::iter::IterMut<'a, @T>>}::into_iter" "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 118 *)
+   mk_fun "alloc::vec::{core::iter::traits::collect::IntoIterator<alloc::vec::Vec<@T>, @T, alloc::vec::into_iter::IntoIter<@T, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 407 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 414 *)
+   mk_fun "alloc::vec::{core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>}::deref" "_root_.Aeneas.Std.alloc.vec.Vec.deref" ~keep_params:(Some [true; false]) ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 421 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 428 *)
+   mk_fun "alloc::vec::{core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>}::deref_mut" "_root_.Aeneas.Std.alloc.vec.Vec.deref_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/Vec.lean", line: 239 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 246 *)
+   mk_fun "alloc::vec::{core::ops::index::Index<alloc::vec::Vec<@T>, @I, @O>}::index" "_root_.Aeneas.Std.alloc.vec.Vec.index" ~keep_params:(Some [true; true; false; true]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 245 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 252 *)
+   mk_fun "alloc::vec::{core::ops::index::IndexMut<alloc::vec::Vec<@T>, @I, @O>}::index_mut" "_root_.Aeneas.Std.alloc.vec.Vec.index_mut" ~keep_params:(Some [true; true; false; true]);
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 130 *)
+   mk_fun "core::array::equality::{core::cmp::PartialEq<[@T; @N], [@U; @N]>}::eq" "_root_.Aeneas.Std.core.array.equality.PartialEqArray.eq";
+@@ -1040,57 +1070,57 @@ let lean_builtin_funs = [
+   mk_fun "core::result::{core::result::Result<@T, @E>}::expect" "_root_.Aeneas.Std.core.result.Result.expect";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 492 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::unwrap" "_root_.Aeneas.Std.core.result.Result.unwrap";
+-  (* file: "Aeneas/Std/Slice.lean", line: 286 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 290 *)
+   mk_fun "core::slice::index::{core::ops::index::Index<[@T], @I, @O>}::index" "_root_.Aeneas.Std.core.slice.index.Slice.index";
+-  (* file: "Aeneas/Std/Slice.lean", line: 364 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 368 *)
+   mk_fun "core::slice::index::{core::ops::index::IndexMut<[@T], @I, @O>}::index_mut" "_root_.Aeneas.Std.core.slice.index.Slice.index_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 312 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 316 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::get" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.get";
+-  (* file: "Aeneas/Std/Slice.lean", line: 319 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 323 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::get_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.get_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 333 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 337 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::get_unchecked" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.get_unchecked";
+-  (* file: "Aeneas/Std/Slice.lean", line: 339 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 343 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::get_unchecked_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.get_unchecked_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 345 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 349 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::index" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.index";
+-  (* file: "Aeneas/Std/Slice.lean", line: 351 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 355 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>}::index_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice.index_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 534 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 538 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::get" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.get";
+-  (* file: "Aeneas/Std/Slice.lean", line: 540 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 544 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::get_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.get_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 554 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 558 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::get_unchecked" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.get_unchecked";
+-  (* file: "Aeneas/Std/Slice.lean", line: 560 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 564 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::get_unchecked_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.get_unchecked_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 566 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 570 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::index" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.index";
+-  (* file: "Aeneas/Std/Slice.lean", line: 573 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 577 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>}::index_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice.index_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 391 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 395 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::get" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.get";
+-  (* file: "Aeneas/Std/Slice.lean", line: 398 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 402 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::get_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.get_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 413 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 417 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::get_unchecked" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.get_unchecked";
+-  (* file: "Aeneas/Std/Slice.lean", line: 419 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 423 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::get_unchecked_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.get_unchecked_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 426 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 430 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::index" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.index";
+-  (* file: "Aeneas/Std/Slice.lean", line: 433 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 437 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>}::index_mut" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice.index_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 474 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 478 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::get" "_root_.Aeneas.Std.core.slice.index.Usize.get";
+-  (* file: "Aeneas/Std/Slice.lean", line: 479 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 483 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::get_mut" "_root_.Aeneas.Std.core.slice.index.Usize.get_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 484 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 488 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::get_unchecked" "_root_.Aeneas.Std.core.slice.index.Usize.get_unchecked";
+-  (* file: "Aeneas/Std/Slice.lean", line: 490 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 494 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::get_unchecked_mut" "_root_.Aeneas.Std.core.slice.index.Usize.get_unchecked_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 496 *)
+-  mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::index" "_root_.Aeneas.Std.core.slice.index.Usize.index";
+   (* file: "Aeneas/Std/Slice.lean", line: 500 *)
++  mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::index" "_root_.Aeneas.Std.core.slice.index.Usize.index";
++  (* file: "Aeneas/Std/Slice.lean", line: 504 *)
+   mk_fun "core::slice::index::{core::slice::index::SliceIndex<usize, [@T], @T>}::index_mut" "_root_.Aeneas.Std.core.slice.index.Usize.index_mut";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 277 *)
+   mk_fun "core::slice::iter::{core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>}::into_iter" "_root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter";
+@@ -1186,15 +1216,15 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::chunks_exact" "_root_.Aeneas.Std.core.slice.Slice.chunks_exact";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 33 *)
+   mk_fun "core::slice::{[@T]}::contains" "_root_.Aeneas.Std.core.slice.Slice.contains";
+-  (* file: "Aeneas/Std/Slice.lean", line: 528 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 532 *)
+   mk_fun "core::slice::{[@T]}::copy_from_slice" "_root_.Aeneas.Std.core.slice.Slice.copy_from_slice";
+   (* file: "Aeneas/Std/Slice.lean", line: 121 *)
+   mk_fun "core::slice::{[@T]}::first" "_root_.Aeneas.Std.core.slice.Slice.first";
+-  (* file: "Aeneas/Std/Slice.lean", line: 292 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 296 *)
+   mk_fun "core::slice::{[@T]}::get" "_root_.Aeneas.Std.core.slice.Slice.get";
+-  (* file: "Aeneas/Std/Slice.lean", line: 306 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 310 *)
+   mk_fun "core::slice::{[@T]}::get_mut" "_root_.Aeneas.Std.core.slice.Slice.get_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 298 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 302 *)
+   mk_fun "core::slice::{[@T]}::get_unchecked" "_root_.Aeneas.Std.core.slice.Slice.get_unchecked";
+   (* file: "Aeneas/Std/Slice.lean", line: 112 *)
+   mk_fun "core::slice::{[@T]}::is_empty" "_root_.Aeneas.Std.core.slice.Slice.is_empty";
+@@ -1202,15 +1232,17 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::iter" "_root_.Aeneas.Std.core.slice.Slice.iter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 56 *)
+   mk_fun "core::slice::{[@T]}::iter_mut" "_root_.Aeneas.Std.core.slice.Slice.iter_mut";
++  (* file: "Aeneas/Std/Slice.lean", line: 125 *)
++  mk_fun "core::slice::{[@T]}::last" "_root_.Aeneas.Std.core.slice.Slice.last";
+   (* file: "Aeneas/Std/Slice.lean", line: 45 *)
+   mk_fun "core::slice::{[@T]}::len" "_root_.Aeneas.Std.Slice.len" ~can_fail:false ~lift:false;
+-  (* file: "Aeneas/Std/Slice.lean", line: 269 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 273 *)
+   mk_fun "core::slice::{[@T]}::reverse" "_root_.Aeneas.Std.core.slice.Slice.reverse" ~can_fail:false;
+-  (* file: "Aeneas/Std/Slice.lean", line: 637 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 641 *)
+   mk_fun "core::slice::{[@T]}::split_at" "_root_.Aeneas.Std.core.slice.Slice.split_at";
+-  (* file: "Aeneas/Std/Slice.lean", line: 648 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 652 *)
+   mk_fun "core::slice::{[@T]}::split_at_mut" "_root_.Aeneas.Std.core.slice.Slice.split_at_mut";
+-  (* file: "Aeneas/Std/Slice.lean", line: 708 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 712 *)
+   mk_fun "core::slice::{[@T]}::swap" "_root_.Aeneas.Std.core.slice.Slice.swap";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 317 *)
+   mk_fun "core::slice::{[@T]}::windows" "_root_.Aeneas.Std.core.slice.Slice.windows";
+@@ -1256,24 +1288,106 @@ let lean_builtin_funs = [
+   mk_fun "core::tuple::{core::cmp::PartialOrd<(@U, @T), (@U, @T)>}::partial_cmp" "_root_.Aeneas.Std.core.tuple.PartialOrdPair.partial_cmp";
+   (* file: "Aeneas/Std/Float.lean", line: 414 *)
+   mk_fun "half::bfloat::{core::clone::Clone<half::bfloat::bf16>}::clone" "_root_.Aeneas.Std.BF16.clone";
++  (* file: "Aeneas/Std/Half.lean", line: 357 *)
++  mk_fun "half::bfloat::{core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>}::eq" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16.eq";
++  (* file: "Aeneas/Std/Half.lean", line: 376 *)
++  mk_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::ge" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16.ge";
++  (* file: "Aeneas/Std/Half.lean", line: 373 *)
++  mk_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::gt" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16.gt";
++  (* file: "Aeneas/Std/Half.lean", line: 370 *)
++  mk_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::le" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16.le";
++  (* file: "Aeneas/Std/Half.lean", line: 367 *)
++  mk_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::lt" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16.lt";
++  (* file: "Aeneas/Std/Half.lean", line: 364 *)
++  mk_fun "half::bfloat::{core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>}::partial_cmp" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16.partial_cmp";
++  (* file: "Aeneas/Std/Half.lean", line: 352 *)
++  mk_fun "half::bfloat::{core::convert::From<f64, half::bfloat::bf16>}::from" "_root_.Aeneas.Std.half.bfloat.FromF64BF16.from_";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 178 *)
+   mk_fun "half::bfloat::{core::fmt::Debug<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 182 *)
+   mk_fun "half::bfloat::{core::fmt::Display<half::bfloat::bf16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBF16.fmt";
+   (* file: "Aeneas/Std/Float.lean", line: 410 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::from_bits" "_root_.Aeneas.Std.BF16.from_bits";
++  (* file: "Aeneas/Std/Half.lean", line: 326 *)
++  mk_fun "half::bfloat::{half::bfloat::bf16}::from_f32" "_root_.Aeneas.Std.BF16.from_f32";
++  (* file: "Aeneas/Std/Half.lean", line: 328 *)
++  mk_fun "half::bfloat::{half::bfloat::bf16}::from_f64" "_root_.Aeneas.Std.BF16.from_f64";
++  (* file: "Aeneas/Std/Half.lean", line: 334 *)
++  mk_fun "half::bfloat::{half::bfloat::bf16}::is_nan" "_root_.Aeneas.Std.BF16.is_nan";
+   (* file: "Aeneas/Std/Float.lean", line: 412 *)
+   mk_fun "half::bfloat::{half::bfloat::bf16}::to_bits" "_root_.Aeneas.Std.BF16.to_bits";
++  (* file: "Aeneas/Std/Half.lean", line: 330 *)
++  mk_fun "half::bfloat::{half::bfloat::bf16}::to_f32" "_root_.Aeneas.Std.BF16.to_f32";
++  (* file: "Aeneas/Std/Half.lean", line: 332 *)
++  mk_fun "half::bfloat::{half::bfloat::bf16}::to_f64" "_root_.Aeneas.Std.BF16.to_f64";
+   (* file: "Aeneas/Std/Float.lean", line: 397 *)
+   mk_fun "half::binary16::{core::clone::Clone<half::binary16::f16>}::clone" "_root_.Aeneas.Std.F16.clone";
++  (* file: "Aeneas/Std/Half.lean", line: 287 *)
++  mk_fun "half::binary16::{core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>}::eq" "_root_.Aeneas.Std.half.binary16.PartialEqF16.eq";
++  (* file: "Aeneas/Std/Half.lean", line: 306 *)
++  mk_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::ge" "_root_.Aeneas.Std.half.binary16.PartialOrdF16.ge";
++  (* file: "Aeneas/Std/Half.lean", line: 303 *)
++  mk_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::gt" "_root_.Aeneas.Std.half.binary16.PartialOrdF16.gt";
++  (* file: "Aeneas/Std/Half.lean", line: 300 *)
++  mk_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::le" "_root_.Aeneas.Std.half.binary16.PartialOrdF16.le";
++  (* file: "Aeneas/Std/Half.lean", line: 297 *)
++  mk_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::lt" "_root_.Aeneas.Std.half.binary16.PartialOrdF16.lt";
++  (* file: "Aeneas/Std/Half.lean", line: 294 *)
++  mk_fun "half::binary16::{core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>}::partial_cmp" "_root_.Aeneas.Std.half.binary16.PartialOrdF16.partial_cmp";
++  (* file: "Aeneas/Std/Half.lean", line: 282 *)
++  mk_fun "half::binary16::{core::convert::From<f64, half::binary16::f16>}::from" "_root_.Aeneas.Std.half.binary16.FromF64F16.from_";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 169 *)
+   mk_fun "half::binary16::{core::fmt::Debug<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugF16.fmt";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 173 *)
+   mk_fun "half::binary16::{core::fmt::Display<half::binary16::f16>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayF16.fmt";
+   (* file: "Aeneas/Std/Float.lean", line: 393 *)
+   mk_fun "half::binary16::{half::binary16::f16}::from_bits" "_root_.Aeneas.Std.F16.from_bits";
++  (* file: "Aeneas/Std/Half.lean", line: 258 *)
++  mk_fun "half::binary16::{half::binary16::f16}::from_f32" "_root_.Aeneas.Std.F16.from_f32";
++  (* file: "Aeneas/Std/Half.lean", line: 264 *)
++  mk_fun "half::binary16::{half::binary16::f16}::is_nan" "_root_.Aeneas.Std.F16.is_nan";
+   (* file: "Aeneas/Std/Float.lean", line: 395 *)
+   mk_fun "half::binary16::{half::binary16::f16}::to_bits" "_root_.Aeneas.Std.F16.to_bits";
++  (* file: "Aeneas/Std/Half.lean", line: 260 *)
++  mk_fun "half::binary16::{half::binary16::f16}::to_f32" "_root_.Aeneas.Std.F16.to_f32";
++  (* file: "Aeneas/Std/Half.lean", line: 262 *)
++  mk_fun "half::binary16::{half::binary16::f16}::to_f64" "_root_.Aeneas.Std.F16.to_f64";
++  (* file: "Aeneas/Std/BigUint.lean", line: 38 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u128>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromU128.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 30 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u16>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromU16.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 32 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u32>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromU32.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 34 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u64>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromU64.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 28 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, u8>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromU8.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 36 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::From<num_bigint::biguint::BigUint, usize>}::from" "_root_.Aeneas.Std.num_bigint.BigUint.FromUsize.from_";
++  (* file: "Aeneas/Std/BigUint.lean", line: 43 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::TryFrom<u64, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>}::try_from" "_root_.Aeneas.Std.num_bigint.BigUint.TryFromU64.try_from";
++  (* file: "Aeneas/Std/BigUint.lean", line: 49 *)
++  mk_fun "num_bigint::biguint::convert::{core::convert::TryFrom<usize, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>}::try_from" "_root_.Aeneas.Std.num_bigint.BigUint.TryFromUsize.try_from";
++  (* file: "Aeneas/Std/BigUint.lean", line: 60 *)
++  mk_fun "num_bigint::biguint::division::{core::ops::arith::Div<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::div" "_root_.Aeneas.Std.num_bigint.BigUint.DivShared.div";
++  (* file: "Aeneas/Std/BigUint.lean", line: 63 *)
++  mk_fun "num_bigint::biguint::division::{core::ops::arith::Div<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::div" "_root_.Aeneas.Std.num_bigint.BigUint.DivBigUint.div";
++  (* file: "Aeneas/Std/BigUint.lean", line: 69 *)
++  mk_fun "num_bigint::biguint::division::{core::ops::arith::Rem<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::rem" "_root_.Aeneas.Std.num_bigint.BigUint.RemShared.rem";
++  (* file: "Aeneas/Std/BigUint.lean", line: 72 *)
++  mk_fun "num_bigint::biguint::division::{core::ops::arith::Rem<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::rem" "_root_.Aeneas.Std.num_bigint.BigUint.RemBigUint.rem";
++  (* file: "Aeneas/Std/BigUint.lean", line: 56 *)
++  mk_fun "num_bigint::biguint::multiplication::{core::ops::arith::Mul<&'a num_bigint::biguint::BigUint, &'b num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::mul" "_root_.Aeneas.Std.num_bigint.BigUint.MulShared.mul";
++  (* file: "Aeneas/Std/BigUint.lean", line: 54 *)
++  mk_fun "num_bigint::biguint::multiplication::{core::ops::arith::Mul<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::mul" "_root_.Aeneas.Std.num_bigint.BigUint.MulBigUint.mul";
++  (* file: "Aeneas/Std/BigUint.lean", line: 76 *)
++  mk_fun "num_bigint::biguint::{core::clone::Clone<num_bigint::biguint::BigUint>}::clone" "_root_.Aeneas.Std.num_bigint.BigUint.CloneBigUint.clone";
++  (* file: "Aeneas/Std/BigUint.lean", line: 85 *)
++  mk_fun "num_bigint::biguint::{core::cmp::Ord<num_bigint::biguint::BigUint>}::cmp" "_root_.Aeneas.Std.num_bigint.BigUint.OrdBigUint.cmp";
++  (* file: "Aeneas/Std/BigUint.lean", line: 80 *)
++  mk_fun "num_bigint::biguint::{core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::eq" "_root_.Aeneas.Std.num_bigint.BigUint.PartialEqBigUint.eq";
++  (* file: "Aeneas/Std/BigUint.lean", line: 89 *)
++  mk_fun "num_bigint::biguint::{core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::partial_cmp" "_root_.Aeneas.Std.num_bigint.BigUint.PartialOrdBigUint.partial_cmp";
+   (* file: "Aeneas/Std/Float.lean", line: 267 *)
+   mk_fun "std::f32::{f32}::fract" "_root_.Aeneas.Std.F32.fract";
+   (* file: "Aeneas/Std/Float.lean", line: 269 *)
+@@ -1389,9 +1503,9 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::try_trait::Residual" "_root_.Aeneas.Std.core.ops.try_trait.Residual" ~parent_clauses:["TryInst"];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 97 *)
+   mk_trait_decl "core::ops::try_trait::Try" "_root_.Aeneas.Std.core.ops.try_trait.Try" ~parent_clauses:["FromResidualInst"] ~methods:[("from_output", "from_output"); ("branch", "branch")];
+-  (* file: "Aeneas/Std/Slice.lean", line: 276 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 280 *)
+   mk_trait_decl "core::slice::index::SliceIndex" "_root_.Aeneas.Std.core.slice.index.SliceIndex" ~parent_clauses:["sealedInst"] ~methods:[("get", "get"); ("get_mut", "get_mut"); ("get_unchecked", "get_unchecked"); ("get_unchecked_mut", "get_unchecked_mut"); ("index", "index"); ("index_mut", "index_mut")];
+-  (* file: "Aeneas/Std/Slice.lean", line: 273 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 277 *)
+   mk_trait_decl "core::slice::index::private_slice_index::Sealed" "_root_.Aeneas.Std.core.slice.index.private_slice_index.Sealed";
+ ]
+ 
+@@ -1416,7 +1530,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<alloc::string::String>" "_root_.Aeneas.Std.core.clone.CloneString";
+   (* file: "Aeneas/Std/Sync.lean", line: 46 *)
+   mk_trait_impl "core::clone::Clone<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.clone.CloneArc" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 517 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 524 *)
+   mk_trait_impl "core::clone::Clone<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.clone.CloneallocvecVec" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 71 *)
+   mk_trait_impl "core::clone::Clone<bool>" "_root_.Aeneas.Std.core.clone.CloneBool";
+@@ -1458,16 +1572,22 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::clone::Clone<half::bfloat::bf16>" "_root_.Aeneas.Std.core.clone.CloneBF16";
+   (* file: "Aeneas/Std/Float.lean", line: 402 *)
+   mk_trait_impl "core::clone::Clone<half::binary16::f16>" "_root_.Aeneas.Std.core.clone.CloneF16";
++  (* file: "Aeneas/Std/BigUint.lean", line: 96 *)
++  mk_trait_impl "core::clone::Clone<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.CloneBigUint";
+   (* file: "Aeneas/Std/Tuple.lean", line: 28 *)
+   mk_trait_impl "core::cmp::Eq<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.EqPair";
+   (* file: "Aeneas/Std/String.lean", line: 104 *)
+   mk_trait_impl "core::cmp::Eq<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.EqString";
++  (* file: "Aeneas/Std/BigUint.lean", line: 106 *)
++  mk_trait_impl "core::cmp::Eq<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.EqBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 113 *)
+   mk_trait_impl "core::cmp::Eq<str>" "_root_.Aeneas.Std.core.cmp.EqStr";
+   (* file: "Aeneas/Std/Tuple.lean", line: 96 *)
+   mk_trait_impl "core::cmp::Ord<(@U, @T)>" "_root_.Aeneas.Std.core.cmp.OrdPair";
+   (* file: "Aeneas/Std/String.lean", line: 133 *)
+   mk_trait_impl "core::cmp::Ord<alloc::string::String>" "_root_.Aeneas.Std.core.cmp.OrdString";
++  (* file: "Aeneas/Std/BigUint.lean", line: 117 *)
++  mk_trait_impl "core::cmp::Ord<num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.OrdBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 154 *)
+   mk_trait_impl "core::cmp::Ord<str>" "_root_.Aeneas.Std.core.cmp.OrdStr";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 225 *)
+@@ -1482,7 +1602,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, alloc::string::String>" "_root_.Aeneas.Std.core.cmp.PartialEqString";
+   (* file: "Aeneas/Std/String.lean", line: 81 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStringStr";
+-  (* file: "Aeneas/Std/Vec.lean", line: 545 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 552 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::vec::Vec<@T>, alloc::vec::Vec<@U>>" "_root_.Aeneas.Std.core.cmp.PartialEqVec" ~keep_params:(Some [true; true; false; false]);
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 210 *)
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+@@ -1490,6 +1610,12 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialEqF32";
+   (* file: "Aeneas/Std/Float.lean", line: 355 *)
+   mk_trait_impl "core::cmp::PartialEq<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialEqF64";
++  (* file: "Aeneas/Std/Half.lean", line: 360 *)
++  mk_trait_impl "core::cmp::PartialEq<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialEqBF16";
++  (* file: "Aeneas/Std/Half.lean", line: 290 *)
++  mk_trait_impl "core::cmp::PartialEq<half::binary16::f16, half::binary16::f16>" "_root_.Aeneas.Std.half.binary16.PartialEqF16";
++  (* file: "Aeneas/Std/BigUint.lean", line: 100 *)
++  mk_trait_impl "core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.PartialEqBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 95 *)
+   mk_trait_impl "core::cmp::PartialEq<str, str>" "_root_.Aeneas.Std.core.cmp.PartialEqStr";
+   (* file: "Aeneas/Std/Tuple.lean", line: 76 *)
+@@ -1500,6 +1626,12 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialOrd<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialOrdF32";
+   (* file: "Aeneas/Std/Float.lean", line: 371 *)
+   mk_trait_impl "core::cmp::PartialOrd<f64, f64>" "_root_.Aeneas.Std.core.cmp.PartialOrdF64";
++  (* file: "Aeneas/Std/Half.lean", line: 379 *)
++  mk_trait_impl "core::cmp::PartialOrd<half::bfloat::bf16, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.PartialOrdBF16";
++  (* file: "Aeneas/Std/Half.lean", line: 309 *)
++  mk_trait_impl "core::cmp::PartialOrd<half::binary16::f16, half::binary16::f16>" "_root_.Aeneas.Std.half.binary16.PartialOrdF16";
++  (* file: "Aeneas/Std/BigUint.lean", line: 110 *)
++  mk_trait_impl "core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>" "_root_.Aeneas.Std.num_bigint.PartialOrdBigUint";
+   (* file: "Aeneas/Std/String.lean", line: 148 *)
+   mk_trait_impl "core::cmp::PartialOrd<str, str>" "_root_.Aeneas.Std.core.cmp.PartialOrdStr";
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 62 *)
+@@ -1508,14 +1640,24 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<@Self, @Self>" "_root_.Aeneas.Std.core.convert.FromSame";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 38 *)
+   mk_trait_impl "core::convert::From<Box<@T>, @T>" "_root_.Aeneas.Std.core.convert.FromBox";
+-  (* file: "Aeneas/Std/Vec.lean", line: 482 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 489 *)
+   mk_trait_impl "core::convert::From<Box<[@T]>, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.convert.FromBoxSliceVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 195 *)
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+   (* file: "Aeneas/Std/String.lean", line: 184 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.convert.FromStrString";
+-  (* file: "Aeneas/Std/Vec.lean", line: 466 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 473 *)
+   mk_trait_impl "core::convert::From<alloc::vec::Vec<@T>, [@T; @N]>" "_root_.Aeneas.Std.core.convert.FromVecArray";
++  (* file: "Aeneas/Std/Half.lean", line: 354 *)
++  mk_trait_impl "core::convert::From<f64, half::bfloat::bf16>" "_root_.Aeneas.Std.half.bfloat.FromF64BF16";
++  (* file: "Aeneas/Std/Half.lean", line: 284 *)
++  mk_trait_impl "core::convert::From<f64, half::binary16::f16>" "_root_.Aeneas.Std.half.binary16.FromF64F16";
++  (* file: "Aeneas/Std/BigUint.lean", line: 128 *)
++  mk_trait_impl "core::convert::From<num_bigint::biguint::BigUint, u64>" "_root_.Aeneas.Std.num_bigint.FromBigUintU64";
++  (* file: "Aeneas/Std/BigUint.lean", line: 125 *)
++  mk_trait_impl "core::convert::From<num_bigint::biguint::BigUint, u8>" "_root_.Aeneas.Std.num_bigint.FromBigUintU8";
++  (* file: "Aeneas/Std/BigUint.lean", line: 131 *)
++  mk_trait_impl "core::convert::From<num_bigint::biguint::BigUint, usize>" "_root_.Aeneas.Std.num_bigint.FromBigUintUsize";
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 20 *)
+   mk_trait_impl "core::convert::Into<@Self, @T>" "_root_.Aeneas.Std.core.convert.IntoFrom";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 195 *)
+@@ -1524,6 +1666,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::TryFrom<i32, usize, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI32Usize";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 53 *)
+   mk_trait_impl "core::convert::TryFrom<i64, usize, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromI64Usize";
++  (* file: "Aeneas/Std/BigUint.lean", line: 136 *)
++  mk_trait_impl "core::convert::TryFrom<u64, num_bigint::biguint::BigUint, num_bigint::TryFromBigIntError<num_bigint::biguint::BigUint>>" "_root_.Aeneas.Std.num_bigint.TryFromU64BigUint";
+   (* file: "Aeneas/Std/Scalar/CoreConvertNum.lean", line: 42 *)
+   mk_trait_impl "core::convert::TryFrom<usize, i32, core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.convert.num.TryFromUsizeI32";
+   (* file: "Aeneas/Std/Core/Convert.lean", line: 51 *)
+@@ -1550,7 +1694,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+   (* file: "Aeneas/Std/Sync.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.fmt.DebugArc" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 564 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 571 *)
+   mk_trait_impl "core::fmt::Debug<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.fmt.DebugVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 284 *)
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
+@@ -1832,43 +1976,43 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::deref::Deref<alloc::rc::Rc<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefRc" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 67 *)
+   mk_trait_impl "core::ops::deref::Deref<alloc::sync::Arc<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefArc" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 416 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 423 *)
+   mk_trait_impl "core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.ops.deref.DerefVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 36 *)
+   mk_trait_impl "core::ops::deref::DerefMut<Box<@T>, @T>" "_root_.Aeneas.Std.core.ops.deref.DerefMutBoxInst" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Vec.lean", line: 427 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 434 *)
+   mk_trait_impl "core::ops::deref::DerefMut<alloc::vec::Vec<@T>, [@T]>" "_root_.Aeneas.Std.core.ops.deref.DerefMutVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 100 *)
+   mk_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexArray";
+-  (* file: "Aeneas/Std/Slice.lean", line: 459 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 463 *)
+   mk_trait_impl "core::ops::index::Index<[@T], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexSlice";
+-  (* file: "Aeneas/Std/Vec.lean", line: 253 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 260 *)
+   mk_trait_impl "core::ops::index::Index<alloc::vec::Vec<@T>, @T, @O>" "_root_.Aeneas.Std.alloc.vec.Vec.Index" ~keep_params:(Some [true; true; false; true]);
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 107 *)
+   mk_trait_impl "core::ops::index::IndexMut<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexMutArray";
+-  (* file: "Aeneas/Std/Slice.lean", line: 466 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 470 *)
+   mk_trait_impl "core::ops::index::IndexMut<[@T], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexMutSlice";
+-  (* file: "Aeneas/Std/Vec.lean", line: 261 *)
++  (* file: "Aeneas/Std/Vec.lean", line: 268 *)
+   mk_trait_impl "core::ops::index::IndexMut<alloc::vec::Vec<@T>, @T, @O>" "_root_.Aeneas.Std.alloc.vec.Vec.IndexMut" ~keep_params:(Some [true; true; false; true]);
+   (* file: "Aeneas/Std/Core/Result.lean", line: 21 *)
+   mk_trait_impl "core::ops::try_trait::FromResidual<core::result::Result<@T, @F>, core::result::Result<core::convert::Infallible, @E>>" "_root_.Aeneas.Std.core.result.FromResidualResult";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 45 *)
+   mk_trait_impl "core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>" "_root_.Aeneas.Std.core.result.TryResult";
+-  (* file: "Aeneas/Std/Slice.lean", line: 374 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 378 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice";
+-  (* file: "Aeneas/Std/Slice.lean", line: 599 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 603 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice";
+-  (* file: "Aeneas/Std/Slice.lean", line: 446 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 450 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice";
+-  (* file: "Aeneas/Std/Slice.lean", line: 509 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 513 *)
+   mk_trait_impl "core::slice::index::SliceIndex<usize, [@T], @T>" "_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice";
+-  (* file: "Aeneas/Std/Slice.lean", line: 370 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 374 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::Range<usize>>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedRangeUsize";
+-  (* file: "Aeneas/Std/Slice.lean", line: 594 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 598 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::RangeFrom<usize>>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedRangeFromUsize";
+-  (* file: "Aeneas/Std/Slice.lean", line: 386 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 390 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::RangeTo<usize>>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedRangeToUsize";
+-  (* file: "Aeneas/Std/Slice.lean", line: 505 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 509 *)
+   mk_trait_impl "core::slice::index::private_slice_index::Sealed<usize>" "_root_.Aeneas.Std.core.slice.index.private_slice_index.SealedUsize";
+ ]
+ 

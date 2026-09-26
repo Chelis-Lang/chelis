@@ -1,0 +1,2127 @@
+# aeneas integration step 64 after cba11f3beb: commit c7d076df6bf257095b0a0755439280de863daeb8
+# first parent c1e49e216e6ed2d6aa2e7f0dc99a1545beb087cb, merged b245c0c3506e573fcd2b7da9a8520e29492f9b78
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/shell-borrowing-states' (modeled native-shell instances at borrowing states translate to the model at an extended state)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Ops.lean b/backends/lean/Aeneas/Std/Core/Ops.lean
+index 174b6de..a6bbc3a 100644
+--- a/backends/lean/Aeneas/Std/Core/Ops.lean
++++ b/backends/lean/Aeneas/Std/Core/Ops.lean
+@@ -79,6 +79,63 @@ structure core.ops.function.FnOnceMutArgMutArg (Self : Type u) (T : Type v) (U :
+     (Output : Type x) where
+   call_once : Self → (T × U) → Result (Output × T × U)
+ 
++/-! ### Closure specializations at borrowing states
++
++A partial-monomorphization instance of a modeled function which threads a state
++`S` through closures (e.g. `scoped::<HostCx<'a>, ..>`, whose state holds mutable
++borrows) receives closure specializations such as `FnOnce<(&'b mut HostCx<'a>,)>`
++whose call also returns `k : K`, the backward function of the inner borrows of
++the state: given the values the caller gives back to the borrows of the returned
++state, the values of the borrows of the lent state. A model is parametric in its
++state, so the instance runs it at the state `S × K`: `thread` turns such a
++closure into a dictionary of the model which composes the backward functions of
++successive calls (`BackCompose.comp k b` applies `b`, the backward function of
++the call, then `k`, that of the calls before). The instance starts from
++`BackCompose.id` and returns the final state and its backward function. -/
++
++/-- The backward functions of the inner borrows of a state: one function per
++    region, composed call after call. -/
++class BackCompose (K : Type u) where
++  id : K
++  comp : K → K → K
++
++instance BackCompose.fn {A : Type u} : BackCompose (A → A) where
++  id := fun a => a
++  comp k b := fun a => k (b a)
++
++instance BackCompose.prod {A B : Type u} [BackCompose A] [BackCompose B] :
++    BackCompose (A × B) where
++  id := (BackCompose.id, BackCompose.id)
++  comp k b := (BackCompose.comp k.1 b.1, BackCompose.comp k.2 b.2)
++
++/-- A closure `FnOnce<(&'a mut T,)>` at a borrowing state `T` as a dictionary of
++    the model at the state `T × K`. -/
++def core.ops.function.FnOnceMutArg.thread {Self : Type u} {T K : Type v} {Output : Type w}
++    [BackCompose K] (call : Self → T → Result (Output × T × K)) :
++    core.ops.function.FnOnceMutArg Self (T × K) Output where
++  call_once f s := do
++    let (o, t, b) ← call f s.1
++    .ok (o, t, BackCompose.comp s.2 b)
++
++/-- A closure `FnOnce<(&'a mut T, U)>` at a borrowing state `T` as a dictionary
++    of the model at the state `T × K`. -/
++def core.ops.function.FnOnceMutArgPair.thread {Self : Type u} {T K : Type v} {U : Type w}
++    {Output : Type x} [BackCompose K] (call : Self → (T × U) → Result (Output × T × K)) :
++    core.ops.function.FnOnceMutArgPair Self (T × K) U Output where
++  call_once f a := do
++    let (o, t, b) ← call f (a.1.1, a.2)
++    .ok (o, t, BackCompose.comp a.1.2 b)
++
++/-- A closure `FnOnce<(&'a mut T, &'b mut U)>` at a borrowing state `U` (the
++    second argument) as a dictionary of the model at the state `U × K`. -/
++def core.ops.function.FnOnceMutArgMutArg.threadSnd {Self : Type u} {T : Type v}
++    {U K : Type w} {Output : Type x} [BackCompose K]
++    (call : Self → (T × U) → Result (Output × T × U × K)) :
++    core.ops.function.FnOnceMutArgMutArg Self T (U × K) Output where
++  call_once f a := do
++    let (o, t, u, b) ← call f (a.1, a.2.1)
++    .ok (o, t, u, BackCompose.comp a.2.2 b)
++
+ @[rust_trait "core::ops::function::FnMut" (parentClauses := ["FnOnceInst"])]
+ structure core.ops.function.FnMut (Self : Type u) (Args : Type v) (Output : Type w) where
+   FnOnceInst : core.ops.function.FnOnce Self Args Output
+diff --git a/src/Main.ml b/src/Main.ml
+index 9596e07..9f11076 100644
+--- a/src/Main.ml
++++ b/src/Main.ml
+@@ -651,11 +651,14 @@ let () =
+                    (ExtractBuiltin.mem_fun
+                       (Charon.NameMatcher.ctx_from_crate m)
+                       d.def_id d.item_meta.name)
+-              (* We also ignore the trait method declarations *)
+-              &&
+-              match d.src with
+-              | TraitDeclItem _ -> false
+-              | _ -> true)
++              (* We also ignore the trait method declarations, and the
++                 instances of modeled functions at borrowing states, which are
++                 translated to their model *)
++              && (match d.src with
++                 | TraitDeclItem _ -> false
++                 | _ -> true)
++              && Option.is_none
++                   (Aeneas.ModelStateABI.threaded_instance_of_decl m d))
+             fun_decls
+         in
+         let global_decls =
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index 41e8930..b433efc 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -938,6 +938,41 @@ and extract_function_call (span : Meta.span) (ctx : extraction_ctx)
+       extract_binop span ctx
+         (extract_texpr span ctx fmt ~inside_do)
+         fmt ~inside binop arg0 arg1
++  | Fun (Pure (ThreadedModel model)), _ ->
++      (* The model applied to its dictionaries, the threaded ones wrapped by
++         their helper (see [Pure.threaded_model]), then to the arguments. The
++         type arguments are implicit. *)
++      [%sanity_check] span
++        (backend () = Lean && generics.types = []
++        && generics.const_generics = []
++        && List.length generics.trait_refs
++           = List.length model.dictionaries);
++      if inside then F.pp_print_string fmt "(";
++      F.pp_print_string fmt model.model;
++      List.iter2
++        (fun dictionary (trait_ref : trait_ref) ->
++          F.pp_print_space fmt ();
++          match dictionary with
++          | None ->
++              extract_trait_ref span ctx fmt TypeDeclId.Set.empty ~inside:true
++                trait_ref
++          | Some (helper, method_name) ->
++              F.pp_print_string fmt ("(" ^ helper);
++              F.pp_print_space fmt ();
++              extract_trait_ref span ctx fmt TypeDeclId.Set.empty ~inside:true
++                trait_ref;
++              F.pp_print_string fmt
++                ("."
++                ^ ctx_get_trait_method span
++                    trait_ref.trait_decl_ref.trait_decl_id method_name ctx
++                ^ ")"))
++        model.dictionaries generics.trait_refs;
++      List.iter
++        (fun arg ->
++          F.pp_print_space fmt ();
++          extract_texpr span ctx fmt ~inside:true ~inside_do arg)
++        args;
++      if inside then F.pp_print_string fmt ")"
+   | Fun fun_id, _ ->
+       let use_brackets = inside in
+       if use_brackets then F.pp_print_string fmt "(";
+diff --git a/src/pure/PrintPure.ml b/src/pure/PrintPure.ml
+index 3350ada..5f89003 100644
+--- a/src/pure/PrintPure.ml
++++ b/src/pure/PrintPure.ml
+@@ -878,6 +878,7 @@ let pure_builtin_fun_id_to_string (fid : pure_builtin_fun_id) : string =
+   | SliceLen -> "@sliceLen"
+   | UbChecks -> "@ubChecks"
+   | ModelStateMerge name -> "@modelStateMerge(" ^ name ^ ")"
++  | ThreadedModel m -> "@threadedModel(" ^ m.model ^ ")"
+   | ResultUnwrapMut -> "@resultUnwrapMut"
+   | ToNested c -> "@toNested(" ^ nested_collection_to_string c ^ ")"
+   | OfNested c -> "@ofNested(" ^ nested_collection_to_string c ^ ")"
+diff --git a/src/pure/Pure.ml b/src/pure/Pure.ml
+index 1a4036d..c7b1534 100644
+--- a/src/pure/Pure.ml
++++ b/src/pure/Pure.ml
+@@ -106,6 +106,16 @@ type builtin_ty =
+ 
+ type array_or_slice = Array | Slice [@@deriving show, ord]
+ 
++(** A call to a state-parametric model at a borrowing state (see
++    [ModelStateABI.threaded_fun_instance]): the model's Lean name, and for each
++    trait argument of the call either [None] (the dictionary is passed as is)
++    or the Lean helper and the method of the closure dictionary it threads. *)
++type threaded_model = {
++  model : string;
++  dictionaries : (string * string) option list;
++}
++[@@deriving show, ord]
++
+ (** Identifiers of builtin functions that we use only in the pure translation *)
+ type pure_builtin_fun_id =
+   | Return  (** The monadic return *)
+@@ -148,6 +158,10 @@ type pure_builtin_fun_id =
+           arguments merge selected generic-parameter states before the original
+           and update values; private, non-borrowed model state remains
+           authoritative in the original value. *)
++  | ThreadedModel of threaded_model
++      (** A call to a model at a borrowing state: extracted as the model
++          applied to its trait arguments, the threaded ones wrapped by their
++          helper (see [threaded_model]), then to the arguments. *)
+   | ResultUnwrapMut
+       (** Temporary fix: the
+           [core::result::{core::result::Result<@T, @E>}::unwrap] instantiated
+diff --git a/src/pure/PureMicroPassesAnnots.ml b/src/pure/PureMicroPassesAnnots.ml
+index cea0fee..7e5328a 100644
+--- a/src/pure/PureMicroPassesAnnots.ml
++++ b/src/pure/PureMicroPassesAnnots.ml
+@@ -216,7 +216,7 @@ let add_type_annotations_to_fun_decl (trans_ctx : trans_ctx)
+           | Discriminant -> (hole, mk_holes (), false)
+           | Fail | Assert | FuelDecrease | FuelEqZero | UbChecks ->
+               (f.ty, mk_known (), false)
+-          | ModelStateMerge _ -> (f.ty, mk_known (), false)
++          | ModelStateMerge _ | ThreadedModel _ -> (f.ty, mk_known (), false)
+           | UpdateAtIndex _ | SliceLen | ToNested _ | OfNested _ | NestedMap _
+             ->
+               (known_f_ty, known_args_tys, false)
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index f366856..990e113 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -399,6 +399,399 @@ let fun_instance_is_compatible (crate : A.crate) (decl : A.fun_decl)
+   && List.length params.types = List.length decl.generics.types
+   && not !visible
+ 
++(** {1 Modeled functions at borrowing states}
++
++    A modeled function which threads a state [S] through closures, such as
++    [scoped<S, T, R>(state: &mut S, enter: impl FnOnce(&mut S) -> T, ..)], has
++    a model parametric in [S]. Its partial-monomorphization instance at a state
++    holding mutable borrows (e.g. [scoped::<'0, HostCx<'1>, ..>]) has one more
++    backward function per inner region (['1]): given the values the caller
++    gives back to the borrows of the returned state, the values of the borrows
++    of the lent state. The function lends the state to the closures one call
++    after the other, so this backward function is the composition of those of
++    the closure calls, the last call's first. The instance is translated to the
++    model at the state [S × K], where [K] holds these backward functions and
++    every closure dictionary composes the backward functions of its call with
++    [K] (the [thread] helpers of the Lean library, e.g.
++    [core.ops.function.FnOnceMutArg.thread]), starting from the identities.
++
++    This relies on the function reaching the state only by lending it to the
++    closures of its bounds, which parametricity guarantees for its model and
++    which is checked on the instance: the regions of the state type occur only
++    in the state input [&'r mut S] and in the borrowed arguments of the closure
++    bounds ([FnOnce] specializations of a model schema), the state type is the
++    instantiation of one type parameter, and the Lean layouts of the instance
++    and of the closure specializations are those of the model at [S × K] (see
++    [threaded_fun_body]). Every other instance stays an unknown external. *)
++
++(** The model schema of a closure bound which borrows the state [S]:
++    [FnOnce<(&mut S,)>] ([FnOnceMutArg]), [FnOnce<(&mut S, U)>]
++    ([FnOnceMutArgPair]) or [FnOnce<(&mut T, &mut S)>]
++    ([FnOnceMutArgMutArg]). *)
++type thread_kind = MutArg | MutArgPair | MutArgMutArgSnd
++
++(** The Lean helper which threads the backward functions of the inner regions
++    of the state through a closure dictionary of this schema. *)
++let thread_helper_name = function
++  | MutArg -> "_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread"
++  | MutArgPair -> "_root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair.thread"
++  | MutArgMutArgSnd ->
++      "_root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg.threadSnd"
++
++type threaded_instance = {
++  model : string;  (** The model's Lean name *)
++  state : int;  (** The index of the state input [&'r mut S] *)
++  state_region : T.RegionId.id;  (** ['r] *)
++  inner : T.RegionId.Set.t;  (** The regions of [S] *)
++  dictionaries : (T.trait_clause_id * thread_kind) list;
++      (** The closure bounds which borrow the state (their [call_once] is
++          threaded) *)
++}
++
++(** Collects the free regions of a type or trait parameter (the regions bound
++    inside it are not free). *)
++let free_regions_visitor =
++  object
++    inherit [_] T.iter_ty
++
++    method! visit_region acc r =
++      match r with
++      | T.RVar (T.Free id) -> acc := T.RegionId.Set.add id !acc
++      | _ -> ()
++  end
++
++let ty_free_regions (ty : T.ty) =
++  let acc = ref T.RegionId.Set.empty in
++  free_regions_visitor#visit_ty acc ty;
++  !acc
++
++let trait_param_free_regions (c : T.trait_param) =
++  let acc = ref T.RegionId.Set.empty in
++  free_regions_visitor#visit_trait_param acc c;
++  !acc
++
++(** The model schema of a closure [FnOnce<Args>] specialization whose
++    arguments borrow the state [state] mutably, if there is one. *)
++let thread_kind inner state (args : T.ty) =
++  let outside ty = T.RegionId.Set.disjoint inner (ty_free_regions ty) in
++  match args with
++  | T.TAdt { id = T.TTuple; generics = { types; _ } } -> (
++      match types with
++      | [ T.TRef (_, t, T.RMut) ] when t = state -> Some MutArg
++      | [ T.TRef (_, t, T.RMut); u ] when t = state && outside u -> (
++          match u with
++          | T.TRef (_, _, T.RMut) -> None
++          | _ -> Some MutArgPair)
++      | [ T.TRef (_, a, T.RMut); T.TRef (_, t, T.RMut) ]
++        when t = state && outside a -> Some MutArgMutArgSnd
++      | _ -> None)
++  | _ -> None
++
++(** Whether a partial-monomorphization instance of a modeled function (see
++    [fun_instance_is_compatible]) threads a borrowing state through the model
++    (see [threaded_instance]). Only the instance's LLBC signature is checked
++    here; [threaded_fun_body] checks its Lean layout. *)
++let threaded_fun_instance (crate : A.crate) (decl : A.fun_decl)
++    (info : builtin_fun_info) (shape : T.generic_args T.binder) :
++    threaded_instance option =
++  let span = Some decl.item_meta.span in
++  let has_body =
++    match decl.body with
++    | A.StructuredBody _ -> true
++    | _ -> false
++  in
++  (* The shape's arguments in terms of the instance's parameters *)
++  let args =
++    Substitute.apply_args_to_binder
++      (Charon.TypesUtils.generic_args_of_params span decl.generics)
++      Substitute.generic_args_substitute shape
++  in
++  let borrowing =
++    List.filter
++      (fun ty -> not (T.RegionId.Set.is_empty (ty_free_regions ty)))
++      args.types
++  in
++  match borrowing with
++  | [ state ]
++    when (not has_body)
++         && Option.is_none (modeled_fun_abi crate decl info)
++         && List.length shape.binder_params.regions
++            = List.length decl.generics.regions
++         && List.length shape.binder_params.types
++            = List.length decl.generics.types -> (
++      let inner = ty_free_regions state in
++      let mentions ty =
++        not (T.RegionId.Set.disjoint inner (ty_free_regions ty))
++      in
++      let inputs =
++        List.filter
++          (fun (_, ty) -> mentions ty)
++          (List.mapi (fun i ty -> (i, ty)) decl.signature.inputs)
++      in
++      match inputs with
++      | [ (index, T.TRef (T.RVar (T.Free r), s, T.RMut)) ]
++        when s = state
++             && (not (T.RegionId.Set.mem r inner))
++             && not (mentions decl.signature.output) -> (
++          (* The closure bounds which borrow the state *)
++          let clause (c : T.trait_param) =
++            if T.RegionId.Set.disjoint inner (trait_param_free_regions c) then
++              Some None
++            else
++              let tr = c.trait.binder_value in
++              let tdecl = T.TraitDeclId.Map.find tr.id crate.trait_decls in
++              let name, args =
++                NameMatcher.instantiate_name_generics tdecl.item_meta.name
++                  tr.generics
++              in
++              let path =
++                List.map
++                  (function
++                    | T.PeIdent (id, _) -> Some id
++                    | _ -> None)
++                  name
++              in
++              match (path, List.rev tdecl.item_meta.name, args.types) with
++              | ( [ Some "core"; Some "ops"; Some "function"; Some "FnOnce" ],
++                  T.PeInstantiated _ :: _,
++                  [ self; call_args; output ] )
++                when (not (mentions self)) && not (mentions output) ->
++                  Option.map
++                    (fun kind -> Some (c.clause_id, kind))
++                    (thread_kind inner state call_args)
++              | _ -> None
++          in
++          let clauses = List.map clause decl.generics.trait_clauses in
++          if List.exists Option.is_none clauses then None
++          else
++            Some
++              {
++                model = info.extract_name;
++                state = index;
++                state_region = r;
++                inner;
++                dictionaries = List.filter_map Option.join clauses;
++              })
++      | _ -> None)
++  | _ -> None
++
++(** The partial-monomorphization instance of a modeled function at a borrowing
++    state that a declaration is, if it is one (and not an instance admitted with
++    the ABI of its model, see [fun_instance_is_compatible]). *)
++let threaded_instance_of_decl (crate : A.crate) (decl : A.fun_decl) =
++  if Config.backend () <> Config.Lean then None
++  else
++    match List.rev decl.item_meta.name with
++    | T.PeInstantiated shape :: _
++      when not
++             (A.FunDeclId.Set.mem decl.def_id
++                !ExtractBuiltin.admitted_fun_instances) -> (
++        match
++          ExtractBuiltin.find_generic_fun_info
++            (NameMatcher.ctx_from_crate crate)
++            decl.item_meta.name
++        with
++        | Some info -> threaded_fun_instance crate decl info shape
++        | None -> None)
++    | _ -> None
++
++(** The body of a partial-monomorphization instance of a modeled function at a
++    borrowing state (see [threaded_instance]): the model at the state [S × K],
++    where [K] holds the backward functions of the inner regions of the state,
++    starting from their identities. Its forward output ends with the state
++    given back at ['r] followed by these backward functions, so the model's
++    result at [S × K] is the instance's. Checks this layout (each backward
++    function of an inner region must be a total endomorphism of the values of
++    its borrows, and no other region may give back after ['r]), and that the
++    call of every threaded closure specialization has the layout of its model
++    schema at [S × K] (the same state [S] and backward functions [K], after
++    the other results). Raises otherwise: the instance then stays an unknown
++    external. *)
++let threaded_fun_body (span : Meta.span) (ctx : Contexts.decls_ctx)
++    (fresh : string option -> ty -> fvar) (decl : A.fun_decl)
++    (dsg : decomposed_fun_sig) (sg : fun_sig) (inst : threaded_instance) :
++    fun_body =
++  let fun_ty = dsg.fun_ty in
++  [%cassert] span
++    (fun_ty.state_outputs = []
++    && fun_ty.fwd_info.effect_info.can_fail
++    && (not fun_ty.fwd_info.ignore_output)
++    && List.length fun_ty.fwd_inputs = List.length decl.signature.inputs)
++    "Model at a borrowing state: unsupported forward signature";
++  let state_ty = List.nth fun_ty.fwd_inputs inst.state in
++  (* The region groups of the instance: those of the state's inner regions
++     come last, after the group of ['r] *)
++  let groups =
++    RegionsHierarchy.compute_regions_hierarchy_for_sig (Some span) ctx.crate
++      { item_binder_params = decl.generics; item_binder_value = decl.signature }
++  in
++  let is_inner gid =
++    let g = List.find (fun (g : T.region_var_group) -> g.id = gid) groups in
++    let regions = T.RegionId.Set.of_list g.regions in
++    if T.RegionId.Set.subset regions inst.inner then true
++    else if T.RegionId.Set.disjoint regions inst.inner then false
++    else
++      [%craise] span
++        "Model at a borrowing state: a region group mixes regions of the \
++         state with other regions"
++  in
++  let backs =
++    List.combine
++      (T.RegionGroupId.Map.bindings fun_ty.back_sg)
++      (compute_back_tys_with_info fun_ty)
++  in
++  let outer, inner =
++    List.partition (fun ((gid, _), _) -> not (is_inner gid)) backs
++  in
++  let ids = List.map (fun ((gid, _), _) -> gid) in
++  [%cassert] span
++    (inner <> [] && ids backs = ids (outer @ inner))
++    "Model at a borrowing state: the regions of the state do not come last";
++  let ks =
++    List.map
++      (fun ((_, (back : back_sg_info)), ty) ->
++        match ty with
++        | Some (_, (TArrow (v, v') as k)) when v = v' && back.early = [] ->
++            (v, k)
++        | _ ->
++            [%craise] span
++              "Model at a borrowing state: the backward function of an inner \
++               region of the state is not a total endomorphism of the values \
++               of its borrows")
++      inner
++  in
++  (match List.rev (List.filter (fun (_, ty) -> Option.is_some ty) outer) with
++  | ((gid, _), Some (_, ty)) :: _ ->
++      let g = List.find (fun (g : T.region_var_group) -> g.id = gid) groups in
++      [%cassert] span
++        (List.mem inst.state_region g.regions && ty = state_ty)
++        "Model at a borrowing state: the state is not the last value given \
++         back before the backward functions of its inner regions"
++  | _ ->
++      [%craise] span
++        "Model at a borrowing state: the state is not given back by the \
++         instance");
++  (* The closure specializations: the model's dictionary at [S × K] *)
++  let k_tys = List.map snd ks in
++  List.iter
++    (fun (clause_id, kind) ->
++      let c =
++        List.find
++          (fun (c : T.trait_param) -> c.clause_id = clause_id)
++          decl.generics.trait_clauses
++      in
++      let tdecl =
++        T.TraitDeclId.Map.find c.trait.binder_value.id ctx.crate.trait_decls
++      in
++      let method_id =
++        match
++          List.find_opt
++            (fun (m : A.trait_method T.binder) ->
++              m.binder_value.name = "call_once")
++            tdecl.methods
++        with
++        | Some m -> m.binder_value.item.id
++        | None ->
++            [%craise] span
++              "Model at a borrowing state: a closure bound has no call_once"
++      in
++      let tr : T.trait_ref =
++        { kind = T.Clause (T.Free clause_id); trait_decl_ref = c.trait }
++      in
++      let inputs, output =
++        translate_fn_item_sig (Some span) ctx
++          {
++            kind = T.TraitMethod (tr, "call_once", method_id);
++            generics = TypesUtils.empty_generic_args;
++          }
++      in
++      let returned =
++        match output with
++        | TAdt
++            (TBuiltin TResult, { types = [ TAdt (TTuple, { types; _ }) ]; _ })
++          -> Some types
++        | _ -> None
++      in
++      let expected =
++        match (kind, inputs, returned) with
++        | MutArg, [ _; s ], Some (_ :: s' :: ks) ->
++            s = state_ty && s' = s && ks = k_tys
++        | ( MutArgPair,
++            [ _; TAdt (TTuple, { types = [ s; _ ]; _ }) ],
++            Some (_ :: s' :: ks) ) -> s = state_ty && s' = s && ks = k_tys
++        | ( MutArgMutArgSnd,
++            [ _; TAdt (TTuple, { types = [ a; s ]; _ }) ],
++            Some (_ :: a' :: s' :: ks) ) ->
++            a' = a && s = state_ty && s' = s && ks = k_tys
++        | _ -> false
++      in
++      [%cassert] span expected
++        "Model at a borrowing state: a closure bound does not give back the \
++         state and the backward functions of its inner regions like the \
++         instance")
++    inst.dictionaries;
++  (* The body: the model at [S × K], from the identities *)
++  let inputs =
++    List.mapi
++      (fun i ty -> fresh (if i = inst.state then Some "state" else None) ty)
++      fun_ty.fwd_inputs
++  in
++  let identity (v, _) =
++    let x = fresh (Some "x") v in
++    mk_closed_lambdas span [ mk_tpat_from_fvar None x ] (mk_texpr_from_fvar x)
++  in
++  let initial =
++    mk_simpl_tuple_texpr span
++      [
++        mk_texpr_from_fvar (List.nth inputs inst.state);
++        mk_simpl_tuple_texpr span (List.map identity ks);
++      ]
++  in
++  let args =
++    List.mapi
++      (fun i x -> if i = inst.state then initial else mk_texpr_from_fvar x)
++      inputs
++  in
++  [%cassert] span
++    (List.for_all
++       (fun (id, _) ->
++         List.exists
++           (fun (c : trait_param) -> c.clause_id = id)
++           sg.generics.trait_clauses)
++       inst.dictionaries)
++    "Model at a borrowing state: a threaded closure bound is not a parameter";
++  let dictionaries =
++    List.map
++      (fun (c : trait_param) ->
++        Option.map
++          (fun kind -> (thread_helper_name kind, "call_once"))
++          (List.assoc_opt c.clause_id inst.dictionaries))
++      sg.generics.trait_clauses
++  in
++  let generics =
++    {
++      types = [];
++      const_generics = [];
++      trait_refs = (generic_args_of_params sg.generics).trait_refs;
++    }
++  in
++  let func =
++    {
++      e =
++        Qualif
++          {
++            id =
++              FunOrOp
++                (Fun
++                   (Pure (ThreadedModel { model = inst.model; dictionaries })));
++            generics;
++          };
++      ty = mk_arrows (List.map (fun (arg : texpr) -> arg.ty) args) sg.output;
++    }
++  in
++  let body = [%add_loc] mk_apps span func args in
++  mk_closed_fun_body span (List.map (mk_tpat_from_fvar None) inputs) body
++
+ let for_call (ctx : Contexts.decls_ctx) (fid : A.fn_ptr_kind) =
+   if Config.backend () <> Config.Lean then None
+   else
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index 12db428..7004113 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -85,10 +85,25 @@ let translate_fun_decl (ctx : bs_ctx) (body : S.expr option) : fun_decl =
+   let name = name_to_string ctx def.item_meta.name in
+   (* Translate the signature *)
+   let signature = translate_fun_sig_from_decomposed ctx.sg in
+-  (* Translate the body, if there is *)
++  (* Translate the body, if there is. A partial-monomorphization instance of a
++     modeled function at a borrowing state is the model at an extended state
++     (see [ModelStateABI.threaded_fun_body]). *)
+   let body =
+     match body with
+-    | None -> None
++    | None -> (
++        match
++          ModelStateABI.threaded_instance_of_decl ctx.decls_ctx.crate def
++        with
++        | None -> None
++        | Some instance -> (
++            let fresh basename ty : fvar =
++              { id = ctx.fresh_fvar_id (); basename; ty }
++            in
++            try
++              Some
++                (ModelStateABI.threaded_fun_body def.item_meta.span
++                   ctx.decls_ctx fresh def ctx.sg signature instance)
++            with CFailure _ -> None))
+     | Some body -> (
+         try Some (translate_fun_decl_body ctx signature body)
+         with CFailure _ ->
+diff --git a/tests/lean/ShellBorrowingStates.lean b/tests/lean/ShellBorrowingStates.lean
+new file mode 100644
+index 0000000..77f406b
+--- /dev/null
++++ b/tests/lean/ShellBorrowingStates.lean
+@@ -0,0 +1 @@
++import ShellBorrowingStates.Checks
+diff --git a/tests/lean/ShellBorrowingStates/Checks.lean b/tests/lean/ShellBorrowingStates/Checks.lean
+new file mode 100644
+index 0000000..f0e54d7
+--- /dev/null
++++ b/tests/lean/ShellBorrowingStates/Checks.lean
+@@ -0,0 +1,47 @@
++import ShellBorrowingStates.ChelisIr
++
++/-! Evaluate the models of `tests/src/chelis_ir.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace chelis_ir.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def w (n : Nat) : U64 := ⟨BitVec.ofNat _ n⟩
++
++/-- The result and the final values of both borrowed arguments. -/
++def res {α : Type} (f : α → Nat) (r : Result (α × U32 × U64)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (v, a, b) => some (f v, a.val, b.val)
++  | _ => none
++
++#guard res (·.val) (struct_state (u 4) (w 3)) == some (12, 5, 10)
++#guard res (·.val) (struct_state (u 4294967295) (w 18446744073709551615)) ==
++  some (18446744073709551615, 0, 4294967293)
++
++#guard res (·.val) (tuple_state (u 4) (w 3)) == some (14, 14, 16)
++#guard res (·.val) (tuple_state (u 4294967295) (w 1)) == some (4, 4, 5)
++
++/-- A lowering runtime in its initial state. -/
++def runtime : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime :=
++  { u := false, o := false, hook := [], builds := 0#u64, nextPreflightFrame := 0#u64,
++    hostVar := fun _ => 0#u32, hostVarsTaken := 0, profileEnv := fun _ => false,
++    profileEnvReads := 0, profileMarks := 0#usize }
++
++/-- The result (`true` for `Ok`), the final session, the quiet-output flag of the
++    runtime and the final native state. -/
++def host (checked invocation log native : Nat) :
++    Option ((Bool × Nat) × Nat × Nat × Bool × Nat) :=
++  match host_scenario (u checked) { invocation := u invocation, log := w log } runtime
++      (w native) with
++  | ok (r, s, rt, n) =>
++    let r := match r with
++      | .Ok v => (true, v.val)
++      | .Err e => (false, e.val)
++    some (r, s.invocation.val, s.log.val, rt.o, n.val)
++  | _ => none
++
++#guard host 3 9 4 10 == some ((true, 3), 9, 5, false, 14)
++#guard host 6 9 4 10 == some ((false, 7), 9, 5, false, 17)
++
++end chelis_ir.checks
+diff --git a/tests/lean/ShellBorrowingStates/ChelisIr.lean b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+new file mode 100644
+index 0000000..54939c8
+--- /dev/null
++++ b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+@@ -0,0 +1,1165 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [chelis_ir]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++/- You can remove the following line by using the CLI option `-all-computable`: -/
++noncomputable section
++
++namespace chelis_ir
++
++/-- [chelis_ir::Cx]
++    Source: 'tests/src/chelis_ir.rs', lines 76:0-80:1
++    Visibility: public -/
++structure Cx where
++  depth : _root_.Aeneas.Std.U32
++  a : _root_.Aeneas.Std.U32
++  b : _root_.Aeneas.Std.U64
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::Cx<'1>), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::Cx<'1>), @T1>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  (T0 : Type) (T1 : Type) where
++  call_once : T0 → _root_.chelis_ir.Cx → _root_.Aeneas.Std.Result (T1 ×
++    _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
++
++/-- [chelis_ir::Session]
++    Source: 'tests/src/chelis_ir.rs', lines 131:0-134:1
++    Visibility: public -/
++structure Session where
++  invocation : _root_.Aeneas.Std.U32
++  log : _root_.Aeneas.Std.U64
++
++/-- [chelis_ir::HostCx]
++    Source: 'tests/src/chelis_ir.rs', lines 137:0-142:1
++    Visibility: public -/
++structure HostCx where
++  checked : _root_.Aeneas.Std.U32
++  state : _root_.chelis_ir.Session
++  runtime : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime
++  native : _root_.Aeneas.Std.U64
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::HostCx<'1>), @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::HostCx<'1>), @T1>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  (T0 : Type) (T1 : Type) where
++  call_once : T0 → _root_.chelis_ir.HostCx → _root_.Aeneas.Std.Result (T1
++    × _root_.chelis_ir.HostCx × (_root_.chelis_ir.HostCx →
++    _root_.chelis_ir.HostCx))
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>), T1), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::Cx<'1>, @T1), @T2>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::Cx<'1>, @T1), @T2>"]
++structure
++  core.ops.function.FnOnceT0PairMut0CxT1T2_specialized_f4750442fb4f013eff7e56a40d604da1
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  call_once : T0 → (_root_.chelis_ir.Cx × T1) → _root_.Aeneas.Std.Result
++    (T2 × _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx →
++    _root_.chelis_ir.Cx))
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2)), @T3>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2)), @T3>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  call_once : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × (T1 × T2)
++    × (T1 → T1) × (T2 → T2))
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2))), T3), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2), @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut (&'1 mut @T1, &'2 mut @T2), @T3), @T4>"]
++structure
++  core.ops.function.FnOnceT0PairMut0PairMut1T1Mut2T2T3T4_specialized_8105c2216879d8d0b41e91e8c5b10a0b
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) where
++  call_once : T0 → ((T1 × T2) × T3) → _root_.Aeneas.Std.Result (T4 × (T1
++    × T2) × (T1 → T1) × (T2 → T2))
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::HostCx<'1>, @T1), @T2>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut chelis_ir::HostCx<'1>, @T1), @T2>"]
++structure
++  core.ops.function.FnOnceT0PairMut0HostCxT1T2_specialized_64d5935a70d0f55ff5526f41ca0be613
++  (T0 : Type) (T1 : Type) (T2 : Type) where
++  call_once : T0 → (_root_.chelis_ir.HostCx × T1) →
++    _root_.Aeneas.Std.Result (T2 × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut ((&2 mut (T2), &3 mut (T3)))), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut @T1, &'1 mut (&'2 mut @T2, &'3 mut @T3)), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut @T1, &'1 mut (&'2 mut @T2, &'3 mut @T3)), @T4>"]
++structure
++  core.ops.function.FnOnceT0PairMut0T1Mut1PairMut2T2Mut3T3T4_specialized_ebd49ec0b3325f713f29c67874adcf92
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) where
++  call_once : T0 → (T1 × (T2 × T3)) → _root_.Aeneas.Std.Result (T4 × T1
++    × (T2 × T3) × (T2 → T2) × (T3 → T3))
++
++/-- [chelis_ir::lowering_runtime::scoped::<0, chelis_ir::Cx<1>, T0, T1, T2, T3, T4>]:
++    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++def
++  lowering_runtime.scoped0CxT0T1T2T3T4_specialized_c8c62050160dfcef86628f67d9cb7a97
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type}
++  (coreopsfunctionFnOnceT2TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T2 T0)
++  (coreopsfunctionFnOnceT3PairMut0CxT0Tuple_specialized_f4750442fb4f013eff7e56a40d604da1Inst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0CxT1T2_specialized_f4750442fb4f013eff7e56a40d604da1
++  T3 T0 _root_.Unit)
++  (coreopsfunctionFnOnceT4TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T4 T1) (state : _root_.chelis_ir.Cx) (t : T2) (t1 : T3) (t2 : T4) :
++  _root_.Aeneas.Std.Result (T1 × _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx
++    → _root_.chelis_ir.Cx))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.scoped
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT2TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair.thread
++    coreopsfunctionFnOnceT3PairMut0CxT0Tuple_specialized_f4750442fb4f013eff7e56a40d604da1Inst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT4TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst.call_once)
++    (state, fun x => x) t t1 t2
++
++/-- [chelis_ir::lowering_runtime::scoped::<0, (&1 mut (T0), &2 mut (T1)), T2, T3, T4, T5, T6>]:
++    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++def
++  lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_54b4a0a8ec620ad0bd53cccbc87b9ac1
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type} {T5 : Type} {T6 :
++  Type}
++  (coreopsfunctionFnOnceT4TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  T4 T0 T1 T2)
++  (coreopsfunctionFnOnceT5PairMut0PairMut1T0Mut2T1T2Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0PairMut1T1Mut2T2T3T4_specialized_8105c2216879d8d0b41e91e8c5b10a0b
++  T5 T0 T1 T2 _root_.Unit)
++  (coreopsfunctionFnOnceT6TupleMut0PairMut1T0Mut2T1T3_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  T6 T0 T1 T3) (state : (T0 × T1)) (t : T4) (t1 : T5) (t2 : T6) :
++  _root_.Aeneas.Std.Result (T3 × (T0 × T1) × (T0 → T0) × (T1 → T1))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.scoped
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT4TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair.thread
++    coreopsfunctionFnOnceT5PairMut0PairMut1T0Mut2T1T2Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0bInst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT6TupleMut0PairMut1T0Mut2T1T3_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst.call_once)
++    (state, (fun x => x, fun x => x)) t t1 t2
++
++/-- [chelis_ir::lowering_runtime::scoped::<0, chelis_ir::HostCx<1>, T0, T1, T2, T3, T4>]:
++    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++def
++  lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_9077cbd83fddedb40fbeb2c0e1d38c35
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type}
++  (coreopsfunctionFnOnceT2TupleMut0HostCxT0_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T2 T0)
++  (coreopsfunctionFnOnceT3PairMut0HostCxT0Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613Inst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0HostCxT1T2_specialized_64d5935a70d0f55ff5526f41ca0be613
++  T3 T0 _root_.Unit)
++  (coreopsfunctionFnOnceT4TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T4 T1) (state : _root_.chelis_ir.HostCx) (t : T2) (t1 : T3) (t2 : T4) :
++  _root_.Aeneas.Std.Result (T1 × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.scoped
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT2TupleMut0HostCxT0_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair.thread
++    coreopsfunctionFnOnceT3PairMut0HostCxT0Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613Inst.call_once)
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT4TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst.call_once)
++    (state, fun x => x) t t1 t2
++
++/-- [chelis_ir::lowering_runtime::grow_stack_if_needed::<0, chelis_ir::Cx<1>, T0, T1>]:
++    Source: 'tests/src/chelis_ir.rs', lines 36:4-44:5 -/
++def
++  lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_33ec2cf8532db265f4f60a31d41df5ed
++  {T0 : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 T0) (state : _root_.chelis_ir.Cx) (i : _root_.Aeneas.Std.Usize)
++  (i1 : _root_.Aeneas.Std.Usize) (t : T1) :
++  _root_.Aeneas.Std.Result (T0 × _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx
++    → _root_.chelis_ir.Cx))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.grow_stack_if_needed
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT1TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst.call_once)
++    (state, fun x => x) i i1 t
++
++/-- [chelis_ir::lowering_runtime::grow_stack_if_needed::<0, (&1 mut (T0), &2 mut (T1)), T2, T3>]:
++    Source: 'tests/src/chelis_ir.rs', lines 36:4-44:5 -/
++def
++  lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_3f7ba04ade003cd97fba0902333447b1
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
++  (coreopsfunctionFnOnceT3TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  T3 T0 T1 T2) (state : (T0 × T1)) (i : _root_.Aeneas.Std.Usize)
++  (i1 : _root_.Aeneas.Std.Usize) (t : T3) :
++  _root_.Aeneas.Std.Result (T2 × (T0 × T1) × (T0 → T0) × (T1 → T1))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.grow_stack_if_needed
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArg.thread
++    coreopsfunctionFnOnceT3TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst.call_once)
++    (state, (fun x => x, fun x => x)) i i1 t
++
++/-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind::<0, 1, (&2 mut (T0), &3 mut (T1)), T2, T3, T4, T5, T6>]:
++    Source: 'tests/src/chelis_ir.rs', lines 60:8-69:9 -/
++def
++  lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_548c65501b418ac6956b216f2c7b1262
++  {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type} {T5 : Type} {T6 :
++  Type} (corecloneCloneInst : _root_.Aeneas.Std.core.clone.Clone T3)
++  (coreopsfunctionFnOnceT4PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1Result_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0T1Mut1PairMut2T2Mut3T3T4_specialized_ebd49ec0b3325f713f29c67874adcf92
++  T4 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
++  (_root_.Aeneas.Std.core.result.Result T2 T3))
++  (coreopsfunctionFnOnceT5TupleT3Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce T5 _root_.Unit T3)
++  (coreopsfunctionFnOnceT6TupleOptionStringT3Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce T6 (_root_.Option _root_.String)
++  T3) (lr : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  (state : (T0 × T1)) (t : T4) (t1 : T5) (t2 : T6) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result T2 T3) ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime × (T0 × T1)
++    × (T0 → T0) × (T1 → T1))
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind
++    corecloneCloneInst
++    (_root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg.threadSnd
++    coreopsfunctionFnOnceT4PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1Result_specialized_ebd49ec0b3325f713f29c67874adcf92Inst.call_once)
++    coreopsfunctionFnOnceT5TupleT3Inst
++    coreopsfunctionFnOnceT6TupleOptionStringT3Inst lr (state, (fun x => x,
++    fun x => x)) t t1 t2
++
++/-- [chelis_ir::with_bump::closure#1]
++    Source: 'tests/src/chelis_ir.rs', lines 91:8-94:9 -/
++@[reducible]
++def with_bump.closure_1 {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutCxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_bump::closure#1<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 91:8-94:9 -/
++def
++  with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R)
++  (c : _root_.chelis_ir.with_bump.closure_1
++  coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++  (tupled_args : (_root_.chelis_ir.Cx × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.chelis_ir.Cx ×
++    (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
++  := do
++  let (c1, old) := tupled_args
++  let i ← c1.depth - 1#u32
++  let i1 ← lift (UScalar.cast .U64 old)
++  let i2 ← lift (core.num.U64.wrapping_add c1.b i1)
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with depth := c1.depth } :
++      _root_.chelis_ir.Cx → _root_.chelis_ir.Cx)
++  _root_.Aeneas.Std.Result.ok ((), { c1 with depth := i, b := i2 }, back)
++
++/-- Trait implementation: [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_bump::closure#1<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 91:8-94:9 -/
++@[reducible]
++def
++  with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0CxT1T2_specialized_f4750442fb4f013eff7e56a40d604da1
++  (_root_.chelis_ir.with_bump.closure_1
++  coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  call_once :=
++    _root_.chelis_ir.with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1.call_once
++    coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++}
++
++/-- [chelis_ir::with_bump::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 85:8-90:9 -/
++@[reducible]
++def with_bump.closure {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutCxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::with_bump::closure<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 85:8-90:9 -/
++def
++  with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R)
++  (c : _root_.chelis_ir.with_bump.closure
++  coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++  (tupled_args : _root_.chelis_ir.Cx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.chelis_ir.Cx ×
++    (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
++  := do
++  let i ← tupled_args.depth + 1#u32
++  let i1 ← lift (core.num.U32.wrapping_add tupled_args.a 1#u32)
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with depth := tupled_args.depth } :
++      _root_.chelis_ir.Cx → _root_.chelis_ir.Cx)
++  _root_.Aeneas.Std.Result.ok (tupled_args.a,
++    { tupled_args with depth := i, a := i1 }, back)
++
++/-- Trait implementation: [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::with_bump::closure<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 85:8-90:9 -/
++@[reducible]
++def
++  with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  (_root_.chelis_ir.with_bump.closure
++  coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++    coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++}
++
++/-- [chelis_ir::with_bump]:
++    Source: 'tests/src/chelis_ir.rs', lines 82:0-97:1 -/
++def with_bump
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  T1 R) (cx : _root_.chelis_ir.Cx) (body : T1) :
++  _root_.Aeneas.Std.Result (R × _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx
++    → _root_.chelis_ir.Cx))
++  := do
++  let (t, cx1, scoped_back) ←
++    _root_.chelis_ir.lowering_runtime.scoped0CxT0T1T2T3T4_specialized_c8c62050160dfcef86628f67d9cb7a97
++      (_root_.chelis_ir.with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++      coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++      (_root_.chelis_ir.with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1
++      coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
++      coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
++      cx () () body
++  let back :=
++    (fun cx2 =>
++       let c := scoped_back { cx2 with depth := cx1.depth }
++       { c with depth := cx.depth } : _root_.chelis_ir.Cx →
++      _root_.chelis_ir.Cx)
++  _root_.Aeneas.Std.Result.ok (t, cx1, back)
++
++/-- [chelis_ir::struct_state::closure::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 103:50-106:9 -/
++@[reducible]
++def struct_state.closure.closure := _root_.Unit
++
++/-- [chelis_ir::struct_state::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::struct_state::closure::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 103:50-106:9 -/
++def
++  struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++  (c : _root_.chelis_ir.struct_state.closure.closure)
++  (tupled_args : _root_.chelis_ir.Cx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.chelis_ir.Cx ×
++    (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
++  := do
++  let i ← lift (core.num.U64.wrapping_mul tupled_args.b 2#u64)
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with depth := tupled_args.depth } :
++      _root_.chelis_ir.Cx → _root_.chelis_ir.Cx)
++  _root_.Aeneas.Std.Result.ok (tupled_args.depth, { tupled_args with b := i },
++    back)
++
++/-- Trait implementation: [chelis_ir::struct_state::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::struct_state::closure::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 103:50-106:9 -/
++@[reducible]
++def
++  struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  _root_.chelis_ir.struct_state.closure.closure _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++}
++
++/-- [chelis_ir::struct_state::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 102:31-108:5 -/
++@[reducible]
++def struct_state.closure := _root_.Unit
++
++/-- [chelis_ir::struct_state::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u64> for chelis_ir::struct_state::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 102:31-108:5 -/
++def
++  struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++  (c : _root_.chelis_ir.struct_state.closure)
++  (tupled_args : _root_.chelis_ir.Cx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.chelis_ir.Cx ×
++    (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
++  := do
++  let (seen, cx, grow_stack_if_needed_back) ←
++    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_33ec2cf8532db265f4f60a31d41df5ed
++      _root_.chelis_ir.struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++      tupled_args 1#usize 2#usize ()
++  let i ← lift (UScalar.cast .U64 cx.a)
++  let i1 ← i + cx.b
++  let i2 ← lift (UScalar.cast .U64 seen)
++  let i3 ← i1 + i2
++  let back :=
++    (fun tupled_args1 =>
++       let c1 :=
++         grow_stack_if_needed_back { tupled_args1 with depth := cx.depth }
++       { c1 with depth := tupled_args.depth } : _root_.chelis_ir.Cx →
++      _root_.chelis_ir.Cx)
++  _root_.Aeneas.Std.Result.ok (i3, cx, back)
++
++/-- Trait implementation: [chelis_ir::struct_state::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u64> for chelis_ir::struct_state::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 102:31-108:5 -/
++@[reducible]
++def
++  struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0CxT1_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++  _root_.chelis_ir.struct_state.closure _root_.Aeneas.Std.U64 := {
++  call_once :=
++    _root_.chelis_ir.struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
++}
++
++/-- [chelis_ir::struct_state]:
++    Source: 'tests/src/chelis_ir.rs', lines 100:0-110:1
++    Visibility: public -/
++def struct_state
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64)
++  := do
++  let (r, cx, with_bump_back) ←
++    _root_.chelis_ir.with_bump
++      _root_.chelis_ir.struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b
++      { depth := 0#u32, a, b } ()
++  let i ← lift (UScalar.cast .U64 cx.depth)
++  let i1 ← r + i
++  let c := with_bump_back cx
++  _root_.Aeneas.Std.Result.ok (i1, c.a, c.b)
++
++/-- [chelis_ir::tuple_state::closure#2::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 122:66-126:13 -/
++@[reducible]
++def tuple_state.closure_2.closure := _root_.Unit
++
++/-- [chelis_ir::tuple_state::closure#2::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 122:66-126:13 -/
++def
++  tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++  (c : _root_.chelis_ir.tuple_state.closure_2.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
++  := do
++  let (a, b) := tupled_args
++  let b1 ← lift (core.num.U64.wrapping_mul b 3#u64)
++  let a1 ← lift (core.num.U32.wrapping_mul a 2#u32)
++  _root_.Aeneas.Std.Result.ok (a1, (a1, b1), fun tupled_args1 => tupled_args1,
++    fun tupled_args1 => tupled_args1)
++
++/-- Trait implementation: [chelis_ir::tuple_state::closure#2::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 122:66-126:13 -/
++@[reducible]
++def
++  tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  _root_.chelis_ir.tuple_state.closure_2.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++}
++
++/-- [chelis_ir::tuple_state::closure#2]
++    Source: 'tests/src/chelis_ir.rs', lines 121:8-127:9 -/
++@[reducible]
++def tuple_state.closure_2 := _root_.Unit
++
++/-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 121:8-127:9 -/
++def
++  tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++  (c : _root_.chelis_ir.tuple_state.closure_2)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
++  := do
++  let (i, p, grow_stack_if_needed_back, grow_stack_if_needed_back1) ←
++    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_3f7ba04ade003cd97fba0902333447b1
++      _root_.chelis_ir.tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++      tupled_args 1#usize 2#usize ()
++  let (i1, i2) := p
++  let i3 := grow_stack_if_needed_back i1
++  let i4 := grow_stack_if_needed_back1 i2
++  _root_.Aeneas.Std.Result.ok (i, (i3, i4), fun tupled_args1 => tupled_args1,
++    fun tupled_args1 => tupled_args1)
++
++/-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2}]
++    Source: 'tests/src/chelis_ir.rs', lines 121:8-127:9 -/
++@[reducible]
++def
++  tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  _root_.chelis_ir.tuple_state.closure_2 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++}
++
++/-- [chelis_ir::tuple_state::closure#1]
++    Source: 'tests/src/chelis_ir.rs', lines 120:8-120:50 -/
++@[reducible]
++def tuple_state.closure_1 := _root_.Unit
++
++/-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2))), T3), T4><'_, '_, '_, u32, u64, u32, ()> for chelis_ir::tuple_state::closure#1}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 120:8-120:50 -/
++def
++  tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b.call_once
++  (c : _root_.chelis_ir.tuple_state.closure_1)
++  (tupled_args : ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64) ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
++  := do
++  let (p, t) := tupled_args
++  let (i, b) := p
++  let i1 ← lift (UScalar.cast .U64 t)
++  let b1 ← lift (core.num.U64.wrapping_add b i1)
++  _root_.Aeneas.Std.Result.ok ((), (i, b1), fun tupled_args1 => tupled_args1,
++    fun tupled_args1 => tupled_args1)
++
++/-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2))), T3), T4><'_, '_, '_, u32, u64, u32, ()> for chelis_ir::tuple_state::closure#1}]
++    Source: 'tests/src/chelis_ir.rs', lines 120:8-120:50 -/
++@[reducible]
++def
++  tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0PairMut1T1Mut2T2T3T4_specialized_8105c2216879d8d0b41e91e8c5b10a0b
++  _root_.chelis_ir.tuple_state.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 _root_.Unit := {
++  call_once :=
++    _root_.chelis_ir.tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b.call_once
++}
++
++/-- [chelis_ir::tuple_state::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 116:8-119:9 -/
++@[reducible]
++def tuple_state.closure := _root_.Unit
++
++/-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 116:8-119:9 -/
++def
++  tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++  (c : _root_.chelis_ir.tuple_state.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++    × (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
++  := do
++  let (a, i) := tupled_args
++  let a1 ← lift (core.num.U32.wrapping_add a 3#u32)
++  _root_.Aeneas.Std.Result.ok (a1, (a1, i), fun tupled_args1 => tupled_args1,
++    fun tupled_args1 => tupled_args1)
++
++/-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 116:8-119:9 -/
++@[reducible]
++def
++  tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0PairMut1T1Mut2T2T3_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++  _root_.chelis_ir.tuple_state.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U64 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
++}
++
++/-- [chelis_ir::tuple_state]:
++    Source: 'tests/src/chelis_ir.rs', lines 113:0-129:1
++    Visibility: public -/
++def tuple_state
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64)
++  := do
++  let (i, p, scoped_back, scoped_back1) ←
++    _root_.chelis_ir.lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_54b4a0a8ec620ad0bd53cccbc87b9ac1
++      _root_.chelis_ir.tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++      _root_.chelis_ir.tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b
++      _root_.chelis_ir.tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
++      (a, b) () () ()
++  let (i1, i2) := p
++  let a1 := scoped_back i1
++  let b1 := scoped_back1 i2
++  _root_.Aeneas.Std.Result.ok (i, a1, b1)
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#2]
++    Source: 'tests/src/chelis_ir.rs', lines 160:12-160:17 -/
++@[reducible]
++def HostCx.catch_invocation.closure_2 := _root_.Unit
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#2<0>}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 160:12-160:17 -/
++def
++  HostCx.catch_invocation.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32.call_once
++  (c : _root_.chelis_ir.HostCx.catch_invocation.closure_2)
++  (tupled_args : _root_.Option _root_.String) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 2#u32
++
++/-- Trait implementation: [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#2<0>}]
++    Source: 'tests/src/chelis_ir.rs', lines 160:12-160:17 -/
++@[reducible]
++def
++  HostCx.catch_invocation.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.chelis_ir.HostCx.catch_invocation.closure_2 (_root_.Option
++  _root_.String) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.chelis_ir.HostCx.catch_invocation.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#1]
++    Source: 'tests/src/chelis_ir.rs', lines 159:12-159:16 -/
++@[reducible]
++def HostCx.catch_invocation.closure_1 := _root_.Unit
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce<(), u32> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#1<0>}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 159:12-159:16 -/
++def
++  HostCx.catch_invocation.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.chelis_ir.HostCx.catch_invocation.closure_1) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok 1#u32
++
++/-- Trait implementation: [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce<(), u32> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure#1<0>}]
++    Source: 'tests/src/chelis_ir.rs', lines 159:12-159:16 -/
++@[reducible]
++def HostCx.catch_invocation.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.chelis_ir.HostCx.catch_invocation.closure_1 _root_.Unit
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.chelis_ir.HostCx.catch_invocation.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 151:12-158:13 -/
++@[reducible]
++def HostCx.catch_invocation.closure := _root_.Aeneas.Std.U32
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut ((&2 mut (T2), &3 mut (T3)))), T4><'_, '_, '_, '_, chelis_ir::lowering_runtime::LoweringRuntime, chelis_ir::Session, u64, core::result::Result<u32, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure<0>}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 151:12-158:13 -/
++def
++  HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultU32U32_specialized_ebd49ec0b3325f713f29c67874adcf92.call_once
++  (c : _root_.chelis_ir.HostCx.catch_invocation.closure)
++  (tupled_args : (_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime
++  × (_root_.chelis_ir.Session × _root_.Aeneas.Std.U64))) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime ×
++    (_root_.chelis_ir.Session × _root_.Aeneas.Std.U64) ×
++    (_root_.chelis_ir.Session → _root_.chelis_ir.Session) ×
++    (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
++  := do
++  let (tupled_args1, p) := tupled_args
++  let (state, native) := p
++  let i ← lift (UScalar.cast .U64 state.invocation)
++  let native1 ← lift (core.num.U64.wrapping_add native i)
++  if c > 5#u32
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      7#u32, tupled_args1, (state, native1), fun tupled_args2 => tupled_args2,
++      fun tupled_args2 => tupled_args2)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      state.invocation, tupled_args1, (state, native1),
++      fun tupled_args2 => tupled_args2, fun tupled_args2 => tupled_args2)
++
++/-- Trait implementation: [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut ((&2 mut (T2), &3 mut (T3)))), T4><'_, '_, '_, '_, chelis_ir::lowering_runtime::LoweringRuntime, chelis_ir::Session, u64, core::result::Result<u32, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure<0>}]
++    Source: 'tests/src/chelis_ir.rs', lines 151:12-158:13 -/
++@[reducible]
++def
++  HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultU32U32_specialized_ebd49ec0b3325f713f29c67874adcf92
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0T1Mut1PairMut2T2Mut3T3T4_specialized_ebd49ec0b3325f713f29c67874adcf92
++  _root_.chelis_ir.HostCx.catch_invocation.closure
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime
++  _root_.chelis_ir.Session _root_.Aeneas.Std.U64
++  (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    _root_.chelis_ir.HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultU32U32_specialized_ebd49ec0b3325f713f29c67874adcf92.call_once
++}
++
++/-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation]:
++    Source: 'tests/src/chelis_ir.rs', lines 147:4-162:5 -/
++def HostCx.catch_invocation
++  (self : _root_.chelis_ir.HostCx) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (r, lr, p, catch_native_unwind_back, catch_native_unwind_back1) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_548c65501b418ac6956b216f2c7b1262
++      core.clone.CloneU32
++      _root_.chelis_ir.HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultU32U32_specialized_ebd49ec0b3325f713f29c67874adcf92
++      _root_.chelis_ir.HostCx.catch_invocation.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
++      _root_.chelis_ir.HostCx.catch_invocation.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32
++      self.runtime (self.state, self.native) self.checked () ()
++  let (s, i) := p
++  let s1 := catch_native_unwind_back s
++  let i1 := catch_native_unwind_back1 i
++  let back :=
++    (fun self1 => { self1 with checked := self.checked } :
++      _root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (r,
++    { self with state := s1, runtime := lr, native := i1 }, back)
++
++/-- [chelis_ir::with_invocation::closure#1]
++    Source: 'tests/src/chelis_ir.rs', lines 170:8-170:53 -/
++@[reducible]
++def with_invocation.closure_1 {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_invocation::closure#1<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 170:8-170:53 -/
++def
++  with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R)
++  (c : _root_.chelis_ir.with_invocation.closure_1
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  (tupled_args : (_root_.chelis_ir.HostCx × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (hc, previous) := tupled_args
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with checked := hc.checked } :
++      _root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok ((),
++    { hc with state := { hc.state with invocation := previous } }, back)
++
++/-- Trait implementation: [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_invocation::closure#1<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 170:8-170:53 -/
++@[reducible]
++def
++  with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0HostCxT1T2_specialized_64d5935a70d0f55ff5526f41ca0be613
++  (_root_.chelis_ir.with_invocation.closure_1
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  call_once :=
++    _root_.chelis_ir.with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
++    coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++}
++
++/-- [chelis_ir::with_invocation::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 169:8-169:59 -/
++@[reducible]
++def with_invocation.closure {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u32> for chelis_ir::with_invocation::closure<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 169:8-169:59 -/
++def
++  with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R)
++  (c : _root_.chelis_ir.with_invocation.closure
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  (tupled_args : _root_.chelis_ir.HostCx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (i, i1) :=
++    _root_.Aeneas.Std.core.mem.replace tupled_args.state.invocation 0#u32
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with checked := tupled_args.checked } :
++      _root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (i,
++    { tupled_args with state := { tupled_args.state with invocation := i1 } },
++    back)
++
++/-- Trait implementation: [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u32> for chelis_ir::with_invocation::closure<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 169:8-169:59 -/
++@[reducible]
++def
++  with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  (_root_.chelis_ir.with_invocation.closure
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    _root_.chelis_ir.with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++    coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++}
++
++/-- [chelis_ir::with_invocation]:
++    Source: 'tests/src/chelis_ir.rs', lines 166:0-173:1 -/
++def with_invocation
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) (cx : _root_.chelis_ir.HostCx) (body : T1) :
++  _root_.Aeneas.Std.Result (R × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (t, cx1, scoped_back) ←
++    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_9077cbd83fddedb40fbeb2c0e1d38c35
++      (_root_.chelis_ir.with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++      (_root_.chelis_ir.with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++      cx () () body
++  let back :=
++    (fun cx2 =>
++       let hc := scoped_back { cx2 with checked := cx1.checked }
++       { hc with checked := cx.checked } : _root_.chelis_ir.HostCx →
++      _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (t, cx1, back)
++
++/-- [chelis_ir::with_probe::closure#1]
++    Source: 'tests/src/chelis_ir.rs', lines 177:34-177:72 -/
++@[reducible]
++def with_probe.closure_1 {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u64, ()> for chelis_ir::with_probe::closure#1<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 177:34-177:72 -/
++def
++  with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R)
++  (c : _root_.chelis_ir.with_probe.closure_1
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  (tupled_args : (_root_.chelis_ir.HostCx × _root_.Aeneas.Std.U64)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (hc, snapshot) := tupled_args
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with checked := hc.checked } :
++      _root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok ((),
++    { hc with state := { hc.state with log := snapshot } }, back)
++
++/-- Trait implementation: [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u64, ()> for chelis_ir::with_probe::closure#1<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 177:34-177:72 -/
++@[reducible]
++def
++  with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0HostCxT1T2_specialized_64d5935a70d0f55ff5526f41ca0be613
++  (_root_.chelis_ir.with_probe.closure_1
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  _root_.Aeneas.Std.U64 _root_.Unit := {
++  call_once :=
++    _root_.chelis_ir.with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
++    coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++}
++
++/-- [chelis_ir::with_probe::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 177:15-177:32 -/
++@[reducible]
++def with_probe.closure {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :=
++_root_.Unit
++
++/-- [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u64> for chelis_ir::with_probe::closure<R, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 177:15-177:32 -/
++def
++  with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R)
++  (c : _root_.chelis_ir.with_probe.closure
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  (tupled_args : _root_.chelis_ir.HostCx) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let back :=
++    (fun tupled_args1 => { tupled_args1 with checked := tupled_args.checked } :
++      _root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (tupled_args.state.log, tupled_args, back)
++
++/-- Trait implementation: [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u64> for chelis_ir::with_probe::closure<R, T1>[TraitClause@0]}]
++    Source: 'tests/src/chelis_ir.rs', lines 177:15-177:32 -/
++@[reducible]
++def
++  with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  (_root_.chelis_ir.with_probe.closure
++  coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++  _root_.Aeneas.Std.U64 := {
++  call_once :=
++    _root_.chelis_ir.with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++    coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++}
++
++/-- [chelis_ir::with_probe]:
++    Source: 'tests/src/chelis_ir.rs', lines 176:0-178:1 -/
++def with_probe
++  {R : Type} {T1 : Type}
++  (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  T1 R) (cx : _root_.chelis_ir.HostCx) (body : T1) :
++  _root_.Aeneas.Std.Result (R × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let (t, cx1, scoped_back) ←
++    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_9077cbd83fddedb40fbeb2c0e1d38c35
++      (_root_.chelis_ir.with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++      (_root_.chelis_ir.with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
++      coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
++      cx () () body
++  let back :=
++    (fun cx2 =>
++       let hc := scoped_back { cx2 with checked := cx1.checked }
++       { hc with checked := cx.checked } : _root_.chelis_ir.HostCx →
++      _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (t, cx1, back)
++
++/-- [chelis_ir::host_scenario::closure::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 195:23-199:9 -/
++@[reducible]
++def host_scenario.closure.closure := _root_.Unit
++
++/-- [chelis_ir::host_scenario::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 195:23-199:9 -/
++def
++  host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++  (c : _root_.chelis_ir.host_scenario.closure.closure)
++  (tupled_args : _root_.chelis_ir.HostCx) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let i ← lift (core.num.U64.wrapping_mul tupled_args.state.log 3#u64)
++  let i1 ← lift (core.num.U64.wrapping_add tupled_args.native 1#u64)
++  let (r, tupled_args1, catch_invocation_back) ←
++    _root_.chelis_ir.HostCx.catch_invocation
++      {
++        tupled_args
++          with
++          state := { tupled_args.state with log := i }, native := i1
++      }
++  let back :=
++    (fun tupled_args2 =>
++       let hc :=
++         catch_invocation_back
++           { tupled_args2 with checked := tupled_args1.checked }
++       { hc with checked := tupled_args.checked } : _root_.chelis_ir.HostCx →
++      _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (r, tupled_args1, back)
++
++/-- Trait implementation: [chelis_ir::host_scenario::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 195:23-199:9 -/
++@[reducible]
++def
++  host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  _root_.chelis_ir.host_scenario.closure.closure
++  (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    _root_.chelis_ir.host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++}
++
++/-- [chelis_ir::host_scenario::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 193:37-200:5 -/
++@[reducible]
++def host_scenario.closure := _root_.Unit
++
++/-- [chelis_ir::host_scenario::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 193:37-200:5 -/
++def
++  host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++  (c : _root_.chelis_ir.host_scenario.closure)
++  (tupled_args : _root_.chelis_ir.HostCx) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.chelis_ir.HostCx ×
++    (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
++  := do
++  let i ←
++    lift (core.num.U32.wrapping_add tupled_args.state.invocation
++      tupled_args.checked)
++  let (r, tupled_args1, with_probe_back) ←
++    _root_.chelis_ir.with_probe
++      _root_.chelis_ir.host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++      { tupled_args with state := { tupled_args.state with invocation := i } }
++      ()
++  let back :=
++    (fun tupled_args2 =>
++       let hc :=
++         with_probe_back { tupled_args2 with checked := tupled_args1.checked }
++       { hc with checked := tupled_args.checked } : _root_.chelis_ir.HostCx →
++      _root_.chelis_ir.HostCx)
++  _root_.Aeneas.Std.Result.ok (r, tupled_args1, back)
++
++/-- Trait implementation: [chelis_ir::host_scenario::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 193:37-200:5 -/
++@[reducible]
++def
++  host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  :
++  _root_.chelis_ir.core.ops.function.FnOnceT0TupleMut0HostCxT1_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++  _root_.chelis_ir.host_scenario.closure (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  call_once :=
++    _root_.chelis_ir.host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
++}
++
++/-- [chelis_ir::host_scenario]:
++    Source: 'tests/src/chelis_ir.rs', lines 181:0-203:1
++    Visibility: public -/
++def host_scenario
++  (checked : _root_.Aeneas.Std.U32) (state : _root_.chelis_ir.Session)
++  (runtime : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  (native : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.chelis_ir.Session ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime ×
++    _root_.Aeneas.Std.U64)
++  := do
++  let (r, cx, with_invocation_back) ←
++    _root_.chelis_ir.with_invocation
++      _root_.chelis_ir.host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
++      { checked, state, runtime, native } ()
++  let i ← lift (core.num.U64.wrapping_add cx.state.log 1#u64)
++  let hc :=
++    with_invocation_back { cx with state := { cx.state with log := i } }
++  _root_.Aeneas.Std.Result.ok (r, hc.state, hc.runtime, hc.native)
++
++end chelis_ir
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index b4f7641..01c5451 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -124,6 +124,7 @@ package «tests» {}
+ @[default_target] lean_lib SharedObservationConsumed
+ @[default_target] lean_lib SharedPayloadMutJoin
+ @[default_target] lean_lib SharedReborrowInnerShared
++@[default_target] lean_lib ShellBorrowingStates
+ @[default_target] lean_lib SliceElementRegions
+ @[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
+diff --git a/tests/src/chelis_ir.rs b/tests/src/chelis_ir.rs
+new file mode 100644
+index 0000000..ae822cf
+--- /dev/null
++++ b/tests/src/chelis_ir.rs
+@@ -0,0 +1,241 @@
++//@ [!lean] skip
++//@ [lean] subdir=ShellBorrowingStates
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --opaque-hard=chelis_ir::lowering_runtime::scoped --opaque-hard=chelis_ir::lowering_runtime::grow_stack_if_needed --opaque-hard=chelis_ir::lowering_runtime::LoweringRuntime --opaque-hard=chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The native shell primitives of `chelis_ir::lowering_runtime` (models in
++//! `Aeneas/Std/ChelisNative.lean`; this crate is named `chelis_ir` so that the
++//! models apply) threading a state which holds mutable borrows: a context
++//! struct with `&mut` fields, as `chelis_ir::host::HostCx`, and tuples of
++//! `&mut`. Charon's `--monomorphize-mut` makes partial-monomorphization
++//! instances such as `scoped::<'_, HostCx<'_>, ..>`, whose ABI has a backward
++//! function for the inner region of the state. The models are parametric in
++//! the state, so the instances are the models at the state extended with this
++//! backward function, which the closure dictionaries compose call after call
++//! (see `ModelStateABI.threaded_fun_instance`).
++//! `ShellBorrowingStates/Checks.lean` evaluates the models on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub mod lowering_runtime {
++    use std::marker::PhantomData;
++
++    /// Primitive (hard-opaque). Model: `let t := enter s; let r := body s;
++    /// exit s t; r`.
++    pub(crate) fn scoped<S, T, R>(
++        state: &mut S,
++        enter: impl FnOnce(&mut S) -> T,
++        exit: impl FnOnce(&mut S, T),
++        body: impl FnOnce(&mut S) -> R,
++    ) -> R {
++        let token = enter(state);
++        let result = body(state);
++        exit(state, token);
++        result
++    }
++
++    /// Primitive (hard-opaque). Model: `f state`.
++    pub(crate) fn grow_stack_if_needed<S, R>(
++        state: &mut S,
++        red_zone: usize,
++        stack_size: usize,
++        f: impl FnOnce(&mut S) -> R,
++    ) -> R {
++        let _ = (red_zone, stack_size);
++        f(state)
++    }
++
++    /// The lowering runtime handle (hard-opaque).
++    pub struct LoweringRuntime {
++        thread_bound: PhantomData<*const ()>,
++    }
++
++    impl LoweringRuntime {
++        #[cfg(test)]
++        pub(crate) fn for_test() -> Self {
++            Self {
++                thread_bound: PhantomData,
++            }
++        }
++
++        /// Primitive (hard-opaque). Model: `f self state` with quiet output.
++        pub(crate) fn catch_native_unwind<S, T, D: Clone + 'static>(
++            &mut self,
++            state: &mut S,
++            f: impl FnOnce(&mut Self, &mut S) -> Result<T, D>,
++            marker: impl FnOnce() -> D,
++            message: impl FnOnce(Option<String>) -> D,
++        ) -> Result<T, D> {
++            let _ = (marker, message);
++            f(self, state)
++        }
++    }
++}
++
++use lowering_runtime::{LoweringRuntime, grow_stack_if_needed, scoped};
++
++/// A struct with an owned field and two `&mut` fields.
++pub struct Cx<'a> {
++    pub depth: u32,
++    pub a: &'a mut u32,
++    pub b: &'a mut u64,
++}
++
++fn with_bump<R>(cx: &mut Cx<'_>, body: impl FnOnce(&mut Cx<'_>) -> R) -> R {
++    scoped(
++        cx,
++        |cx| {
++            cx.depth += 1;
++            let old = *cx.a;
++            *cx.a = old.wrapping_add(1);
++            old
++        },
++        |cx, old| {
++            cx.depth -= 1;
++            *cx.b = cx.b.wrapping_add(old as u64);
++        },
++        body,
++    )
++}
++
++/// `scoped` and `grow_stack_if_needed` at a struct state.
++pub fn struct_state(a: &mut u32, b: &mut u64) -> u64 {
++    let mut cx = Cx { depth: 0, a, b };
++    let r = with_bump(&mut cx, |cx| {
++        let seen = grow_stack_if_needed(cx, 1, 2, |cx| {
++            *cx.b = cx.b.wrapping_mul(2);
++            cx.depth
++        });
++        *cx.a as u64 + *cx.b + seen as u64
++    });
++    r + cx.depth as u64
++}
++
++/// `scoped` and `grow_stack_if_needed` at tuple states.
++pub fn tuple_state(a: &mut u32, b: &mut u64) -> u32 {
++    scoped(
++        &mut (&mut *a, &mut *b),
++        |(a, _)| {
++            **a = a.wrapping_add(3);
++            **a
++        },
++        |(_, b), t| **b = b.wrapping_add(t as u64),
++        |(a, b)| {
++            grow_stack_if_needed(&mut (&mut **a, &mut **b), 1, 2, |(a, b)| {
++                **b = b.wrapping_mul(3);
++                **a = a.wrapping_mul(2);
++                **a
++            })
++        },
++    )
++}
++
++pub struct Session {
++    pub invocation: u32,
++    pub log: u64,
++}
++
++/// `chelis_ir::host::HostCx`: a shared and three mutable borrows.
++pub struct HostCx<'a> {
++    pub checked: &'a u32,
++    pub state: &'a mut Session,
++    pub runtime: &'a mut LoweringRuntime,
++    pub native: &'a mut u64,
++}
++
++impl HostCx<'_> {
++    /// `HostCx::catch_lowering`: the session and the native services are the
++    /// catch's explicit state (a tuple of `&mut`).
++    fn catch_invocation(&mut self) -> Result<u32, u32> {
++        let checked = *self.checked;
++        self.runtime.catch_native_unwind(
++            &mut (&mut *self.state, &mut *self.native),
++            move |_, (state, native)| {
++                **native = native.wrapping_add(state.invocation as u64);
++                if checked > 5 {
++                    Err(7)
++                } else {
++                    Ok(state.invocation)
++                }
++            },
++            || 1,
++            |_| 2,
++        )
++    }
++}
++
++/// `with_host_invocation`: a fresh invocation, restored on exit.
++fn with_invocation<R>(cx: &mut HostCx<'_>, body: impl FnOnce(&mut HostCx<'_>) -> R) -> R {
++    scoped(
++        cx,
++        |cx| std::mem::replace(&mut cx.state.invocation, 0),
++        |cx, previous| cx.state.invocation = previous,
++        body,
++    )
++}
++
++/// `with_mono_probe`: the log is rolled back on exit.
++fn with_probe<R>(cx: &mut HostCx<'_>, body: impl FnOnce(&mut HostCx<'_>) -> R) -> R {
++    scoped(cx, |cx| cx.state.log, |cx, snapshot| cx.state.log = snapshot, body)
++}
++
++/// The scopes and the catch of host lowering, nested.
++pub fn host_scenario(
++    checked: &u32,
++    state: &mut Session,
++    runtime: &mut LoweringRuntime,
++    native: &mut u64,
++) -> Result<u32, u32> {
++    let mut cx = HostCx {
++        checked,
++        state,
++        runtime,
++        native,
++    };
++    let r = with_invocation(&mut cx, |cx| {
++        cx.state.invocation = cx.state.invocation.wrapping_add(*cx.checked);
++        with_probe(cx, |cx| {
++            cx.state.log = cx.state.log.wrapping_mul(3);
++            *cx.native = cx.native.wrapping_add(1);
++            cx.catch_invocation()
++        })
++    });
++    cx.state.log = cx.state.log.wrapping_add(1);
++    r
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn struct_state_threads_both_borrows() {
++        let (mut a, mut b) = (4, 3);
++        assert_eq!(struct_state(&mut a, &mut b), 12);
++        assert_eq!((a, b), (5, 10));
++        let (mut a, mut b) = (u32::MAX, u64::MAX);
++        assert_eq!(struct_state(&mut a, &mut b), u64::MAX);
++        assert_eq!((a, b), (0, 4294967293));
++    }
++
++    #[test]
++    fn tuple_state_threads_both_borrows() {
++        let (mut a, mut b) = (4, 3);
++        assert_eq!(tuple_state(&mut a, &mut b), 14);
++        assert_eq!((a, b), (14, 16));
++        let (mut a, mut b) = (u32::MAX, 1);
++        assert_eq!(tuple_state(&mut a, &mut b), 4);
++        assert_eq!((a, b), (4, 5));
++    }
++
++    #[test]
++    fn host_scenario_restores_the_session() {
++        let mut runtime = LoweringRuntime::for_test();
++        let mut state = Session { invocation: 9, log: 4 };
++        let mut native = 10;
++        assert_eq!(host_scenario(&3, &mut state, &mut runtime, &mut native), Ok(3));
++        assert_eq!((state.invocation, state.log, native), (9, 5, 14));
++        let mut state = Session { invocation: 9, log: 4 };
++        let mut native = 10;
++        assert_eq!(host_scenario(&6, &mut state, &mut runtime, &mut native), Err(7));
++        assert_eq!((state.invocation, state.log, native), (9, 5, 17));
++    }
++}

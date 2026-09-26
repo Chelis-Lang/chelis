@@ -1,0 +1,361 @@
+# charon integration step 31 after 546078ea5d: commit b4ecd728011cb4488f4477a39afc7e37bfddc150
+# first parent 2eb221b25a42d74b46a0c3fbd202fb8609cb86cc
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: intern names in deduplicated files
+#
+# Every item name was written twice: in the item_names table and in the item's ItemMeta (chelis-deep:
+# 26 MB of item_names, a seventh of the file, mostly the generic arguments of Instantiated path
+# elements of monomorphized copies). When values are deduplicated, names are now interned like spans:
+# the first occurrence of each distinct name is {"Def": [id, path]}, later ones are the id alone.
+# item_names comes first, so item metas refer to its names by id. Rust deserialization and charon-ml
+# give back the same names; no field or type changes.
+#
+# The span table of the dedup state becomes a generic Interner used for spans and names; generate-ml
+# decodes names with a hand-written interned_name_of_json and treats names as order-dependent values
+# in opaque fields.
+
+diff --git a/src/ast/hash_cons.rs b/src/ast/hash_cons.rs
+index 7f8c9f9..88477ab 100644
+--- a/src/ast/hash_cons.rs
++++ b/src/ast/hash_cons.rs
+@@ -209,19 +209,21 @@ where
+ /// the first time it comes up, and use ids only subsequent times. This relies on the fact that
+ /// `derive(Serialize, Deserialize)` traverse the value in the same order.
+ ///
+-/// The same state also interns [`Span`](crate::ast::Span)s, with the same order-dependent scheme
+-/// (see the serialization of `Span`).
++/// The same state also interns [`Span`](crate::ast::Span)s and the paths of
++/// [`Name`](crate::ast::Name)s, with the same order-dependent scheme (see their serialization).
+ pub use serialize::{HashConsDedupSerializer, HashConsSerializerState};
+ mod serialize {
+     use indexmap::IndexMap as SeqHashMap;
+     use serde::{Deserialize, Serialize};
+     use serde_state::{DeserializeState, SerializeState};
+     use std::any::type_name;
++    use std::borrow::Borrow;
+     use std::cell::RefCell;
+     use std::collections::{HashMap, HashSet};
++    use std::hash::Hash;
+ 
+     use super::{HashConsId, HashConsable, HashConsed};
+-    use crate::ast::Span;
++    use crate::ast::{PathElem, Span};
+     use crate::common::type_map::{Mappable, Mapper, TypeMap};
+ 
+     pub trait HashConsSerializerState: Sized {
+@@ -241,6 +243,12 @@ mod serialize {
+         fn record_deserialized_span(&self, id: usize, span: Span) -> bool;
+         /// Find the previously-deserialized span with that id.
+         fn get_deserialized_span(&self, id: usize) -> Option<Span>;
++        /// Like `record_serialized_span`, for the path of a name.
++        fn record_serialized_name(&self, path: &[PathElem]) -> Option<(usize, bool)>;
++        /// Like `record_deserialized_span`, for the path of a name.
++        fn record_deserialized_name(&self, id: usize, path: &[PathElem]) -> bool;
++        /// Like `get_deserialized_span`, for the path of a name.
++        fn get_deserialized_name(&self, id: usize) -> Option<Vec<PathElem>>;
+     }
+ 
+     impl HashConsSerializerState for () {
+@@ -260,6 +268,56 @@ mod serialize {
+         fn get_deserialized_span(&self, _id: usize) -> Option<Span> {
+             None
+         }
++        fn record_serialized_name(&self, _path: &[PathElem]) -> Option<(usize, bool)> {
++            None
++        }
++        fn record_deserialized_name(&self, _id: usize, _path: &[PathElem]) -> bool {
++            false
++        }
++        fn get_deserialized_name(&self, _id: usize) -> Option<Vec<PathElem>> {
++            None
++        }
++    }
++
++    /// Interned values: their ids when serializing, the values by id when deserializing. Ids are
++    /// consecutive from 0 in serialization order.
++    struct Interner<K> {
++        ids: HashMap<K, usize>,
++        values: Vec<K>,
++    }
++
++    impl<K> Default for Interner<K> {
++        fn default() -> Self {
++            Interner {
++                ids: HashMap::new(),
++                values: Vec::new(),
++            }
++        }
++    }
++
++    impl<K: Hash + Eq> Interner<K> {
++        /// The id of this value, and whether it was newly recorded.
++        fn serialized<Q>(&mut self, value: &Q) -> (usize, bool)
++        where
++            K: Borrow<Q>,
++            Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
++        {
++            if let Some(&id) = self.ids.get(value) {
++                return (id, false);
++            }
++            let id = self.ids.len();
++            self.ids.insert(value.to_owned(), id);
++            (id, true)
++        }
++
++        /// Record the value deserialized with this id; `false` unless it is the next id.
++        fn deserialized(&mut self, id: usize, value: K) -> bool {
++            let expected = id == self.values.len();
++            if expected {
++                self.values.push(value);
++            }
++            expected
++        }
+     }
+ 
+     struct SerializeTableMapper;
+@@ -276,10 +334,8 @@ mod serialize {
+         ser: RefCell<TypeMap<SerializeTableMapper>>,
+         // Table used for deserialization.
+         de: RefCell<TypeMap<DeserializeTableMapper>>,
+-        // Span ids, for serialization.
+-        ser_spans: RefCell<HashMap<Span, usize>>,
+-        // Spans indexed by id, for deserialization.
+-        de_spans: RefCell<Vec<Span>>,
++        spans: RefCell<Interner<Span>>,
++        names: RefCell<Interner<Vec<PathElem>>>,
+     }
+     impl HashConsSerializerState for HashConsDedupSerializer {
+         fn record_serialized<T: Mappable>(&self, id: HashConsId) -> Option<bool> {
+@@ -296,21 +352,22 @@ mod serialize {
+                 .cloned()
+         }
+         fn record_serialized_span(&self, span: Span) -> Option<(usize, bool)> {
+-            let mut spans = self.ser_spans.borrow_mut();
+-            let next_id = spans.len();
+-            let id = *spans.entry(span).or_insert(next_id);
+-            Some((id, id == next_id))
++            Some(self.spans.borrow_mut().serialized(&span))
+         }
+         fn record_deserialized_span(&self, id: usize, span: Span) -> bool {
+-            let mut spans = self.de_spans.borrow_mut();
+-            let expected = id == spans.len();
+-            if expected {
+-                spans.push(span);
+-            }
+-            expected
++            self.spans.borrow_mut().deserialized(id, span)
+         }
+         fn get_deserialized_span(&self, id: usize) -> Option<Span> {
+-            self.de_spans.borrow().get(id).copied()
++            self.spans.borrow().values.get(id).copied()
++        }
++        fn record_serialized_name(&self, path: &[PathElem]) -> Option<(usize, bool)> {
++            Some(self.names.borrow_mut().serialized(path))
++        }
++        fn record_deserialized_name(&self, id: usize, path: &[PathElem]) -> bool {
++            self.names.borrow_mut().deserialized(id, path.to_vec())
++        }
++        fn get_deserialized_name(&self, id: usize) -> Option<Vec<PathElem>> {
++            self.names.borrow().values.get(id).cloned()
+         }
+     }
+ 
+diff --git a/src/ast/names.rs b/src/ast/names.rs
+index df956f2..b9ad4e4 100644
+--- a/src/ast/names.rs
++++ b/src/ast/names.rs
+@@ -86,10 +86,102 @@ pub enum ImplElem {
+ /// name clashes anyway. Still, we might want to be more precise in the future.
+ ///
+ /// Also note that the first path element in the name is always the crate name.
++///
++/// When values are deduplicated (see [HashConsSerializerState]), names are interned like spans:
++/// the first occurrence of each distinct name is written `{"Def": [id, path]}`, later ones are the
++/// id alone. This avoids writing each item name twice, in `item_names` and in the item's
++/// `ItemMeta`.
+ #[derive(
+     Debug, Default, Clone, PartialEq, Eq, Hash, SerializeState, DeserializeState, Drive, DriveMut,
+ )]
+ #[serde(transparent)]
++#[serde_state(state_implements = HashConsSerializerState)]
+ pub struct Name {
++    #[serde(with = "InternedPath")]
+     pub name: Vec<PathElem>,
+ }
++
++/// The (de)serialization of the path of a [Name], see there.
++struct InternedPath;
++
++impl InternedPath {
++    fn serialize_state<S: serde::Serializer, State: HashConsSerializerState>(
++        path: &Vec<PathElem>,
++        state: &State,
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        match state.record_serialized_name(path) {
++            None => path.serialize_state(state, serializer),
++            Some((id, false)) => serializer.serialize_u64(id as u64),
++            Some((id, true)) => serializer.serialize_newtype_variant(
++                "Name",
++                0,
++                "Def",
++                &serde_state::WithState::new((id, path), state),
++            ),
++        }
++    }
++
++    fn deserialize_state<'de, D: serde::Deserializer<'de>, State: HashConsSerializerState>(
++        state: &State,
++        deserializer: D,
++    ) -> Result<Vec<PathElem>, D::Error> {
++        deserializer.deserialize_any(InternedPathVisitor(state))
++    }
++}
++
++struct InternedPathVisitor<'a, State>(&'a State);
++
++/// Deserializes a `T` with the state.
++struct WithStateSeed<'a, T, State>(&'a State, std::marker::PhantomData<T>);
++
++impl<'de, T: DeserializeState<'de, State>, State> serde::de::DeserializeSeed<'de>
++    for WithStateSeed<'_, T, State>
++{
++    type Value = T;
++    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
++        T::deserialize_state(self.0, deserializer)
++    }
++}
++
++impl<'de, State: HashConsSerializerState> serde::de::Visitor<'de> for InternedPathVisitor<'_, State> {
++    type Value = Vec<PathElem>;
++
++    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++        write!(f, "a name: a list of path elements, or an interned name")
++    }
++
++    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
++        let mut path = Vec::new();
++        while let Some(elem) = seq.next_element_seed(WithStateSeed(self.0, Default::default()))? {
++            path.push(elem);
++        }
++        Ok(path)
++    }
++
++    fn visit_u64<E: serde::de::Error>(self, id: u64) -> Result<Self::Value, E> {
++        self.0.get_deserialized_name(id as usize).ok_or_else(|| {
++            E::custom(format!(
++                "unknown name id {id}; there is a serialization/deserialization mismatch"
++            ))
++        })
++    }
++
++    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
++        use serde::de::Error;
++        let Some("Def") = map.next_key::<String>()?.as_deref() else {
++            return Err(A::Error::custom("expected an interned name `{\"Def\": [id, path]}`"));
++        };
++        let (id, path): (usize, Vec<PathElem>) =
++            map.next_value_seed(WithStateSeed(self.0, Default::default()))?;
++        if map.next_key::<String>()?.is_some() {
++            return Err(A::Error::custom("unexpected key in an interned name"));
++        }
++        if !self.0.record_deserialized_name(id, &path) {
++            return Err(A::Error::custom(format!(
++                "unexpected name id {id}; there is a serialization/deserialization mismatch"
++            )));
++        }
++        Ok(path)
++    }
++}
+diff --git a/src/bin/generate-ml/of_json.rs b/src/bin/generate-ml/of_json.rs
+index 2518da2..c99c9ee 100644
+--- a/src/bin/generate-ml/of_json.rs
++++ b/src/bin/generate-ml/of_json.rs
+@@ -72,6 +72,11 @@ const MANUAL_IMPLS: &[(&str, &str)] = &[
+     ),
+     // Hand-written because spans are serialized as arrays of numbers, and interned.
+     ("charon_lib::ast::meta::Span", "span_numbers_of_json ctx json"),
++    // Hand-written because names are interned.
++    (
++        "charon_lib::ast::names::Name",
++        "interned_name_of_json (list_of_json path_elem_of_json) ctx json",
++    ),
+ ];
+ 
+ impl<'a> GenerateCtx<'a> {
+@@ -190,13 +195,17 @@ impl<'a> GenerateCtx<'a> {
+     }
+ 
+     /// Whether values of this type may contain values that are deduplicated in serialization order:
+-    /// hash-consed values (`Ty`, `TraitRef`) and spans. The Rust serializer deduplicates those
++    /// hash-consed values (`Ty`, `TraitRef`), spans and names. The Rust serializer deduplicates those
+     /// across the whole file: the first occurrence carries the value and its key, later occurrences
+     /// only the key. The decoder must therefore visit every such value in serialization order,
+     /// including values of fields that OCaml does not keep.
+     fn may_contain_deduplicated(&self, ty: &Ty) -> bool {
+-        let deduplicated =
+-            ["HashConsed", "charon_lib::ast::meta::Span"].map(|name| self.name_to_type[name].def_id);
++        let deduplicated = [
++            "HashConsed",
++            "charon_lib::ast::meta::Span",
++            "charon_lib::ast::names::Name",
++        ]
++        .map(|name| self.name_to_type[name].def_id);
+         let mut stack = vec![];
+         ty.dyn_visit(|id: &TypeDeclId| stack.push(*id));
+         let mut seen = HashSet::new();
+diff --git a/src/bin/generate-ml/templates/OfJson.ml b/src/bin/generate-ml/templates/OfJson.ml
+index 23e454d..286fa67 100644
+--- a/src/bin/generate-ml/templates/OfJson.ml
++++ b/src/bin/generate-ml/templates/OfJson.ml
+@@ -36,6 +36,7 @@ type of_json_ctx = {
+   ty_hashcons_map : ty HashConsId.Map.t ref;
+   tref_hashcons_map : trait_ref HashConsId.Map.t ref;
+   span_table : (int, span) Hashtbl.t;  (** Interned spans, by id. *)
++  name_table : (int, name) Hashtbl.t;  (** Interned names, by id. *)
+ }
+ 
+ (** A fresh context for decoding one file. The file and hash-consing tables are
+@@ -46,6 +47,7 @@ let fresh_of_json_ctx () : of_json_ctx =
+     ty_hashcons_map = ref HashConsId.Map.empty;
+     tref_hashcons_map = ref HashConsId.Map.empty;
+     span_table = Hashtbl.create 1024;
++    name_table = Hashtbl.create 1024;
+   }
+ 
+ let hash_consed_val_of_json (map : 'a HashConsId.Map.t ref)
+@@ -124,6 +126,33 @@ let span_numbers_of_json (ctx : of_json_ctx) (js : json) : (span, string) result
+         | _ -> span numbers)
+     | _ -> Error "")
+ 
++(** A name is the list of its path elements. In deduplicated files, the first
++    occurrence of each name is [{"Def": [id, path]}] (ids are consecutive from
++    0) and the later occurrences are the id alone. *)
++let interned_name_of_json
++    (path_of_json : of_json_ctx -> json -> (name, string) result)
++    (ctx : of_json_ctx) (js : json) : (name, string) result =
++  combine_error_msgs js __FUNCTION__
++    (match js with
++    | `List _ -> path_of_json ctx js
++    | `Int id -> (
++        match Hashtbl.find_opt ctx.name_table id with
++        | Some name -> Ok name
++        | None ->
++            Error
++              "Name id not found; there is a serialization mismatch between \
++               Rust and OCaml")
++    | `Assoc [ ("Def", `List [ `Int id; path ]) ] ->
++        if id <> Hashtbl.length ctx.name_table then
++          Error
++            "Unexpected name id; there is a serialization mismatch between \
++             Rust and OCaml"
++        else
++          let* name = path_of_json ctx path in
++          Hashtbl.add ctx.name_table id name;
++          Ok name
++    | _ -> Error "")
++
+ let path_buf_of_json = string_of_json
+ 
+ let big_int_of_json _ (js : json) : (big_int, string) result =

@@ -1,0 +1,1077 @@
+# aeneas integration step 24 after cba11f3beb: commit 8fc2977fcce978080f3e00962785dc84408a1dac
+# first parent 869ee0b187158abec4731b4e279265b55d6563b8, merged 1c81c6c37bd97dd993f3c628a2608a690d9654d4
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/enum-expansion'
+
+diff --git a/backends/lean/Aeneas/Std/Slice.lean b/backends/lean/Aeneas/Std/Slice.lean
+index 643033c..9ef7286 100644
+--- a/backends/lean/Aeneas/Std/Slice.lean
++++ b/backends/lean/Aeneas/Std/Slice.lean
+@@ -252,6 +252,24 @@ theorem Slice.subslice_spec {α : Type u} [Inhabited α] (s : Slice α) (r : Ran
+   simp only [List.getElem!_eq_getElem?_getD, getElem!_Nat_eq] at *
+   apply this
+ 
++/-- The shared subslice `s[start..end_]` (builtin `@SliceSubSliceShared`, which
++    Charon generates for range projections such as the rest `rest @ ..` of a
++    slice pattern). As in Rust, the subslice may be empty (`start = end_`). -/
++def Slice.subslice_shared {α : Type u} (s : Slice α) (start end_ : Usize) : Result (Slice α) :=
++  if start.val ≤ end_.val ∧ end_.val ≤ s.length then
++    ok ⟨ s.val.slice start.val end_.val,
++          by
++            have := s.val.slice_length_le start.val end_.val
++            scalar_tac ⟩
++  else
++    fail panic
++
++@[step]
++theorem Slice.subslice_shared_spec {α : Type u} (s : Slice α) (start end_ : Usize)
++  (h0 : start.val ≤ end_.val) (h1 : end_.val ≤ s.val.length) :
++  subslice_shared s start end_ ⦃ ns => ns.val = s.val.slice start.val end_.val ⦄ := by
++  simp_all only [subslice_shared, length, and_self, ite_true, spec_ok]
++
+ def Slice.update_subslice {α : Type u} (s : Slice α) (r : Range Usize) (ss : Slice α) : Result (Slice α) :=
+   -- TODO: not completely sure here
+   if h: r.start.val < r.end.val ∧ r.end.val ≤ s.length ∧ ss.val.length = r.end.val - r.start.val then
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 648ae4d..921b4d1 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -2820,6 +2820,208 @@ let resolve_default_only_dispatch (crate : crate) : crate =
+     in
+     visitor#visit_crate () crate
+ 
++(** Share repeated shared indexings of an unchanged place.
++
++    A slice pattern such as [[A(B(x)), C(y), rest @ ..]] tests the variant of
++    each element, then reads the tested elements again through fresh
++    constant-index projections. Charon lowers every such projection to its own
++    builtin call ([@SliceIndexShared], [@ArrayIndexShared]) on a fresh shared
++    borrow of the indexed place, so the symbolic interpreter sees unrelated
++    element references: projecting through the variant tested on the first
++    reference then requires expanding the second one without branching, which
++    fails ("Not allowed to expand enumerations with several variants").
++
++    A shared indexing is a pure function of the indexed place and the index:
++    while the indexed place, the index and the first result are unchanged, a
++    second shared indexing with the same arguments returns the same element
++    reference (and cannot fail, since the first one did not). Replace it with a
++    copy of the first result, which is the MIR semantics of the projection.
++
++    A result is available in the statements which follow it in its block,
++    including nested blocks, until a statement may write one of the locals it
++    depends on (assignment, move, mutable or raw borrow, storage marker, drop).
++    After a branching, a result survives only if no branch writes those locals;
++    in a loop body, only if the loop body does not write them. *)
++let share_repeated_shared_indexing (_crate : crate) (f : fun_decl) : fun_decl =
++  let rec root (p : place) : LocalId.id option =
++    match p.kind with
++    | PlaceLocal id -> Some id
++    | PlaceProjection (p, _) -> root p
++    | PlaceGlobal _ -> None
++  in
++  (* The locals a statement (with its nested blocks) may write *)
++  let written (st : statement) : LocalId.Set.t =
++    let set = ref LocalId.Set.empty in
++    let add (p : place) =
++      Option.iter (fun id -> set := LocalId.Set.add id !set) (root p)
++    in
++    let visitor =
++      object
++        inherit [_] iter_statement as super
++
++        method! visit_statement env st =
++          (match st.kind with
++          | Assign (p, _) | SetDiscriminant (p, _) | Drop (p, _, _) -> add p
++          | Call call -> add call.dest
++          | StorageLive id | StorageDead id -> set := LocalId.Set.add id !set
++          | _ -> ());
++          super#visit_statement env st
++
++        method! visit_operand env op =
++          (match op with
++          | Move p -> add p
++          | _ -> ());
++          super#visit_operand env op
++
++        method! visit_rvalue env rv =
++          (match rv with
++          | RvRef (_, BShared, _) -> ()
++          | RvRef (p, _, _) | RawPtr (p, _, _) -> add p
++          | _ -> ());
++          super#visit_rvalue env rv
++      end
++    in
++    visitor#visit_statement () st;
++    !set
++  in
++  (* The locals read by an indexing key: the borrow of the indexed place and
++     the index *)
++  let key_locals (rv, idx) : LocalId.Set.t =
++    let set = ref LocalId.Set.empty in
++    let visitor =
++      object
++        inherit [_] iter_statement
++        method! visit_local_id _ id = set := LocalId.Set.add id !set
++      end
++    in
++    visitor#visit_rvalue () rv;
++    visitor#visit_operand () idx;
++    !set
++  in
++  (* An available result: the key (borrow rvalue, builtin, generics, index),
++     its locals, and the local holding the result *)
++  let valid written (key, locals, result) =
++    ignore key;
++    (not (LocalId.Set.mem result written))
++    && LocalId.Set.disjoint locals written
++  in
++  let shared_index (st : statement) =
++    match st.kind with
++    | Call
++        {
++          func =
++            FnOpRegular
++              {
++                kind =
++                  FunId
++                    (FBuiltin
++                       (Index { mutability = RShared; is_range = false; _ } as
++                        builtin));
++                generics;
++              };
++          args = [ Move { kind = PlaceLocal borrow; _ }; idx ];
++          dest = { kind = PlaceLocal result; ty };
++        } -> Some (builtin, generics, borrow, idx, result, ty)
++    | _ -> None
++  in
++  match f.body with
++  | StructuredBody body ->
++      let rec block avail (b : block) : block =
++        let rec go avail (sts : statement list) =
++          match sts with
++          | ({ kind = Assign ({ kind = PlaceLocal borrow; _ }, rv); _ } as st0)
++            :: rest -> (
++              (* The indexing call may follow storage markers *)
++              let rec split lives = function
++                | ({ kind = StorageLive id; _ } as st) :: rest when id <> borrow
++                  -> split (st :: lives) rest
++                | st1 :: rest -> Some (List.rev lives, st1, rest)
++                | [] -> None
++              in
++              match (rv, split [] rest) with
++              | RvRef (_, BShared, _), Some (lives, st1, rest') -> (
++                  match shared_index st1 with
++                  | Some (builtin, generics, borrow', idx, result, ty)
++                    when borrow = borrow' ->
++                      let key = (rv, builtin, generics, idx) in
++                      let written =
++                        List.fold_left
++                          (fun w st -> LocalId.Set.union w (written st))
++                          LocalId.Set.empty
++                          ((st0 :: lives) @ [ st1 ])
++                      in
++                      let avail = List.filter (valid written) avail in
++                      let previous =
++                        List.find_opt (fun (key', _, _) -> key' = key) avail
++                      in
++                      let sts, avail =
++                        match previous with
++                        | Some (_, _, previous) ->
++                            (* The previous result is still valid after these
++                               statements, which write [result] *)
++                            let copy =
++                              {
++                                st1 with
++                                kind =
++                                  Assign
++                                    ( { kind = PlaceLocal result; ty },
++                                      Use
++                                        (Copy { kind = PlaceLocal previous; ty })
++                                    );
++                                comments_before =
++                                  st0.comments_before @ st1.comments_before;
++                              }
++                            in
++                            (lives @ [ copy ], avail)
++                        | None ->
++                            let locals = key_locals (rv, idx) in
++                            ( (st0 :: lives) @ [ st1 ],
++                              (key, locals, result) :: avail )
++                      in
++                      sts @ go avail rest'
++                  | _ -> statement avail st0 rest)
++              | _ -> statement avail st0 rest)
++          | st :: rest -> statement avail st rest
++          | [] -> []
++        and statement avail st rest =
++          let written = written st in
++          let st =
++            match st.kind with
++            | Switch switch ->
++                (* A branch runs from the switch: its scan invalidates the
++                   results it writes from the writing statement on *)
++                let inner = avail in
++                let switch =
++                  match switch with
++                  | If (op, b0, b1) -> If (op, block inner b0, block inner b1)
++                  | SwitchInt (op, ty, branches, otherwise) ->
++                      SwitchInt
++                        ( op,
++                          ty,
++                          List.map (fun (v, b) -> (v, block inner b)) branches,
++                          block inner otherwise )
++                  | Match (p, branches, otherwise) ->
++                      Match
++                        ( p,
++                          List.map (fun (v, b) -> (v, block inner b)) branches,
++                          Option.map (block inner) otherwise )
++                in
++                { st with kind = Switch switch }
++            | Loop b ->
++                (* Every iteration may follow a write of the loop body *)
++                {
++                  st with
++                  kind = Loop (block (List.filter (valid written) avail) b);
++                }
++            | _ -> st
++          in
++          st :: go (List.filter (valid written) avail) rest
++        in
++        { b with statements = go avail b.statements }
++      in
++      { f with body = StructuredBody { body with body = block [] body.body } }
++  | _ -> f
++
+ (** Optimized upstream MIR may use [Copy] at a non-Copy value's last use
+     (including an unconstrained generic parameter). Recover the ownership
+     transfer before symbolic execution. A place must be locally owned, used only
+@@ -3322,6 +3524,7 @@ let apply_passes (crate : crate) : crate =
+       ("erase_body_regions", erase_body_regions);
+       ("remove_unreachable", remove_unreachable);
+       ("update_loop", update_loops);
++      ("share_repeated_shared_indexing", share_repeated_shared_indexing);
+       ("remove_useless_joins", remove_useless_joins);
+       ("recover_last_use_moves", recover_last_use_moves);
+       ("inline_deref_copies", inline_deref_copies);
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index f948002..95f3198 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -620,13 +620,17 @@ let extract_binop (span : Meta.span) (ctx : extraction_ctx)
+   | HOL4, (Eq _ | Ne _)
+   | (FStar | Coq | Lean), (Eq _ | Lt _ | Le _ | Ne _ | Ge _ | Gt _ | BoolOr)
+   | ( Lean,
+-      ( Div (OPanic, _)
+-      | Rem (OPanic, _)
+-      | Add (OPanic, _)
+-      | Sub (OPanic, _)
+-      | Mul (OPanic, _)
+-      | Shl (OPanic, _, _)
+-      | Shr (OPanic, _, _)
++      (* Overflow in an [OUB] operation (e.g. the [ub.-] Charon emits for the
++         lengths of slice patterns) is undefined behavior: like the
++         [undefined_behavior] assertions, it is modeled by the failing
++         operation. *)
++      ( Div ((OPanic | OUB), _)
++      | Rem ((OPanic | OUB), _)
++      | Add ((OPanic | OUB), _)
++      | Sub ((OPanic | OUB), _)
++      | Mul ((OPanic | OUB), _)
++      | Shl ((OPanic | OUB), _, _)
++      | Shr ((OPanic | OUB), _, _)
+       | BitXor _ | BitOr _ | BitAnd _ ) ) ->
+       let binop_str =
+         match binop with
+@@ -636,13 +640,13 @@ let extract_binop (span : Meta.span) (ctx : extraction_ctx)
+         | Ne _ -> if backend () = Lean then "!=" else "<>"
+         | Ge _ -> ">="
+         | Gt _ -> ">"
+-        | Div (OPanic, _) -> "/"
+-        | Rem (OPanic, _) -> "%"
+-        | Add (OPanic, _) -> "+"
+-        | Sub (OPanic, _) -> "-"
+-        | Mul (OPanic, _) -> "*"
+-        | Shl (OPanic, _, _) -> "<<<"
+-        | Shr (OPanic, _, _) -> ">>>"
++        | Div ((OPanic | OUB), _) -> "/"
++        | Rem ((OPanic | OUB), _) -> "%"
++        | Add ((OPanic | OUB), _) -> "+"
++        | Sub ((OPanic | OUB), _) -> "-"
++        | Mul ((OPanic | OUB), _) -> "*"
++        | Shl ((OPanic | OUB), _, _) -> "<<<"
++        | Shr ((OPanic | OUB), _, _) -> ">>>"
+         | BitXor _ -> "^^^"
+         | BitOr _ -> "|||"
+         | BitAnd _ -> "&&&"
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index 24646eb..03f485c 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -1382,6 +1382,8 @@ let builtin_llbc_functions () : (A.builtin_fun_id * string) list =
+           "Slice.index_usize" );
+         ( Index { is_array = false; mutability = RMut; is_range = false },
+           "Slice.index_mut_usize" );
++        ( Index { is_array = false; mutability = RShared; is_range = true },
++          "Slice.subslice_shared" );
+       ]
+ 
+ let builtin_pure_functions () : (pure_builtin_fun_id * string) list =
+diff --git a/src/interp/InterpExpressions.ml b/src/interp/InterpExpressions.ml
+index 83f91ae..b3dcebe 100644
+--- a/src/interp/InterpExpressions.ml
++++ b/src/interp/InterpExpressions.ml
+@@ -1502,6 +1502,19 @@ let eval_rvalue_not_global (config : config) (span : Meta.span)
+   | Aggregate (aggregate_kind, ops) ->
+       wrap_in_result (eval_rvalue_aggregate config span aggregate_kind ops ctx)
+   | Discriminant p -> wrap_in_result (eval_discriminant config span p ctx)
++  | Len (_, _, Some len) ->
++      (* Arrays: the length is a constant *)
++      wrap_in_result (eval_operand config span (Constant len) ctx)
++  | Len ({ kind = PlaceProjection (r, Deref); _ }, _, None) -> (
++      (* Slice patterns read the length of the matched slice. Behind a shared
++         reference, this is the metadata of the reference. *)
++      match r.ty with
++      | TRef (_, (TSlice _ as ty), RShared) ->
++          let metadata : place =
++            { kind = PlaceProjection (r, PtrMetadata); ty = TPtrMetadata ty }
++          in
++          wrap_in_result (eval_operand config span (Copy metadata) ctx)
++      | _ -> [%craise] span "Unhandled Len")
+   | Len _ -> [%craise] span "Unhandled Len"
+   | _ ->
+       [%craise] span
+diff --git a/src/interp/InterpStatements.ml b/src/interp/InterpStatements.ml
+index 6eebd4e..163fd28 100644
+--- a/src/interp/InterpStatements.ml
++++ b/src/interp/InterpStatements.ml
+@@ -1054,7 +1054,10 @@ and eval_statement_raw (config : config) (st : statement) : stl_cm_fun =
+                  reserved borrow, we later can't translate it to pure values...) *)
+               let cc =
+                 match rvalue with
+-                | Len _ -> [%craise] st.span "Len is not handled yet"
++                | Len _ ->
++                    (* The length is not the value of the measured place *)
++                    let p = S.mk_mplace st.span p ctx in
++                    S.synthesize_assignment ctx p rv None
+                 | Repeat _ ->
+                     [%craise] st.span
+                       "Repeat should have been removed in a micropass"
+diff --git a/src/llbc/Builtin.ml b/src/llbc/Builtin.ml
+index 87280c1..5cd0e08 100644
+--- a/src/llbc/Builtin.ml
++++ b/src/llbc/Builtin.ml
+@@ -162,6 +162,19 @@ module Sig = struct
+     mk_array_slice_borrow_sig cgs input_ty (Some index_ty) output_ty is_mut
+ 
+   let array_index_sig (is_mut : bool) = mk_array_slice_index_sig true is_mut
++
++  (** [fn<'a, T>(&'a [T], usize, usize) -> &'a [T]]: the subslice [from..to] (a
++      range projection, e.g. the rest of a slice pattern). *)
++  let slice_subslice_shared_sig : bound_fun_sig =
++    let generics =
++      mk_generic_params [ region_param_0 ] [ type_param_0 ] [] (* <'a, T> *)
++    in
++    let slice =
++      mk_ref_ty rvar_0 (mk_slice_ty tvar_0) false
++      (* &'a [T] *)
++    in
++    mk_sig generics [ slice; usize_ty; usize_ty ] slice
++
+   let slice_index_sig (is_mut : bool) = mk_array_slice_index_sig false is_mut
+ 
+   let array_to_slice_sig (is_mut : bool) : bound_fun_sig =
+@@ -258,6 +271,10 @@ let raw_builtin_fun_infos : raw_builtin_fun_info list =
+       Sig.slice_index_sig true,
+       true,
+       None );
++    ( Index { is_array = false; mutability = RShared; is_range = true },
++      Sig.slice_subslice_shared_sig,
++      true,
++      None );
+   ]
+ 
+ module OrderedBuiltinFunId :
+diff --git a/tests/lean/SlicePatterns.lean b/tests/lean/SlicePatterns.lean
+new file mode 100644
+index 0000000..3e1fc9c
+--- /dev/null
++++ b/tests/lean/SlicePatterns.lean
+@@ -0,0 +1 @@
++import SlicePatterns.Checks
+diff --git a/tests/lean/SlicePatterns/Checks.lean b/tests/lean/SlicePatterns/Checks.lean
+new file mode 100644
+index 0000000..93b3893
+--- /dev/null
++++ b/tests/lean/SlicePatterns/Checks.lean
+@@ -0,0 +1,53 @@
++import SlicePatterns.SlicePatterns
++
++/-! Evaluate the model of `tests/src/slice-patterns.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++
++namespace slice_patterns.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def tag (t : Nat) : Expr := .Atom (.Tag (u t)) (u 0)
++def nm (n : Nat) : Expr := .Atom (.Name (u n)) (u 0)
++def map (m : Nat) : Expr := .Map (u m) (u 0)
++
++def sl (xs : List Expr) (h : xs.length ≤ Usize.max := by simp; try scalar_tac) : Slice Expr :=
++  ⟨xs, h⟩
++
++def arr (x y z : Expr) : Array Expr 3#usize := ⟨[x, y, z], by simp⟩
++
++def res (r : Result U32) : Option Nat :=
++  match r with
++  | ok v => some v.val
++  | _ => none
++
++-- summaries
++#guard res (summary (sl [tag 3, map 4])) == some 10340
++#guard res (summary (sl [tag 3, map 4, tag 1, nm 2])) == some 10342
++#guard res (summary (sl [nm 5, map 6, map 1])) == some 20561
++#guard res (summary (sl [tag 3])) == some 30001
++#guard res (summary (sl [])) == some 30000
++#guard res (summary (sl [map 1, map 2])) == some 30002
++#guard res (summary (sl [tag 3, nm 4])) == some 30002
++#guard res (summary (sl [.Pair (u 1) (u 2), map 4])) == some 30002
++
++-- first_child_tags
++#guard res (first_child_tag (sl [tag 3, map 4, tag 9])) == some 9
++#guard res (first_child_tag (sl [tag 3, map 4, nm 9])) == some 1
++#guard res (first_child_tag (sl [tag 3, map 4])) == some 1
++#guard res (first_child_tag (sl [nm 3, map 4, tag 9])) == some 0
++
++-- counts
++#guard res (count_tags (sl [tag 1, map 0])) == some 0
++#guard res (count_tags (sl [tag 1, map 0, tag 2, nm 5, tag 3])) == some 5
++#guard res (count_tags (sl [map 0, tag 1, tag 2])) == some 0
++#guard res (count_tags (sl [])) == some 0
++
++-- arrays
++#guard res (array_pattern (arr (.Atom (.Tag (u 2)) (u 3)) (map 4) (tag 0))) == some 9
++#guard res (array_pattern (arr (nm 5) (map 4) (tag 1))) == some 11
++#guard res (array_pattern (arr (nm 5) (map 4) (nm 1))) == some 7
++#guard res (array_pattern (arr (map 5) (map 4) (tag 1))) == some 7
++
++end slice_patterns.checks
+diff --git a/tests/lean/SlicePatterns/SlicePatterns.lean b/tests/lean/SlicePatterns/SlicePatterns.lean
+new file mode 100644
+index 0000000..72f91e5
+--- /dev/null
++++ b/tests/lean/SlicePatterns/SlicePatterns.lean
+@@ -0,0 +1,452 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [slice_patterns]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace slice_patterns
++
++/-- [slice_patterns::Atom]
++    Source: 'src/slice-patterns.rs', lines 11:0-14:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Atom where
++| Tag : _root_.Aeneas.Std.U32 → Atom
++| Name : _root_.Aeneas.Std.U32 → Atom
++
++/-- [slice_patterns::Expr]
++    Source: 'src/slice-patterns.rs', lines 16:0-20:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom : _root_.slice_patterns.Atom → _root_.Aeneas.Std.U32 → Expr
++| Map : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32 → Expr
++| Pair : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32 → Expr
++
++/-- [slice_patterns::Carrier]
++    Source: 'src/slice-patterns.rs', lines 23:0-27:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Carrier where
++| Decoded :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr →
++  Carrier
++| Undecodable :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr →
++  Carrier
++| Malformed : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr → Carrier
++
++/-- [slice_patterns::carrier]:
++    Source: 'src/slice-patterns.rs', lines 31:0-41:1
++    Visibility: public -/
++def carrier
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result _root_.slice_patterns.Carrier
++  := do
++  let elements1 := Slice.len elements
++  if elements1 >= 2#usize
++  then
++    let e ← Slice.index_usize elements 0#usize
++    let joined ←
++      match e with
++      | _root_.slice_patterns.Expr.Atom a _ =>
++        do
++        let e1 ← Slice.index_usize elements 1#usize
++        let joined1 ←
++          match e1 with
++          | _root_.slice_patterns.Expr.Atom _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.slice_patterns.Carrier))
++          | _root_.slice_patterns.Expr.Map m _ =>
++            match a with
++            | _root_.slice_patterns.Atom.Tag tag =>
++              do
++              let i := Slice.len elements
++              let i1 ← i - 0#usize
++              let _ ← i1 - 2#usize
++              let i2 := Slice.len elements
++              let i3 ← i2 - 0#usize
++              let children ← Slice.subslice_shared elements 2#usize i3
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.slice_patterns.Carrier.Decoded tag m children)) :
++                _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Expr _root_.slice_patterns.Carrier))
++            | _root_.slice_patterns.Atom.Name head =>
++              do
++              let i := Slice.len elements
++              let i1 ← i - 0#usize
++              let _ ← i1 - 2#usize
++              let i2 := Slice.len elements
++              let i3 ← i2 - 0#usize
++              let children ← Slice.subslice_shared elements 2#usize i3
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.slice_patterns.Carrier.Undecodable head m children)) :
++                _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Expr _root_.slice_patterns.Carrier))
++          | _root_.slice_patterns.Expr.Pair _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.slice_patterns.Carrier))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++            (_root_.slice_patterns.Carrier.Malformed elements) : _root_.Sum
++            _root_.slice_patterns.Expr _root_.slice_patterns.Carrier)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.slice_patterns.Expr.Map _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr _root_.slice_patterns.Carrier)
++      | _root_.slice_patterns.Expr.Pair _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr _root_.slice_patterns.Carrier)
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.slice_patterns.Carrier.Malformed
++        elements)
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.slice_patterns.Carrier.Malformed
++      elements)
++
++/-- [slice_patterns::summary]:
++    Source: 'src/slice-patterns.rs', lines 44:0-52:1
++    Visibility: public -/
++def summary
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let c ← _root_.slice_patterns.carrier elements
++  match c with
++  | _root_.slice_patterns.Carrier.Decoded tag m children =>
++    let i ← tag * 100#u32
++    let i1 ← 10000#u32 + i
++    let i2 ← m * 10#u32
++    let i3 ← i1 + i2
++    let i4 := _root_.Aeneas.Std.Slice.len children
++    let i5 ← lift (UScalar.cast .U32 i4)
++    i3 + i5
++  | _root_.slice_patterns.Carrier.Undecodable head m children =>
++    let i ← head * 100#u32
++    let i1 ← 20000#u32 + i
++    let i2 ← m * 10#u32
++    let i3 ← i1 + i2
++    let i4 := _root_.Aeneas.Std.Slice.len children
++    let i5 ← lift (UScalar.cast .U32 i4)
++    i3 + i5
++  | _root_.slice_patterns.Carrier.Malformed all =>
++    let i := _root_.Aeneas.Std.Slice.len all
++    let i1 ← lift (UScalar.cast .U32 i)
++    30000#u32 + i1
++
++/-- [slice_patterns::first_child_tag]:
++    Source: 'src/slice-patterns.rs', lines 55:0-63:1
++    Visibility: public -/
++def first_child_tag
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let c ← _root_.slice_patterns.carrier elements
++  let joined ←
++    match c with
++    | _root_.slice_patterns.Carrier.Decoded _ _ children =>
++      let children1 := Slice.len children
++      if children1 >= 1#usize
++      then
++        do
++        let e ← Slice.index_usize children 0#usize
++        let joined1 ←
++          match e with
++          | _root_.slice_patterns.Expr.Atom a _ =>
++            match a with
++            | _root_.slice_patterns.Atom.Tag t =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr t) :
++                _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32))
++            | _root_.slice_patterns.Atom.Name _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                1#u32) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Map _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum
++              _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Pair _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum
++              _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr 1#u32 : _root_.Sum
++            _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr 1#u32 : _root_.Sum
++          _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32)
++    | _root_.slice_patterns.Carrier.Undecodable _ _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32)
++    | _root_.slice_patterns.Carrier.Malformed _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl c : _root_.Sum
++        _root_.slice_patterns.Carrier _root_.Aeneas.Std.U32)
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok 0#u32
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [slice_patterns::count_tags]: loop body 0:
++    Source: 'src/slice-patterns.rs', lines 71:12-76:13
++    Visibility: public -/
++@[rust_loop_body]
++def count_tags_loop.body
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr)
++  (children : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr)
++  (i : _root_.Aeneas.Std.Usize) (i1 : _root_.Aeneas.Std.U32)
++  (i2 : _root_.Aeneas.Std.U32) (i3 : _root_.Aeneas.Std.U32)
++  (i4 : _root_.Aeneas.Std.U32) (count : _root_.Aeneas.Std.U32)
++  (i5 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++    ((_root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) ×
++    (_root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32))
++  := do
++  let i6 := _root_.Aeneas.Std.Slice.len children
++  if i5 < i6
++  then
++    let e ← Slice.index_usize children i5
++    let joined ←
++      match e with
++      | _root_.slice_patterns.Expr.Atom a _ =>
++        do
++        let i7 ←
++          match a with
++          | _root_.slice_patterns.Atom.Tag t => count + t
++          | _root_.slice_patterns.Atom.Name _ =>
++            _root_.Aeneas.Std.Result.ok count
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (i7, e) : _root_.Sum
++          _root_.slice_patterns.Expr (_root_.Aeneas.Std.U32 ×
++          _root_.slice_patterns.Expr))
++      | _root_.slice_patterns.Expr.Map _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr (_root_.Aeneas.Std.U32 ×
++          _root_.slice_patterns.Expr))
++      | _root_.slice_patterns.Expr.Pair _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr (_root_.Aeneas.Std.U32 ×
++          _root_.slice_patterns.Expr))
++    let count1 ←
++      match joined with
++      | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok count
++      | _root_.Sum.inr (exit, _) => _root_.Aeneas.Std.Result.ok exit
++    let i7 ← i5 + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (count1,
++      i7))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (elements,
++      children, count, i5, i, i1, i2, i3, i4))
++
++/-- [slice_patterns::count_tags]: loop 0:
++    Source: 'src/slice-patterns.rs', lines 71:12-76:13
++    Visibility: public -/
++@[rust_loop]
++def count_tags_loop
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr)
++  (children : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr)
++  (count : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize)
++  (i1 : _root_.Aeneas.Std.Usize) (i2 : _root_.Aeneas.Std.U32)
++  (i3 : _root_.Aeneas.Std.U32) (i4 : _root_.Aeneas.Std.U32)
++  (i5 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Slice
++    _root_.slice_patterns.Expr) × (_root_.Aeneas.Std.Slice
++    _root_.slice_patterns.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (count1, i6) => _root_.slice_patterns.count_tags_loop.body elements
++       children i1 i2 i3 i4 i5 count1 i6 : (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.Slice
++      _root_.slice_patterns.Expr) × (_root_.Aeneas.Std.Slice
++      _root_.slice_patterns.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U32)))
++    (count, i)
++
++/-- [slice_patterns::count_tags]:
++    Source: 'src/slice-patterns.rs', lines 66:0-81:1
++    Visibility: public -/
++def count_tags
++  (elements : _root_.Aeneas.Std.Slice _root_.slice_patterns.Expr) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let elements1 := Slice.len elements
++  if elements1 >= 2#usize
++  then
++    let e ← Slice.index_usize elements 0#usize
++    let joined ←
++      match e with
++      | _root_.slice_patterns.Expr.Atom a i =>
++        do
++        let e1 ← Slice.index_usize elements 1#usize
++        let joined1 ←
++          match e1 with
++          | _root_.slice_patterns.Expr.Atom _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Map i1 i2 =>
++            match a with
++            | _root_.slice_patterns.Atom.Tag i3 =>
++              do
++              let i4 := Slice.len elements
++              let i5 ← i4 - 0#usize
++              let i6 ← i5 - 2#usize
++              let i7 := Slice.len elements
++              let i8 ← i7 - 0#usize
++              let children ← Slice.subslice_shared elements 2#usize i8
++              let (_, _, count, _, _, _, _, _, _) ←
++                _root_.slice_patterns.count_tags_loop elements children 0#u32
++                  0#usize i6 i3 i i1 i2
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                count) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Expr _root_.Aeneas.Std.U32))
++            | _root_.slice_patterns.Atom.Name _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                0#u32) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Expr _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Pair _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr 0#u32 : _root_.Sum
++            _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.slice_patterns.Expr.Map _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++      | _root_.slice_patterns.Expr.Pair _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++          _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++    match joined with
++    | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok 0#u32
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok 0#u32
++
++/-- [slice_patterns::array_pattern]:
++    Source: 'src/slice-patterns.rs', lines 84:0-90:1
++    Visibility: public -/
++def array_pattern
++  (a : _root_.Aeneas.Std.Array _root_.slice_patterns.Expr 3#usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let e ← Array.index_usize a 0#usize
++  let joined ←
++    match e with
++    | _root_.slice_patterns.Expr.Atom a1 s =>
++      do
++      let e1 ← Array.index_usize a 1#usize
++      let joined1 ←
++        match e1 with
++        | _root_.slice_patterns.Expr.Atom _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum (_root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++            _root_.Aeneas.Std.U32)) _root_.slice_patterns.Expr))
++        | _root_.slice_patterns.Expr.Map m _ =>
++          match a1 with
++          | _root_.slice_patterns.Atom.Tag t =>
++            do
++            let i ← t + s
++            let i1 ← i + m
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++              (_root_.Sum.inr (_root_.Sum.inr i1))) : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum (_root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32)) _root_.slice_patterns.Expr))
++          | _root_.slice_patterns.Atom.Name _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr e1) :
++              _root_.Sum _root_.slice_patterns.Expr (_root_.Sum (_root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32)) _root_.slice_patterns.Expr))
++        | _root_.slice_patterns.Expr.Pair _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e1 : _root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum (_root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++            _root_.Aeneas.Std.U32)) _root_.slice_patterns.Expr))
++      let joined2 ←
++        match joined1 with
++        | _root_.Sum.inl e2 =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e2 : _root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++            _root_.Aeneas.Std.U32))
++        | _root_.Sum.inr (_root_.Sum.inl exit) =>
++          _root_.Aeneas.Std.Result.ok exit
++        | _root_.Sum.inr (_root_.Sum.inr exit) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++            _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++            _root_.Aeneas.Std.U32))
++      match joined2 with
++      | _root_.Sum.inl _ =>
++        let e2 ← Array.index_usize a 2#usize
++        let joined3 ←
++          match e2 with
++          | _root_.slice_patterns.Expr.Atom a2 _ =>
++            match a1 with
++            | _root_.slice_patterns.Atom.Tag _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                7#u32) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                _root_.slice_patterns.Expr _root_.Aeneas.Std.U32))
++            | _root_.slice_patterns.Atom.Name n =>
++              match a2 with
++              | _root_.slice_patterns.Atom.Tag t =>
++                do
++                let i ← n * 2#u32
++                let i1 ← i + t
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr i1)
++                  : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                  _root_.slice_patterns.Expr _root_.Aeneas.Std.U32))
++              | _root_.slice_patterns.Atom.Name _ =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  7#u32) : _root_.Sum _root_.slice_patterns.Expr (_root_.Sum
++                  _root_.slice_patterns.Expr _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Map _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e2 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32))
++          | _root_.slice_patterns.Expr.Pair _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e2 : _root_.Sum
++              _root_.slice_patterns.Expr (_root_.Sum _root_.slice_patterns.Expr
++              _root_.Aeneas.Std.U32))
++        match joined3 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr 7#u32 : _root_.Sum
++            _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.slice_patterns.Expr.Map _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++        _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++    | _root_.slice_patterns.Expr.Pair _ _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl e : _root_.Sum
++        _root_.slice_patterns.Expr _root_.Aeneas.Std.U32)
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok 7#u32
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++end slice_patterns
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 4ea5e2d..ea78b41 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -72,6 +72,7 @@ package «tests» {}
+ @[default_target] lean_lib Range
+ @[default_target] lean_lib RenameAttribute
+ @[default_target] lean_lib Scalars
++@[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
+ @[default_target] lean_lib Static
+ @[default_target] lean_lib StepBy
+diff --git a/tests/src/slice-patterns.rs b/tests/src/slice-patterns.rs
+new file mode 100644
+index 0000000..767a4fd
+--- /dev/null
++++ b/tests/src/slice-patterns.rs
+@@ -0,0 +1,141 @@
++//@ [!lean] skip
++//@ [lean] subdir=SlicePatterns
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Slice patterns over borrowed slices whose elements are enumerations: the
++//! variants of the matched elements are tested, then the elements (and their
++//! nested fields) are read again, and the rest of the slice is bound.
++//! `SlicePatterns/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub enum Atom {
++    Tag(u32),
++    Name(u32),
++}
++
++pub enum Expr {
++    Atom(Atom, u32),
++    Map(u32, u32),
++    Pair(u32, u32),
++}
++
++/// A view borrowing parts of the matched slice.
++pub enum Carrier<'a> {
++    Decoded(u32, &'a u32, &'a [Expr]),
++    Undecodable(&'a u32, &'a u32, &'a [Expr]),
++    Malformed(&'a [Expr]),
++}
++
++/// The shape of `chelis_deep::ast::Expr::carrier`: nested variants tested on
++/// two elements, the rest bound as a subslice (possibly empty).
++pub fn carrier(elements: &[Expr]) -> Carrier<'_> {
++    match elements {
++        [Expr::Atom(Atom::Tag(tag), _), Expr::Map(m, _), children @ ..] => {
++            Carrier::Decoded(*tag, m, children)
++        }
++        [Expr::Atom(Atom::Name(head), _), Expr::Map(m, _), children @ ..] => {
++            Carrier::Undecodable(head, m, children)
++        }
++        _ => Carrier::Malformed(elements),
++    }
++}
++
++/// A numeric summary of the view, reading through the borrowed parts.
++pub fn summary(elements: &[Expr]) -> u32 {
++    match carrier(elements) {
++        Carrier::Decoded(tag, m, children) => 10000 + tag * 100 + *m * 10 + children.len() as u32,
++        Carrier::Undecodable(head, m, children) => {
++            20000 + *head * 100 + *m * 10 + children.len() as u32
++        }
++        Carrier::Malformed(all) => 30000 + all.len() as u32,
++    }
++}
++
++/// The first element of the rest, when it is a tagged atom.
++pub fn first_child_tag(elements: &[Expr]) -> u32 {
++    match carrier(elements) {
++        Carrier::Decoded(_, _, children) => match children {
++            [Expr::Atom(Atom::Tag(t), _), ..] => *t,
++            _ => 1,
++        },
++        _ => 0,
++    }
++}
++
++/// A loop over the rest of the slice.
++pub fn count_tags(elements: &[Expr]) -> u32 {
++    match elements {
++        [Expr::Atom(Atom::Tag(_), _), Expr::Map(_, _), children @ ..] => {
++            let mut count = 0;
++            let mut i = 0;
++            while i < children.len() {
++                if let Expr::Atom(Atom::Tag(t), _) = &children[i] {
++                    count += *t;
++                }
++                i += 1;
++            }
++            count
++        }
++        _ => 0,
++    }
++}
++
++/// A fixed-size array pattern testing nested variants of two elements.
++pub fn array_pattern(a: &[Expr; 3]) -> u32 {
++    match a {
++        [Expr::Atom(Atom::Tag(t), s), Expr::Map(m, _), _] => *t + *s + *m,
++        [Expr::Atom(Atom::Name(n), _), _, Expr::Atom(Atom::Tag(t), _)] => *n * 2 + *t,
++        _ => 7,
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn tag(t: u32) -> Expr {
++        Expr::Atom(Atom::Tag(t), 0)
++    }
++    fn name(n: u32) -> Expr {
++        Expr::Atom(Atom::Name(n), 0)
++    }
++    fn map(m: u32) -> Expr {
++        Expr::Map(m, 0)
++    }
++
++    #[test]
++    fn summaries() {
++        assert_eq!(summary(&[tag(3), map(4)]), 10340);
++        assert_eq!(summary(&[tag(3), map(4), tag(1), name(2)]), 10342);
++        assert_eq!(summary(&[name(5), map(6), map(1)]), 20561);
++        assert_eq!(summary(&[tag(3)]), 30001);
++        assert_eq!(summary(&[]), 30000);
++        assert_eq!(summary(&[map(1), map(2)]), 30002);
++        assert_eq!(summary(&[tag(3), name(4)]), 30002);
++        assert_eq!(summary(&[Expr::Pair(1, 2), map(4)]), 30002);
++    }
++
++    #[test]
++    fn first_child_tags() {
++        assert_eq!(first_child_tag(&[tag(3), map(4), tag(9)]), 9);
++        assert_eq!(first_child_tag(&[tag(3), map(4), name(9)]), 1);
++        assert_eq!(first_child_tag(&[tag(3), map(4)]), 1);
++        assert_eq!(first_child_tag(&[name(3), map(4), tag(9)]), 0);
++    }
++
++    #[test]
++    fn counts() {
++        assert_eq!(count_tags(&[tag(1), map(0)]), 0);
++        assert_eq!(count_tags(&[tag(1), map(0), tag(2), name(5), tag(3)]), 5);
++        assert_eq!(count_tags(&[map(0), tag(1), tag(2)]), 0);
++        assert_eq!(count_tags(&[]), 0);
++    }
++
++    #[test]
++    fn arrays() {
++        assert_eq!(array_pattern(&[Expr::Atom(Atom::Tag(2), 3), map(4), tag(0)]), 9);
++        assert_eq!(array_pattern(&[name(5), map(4), tag(1)]), 11);
++        assert_eq!(array_pattern(&[name(5), map(4), name(1)]), 7);
++        assert_eq!(array_pattern(&[map(5), map(4), tag(1)]), 7);
++    }
++}

@@ -1,0 +1,937 @@
+# charon integration step 36 after 546078ea5d: commit ac60733caed8178411071c5b4ed88994a657ea7f
+# first parent 5bb203828ea85c38ca598124abaabb68d5cec4b1
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: canonical name patterns and prefix-indexed pattern matching
+#
+# Name patterns can now spell out every item name: `name#N` selects the path element with
+# disambiguator N (closures, `_` items, macro-generated duplicates), the unnamed elements
+# `{vtable}`, `{const}`, ... are identifiers, `@` is a type parameter (so `{impl T for Pair<@>}`
+# differs from `{impl T for Pair<u8>}`), and literal types (`u8`) and tuples (`Tuple<A, B>`, with
+# `Tuple` the unit type) match. `Pattern::canonical_with` renders the most precise pattern for a
+# name, with `#0` where a sibling has the same identifier (`Disambiguation`).
+#
+# `PatternIndex` stores patterns in a trie keyed by path identifiers (impl blocks share one key), so
+# matching a name against thousands of `--opaque`/`--include`/`--exclude` or start-from patterns
+# costs O(name length) plus the candidates, with the same most-precise-wins result. Start-from
+# pattern lists split at commas outside brackets. reorder_decls exposes `item_dependencies`, the
+# per-item edges of the declaration graph.
+
+diff --git a/src/name_matcher/canonical.rs b/src/name_matcher/canonical.rs
+new file mode 100644
+index 0000000..f762604
+--- /dev/null
++++ b/src/name_matcher/canonical.rs
+@@ -0,0 +1,207 @@
++//! Canonical patterns: the most precise pattern the syntax can express for a given item name.
++use std::collections::{HashMap, HashSet};
++
++use super::{PatElem, PatTy, Pattern};
++use crate::ast::*;
++
++/// The path elements whose canonical pattern spells out the disambiguator `#0`: plain `name`
++/// matches every disambiguator, so it would also match a sibling `name#1` (e.g. the `__Field`
++/// enums a derive macro generates in one function). Computed from a set of names.
++#[derive(Debug, Default)]
++pub struct Disambiguation {
++    ambiguous: HashSet<(Vec<PathElem>, String)>,
++}
++
++impl Disambiguation {
++    pub fn new<'a>(names: impl IntoIterator<Item = &'a Name>) -> Self {
++        let mut seen: HashMap<(&'a [PathElem], &'a str), Disambiguator> = HashMap::new();
++        let mut ambiguous = HashSet::new();
++        for name in names {
++            for (i, elem) in name.name.iter().enumerate() {
++                if let PathElem::Ident(ident, d) = elem {
++                    let key = (&name.name[..i], ident.as_str());
++                    match seen.get(&key) {
++                        Some(other) if other != d => {
++                            ambiguous.insert((key.0.to_vec(), key.1.to_owned()));
++                        }
++                        Some(_) => {}
++                        None => {
++                            seen.insert(key, *d);
++                        }
++                    }
++                }
++            }
++        }
++        Self { ambiguous }
++    }
++}
++
++impl Pattern {
++    /// The canonical pattern for this name: every path element spelled out, disambiguators where
++    /// they distinguish siblings, impl blocks with their implemented trait (and its arguments) and
++    /// self type, type parameters as `@`. Type arguments the syntax cannot express (function
++    /// pointers, `dyn`, raw pointers, ...) become `_`, so a canonical pattern may match more than one name;
++    /// callers that need exactness check it against the other names they know.
++    ///
++    /// Returns `None` for names that patterns cannot designate: monomorphized or target-specific
++    /// names, and names containing a trait impl that is not translated.
++    pub fn canonical(ctx: &TranslatedCrate, name: &Name) -> Option<Pattern> {
++        Self::canonical_with(ctx, &Disambiguation::default(), name)
++    }
++
++    /// `canonical`, spelling out `#0` where `disambiguation` says a sibling has the same
++    /// identifier.
++    pub fn canonical_with(
++        ctx: &TranslatedCrate,
++        disambiguation: &Disambiguation,
++        name: &Name,
++    ) -> Option<Pattern> {
++        let cx = Cx {
++            ctx,
++            disambiguation,
++        };
++        let elems = name
++            .name
++            .iter()
++            .enumerate()
++            .map(|(i, elem)| canonical_elem(cx, &name.name[..i], elem))
++            .collect::<Option<Vec<_>>>()?;
++        Some(Pattern { elems })
++    }
++}
++
++#[derive(Clone, Copy)]
++struct Cx<'a> {
++    ctx: &'a TranslatedCrate,
++    disambiguation: &'a Disambiguation,
++}
++
++fn canonical_elem(cx: Cx<'_>, prefix: &[PathElem], elem: &PathElem) -> Option<PatElem> {
++    let ctx = cx.ctx;
++    Some(match elem {
++        PathElem::Ident(name, disambiguator) => {
++            // Closures, anonymous constants and `_` items are numbered among their siblings;
++            // other items only get a nonzero disambiguator when a macro makes names collide.
++            let explicit = *disambiguator != Disambiguator::ZERO
++                || name == "closure"
++                || name == "_"
++                || name.starts_with('{')
++                || cx
++                    .disambiguation
++                    .ambiguous
++                    .contains(&(prefix.to_vec(), name.clone()));
++            PatElem::Ident {
++                name: name.clone(),
++                generics: Vec::new(),
++                is_trait: false,
++                disambiguator: explicit.then_some(*disambiguator),
++            }
++        }
++        PathElem::Impl(ImplElem::Ty(ty)) => {
++            let PatTy::Pat(pat) = canonical_ty(cx, &ty.skip_binder)? else {
++                // Inherent impls on references do not exist.
++                return None;
++            };
++            PatElem::Impl(Box::new(pat))
++        }
++        PathElem::Impl(ImplElem::Trait(impl_id)) => {
++            let timpl = ctx.trait_impls.get(*impl_id)?;
++            let trait_name = ctx.item_name(timpl.impl_trait.id)?;
++            let mut pat = Pattern::canonical_with(ctx, cx.disambiguation, trait_name)?;
++            let generics = canonical_args(cx, &timpl.impl_trait.generics)?;
++            // The first type argument is the self type.
++            if generics.is_empty() {
++                return None;
++            }
++            let Some(PatElem::Ident {
++                generics: last_generics,
++                is_trait,
++                ..
++            }) = pat.elems.last_mut()
++            else {
++                return None;
++            };
++            *last_generics = generics;
++            *is_trait = true;
++            PatElem::Impl(Box::new(pat))
++        }
++        PathElem::Instantiated(_) | PathElem::Target(_) => return None,
++    })
++}
++
++fn glob() -> PatTy {
++    PatTy::Pat(Pattern {
++        elems: vec![PatElem::Glob],
++    })
++}
++
++fn canonical_args(cx: Cx<'_>, args: &GenericArgs) -> Option<Vec<PatTy>> {
++    let mut pats = args
++        .types
++        .iter()
++        .map(|ty| canonical_ty(cx, ty))
++        .collect::<Option<Vec<_>>>()?;
++    // Const generic patterns other than `_` are not supported.
++    pats.extend(args.const_generics.iter().map(|_| glob()));
++    Some(pats)
++}
++
++fn with_generics(mut pat: Pattern, generics: Vec<PatTy>) -> Option<PatTy> {
++    let Some(PatElem::Ident {
++        generics: last_generics,
++        ..
++    }) = pat.elems.last_mut()
++    else {
++        return None;
++    };
++    *last_generics = generics;
++    Some(PatTy::Pat(pat))
++}
++
++fn canonical_ty(cx: Cx<'_>, ty: &Ty) -> Option<PatTy> {
++    let ctx = cx.ctx;
++    let path = |name: &Name| Pattern::canonical_with(ctx, cx.disambiguation, name);
++    Some(match ty.kind() {
++        TyKind::Adt(tref) => match tref.id {
++            TypeId::Adt(id) => {
++                let name = ctx.item_name(id)?;
++                let pat = path(name)?;
++                // A closure type is designated by its path alone: its arguments are those of the
++                // enclosing item.
++                if matches!(name.name.last(), Some(PathElem::Ident(ident, _)) if ident == "closure")
++                {
++                    PatTy::Pat(pat)
++                } else {
++                    with_generics(pat, canonical_args(cx, &tref.generics)?)?
++                }
++            }
++            TypeId::Builtin(builtin) => {
++                let pat = path(&builtin.get_name())?;
++                with_generics(pat, canonical_args(cx, &tref.generics)?)?
++            }
++            TypeId::Tuple => {
++                let pat = path(&Name::from_path(&["Tuple"]))?;
++                with_generics(pat, canonical_args(cx, &tref.generics)?)?
++            }
++        },
++        TyKind::Array(elem, _) => {
++            let pat = path(&Name::from_path(&["Array"]))?;
++            with_generics(pat, vec![canonical_ty(cx, elem)?, glob()])?
++        }
++        TyKind::Slice(elem) => {
++            let pat = path(&Name::from_path(&["Slice"]))?;
++            with_generics(pat, vec![canonical_ty(cx, elem)?])?
++        }
++        TyKind::Ref(_, inner, kind) => PatTy::Ref(*kind, Box::new(canonical_ty(cx, inner)?)),
++        TyKind::Literal(lit) => PatTy::Pat(path(&Name::from_path(&[lit.to_string().as_str()]))?),
++        TyKind::TypeVar(..) => PatTy::Var,
++        TyKind::Never
++        | TyKind::RawPtr(..)
++        | TyKind::TraitType(..)
++        | TyKind::DynTrait(..)
++        | TyKind::FnPtr(..)
++        | TyKind::FnDef(..)
++        | TyKind::PtrMetadata(..)
++        | TyKind::Error(..) => glob(),
++    })
++}
+diff --git a/src/name_matcher/index.rs b/src/name_matcher/index.rs
+new file mode 100644
+index 0000000..bb73535
+--- /dev/null
++++ b/src/name_matcher/index.rs
+@@ -0,0 +1,133 @@
++//! A set of patterns indexed by their path prefixes, to match a name against thousands of
++//! patterns in time proportional to the name's length (plus the patterns that match).
++use std::collections::HashMap;
++
++use super::{PatElem, Pattern};
++use crate::ast::*;
++
++/// A list of patterns with associated values. `matches` returns the same entries, in the same
++/// order, as filtering the list with `Pattern::matches`.
++///
++/// Patterns whose elements are identifiers and impl blocks and that start with an identifier are
++/// stored in a trie keyed by identifier (impl blocks share one key), and are found by walking the
++/// name along the trie. Patterns with globs or starting with an impl block (which match an impl
++/// block anywhere in a name) are few and are tried one by one. Candidates found through the trie
++/// are then matched in full, which checks disambiguators, generics and impl blocks.
++#[derive(Debug, Clone)]
++pub struct PatternIndex<T> {
++    entries: Vec<(Pattern, T)>,
++    trie: TrieNode,
++    unindexed: Vec<usize>,
++}
++
++#[derive(Debug, Clone, Default)]
++struct TrieNode {
++    /// The entries whose pattern ends here.
++    ends: Vec<usize>,
++    idents: HashMap<String, TrieNode>,
++    impls: Option<Box<TrieNode>>,
++}
++
++impl<T> Default for PatternIndex<T> {
++    fn default() -> Self {
++        Self {
++            entries: Vec::new(),
++            trie: TrieNode::default(),
++            unindexed: Vec::new(),
++        }
++    }
++}
++
++impl<T> FromIterator<(Pattern, T)> for PatternIndex<T> {
++    fn from_iter<I: IntoIterator<Item = (Pattern, T)>>(iter: I) -> Self {
++        let mut index = Self::default();
++        for (pat, value) in iter {
++            index.push(pat, value);
++        }
++        index
++    }
++}
++
++impl<T> PatternIndex<T> {
++    pub fn push(&mut self, pat: Pattern, value: T) {
++        let i = self.entries.len();
++        let indexable = matches!(pat.elems.first(), Some(PatElem::Ident { .. }))
++            && pat
++                .elems
++                .iter()
++                .all(|elem| matches!(elem, PatElem::Ident { .. } | PatElem::Impl(_)));
++        if indexable {
++            let mut node = &mut self.trie;
++            for elem in &pat.elems {
++                node = match elem {
++                    PatElem::Ident { name, .. } => node.idents.entry(name.clone()).or_default(),
++                    PatElem::Impl(_) => node.impls.get_or_insert_default(),
++                    PatElem::Glob => unreachable!(),
++                };
++            }
++            node.ends.push(i);
++        } else {
++            self.unindexed.push(i);
++        }
++        self.entries.push((pat, value));
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.entries.is_empty()
++    }
++
++    pub fn len(&self) -> usize {
++        self.entries.len()
++    }
++
++    pub fn iter(&self) -> impl Iterator<Item = &(Pattern, T)> {
++        self.entries.iter()
++    }
++
++    /// The entries whose pattern matches `name` (see `Pattern::matches`), in insertion order.
++    pub fn matches<'a>(
++        &'a self,
++        ctx: &'a TranslatedCrate,
++        name: &'a Name,
++    ) -> impl Iterator<Item = &'a (Pattern, T)> + use<'a, T> {
++        let mut candidates = self.unindexed.clone();
++        // `Pattern::matches` ignores a trailing instantiation.
++        let elems = match name.name.as_slice() {
++            [prefix @ .., PathElem::Instantiated(_)] => prefix,
++            elems => elems,
++        };
++        let mut stack = vec![(&self.trie, 0)];
++        while let Some((node, depth)) = stack.pop() {
++            // A pattern shorter than the name matches it if its elements match.
++            candidates.extend_from_slice(&node.ends);
++            let Some(elem) = elems.get(depth) else {
++                continue;
++            };
++            match elem {
++                PathElem::Ident(ident, _) => {
++                    if let Some(child) = node.idents.get(ident) {
++                        stack.push((child, depth + 1));
++                    }
++                    // `crate` designates the current crate (anywhere, as in `Pattern::matches`).
++                    if *ident == ctx.crate_name
++                        && let Some(child) = node.idents.get("crate")
++                    {
++                        stack.push((child, depth + 1));
++                    }
++                }
++                PathElem::Impl(_) => {
++                    if let Some(child) = &node.impls {
++                        stack.push((child, depth + 1));
++                    }
++                }
++                PathElem::Instantiated(_) | PathElem::Target(_) => {}
++            }
++        }
++        candidates.sort_unstable();
++        candidates.dedup();
++        candidates
++            .into_iter()
++            .map(|i| &self.entries[i])
++            .filter(|(pat, _)| pat.matches(ctx, name))
++    }
++}
+diff --git a/src/name_matcher/mod.rs b/src/name_matcher/mod.rs
+index 9b80034..3124a2f 100644
+--- a/src/name_matcher/mod.rs
++++ b/src/name_matcher/mod.rs
+@@ -5,9 +5,26 @@ use serde::{Deserialize, Serialize};
+ 
+ use crate::{ast::*, formatter::IntoFormatter, pretty::FmtWithCtx};
+ 
++mod canonical;
++mod index;
+ mod parser;
+ 
+ pub use Pattern as NamePattern;
++pub use canonical::Disambiguation;
++pub use index::PatternIndex;
++
++/// The identifiers Charon uses for unnamed path elements (see `path_elem_for_def` and
++/// `name_for_src` in the driver). Patterns spell them as they are, e.g. `Trait::{vtable}`.
++pub const SPECIAL_IDENTS: &[&str] = &[
++    "{use}",
++    "{const}",
++    "{promoted_const}",
++    "{vtable}",
++    "{vtable_method}",
++    "{vtable_drop_shim}",
++    "{vtable_drop_preshim}",
++    "{vtable_method_preshim}",
++];
+ 
+ #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct Pattern {
+@@ -22,6 +39,10 @@ pub enum PatElem {
+         generics: Vec<PatTy>,
+         /// For pretty-printing only: whether this is the name of a trait.
+         is_trait: bool,
++        /// `name#N` only matches the path element with disambiguator `N`; plain `name` matches
++        /// any disambiguator.
++        #[serde(default)]
++        disambiguator: Option<Disambiguator>,
+     },
+     /// An inherent or trait implementation block. For traits, the implemented type is the first
+     /// element of the pattern generics.
+@@ -36,6 +57,9 @@ pub enum PatTy {
+     Pat(Pattern),
+     /// `&T`, `&mut T`
+     Ref(RefKind, Box<Self>),
++    /// `@`: a type parameter of the enclosing item (any of them), e.g. the `T` of
++    /// `impl<T> Trait for Pair<T>`, which `_` would not distinguish from `impl Trait for Pair<u8>`.
++    Var,
+ }
+ 
+ impl Pattern {
+@@ -141,7 +165,25 @@ impl Pattern {
+                         let name = builtin_ty.get_name();
+                         self.matches_with_generics(ctx, &name, Some(args))
+                     }
+-                    TypeId::Tuple => false,
++                    // Tuples are matched as `Tuple<A, B, ..>` (`Tuple` is the unit type): unlike other
++                    // generic types, the arguments must be spelled out.
++                    TypeId::Tuple => match self.elems.as_slice() {
++                        [
++                            PatElem::Ident {
++                                name,
++                                generics,
++                                disambiguator: None,
++                                ..
++                            },
++                        ] if name == "Tuple" => {
++                            generics.len() == args.types.len()
++                                && generics
++                                    .iter()
++                                    .zip(&args.types)
++                                    .all(|(pat, ty)| pat.matches_ty(ctx, ty))
++                        }
++                        _ => false,
++                    },
+                 }
+             }
+             TyKind::Array(ty, len) => {
+@@ -164,8 +206,11 @@ impl Pattern {
+                 };
+                 self.matches_with_generics(ctx, &type_name, Some(&args))
+             }
++            TyKind::Literal(lit) => {
++                let name = Name::from_path(&[lit.to_string().as_str()]);
++                self.matches_with_generics(ctx, &name, Some(&GenericArgs::empty()))
++            }
+             TyKind::TypeVar(..)
+-            | TyKind::Literal(..)
+             | TyKind::Never
+             | TyKind::Ref(..)
+             | TyKind::RawPtr(..)
+@@ -232,14 +277,17 @@ impl PatElem {
+                 PatElem::Ident {
+                     name: pat_ident,
+                     generics,
++                    disambiguator,
+                     ..
+                 },
+-                PathElem::Ident(ident, _),
++                PathElem::Ident(ident, elem_disambiguator),
+             ) => {
+                 // `crate` is a special keyword that referes to the current crate.
+                 let same_ident =
+                     pat_ident == ident || (pat_ident == "crate" && ident == &ctx.crate_name);
+-                same_ident && PatTy::matches_generics(ctx, generics, args)
++                same_ident
++                    && disambiguator.is_none_or(|d| d == *elem_disambiguator)
++                    && PatTy::matches_generics(ctx, generics, args)
+             }
+             (PatElem::Impl(pat), PathElem::Impl(ImplElem::Ty(ty))) => {
+                 pat.matches_ty(ctx, &ty.skip_binder)
+@@ -251,7 +299,13 @@ impl PatElem {
+                 let Some(trait_name) = ctx.item_name(timpl.impl_trait.id) else {
+                     return false;
+                 };
+-                pat.matches_with_generics(ctx, trait_name, Some(&timpl.impl_trait.generics))
++                // After partial monomorphization the trait may be an instance, whose name carries
++                // its arguments; the impl then passes the instance's own parameters.
++                let args = match trait_name.name.last() {
++                    Some(PathElem::Instantiated(_)) => None,
++                    _ => Some(&*timpl.impl_trait.generics),
++                };
++                pat.matches_with_generics(ctx, trait_name, args)
+             }
+             _ => false,
+         }
+@@ -296,6 +350,7 @@ impl PatTy {
+             (PatTy::Ref(pat_mtbl, p_ty), TyKind::Ref(_, ty, ty_mtbl)) => {
+                 pat_mtbl == ty_mtbl && p_ty.matches_ty(ctx, ty)
+             }
++            (PatTy::Var, TyKind::TypeVar(_)) => true,
+             _ => false,
+         }
+     }
+@@ -303,7 +358,7 @@ impl PatTy {
+     pub fn matches_const(&self, ctx: &TranslatedCrate, c: &ConstantExpr) -> bool {
+         match self {
+             PatTy::Pat(p) => p.matches_const(ctx, c),
+-            PatTy::Ref(..) => false,
++            PatTy::Ref(..) | PatTy::Var => false,
+         }
+     }
+ }
+diff --git a/src/name_matcher/parser.rs b/src/name_matcher/parser.rs
+index 1c91243..ec6abb0 100644
+--- a/src/name_matcher/parser.rs
++++ b/src/name_matcher/parser.rs
+@@ -3,7 +3,7 @@ use std::{fmt, str::FromStr};
+ use itertools::Itertools;
+ use nom::{
+     Parser,
+-    bytes::complete::{tag, take_while},
++    bytes::complete::{tag, take_while, take_while1},
+     character::complete::{multispace0, multispace1},
+     combinator::{map_res, success},
+     error::ParseError,
+@@ -12,8 +12,8 @@ use nom::{
+ };
+ use nom_supreme::{ParserExt, error::ErrorTree};
+ 
+-use super::{PatElem, PatTy, Pattern};
+-use crate::ast::RefKind;
++use super::{PatElem, PatTy, Pattern, SPECIAL_IDENTS};
++use crate::ast::{Disambiguator, RefKind};
+ 
+ type ParseResult<'a, T> = nom::IResult<&'a str, T, ErrorTree<&'a str>>;
+ 
+@@ -72,15 +72,57 @@ impl fmt::Debug for Pattern {
+ fn parse_pat_elem(i: &str) -> ParseResult<'_, PatElem> {
+     let parse_glob = tag("*").map(|_| PatElem::Glob);
+     parse_glob
++        .or(parse_special_ident)
+         .or(parse_impl_elem)
+         .or(parse_simple_elem)
+         .parse(i)
+ }
+ 
++/// An optional `#N` suffix that selects the identifier with disambiguator `N`.
++fn parse_disambiguator(i: &str) -> ParseResult<'_, Option<Disambiguator>> {
++    let digits = take_while1(|c: char| c.is_ascii_digit());
++    preceded(
++        tag("#"),
++        map_res(digits, |s: &str| s.parse::<usize>().map(Disambiguator::new)),
++    )
++    .opt()
++    .parse(i)
++}
++
++/// The identifiers Charon gives to unnamed path elements, e.g. `{vtable}`.
++fn parse_special_ident(i: &str) -> ParseResult<'_, PatElem> {
++    let (rest, ident) = delimited(
++        tag("{"),
++        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
++        tag("}"),
++    )
++    .parse(i)?;
++    let name = format!("{{{ident}}}");
++    if !SPECIAL_IDENTS.contains(&name.as_str()) {
++        return Err(nom::Err::Error(ErrorTree::from_error_kind(
++            i,
++            nom::error::ErrorKind::Tag,
++        )));
++    }
++    let (rest, disambiguator) = parse_disambiguator.followed_by(multispace0).parse(rest)?;
++    Ok((
++        rest,
++        PatElem::Ident {
++            name,
++            generics: Vec::new(),
++            is_trait: false,
++            disambiguator,
++        },
++    ))
++}
++
+ fn parse_simple_elem(i: &str) -> ParseResult<'_, PatElem> {
+     let ident = take_while(|c: char| c.is_alphanumeric() || c == '_');
+-    let (i, ident) = ident.followed_by(multispace0).parse(i)?;
+-    if ident == "_" {
++    let (i, (ident, disambiguator)) = ident
++        .and(parse_disambiguator)
++        .followed_by(multispace0)
++        .parse(i)?;
++    if ident == "_" && disambiguator.is_none() {
+         success(PatElem::Glob).parse(i)
+     } else {
+         let args = delimited(
+@@ -96,6 +138,7 @@ fn parse_simple_elem(i: &str) -> ParseResult<'_, PatElem> {
+                 name: ident.to_string(),
+                 generics: args.unwrap_or_default(),
+                 is_trait: false,
++                disambiguator,
+             })
+             .parse(i)
+     }
+@@ -143,8 +186,12 @@ impl fmt::Display for PatElem {
+                 name,
+                 generics,
+                 is_trait,
++                disambiguator,
+             } => {
+                 write!(f, "{name}")?;
++                if let Some(disambiguator) = disambiguator {
++                    write!(f, "#{disambiguator}")?;
++                }
+                 let generics = generics.as_slice();
+                 let (ty, generics) = if let [ty, generics @ ..] = generics
+                     && *is_trait
+@@ -179,6 +226,7 @@ fn parse_pat_ty(i: &str) -> ParseResult<'_, PatTy> {
+         .followed_by(multispace0)
+         .precedes(mutability.and(parse_pat_ty))
+         .map(|(mtbl, ty)| PatTy::Ref(mtbl, ty.into()))
++        .or(tag("@").map(|_| PatTy::Var))
+         .or(parse_pattern.map(PatTy::Pat))
+         .parse(i)
+ }
+@@ -189,6 +237,7 @@ impl fmt::Display for PatTy {
+             PatTy::Pat(p) => write!(f, "{p}"),
+             PatTy::Ref(RefKind::Shared, ty) => write!(f, "&{ty}"),
+             PatTy::Ref(RefKind::Mut, ty) => write!(f, "&mut {ty}"),
++            PatTy::Var => write!(f, "@"),
+         }
+     }
+ }
+@@ -208,6 +257,11 @@ fn test_roundtrip() {
+         "foo::{impl PartialEq<_> for Type<_, _>}",
+         "foo::{impl PartialEq<usize> for Box<u8>}",
+         "foo::{impl foo::Trait<core::option::Option<_>> for alloc::boxed::Box<_>}::method",
++        "foo::closure#0::bar#12",
++        "_#1::{impl Clone for Tuple<u8, &mut Slice<_>>}",
++        "foo::{impl foo::Trait<@> for foo::Pair<@, u8>}::bar",
++        "foo::{vtable}",
++        "foo::{const}#2",
+     ];
+     let other_test_strings = [
+         ("blah::*", "blah::_"),
+@@ -222,6 +276,8 @@ fn test_roundtrip() {
+         "foo::{impl  for alloc::boxed::Box<_>}::method",
+         "foo::{impl foo::_ for alloc::boxed::Box<_>}::method",
+         "foo::{impl &Clone for usize}",
++        "foo#",
++        "foo#x",
+     ];
+ 
+     let test_strings = idempotent_test_strings
+diff --git a/src/options.rs b/src/options.rs
+index 6cc1493..723c627 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -10,7 +10,7 @@ use std::path::PathBuf;
+ use crate::{
+     ast::*,
+     errors::{ErrorCtx, display_unspanned_error},
+-    name_matcher::NamePattern,
++    name_matcher::{NamePattern, PatternIndex},
+     raise_error, register_error,
+ };
+ 
+@@ -89,12 +89,12 @@ pub struct CliOpts {
+     /// A list of item paths to use as starting points for the translation. We will translate these
+     /// items and any items they refer to, according to the opacity rules. When absent, we start
+     /// from the path `crate` (which translates the whole crate).
+-    #[clap(long, value_delimiter = ',')]
++    #[clap(long)]
+     #[serde(default)]
+     pub start_from: Vec<String>,
+     /// Same as --start-from, but won't raise an error if a pattern doesn't match any item. This is useful
+     /// when the patterns are generated by a build script and may be out of sync with the code.
+-    #[clap(long, value_delimiter = ',')]
++    #[clap(long)]
+     #[serde(default)]
+     pub start_from_if_exists: Vec<String>,
+     /// Use all the items annotated with the given attribute as starting points for translation
+@@ -459,6 +459,22 @@ impl CliOpts {
+     }
+ }
+ 
++/// Split a comma-separated list of patterns, ignoring the commas inside brackets (as in
++/// `{impl Trait<A, B> for T}`).
++fn split_patterns(list: &str) -> impl Iterator<Item = &str> {
++    let mut depth = 0usize;
++    list.split(move |c: char| {
++        match c {
++            '<' | '{' | '(' | '[' => depth += 1,
++            '>' | '}' | ')' | ']' => depth = depth.saturating_sub(1),
++            _ => {}
++        }
++        c == ',' && depth == 0
++    })
++    .map(str::trim)
++    .filter(|pat| !pat.is_empty())
++}
++
+ /// Predicates that determine wihch items to use as starting point for translation.
+ #[derive(Debug, Clone, EnumAsGetters)]
+ pub enum StartFrom {
+@@ -492,6 +508,8 @@ impl StartFrom {
+ pub struct TranslateOptions {
+     /// Items from which to start translation.
+     pub start_from: Vec<StartFrom>,
++    /// The patterns of `start_from`, indexed to match item names against them.
++    pub start_from_patterns: PatternIndex<()>,
+     /// The level at which to extract the MIR
+     pub mir_level: MirLevel,
+     /// Usually we skip the provided methods that aren't used. When this flag is on, we translate
+@@ -539,7 +557,7 @@ pub struct TranslateOptions {
+     pub unbind_item_vars: bool,
+     /// List of patterns to assign a given opacity to. Same as the corresponding `TranslateOptions`
+     /// field.
+-    pub item_opacities: Vec<(NamePattern, ItemOpacity)>,
++    pub item_opacities: PatternIndex<ItemOpacity>,
+     /// List of traits for which we transform associated types to type parameters.
+     pub lift_associated_types: Vec<NamePattern>,
+     /// Skip the typecheck passes.
+@@ -571,6 +589,7 @@ impl TranslateOptions {
+         let mut start_from = options
+             .start_from
+             .iter()
++            .flat_map(|paths| split_patterns(paths))
+             .filter_map(|path| parse_pattern(path).ok())
+             .map(|p| StartFrom::Pattern {
+                 pattern: p,
+@@ -581,6 +600,7 @@ impl TranslateOptions {
+             options
+                 .start_from_if_exists
+                 .iter()
++                .flat_map(|paths| split_patterns(paths))
+                 .filter_map(|path| parse_pattern(path).ok())
+                 .map(|p| StartFrom::Pattern {
+                     pattern: p,
+@@ -600,6 +620,13 @@ impl TranslateOptions {
+                 strict: false,
+             });
+         }
++        let start_from_patterns = start_from
++            .iter()
++            .filter_map(|start_from| match start_from {
++                StartFrom::Pattern { pattern, .. } => Some((pattern.clone(), ())),
++                _ => None,
++            })
++            .collect();
+ 
+         let hide_traits = options
+             .hide_marker_traits
+@@ -658,6 +685,7 @@ impl TranslateOptions {
+ 
+         TranslateOptions {
+             start_from,
++            start_from_patterns,
+             mir_level,
+             monomorphize_mut: options.monomorphize_mut,
+             remove_adt_clauses: options.remove_adt_clauses,
+@@ -715,10 +743,21 @@ impl TranslateOptions {
+         // err on the side of being more opaque.
+         let (_, opacity) = self
+             .item_opacities
+-            .iter()
+-            .filter(|(pat, _)| pat.matches(krate, name))
++            .matches(krate, name)
+             .max()
+             .unwrap();
+         *opacity
+     }
++
++    /// Whether a start-from pattern, attribute or `pub` selection matches this item.
++    pub fn start_from_matches(&self, krate: &TranslatedCrate, item_meta: &ItemMeta) -> bool {
++        self.start_from_patterns
++            .matches(krate, &item_meta.name)
++            .next()
++            .is_some()
++            || self.start_from.iter().any(|start_from| {
++                !matches!(start_from, StartFrom::Pattern { .. })
++                    && start_from.matches(krate, item_meta)
++            })
++    }
+ }
+diff --git a/src/transform/add_missing_info/reorder_decls.rs b/src/transform/add_missing_info/reorder_decls.rs
+index f66cb18..113af14 100644
+--- a/src/transform/add_missing_info/reorder_decls.rs
++++ b/src/transform/add_missing_info/reorder_decls.rs
+@@ -149,7 +149,7 @@ pub struct Deps {
+ /// We use this when computing the graph
+ #[derive(Visitor)]
+ pub struct DepsForItem<'a> {
+-    ctx: &'a TransformCtx,
++    krate: &'a TranslatedCrate,
+     deps: &'a mut Deps,
+     current_id: ItemId,
+     // Each item countains its own id; we dont' want to count that as a self-reference. Hence the
+@@ -203,14 +203,14 @@ pub struct DepsForItem<'a> {
+ impl Deps {
+     fn visitor_for_item<'a>(
+         &'a mut self,
+-        ctx: &'a TransformCtx,
++        krate: &'a TranslatedCrate,
+         item: ItemRef<'_>,
+     ) -> DepsForItem<'a> {
+         let current_id = item.id();
+         self.graph.add_node(current_id);
+ 
+         let mut for_item = DepsForItem {
+-            ctx,
++            krate,
+             deps: self,
+             seen_current_id: false,
+             current_id,
+@@ -237,7 +237,7 @@ impl DepsForItem<'_> {
+     fn insert_node(&mut self, tgt: impl Into<ItemId>) {
+         let tgt = tgt.into();
+         // Only add translated items.
+-        if self.ctx.translated.get_item(tgt).is_some() && !self.deps.visited.contains(&tgt) {
++        if self.krate.get_item(tgt).is_some() && !self.deps.visited.contains(&tgt) {
+             self.deps.unprocessed.push(tgt);
+         }
+     }
+@@ -251,7 +251,7 @@ impl DepsForItem<'_> {
+         }
+         self.insert_node(tgt);
+         // Only add translated items.
+-        if self.ctx.translated.get_item(tgt).is_some() {
++        if self.krate.get_item(tgt).is_some() {
+             self.deps.graph.add_edge(self.current_id, tgt, ());
+         }
+     }
+@@ -300,35 +300,11 @@ impl VisitAst for DepsForItem<'_> {
+     }
+ }
+ 
+-fn compute_declarations_graph(ctx: &TransformCtx) -> DiGraphMap<ItemId, ()> {
+-    let mut deps = Deps::default();
+-    // Start from the items included in `start_from`. We've mostly only translated items accessible
+-    // from that, but some passes render items inaccessible again, which we filter out here.
+-    // The items translation selected for the start-from patterns are roots by identity: matching
+-    // their names against the patterns again misses some (e.g. `Type::method` does not match the
+-    // name of an inherent method, whose path contains the impl).
+-    deps.unprocessed = ctx
+-        .translated
+-        .all_items()
+-        .filter(|item| {
+-            ctx.options
+-                .start_from
+-                .iter()
+-                .any(|pat| pat.matches(&ctx.translated, item.item_meta()))
+-        })
+-        .map(|item| item.id())
+-        .chain(ctx.start_from_roots.iter().flat_map(|sel| sel.items.iter().copied()))
+-        .collect();
+-
+-    // Explore reachable items.
+-    while let Some(id) = deps.unprocessed.pop() {
+-        if !deps.visited.insert(id) {
+-            continue;
+-        }
+-        let Some(item) = ctx.translated.get_item(id) else {
+-            continue;
+-        };
+-        let mut visitor = deps.visitor_for_item(ctx, item);
++impl Deps {
++    /// Record the dependency edges of this item, and push the items it makes reachable onto
++    /// `unprocessed`.
++    fn visit_item(&mut self, krate: &TranslatedCrate, item: ItemRef<'_>) {
++        let mut visitor = self.visitor_for_item(krate, item);
+         match item {
+             ItemRef::Type(..) | ItemRef::TraitImpl(..) | ItemRef::Global(..) => {
+                 let _ = item.drive(&mut visitor);
+@@ -394,13 +370,58 @@ fn compute_declarations_graph(ctx: &TransformCtx) -> DiGraphMap<ItemId, ()> {
+                     let id = bound_method.skip_binder.item.id;
+                     visitor.insert_node(id); // Still count the item as reachable.
+                     let _ = bound_method.params.drive(&mut visitor);
+-                    if let Some(decl) = ctx.translated.fun_decls.get(id) {
++                    if let Some(decl) = krate.fun_decls.get(id) {
+                         let _ = decl.signature.drive(&mut visitor);
+                     }
+                 }
+             }
+         }
+     }
++}
++
++/// The dependencies of one translated item as the declaration graph records them: `edges` are the
++/// items its declaration refers to (in its signature and body), `reachable` additionally lists the
++/// items it makes reachable without depending on them (the provided methods and default constants
++/// of a trait declaration). Only translated items are listed; the item itself is only listed if
++/// it refers to itself.
++pub fn item_dependencies(krate: &TranslatedCrate, item: ItemRef<'_>) -> (Vec<ItemId>, Vec<ItemId>) {
++    let mut deps = Deps::default();
++    let id = item.id();
++    deps.visit_item(krate, item);
++    let edges = deps.graph.neighbors(id).collect_vec();
++    let mut reachable = deps.unprocessed;
++    reachable.sort();
++    reachable.dedup();
++    (edges, reachable)
++}
++
++fn compute_declarations_graph(ctx: &TransformCtx) -> DiGraphMap<ItemId, ()> {
++    let mut deps = Deps::default();
++    // Start from the items included in `start_from`. We've mostly only translated items accessible
++    // from that, but some passes render items inaccessible again, which we filter out here.
++    // The items translation selected for the start-from patterns are roots by identity: matching
++    // their names against the patterns again misses some (e.g. `Type::method` does not match the
++    // name of an inherent method, whose path contains the impl).
++    deps.unprocessed = ctx
++        .translated
++        .all_items()
++        .filter(|item| {
++            ctx.options
++                .start_from_matches(&ctx.translated, item.item_meta())
++        })
++        .map(|item| item.id())
++        .chain(ctx.start_from_roots.iter().flat_map(|sel| sel.items.iter().copied()))
++        .collect();
++
++    // Explore reachable items.
++    while let Some(id) = deps.unprocessed.pop() {
++        if !deps.visited.insert(id) {
++            continue;
++        }
++        if let Some(item) = ctx.translated.get_item(id) {
++            deps.visit_item(&ctx.translated, item);
++        }
++    }
+     deps.graph
+ }
+ 

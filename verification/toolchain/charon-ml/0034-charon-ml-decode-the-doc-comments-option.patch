@@ -1,0 +1,49 @@
+# charon integration step 34 after 546078ea5d: commit a112a3e826edf400722d95d92436629cd56a2ad3
+# first parent fa444321bd2ffcb265ff32b4eb2bf2fb67e676bb
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: decode the doc_comments option
+
+diff --git a/charon-ml/src/generated/Generated_FullAst.ml b/charon-ml/src/generated/Generated_FullAst.ml
+index 34e78e1..416dcf2 100644
+--- a/charon-ml/src/generated/Generated_FullAst.ml
++++ b/charon-ml/src/generated/Generated_FullAst.ml
+@@ -123,6 +123,10 @@ and cli_options = {
+   translate_all_methods : bool;
+       (** Usually we skip the provided methods that aren't used. When this flag
+           is on, we translate them all. *)
++  doc_comments : bool;
++      (** Translate doc comments ([/// ...]) into [DocComment] attributes. They
++          are omitted by default: they carry no semantics and take a noticeable
++          part of the llbc of large crates. *)
+   lift_associated_types : string list;
+       (** Transform the associate types of traits to be type parameters instead.
+           This takes a list of name patterns of the traits to transform, using
+diff --git a/charon-ml/src/generated/Generated_OfJson.ml b/charon-ml/src/generated/Generated_OfJson.ml
+index 34f4e85..00567c4 100644
+--- a/charon-ml/src/generated/Generated_OfJson.ml
++++ b/charon-ml/src/generated/Generated_OfJson.ml
+@@ -1997,6 +1997,7 @@ and cli_options_of_json (ctx : of_json_ctx) (js : json) :
+           ("exclude", exclude);
+           ("extract_opaque_bodies", extract_opaque_bodies);
+           ("translate_all_methods", translate_all_methods);
++          ("doc_comments", doc_comments);
+           ("lift_associated_types", lift_associated_types);
+           ("hide_marker_traits", hide_marker_traits);
+           ("remove_adt_clauses", remove_adt_clauses);
+@@ -2048,6 +2049,7 @@ and cli_options_of_json (ctx : of_json_ctx) (js : json) :
+         let* exclude = list_of_json string_of_json ctx exclude in
+         let* extract_opaque_bodies = bool_of_json ctx extract_opaque_bodies in
+         let* translate_all_methods = bool_of_json ctx translate_all_methods in
++        let* doc_comments = bool_of_json ctx doc_comments in
+         let* lift_associated_types =
+           list_of_json string_of_json ctx lift_associated_types
+         in
+@@ -2104,6 +2106,7 @@ and cli_options_of_json (ctx : of_json_ctx) (js : json) :
+              exclude;
+              extract_opaque_bodies;
+              translate_all_methods;
++             doc_comments;
+              lift_associated_types;
+              hide_marker_traits;
+              remove_adt_clauses;

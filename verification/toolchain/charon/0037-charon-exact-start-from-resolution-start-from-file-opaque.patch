@@ -1,0 +1,2411 @@
+# charon integration step 37 after 546078ea5d: commit 83bc6c3233616149764128c8428c558484fa2938
+# first parent ac60733caed8178411071c5b4ed88994a657ea7f
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: exact start-from resolution, --start-from-file/--opaque-file, CHARON_CALLGRAPH
+#
+# Start-from patterns that the rustc path resolver cannot resolve (disambiguators, impl blocks inside
+# a path, closures, promoted constants, closure impls and methods, defaulted methods, drop glue
+# impls, vtables) are resolved exactly as Charon names: `resolve_exact` indexes the definitions of
+# a crate by the parent they are named under and compares impl blocks with rustc's self and trait
+# types, without registering items. A selection of a function, type, trait or impl now covers that
+# item only (modules and inherent impls still cover their contents); `start_from_selected` in the
+# coverage report lists the selected items at translation time. An unmatched strict pattern is an
+# error naming it.
+#
+# `--start-from-file`/`--opaque-file` (charon binary) append one pattern per line to
+# `--start-from`/`--opaque`, leaving the serialized options unchanged.
+#
+# `CHARON_CALLGRAPH=<file>` writes, after translation and before the passes, every translated item
+# with its canonical pattern (checked to parse back and to match the item; other items it matches are
+# listed), kind, crate, module, generics, body size and dependency edges (signature and body, as the
+# declaration graph records them); global initializers, promoted constants and constructors are
+# folded into their owner. `CHARON_CALLGRAPH_ONLY=1` stops there. Format documented in callgraph.rs.
+# The name matcher no longer asserts when an impl's trait is a partial monomorphization instance.
+
+diff --git a/src/bin/charon-driver/main.rs b/src/bin/charon-driver/main.rs
+index 84317c1..9ec67e5 100644
+--- a/src/bin/charon-driver/main.rs
++++ b/src/bin/charon-driver/main.rs
+@@ -139,6 +139,10 @@ fn run_charon() -> Result<usize, CharonFailure> {
+         // We didn't run charon.
+         return Ok(0);
+     };
++    // `CHARON_CALLGRAPH_ONLY=1`: stop once translation has written the call graph.
++    if std::env::var_os("CHARON_CALLGRAPH_ONLY").is_some_and(|v| v == "1") {
++        return Ok(ctx.errors.borrow().error_count);
++    }
+ 
+     // The bulk of the translation is done, we no longer need to interact with rustc internals. We
+     // run several passes that simplify the items and cleanup the bodies.
+diff --git a/src/bin/charon-driver/translate/callgraph.rs b/src/bin/charon-driver/translate/callgraph.rs
+new file mode 100644
+index 0000000..ae5bae0
+--- /dev/null
++++ b/src/bin/charon-driver/translate/callgraph.rs
+@@ -0,0 +1,312 @@
++//! `CHARON_CALLGRAPH=<file>`: after translation, before the transformation passes, write the
++//! translated items with their canonical name patterns and their dependency edges as JSON, so
++//! that a crate can be split into chunks translated separately (`--start-from-file` for the items
++//! of a chunk, `--opaque-file` for the items of earlier chunks). With `CHARON_CALLGRAPH_ONLY=1`,
++//! charon stops there (no transformation passes, no output file).
++//!
++//! Format (`"format": "charon-callgraph", "version": 1`): `crate` is the crate being compiled and
++//! `items` lists the translated items. Items that are part of another item's body are folded into
++//! it: global initializers into their global, promoted constants into the body they come from.
++//! Their bodies count as the owner's and their dependencies as the owner's. Each item has:
++//! - `index`: its position in `items`; edges refer to items by index;
++//! - `id`: the Charon id (`@Fun3`, ...), `kind` (`type`, `fun`, `global`, `trait_decl`,
++//!   `trait_impl`) and `source` (what it was translated from: `item`, `closure_impl(FnMut)`,
++//!   `closure_method(FnMut)`, `closure_as_fn`, `defaulted_method(name)`, `implicit_destruct_impl`,
++//!   `drop_in_place`, `synthetic` for items with no definition such as `UNIT_METADATA`, ...);
++//! - `name`: the pretty-printed Charon name;
++//! - `pattern`: the canonical name pattern (`Pattern::canonical`), accepted by `--start-from`,
++//!   `--start-from-file`, `--opaque` and `--opaque-file`; `null` with a `pattern_error` if the
++//!   name has none, or if the pattern does not parse back to itself or does not match the name;
++//! - `pattern_also_matches`: the other items whose names the pattern matches. Name patterns match
++//!   prefixes, so this lists the items nested in this one (closures and nested items of a
++//!   function, provided methods of a trait, drop glue of a type); where such a pattern should not
++//!   apply to a nested item, give the nested item its own pattern (the longer pattern is more
++//!   precise and wins). As a start-from selection, the pattern selects exactly its item;
++//! - `crate`, `module` (the enclosing rustc module, `crate::path`; `null` for items without a
++//!   rustc definition);
++//! - `generic` (has type parameters), `type_params`, `const_params`;
++//! - `opacity`, `has_body`, `statements` (statements and terminators) and `blocks` of the
++//!   unstructured body;
++//! - `deps`: the items the declaration refers to in its signature and body (the edges of the
++//!   declaration graph Charon orders declarations with), `reaches`: the items it additionally
++//!   makes reachable without depending on them (provided methods and default constants of a
++//!   trait declaration);
++//! - `initializer` (globals), `folded` (the ids folded into this item), and
++//!   `removed_by_passes: true` for the impls of hidden marker traits, which the transformation
++//!   passes remove.
++use std::collections::HashMap;
++
++use super::translate_crate::{TraitImplSource, TransItemSource, TransItemSourceKind};
++use super::translate_ctx::TranslateCtx;
++use crate::hax;
++use crate::hax::SInto;
++use charon_lib::ast::*;
++use charon_lib::formatter::IntoFormatter;
++use charon_lib::name_matcher::{Disambiguation, NamePattern, PatternIndex};
++use charon_lib::pretty::FmtWithCtx;
++use charon_lib::transform::add_missing_info::reorder_decls::item_dependencies;
++use itertools::Itertools;
++use serde_json::json;
++
++fn source_kind(src: Option<&TransItemSource>) -> String {
++    use TransItemSourceKind::*;
++    let Some(src) = src else {
++        return "synthetic".to_owned();
++    };
++    match &src.kind {
++        Global | TraitDecl | Fun | Type | TraitImpl(TraitImplSource::Normal) => "item".to_owned(),
++        TraitImpl(TraitImplSource::Closure(kind)) => format!("closure_impl({kind:?})"),
++        TraitImpl(TraitImplSource::TraitAlias) => "trait_alias_impl".to_owned(),
++        TraitImpl(TraitImplSource::ImplicitDestruct) => "implicit_destruct_impl".to_owned(),
++        DefaultedMethod(_, name) => format!("defaulted_method({name})"),
++        ClosureMethod(kind) => format!("closure_method({kind:?})"),
++        ClosureAsFnCast => "closure_as_fn".to_owned(),
++        DropInPlaceMethod(_) => "drop_in_place".to_owned(),
++        kind => format!("{kind:?}"),
++    }
++}
++
++impl TranslateCtx<'_> {
++    /// The enclosing module of a definition, as `crate::module::path`.
++    fn module_path(&self, src: Option<&TransItemSource>) -> Option<String> {
++        use rustc_hir::def::DefKind;
++        let tcx = self.tcx;
++        let mut def_id = src?.def_id().as_rust_def_id()?;
++        while !matches!(tcx.def_kind(def_id), DefKind::Mod) {
++            def_id = tcx.opt_parent(def_id)?;
++        }
++        let mut path = vec![tcx.crate_name(def_id.krate).to_string()];
++        path.extend(
++            tcx.def_path(def_id)
++                .data
++                .iter()
++                .map(|elem| elem.data.get_opt_name().map_or_else(|| "_".to_owned(), |s| s.to_string())),
++        );
++        Some(path.join("::"))
++    }
++
++    pub fn write_callgraph(&self) {
++        let Some(path) = std::env::var_os("CHARON_CALLGRAPH").filter(|path| !path.is_empty())
++        else {
++            return;
++        };
++        let krate = &self.translated;
++        let fmt = krate.into_fmt();
++
++        // Items that are part of another item are folded into it: global initializers into their
++        // global, promoted constants into the body they were promoted from, and constructors
++        // (which have the name of their type) into their type.
++        let mut folded_into: HashMap<ItemId, ItemId> = krate
++            .global_decls
++            .iter()
++            .map(|global| (ItemId::Fun(global.init), ItemId::Global(global.def_id)))
++            .collect();
++        for (id, src) in &self.reverse_id_map {
++            if krate.get_item(*id).is_none() {
++                continue;
++            }
++            let owner = match src.def_id().base {
++                hax::DefIdBase::Promoted(owner, _) => Some((owner, TransItemSourceKind::Fun)),
++                hax::DefIdBase::Real(def_id)
++                    if matches!(src.kind, TransItemSourceKind::Fun)
++                        && let rustc_hir::def::DefKind::Ctor(of, _) = self.tcx.def_kind(def_id) =>
++                {
++                    let parent = self.tcx.parent(def_id);
++                    let adt = match of {
++                        rustc_hir::def::CtorOf::Struct => parent,
++                        rustc_hir::def::CtorOf::Variant => self.tcx.parent(parent),
++                    };
++                    Some((adt, TransItemSourceKind::Type))
++                }
++                _ => None,
++            };
++            if let Some((owner, kind)) = owner {
++                let owner: hax::DefId = owner.sinto(&self.hax_state);
++                // The body of a closure is that of its `call*` methods.
++                let owner_id = [
++                    kind,
++                    TransItemSourceKind::ClosureMethod(ClosureKind::FnOnce),
++                    TransItemSourceKind::ClosureMethod(ClosureKind::FnMut),
++                    TransItemSourceKind::ClosureMethod(ClosureKind::Fn),
++                ]
++                .into_iter()
++                .find_map(|kind| {
++                    self.id_map
++                        .get(&TransItemSource::polymorphic(&owner, kind))
++                        .filter(|id| krate.get_item(**id).is_some())
++                });
++                if let Some(owner_id) = owner_id {
++                    folded_into.insert(*id, *owner_id);
++                }
++            }
++        }
++        let root_of = |mut id: ItemId| {
++            while let Some(owner) = folded_into.get(&id) {
++                id = *owner;
++            }
++            id
++        };
++        let items = krate
++            .all_items()
++            .filter(|item| !folded_into.contains_key(&item.id()))
++            .collect_vec();
++        let mut index_of: HashMap<ItemId, usize> = items
++            .iter()
++            .enumerate()
++            .map(|(i, item)| (item.id(), i))
++            .collect();
++        let mut folded: Vec<Vec<ItemId>> = vec![Vec::new(); items.len()];
++        for id in folded_into.keys().copied().sorted() {
++            if let Some(&i) = index_of.get(&root_of(id)) {
++                index_of.insert(id, i);
++                folded[i].push(id);
++            }
++        }
++
++        // Canonical patterns, checked to parse back to themselves and to match their item.
++        let disambiguation =
++            Disambiguation::new(krate.all_items().map(|item| &item.item_meta().name));
++        let patterns: Vec<Result<NamePattern, String>> = items
++            .iter()
++            .map(|item| {
++                let name = &item.item_meta().name;
++                let pat = NamePattern::canonical_with(krate, &disambiguation, name)
++                    .ok_or_else(|| "the name cannot be expressed as a pattern".to_owned())?;
++                let text = pat.to_string();
++                match NamePattern::parse(&text) {
++                    Ok(parsed) if parsed == pat => {}
++                    _ => return Err(format!("`{text}` does not parse back to itself")),
++                }
++                if !pat.matches(krate, name) {
++                    return Err(format!("`{text}` does not match the name"));
++                }
++                Ok(pat)
++            })
++            .collect();
++        let index: PatternIndex<usize> = patterns
++            .iter()
++            .enumerate()
++            .filter_map(|(i, pat)| Some((pat.as_ref().ok()?.clone(), i)))
++            .collect();
++        let mut also_matches: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
++        for (j, item) in items.iter().enumerate() {
++            for (_, i) in index.matches(krate, &item.item_meta().name) {
++                if *i != j {
++                    also_matches[*i].push(j);
++                }
++            }
++        }
++
++        let body_size = |id: FunDeclId| match krate.fun_decls.get(id).map(|f| &f.body) {
++            Some(Body::Unstructured(body)) => (
++                body.body
++                    .iter()
++                    .map(|block| block.statements.len() + 1)
++                    .sum::<usize>(),
++                body.body.len(),
++                true,
++            ),
++            Some(Body::Structured(_)) => (0, 0, true),
++            _ => (0, 0, false),
++        };
++
++        let entries = items
++            .iter()
++            .enumerate()
++            .map(|(i, item)| {
++                let id = item.id();
++                let src = self.reverse_id_map.get(&id);
++                let item_meta = item.item_meta();
++                let generics = item.generic_params();
++                let (mut edges, mut reachable) = item_dependencies(krate, *item);
++                for folded_id in &folded[i] {
++                    if let Some(folded_item) = krate.get_item(*folded_id) {
++                        let (e, r) = item_dependencies(krate, folded_item);
++                        edges.extend(e);
++                        reachable.extend(r);
++                    }
++                }
++                let (kind, initializer, (statements, blocks, has_body)) = match item {
++                    ItemRef::Type(_) => ("type", None, (0, 0, false)),
++                    ItemRef::Fun(f) => ("fun", None, body_size(f.def_id)),
++                    ItemRef::Global(g) => ("global", Some(g.init), body_size(g.init)),
++                    ItemRef::TraitDecl(_) => ("trait_decl", None, (0, 0, false)),
++                    ItemRef::TraitImpl(_) => ("trait_impl", None, (0, 0, false)),
++                };
++                // Edges between an item and the items folded into it are not self-dependencies.
++                let self_ids: Vec<ItemId> = std::iter::once(id).chain(folded[i].iter().copied()).collect();
++                let to_indices = |ids: Vec<ItemId>| {
++                    ids.into_iter()
++                        .filter(|id| folded[i].is_empty() || !self_ids.contains(id))
++                        .filter_map(|id| index_of.get(&id).copied())
++                        .sorted()
++                        .dedup()
++                        .collect_vec()
++                };
++                let deps = to_indices(edges);
++                let reaches = to_indices(reachable)
++                    .into_iter()
++                    .filter(|j| deps.binary_search(j).is_err() && *j != i)
++                    .collect_vec();
++                let (pattern, pattern_error) = match &patterns[i] {
++                    Ok(pat) => (Some(pat.to_string()), None),
++                    Err(err) => (None, Some(err.clone())),
++                };
++                let crate_name = src.map(|src| src.def_id().crate_name(&self.hax_state).to_string());
++                let mut entry = json!({
++                    "index": i,
++                    "id": id.to_string(),
++                    "kind": kind,
++                    "source": source_kind(src),
++                    "name": item_meta.name.with_ctx(&fmt).to_string(),
++                    "pattern": pattern,
++                    "pattern_also_matches": also_matches[i],
++                    "crate": crate_name,
++                    "module": self.module_path(src),
++                    "generic": !generics.types.is_empty(),
++                    "type_params": generics.types.len(),
++                    "const_params": generics.const_generics.len(),
++                    "opacity": format!("{:?}", item_meta.opacity),
++                    "has_body": has_body,
++                    "statements": statements,
++                    "blocks": blocks,
++                    "deps": deps,
++                    "reaches": reaches,
++                });
++                if let Some(err) = pattern_error {
++                    entry["pattern_error"] = err.into();
++                }
++                if let Some(init) = initializer {
++                    entry["initializer"] = ItemId::Fun(init).to_string().into();
++                }
++                if !folded[i].is_empty() {
++                    entry["folded"] = folded[i].iter().map(|id| id.to_string()).collect_vec().into();
++                }
++                // Hidden traits (`--hide-marker-traits`) make these impls invisible once their
++                // implemented trait is known; the transformation passes remove them.
++                if self.options.opacity_for_name(krate, &item_meta.name).is_invisible() {
++                    entry["removed_by_passes"] = true.into();
++                }
++                entry
++            })
++            .collect_vec();
++        let report = json!({
++            "format": "charon-callgraph",
++            "version": 1,
++            "crate": krate.crate_name,
++            "items": entries,
++        });
++        let file = std::fs::File::create(&path).unwrap_or_else(|error| {
++            panic!(
++                "cannot write call graph {}: {error}",
++                path.to_string_lossy()
++            )
++        });
++        serde_json::to_writer(std::io::BufWriter::new(file), &report).unwrap_or_else(|error| {
++            panic!(
++                "cannot write call graph {}: {error}",
++                path.to_string_lossy()
++            )
++        });
++    }
++}
+diff --git a/src/bin/charon-driver/translate/mod.rs b/src/bin/charon-driver/translate/mod.rs
+index fd9f326..3d31904 100644
+--- a/src/bin/charon-driver/translate/mod.rs
++++ b/src/bin/charon-driver/translate/mod.rs
+@@ -1,4 +1,6 @@
++pub mod callgraph;
+ pub mod get_mir;
++pub mod resolve_exact;
+ pub mod resolve_path;
+ pub mod translate_bodies;
+ pub mod translate_closures;
+diff --git a/src/bin/charon-driver/translate/resolve_exact.rs b/src/bin/charon-driver/translate/resolve_exact.rs
+new file mode 100644
+index 0000000..ddc5b14
+--- /dev/null
++++ b/src/bin/charon-driver/translate/resolve_exact.rs
+@@ -0,0 +1,510 @@
++//! Resolve a name pattern to the items whose Charon name it spells out, e.g. the canonical
++//! patterns of `CHARON_CALLGRAPH`. This complements `resolve_path`, which follows rustc paths
++//! (including re-exports) but cannot express impl blocks inside a path, closures, disambiguators
++//! or the items Charon derives from a definition (closure impls and methods, defaulted methods).
++//!
++//! Charon names follow the definition paths of rustc (see `path_elem_for_def`), so we index the
++//! definitions of a crate by their parent and walk the pattern down that tree. Impl blocks are
++//! compared with the pattern using the rustc types of their self type and implemented trait. No
++//! item is registered while resolving.
++use std::collections::HashMap;
++use std::rc::Rc;
++
++use anyhow::{Result, bail};
++use charon_lib::ast::ClosureKind;
++use charon_lib::ast::RefKind;
++use charon_lib::name_matcher::{NamePattern, PatElem, PatTy};
++use rustc_hir::def::DefKind;
++use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
++use rustc_hir::definitions::DefPathData;
++use rustc_middle::ty::{self, GenericArgKind, Ty, TyCtxt};
++
++/// What a pattern resolved to: a rustc definition, or an item Charon derives from one.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub enum Resolved {
++    Def(DefId),
++    /// The `Fn*` impl of a closure.
++    ClosureImpl(DefId, ClosureKind),
++    /// The `call*` method of the `Fn*` impl of a closure.
++    ClosureMethod(DefId, ClosureKind),
++    /// The cast of a state-less closure to a function pointer.
++    ClosureAsFn(DefId),
++    /// A method a trait impl takes from the trait's default.
++    DefaultedMethod(DefId, rustc_span::Symbol),
++    /// The vtable struct of a trait.
++    VTable(DefId),
++    /// The vtable of a trait impl, or of the `Fn*` impl of a closure.
++    VTableInstance(DefId, Option<ClosureKind>),
++    /// The `n`th promoted constant of a body.
++    Promoted(DefId, u32),
++    /// The `Destruct` impl Charon generates for an ADT or closure (drop glue).
++    ImplicitDestruct(DefId),
++    /// The `drop_in_place` method of that impl.
++    DropInPlace(DefId),
++}
++
++/// How a definition shows up in a Charon name (mirrors `path_elem_for_def`).
++enum Elem {
++    Ident(String, u32),
++    Impl,
++    /// Not part of the name: the children appear under the parent.
++    Skipped,
++    /// Never part of an item name.
++    None,
++}
++
++fn elem_of(tcx: TyCtxt<'_>, def_id: DefId) -> Elem {
++    let key = tcx.def_key(def_id);
++    let d = key.disambiguated_data.disambiguator;
++    match key.disambiguated_data.data {
++        DefPathData::TypeNs(s) | DefPathData::ValueNs(s) | DefPathData::MacroNs(s) => {
++            Elem::Ident(s.to_string(), d)
++        }
++        DefPathData::Closure => Elem::Ident("closure".to_owned(), d),
++        DefPathData::Use => Elem::Ident("{use}".to_owned(), d),
++        DefPathData::AnonConst => Elem::Ident("{const}".to_owned(), d),
++        DefPathData::Impl => Elem::Impl,
++        DefPathData::ForeignMod | DefPathData::Ctor | DefPathData::OpaqueTy => Elem::Skipped,
++        _ => Elem::None,
++    }
++}
++
++#[derive(Default)]
++struct Children {
++    idents: HashMap<String, Vec<(u32, DefId)>>,
++    impls: Vec<DefId>,
++}
++
++/// The definitions of a crate, by the parent under which they appear in Charon names.
++#[derive(Default)]
++struct CrateIndex {
++    children: HashMap<DefId, Children>,
++}
++
++pub struct ExactResolver<'tcx> {
++    tcx: TyCtxt<'tcx>,
++    crates: HashMap<CrateNum, CrateIndex>,
++    /// The definitions each type or trait path (a pattern without generics) resolves to.
++    paths: HashMap<String, Rc<Vec<DefId>>>,
++}
++
++impl<'tcx> ExactResolver<'tcx> {
++    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
++        Self {
++            tcx,
++            crates: HashMap::new(),
++            paths: HashMap::new(),
++        }
++    }
++
++    fn index(&mut self, krate: CrateNum) -> &CrateIndex {
++        let tcx = self.tcx;
++        self.crates.entry(krate).or_insert_with(|| {
++            let defs: Vec<DefId> = if krate == LOCAL_CRATE {
++                // Not `iter_local_def_id`: it freezes the definitions table, which later
++                // translation still extends. `definitions` lacks closures, which own bodies.
++                let defs: std::collections::HashSet<DefId> = tcx
++                    .hir_crate_items(())
++                    .definitions()
++                    .chain(tcx.hir_body_owners())
++                    .map(|id| id.to_def_id())
++                    .collect();
++                defs.into_iter().collect()
++            } else {
++                (0..tcx.num_extern_def_ids(krate))
++                    .map(|index| DefId {
++                        krate,
++                        index: rustc_hir::def_id::DefIndex::from_usize(index),
++                    })
++                    .collect()
++            };
++            let mut index = CrateIndex::default();
++            for def_id in defs {
++                if def_id.is_crate_root() {
++                    continue;
++                }
++                let elem = elem_of(tcx, def_id);
++                if matches!(elem, Elem::Skipped | Elem::None) {
++                    continue;
++                }
++                // The parent under which this definition is named.
++                let Some(mut parent) = tcx.opt_parent(def_id) else {
++                    continue;
++                };
++                while !parent.is_crate_root() && matches!(elem_of(tcx, parent), Elem::Skipped) {
++                    parent = tcx.parent(parent);
++                }
++                let children = index.children.entry(parent).or_default();
++                match elem {
++                    Elem::Ident(name, d) => children.idents.entry(name).or_default().push((d, def_id)),
++                    Elem::Impl => children.impls.push(def_id),
++                    Elem::Skipped | Elem::None => unreachable!(),
++                }
++            }
++            index
++        })
++    }
++
++    fn children(&mut self, parent: DefId) -> Option<&Children> {
++        self.index(parent.krate).children.get(&parent)
++    }
++
++    /// The items whose Charon name the pattern spells out exactly (the pattern is not a prefix).
++    /// Generic arguments of the path elements are ignored, except in impl blocks. Errors if the
++    /// pattern uses syntax the resolver does not support (globs in the path).
++    pub fn resolve(&mut self, pat: &NamePattern) -> Result<Vec<Resolved>> {
++        let tcx = self.tcx;
++        let [first, rest @ ..] = pat.elems.as_slice() else {
++            bail!("empty pattern")
++        };
++        let PatElem::Ident {
++            name,
++            disambiguator,
++            ..
++        } = first
++        else {
++            bail!("the pattern must start with a crate name")
++        };
++        if disambiguator.is_some_and(|d| d.index() != 0) {
++            return Ok(Vec::new());
++        }
++        let mut cursors: Vec<Resolved> = tcx
++            .crates(())
++            .iter()
++            .copied()
++            .chain([LOCAL_CRATE])
++            .filter(|&krate| {
++                tcx.crate_name(krate).as_str() == name || (krate == LOCAL_CRATE && name == "crate")
++            })
++            .map(|krate| Resolved::Def(krate.as_def_id()))
++            .collect();
++        for elem in rest {
++            let mut next = Vec::new();
++            for cursor in cursors {
++                self.step(cursor, elem, &mut next)?;
++            }
++            let mut seen = std::collections::HashSet::new();
++            next.retain(|r| seen.insert(*r));
++            cursors = next;
++            if cursors.is_empty() {
++                break;
++            }
++        }
++        Ok(cursors)
++    }
++
++    fn step(&mut self, cursor: Resolved, elem: &PatElem, next: &mut Vec<Resolved>) -> Result<()> {
++        let tcx = self.tcx;
++        match (cursor, elem) {
++            (
++                Resolved::Def(parent),
++                PatElem::Ident {
++                    name,
++                    disambiguator,
++                    ..
++                },
++            ) => {
++                let matching = self
++                    .children(parent)
++                    .and_then(|children| children.idents.get(name))
++                    .map(|defs| {
++                        defs.iter()
++                            .filter(|(d, _)| disambiguator.is_none_or(|p| p.index() == *d as usize))
++                            .map(|(_, def_id)| *def_id)
++                            .collect::<Vec<_>>()
++                    })
++                    .unwrap_or_default();
++                let found = !matching.is_empty();
++                next.extend(
++                    matching
++                        .into_iter()
++                        .map(|def_id| Resolved::Def(def_id)),
++                );
++                let kind = tcx.def_kind(parent);
++                if found || (disambiguator.is_some_and(|d| d.index() != 0) && name != "{promoted_const}") {
++                    return Ok(());
++                }
++                match kind {
++                    _ if name == "{promoted_const}" => {
++                        if let Some(d) = disambiguator {
++                            next.push(Resolved::Promoted(parent, d.index() as u32))
++                        }
++                    }
++                    DefKind::Closure if name == "as_fn" => {
++                        next.push(Resolved::ClosureAsFn(parent))
++                    }
++                    DefKind::Trait if name == "{vtable}" => {
++                        next.push(Resolved::VTable(parent))
++                    }
++                    DefKind::Impl { of_trait: true } if name == "{vtable}" => {
++                        next.push(Resolved::VTableInstance(parent, None))
++                    }
++                    // A method the impl does not define: the trait's default.
++                    DefKind::Impl { of_trait: true } => {
++                        let trait_id = tcx.impl_trait_id(parent);
++                        let provided = tcx.associated_items(trait_id).in_definition_order().any(
++                            |assoc| {
++                                matches!(assoc.kind, ty::AssocKind::Fn { .. })
++                                    && assoc.name().as_str() == name
++                                    && assoc.defaultness(tcx).has_value()
++                            },
++                        );
++                        if provided {
++                            next.push(Resolved::DefaultedMethod(
++                                parent,
++                                rustc_span::Symbol::intern(name),
++                            ));
++                        }
++                    }
++                    _ => {}
++                }
++            }
++            (Resolved::ClosureImpl(closure, kind), PatElem::Ident { name, .. })
++                if name == kind.method_name() =>
++            {
++                next.push(Resolved::ClosureMethod(closure, kind))
++            }
++            (Resolved::ClosureImpl(closure, kind), PatElem::Ident { name, .. })
++                if name == "{vtable}" =>
++            {
++                next.push(Resolved::VTableInstance(closure, Some(kind)))
++            }
++            (Resolved::ImplicitDestruct(def_id), PatElem::Ident { name, .. })
++                if name == "drop_in_place" =>
++            {
++                next.push(Resolved::DropInPlace(def_id))
++            }
++            (Resolved::Def(parent), PatElem::Impl(impl_pat)) => {
++                let (impls, closures) = match self.children(parent) {
++                    Some(children) => (
++                        children.impls.clone(),
++                        children.idents.get("closure").cloned().unwrap_or_default(),
++                    ),
++                    None => (Vec::new(), Vec::new()),
++                };
++                for impl_id in impls {
++                    if self.impl_matches(impl_pat, impl_id)? {
++                        next.push(Resolved::Def(impl_id));
++                    }
++                }
++                for (_, closure) in closures {
++                    if let Some(kind) = self.closure_impl_matches(impl_pat, closure)? {
++                        next.push(Resolved::ClosureImpl(closure, kind));
++                    }
++                }
++                if matches!(
++                    tcx.def_kind(parent),
++                    DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Closure
++                ) && self.implicit_destruct_matches(impl_pat, parent)?
++                {
++                    next.push(Resolved::ImplicitDestruct(parent));
++                }
++            }
++            (_, PatElem::Glob) => bail!("globs are not supported in exact patterns"),
++            _ => {}
++        }
++        Ok(())
++    }
++
++    /// The definitions a path pattern (e.g. the trait or type of an impl block) designates.
++    fn path_defs(&mut self, pat: &NamePattern) -> Result<Rc<Vec<DefId>>> {
++        let mut path = pat.clone();
++        if let Some(PatElem::Ident {
++            generics, is_trait, ..
++        }) = path.elems.last_mut()
++        {
++            generics.clear();
++            *is_trait = false;
++        }
++        let key = path.to_string();
++        if let Some(defs) = self.paths.get(&key) {
++            return Ok(defs.clone());
++        }
++        let defs: Vec<DefId> = self
++            .resolve(&path)?
++            .into_iter()
++            .filter_map(|r| match r {
++                Resolved::Def(def_id) => Some(def_id),
++                _ => None,
++            })
++            .collect();
++        let defs = Rc::new(defs);
++        self.paths.insert(key, defs.clone());
++        Ok(defs)
++    }
++
++    fn last_generics(pat: &NamePattern) -> &[PatTy] {
++        match pat.elems.last() {
++            Some(PatElem::Ident { generics, .. }) => generics,
++            _ => &[],
++        }
++    }
++
++    /// Whether a pattern `{P}` (as in `Pattern::matches`) designates this impl block: the self
++    /// type of an inherent impl, or the implemented trait (with its arguments, `Self` first) of a
++    /// trait impl.
++    fn impl_matches(&mut self, pat: &NamePattern, impl_id: DefId) -> Result<bool> {
++        let tcx = self.tcx;
++        match tcx.def_kind(impl_id) {
++            DefKind::Impl { of_trait: false } => {
++                let self_ty = tcx.type_of(impl_id).instantiate_identity();
++                self.pattern_matches_ty(pat, self_ty)
++            }
++            DefKind::Impl { of_trait: true } => {
++                let trait_ref = tcx.impl_trait_ref(impl_id).instantiate_identity();
++                self.path_with_args_matches(pat, trait_ref.def_id, trait_ref.args)
++            }
++            _ => Ok(false),
++        }
++    }
++
++    /// Whether `{impl Fn*<..> for path::to::closure#N}` designates an `Fn*` impl of this closure.
++    fn closure_impl_matches(
++        &mut self,
++        pat: &NamePattern,
++        closure: DefId,
++    ) -> Result<Option<ClosureKind>> {
++        let tcx = self.tcx;
++        let [PatTy::Pat(self_pat), ..] = Self::last_generics(pat) else {
++            return Ok(None);
++        };
++        if !self.path_defs(self_pat)?.contains(&closure) {
++            return Ok(None);
++        }
++        let traits = self.path_defs(pat)?;
++        let kind = traits
++            .iter()
++            .find_map(|&trait_id| tcx.fn_trait_kind_from_def_id(trait_id));
++        Ok(kind.map(|kind| match kind {
++            ty::ClosureKind::Fn => ClosureKind::Fn,
++            ty::ClosureKind::FnMut => ClosureKind::FnMut,
++            ty::ClosureKind::FnOnce => ClosureKind::FnOnce,
++        }))
++    }
++
++    /// Whether `{impl core::marker::Destruct for path::to::Type<..>}` designates the drop glue
++    /// impl Charon generates for this ADT or closure.
++    fn implicit_destruct_matches(&mut self, pat: &NamePattern, def_id: DefId) -> Result<bool> {
++        let tcx = self.tcx;
++        let [PatTy::Pat(self_pat), ..] = Self::last_generics(pat) else {
++            return Ok(false);
++        };
++        let Some(destruct) = tcx.lang_items().destruct_trait() else {
++            return Ok(false);
++        };
++        Ok(self.path_defs(pat)?.contains(&destruct) && self.path_defs(self_pat)?.contains(&def_id))
++    }
++
++    /// Whether `pat` designates the definition `def_id` (its path) applied to `args` (the
++    /// generics of its last element, if any, compared with the non-lifetime arguments).
++    fn path_with_args_matches(
++        &mut self,
++        pat: &NamePattern,
++        def_id: DefId,
++        args: ty::GenericArgsRef<'tcx>,
++    ) -> Result<bool> {
++        if !self.path_defs(pat)?.contains(&def_id) {
++            return Ok(false);
++        }
++        let pats = Self::last_generics(pat).to_vec();
++        self.generics_match(&pats, args)
++    }
++
++    fn generics_match(&mut self, pats: &[PatTy], args: ty::GenericArgsRef<'tcx>) -> Result<bool> {
++        if pats.is_empty() {
++            return Ok(true);
++        }
++        let args: Vec<_> = args
++            .iter()
++            .filter(|arg| !matches!(arg.kind(), GenericArgKind::Lifetime(_)))
++            .collect();
++        if args.len() != pats.len() {
++            return Ok(false);
++        }
++        for (pat, arg) in pats.iter().zip(args) {
++            let ok = match arg.kind() {
++                GenericArgKind::Type(ty) => self.pat_ty_matches(pat, ty)?,
++                GenericArgKind::Const(_) => is_glob_ty(pat),
++                GenericArgKind::Lifetime(_) => unreachable!(),
++            };
++            if !ok {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++
++    fn pat_ty_matches(&mut self, pat: &PatTy, ty: Ty<'tcx>) -> Result<bool> {
++        match (pat, ty.kind()) {
++            (PatTy::Pat(p), _) => self.pattern_matches_ty(p, ty),
++            (PatTy::Var, ty::Param(_)) => Ok(true),
++            (PatTy::Ref(kind, inner), ty::Ref(_, ty, mutbl)) => {
++                if matches!(kind, RefKind::Mut) != mutbl.is_mut() {
++                    return Ok(false);
++                }
++                self.pat_ty_matches(inner, *ty)
++            }
++            _ => Ok(false),
++        }
++    }
++
++    /// Mirrors `Pattern::matches_ty`: builtin types are spelled `u8`, `Str`, `Slice<T>`,
++    /// `Array<T, N>` and `Tuple<..>`; ADTs, closures and foreign types by their path.
++    fn pattern_matches_ty(&mut self, pat: &NamePattern, ty: Ty<'tcx>) -> Result<bool> {
++        if let [PatElem::Glob] = pat.elems.as_slice() {
++            return Ok(true);
++        }
++        if let [
++            PatElem::Ident {
++                name,
++                generics,
++                disambiguator: None,
++                ..
++            },
++        ] = pat.elems.as_slice()
++        {
++            let primitive = match ty.kind() {
++                ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) => {
++                    Some(generics.is_empty() && ty.to_string() == *name)
++                }
++                ty::Str if name == "Str" => Some(generics.is_empty()),
++                ty::Slice(elem) if name == "Slice" => Some(match generics.as_slice() {
++                    [] => true,
++                    [g] => self.pat_ty_matches(g, *elem)?,
++                    _ => false,
++                }),
++                ty::Array(elem, _) if name == "Array" => Some(match generics.as_slice() {
++                    [] => true,
++                    [g, len] => self.pat_ty_matches(g, *elem)? && is_glob_ty(len),
++                    _ => false,
++                }),
++                // The arguments of a tuple are spelled out (`Tuple` is the unit type).
++                ty::Tuple(tys) if name == "Tuple" => Some(if generics.len() != tys.len() {
++                    false
++                } else {
++                    let mut ok = true;
++                    for (g, t) in generics.iter().zip(tys.iter()) {
++                        ok = ok && self.pat_ty_matches(g, t)?;
++                    }
++                    ok
++                }),
++                _ => None,
++            };
++            if let Some(result) = primitive {
++                return Ok(result);
++            }
++        }
++        match ty.kind() {
++            ty::Adt(adt, args) => self.path_with_args_matches(pat, adt.did(), args),
++            // Closure types are designated by their path alone (see `Pattern::canonical`).
++            ty::Closure(def_id, _) | ty::Foreign(def_id) => {
++                Ok(self.path_defs(pat)?.contains(def_id))
++            }
++            _ => Ok(false),
++        }
++    }
++}
++
++fn is_glob_ty(pat: &PatTy) -> bool {
++    matches!(pat, PatTy::Pat(p) if matches!(p.elems.as_slice(), [PatElem::Glob]))
++}
+diff --git a/src/bin/charon-driver/translate/translate_crate.rs b/src/bin/charon-driver/translate/translate_crate.rs
+index 6c96e3e..99f7212 100644
+--- a/src/bin/charon-driver/translate/translate_crate.rs
++++ b/src/bin/charon-driver/translate/translate_crate.rs
+@@ -20,10 +20,14 @@ use std::cell::RefCell;
+ use std::collections::HashSet;
+ use std::path::PathBuf;
+ 
++use super::resolve_exact::{ExactResolver, Resolved};
+ use super::translate_ctx::*;
+ use crate::hax;
+ use crate::hax::SInto;
+ use charon_lib::ast::*;
++use charon_lib::formatter::IntoFormatter;
++use charon_lib::name_matcher::{NamePattern, PatElem};
++use charon_lib::pretty::FmtWithCtx;
+ use charon_lib::options::{CliOpts, StartFrom, TranslateOptions};
+ use charon_lib::transform::{StartFromSelection, TransformCtx};
+ use macros::VariantIndexArity;
+@@ -369,11 +373,13 @@ impl<'tcx> TranslateCtx<'tcx> {
+         }
+     }
+ 
+-    /// The translated items each start-from selection covers: the module items registered for
+-    /// the definitions it resolved to or for their descendants (module contents, inherent impl
+-    /// methods, whole external crates). Declarations are rooted at these ids, not at items whose
+-    /// names happen to match the patterns again.
++    /// The translated items each start-from selection covers: the items an exact pattern
++    /// resolved to, and the module items registered for the definitions it resolved to or, for
++    /// modules and inherent impls, for their descendants (module contents, inherent impl methods,
++    /// whole external crates). Declarations are rooted at these ids, not at items whose names
++    /// happen to match the patterns again.
+     fn start_from_roots(&self) -> Vec<StartFromSelection> {
++        use rustc_hir::def::DefKind;
+         let tcx = self.tcx;
+         let mut ids: Vec<(ItemId, rustc_hir::def_id::DefId)> = self
+             .module_item_ids
+@@ -381,30 +387,118 @@ impl<'tcx> TranslateCtx<'tcx> {
+             .filter_map(|id| Some((*id, self.reverse_id_map.get(id)?.def_id().as_rust_def_id()?)))
+             .collect();
+         ids.sort_by_key(|(id, _)| *id);
++        // A selected function, type, etc. selects itself, not the items nested in its body.
++        let selects = |root: rustc_hir::def_id::DefId, def_id: rustc_hir::def_id::DefId| {
++            def_id == root
++                || (matches!(
++                    tcx.def_kind(root),
++                    DefKind::Mod | DefKind::Impl { of_trait: false }
++                ) && tcx.is_descendant_of(def_id, root))
++        };
+         self.start_from_def_ids
+             .iter()
+-            .map(|(label, strict, resolved)| StartFromSelection {
++            .map(|(label, strict, resolved, exact)| StartFromSelection {
+                 label: label.clone(),
+                 strict: *strict,
+-                items: ids
++                items: exact
+                     .iter()
+-                    .filter(|(_, def_id)| {
+-                        resolved
+-                            .iter()
+-                            .any(|root| tcx.is_descendant_of(*def_id, *root))
+-                    })
+-                    .map(|(id, _)| *id)
++                    .copied()
++                    .chain(
++                        ids.iter()
++                            .filter(|(_, def_id)| {
++                                resolved.iter().any(|root| selects(*root, *def_id))
++                            })
++                            .map(|(id, _)| *id),
++                    )
+                     .collect(),
+             })
+             .collect()
+     }
+ 
++    /// Register and enqueue the item an exact start-from pattern resolved to. Modules and
++    /// inherent impls are explored like module items; their contents are selected through
++    /// `def_ids`.
++    fn enqueue_exact_start_from(
++        &mut self,
++        resolved: Resolved,
++        def_ids: &mut Vec<rustc_hir::def_id::DefId>,
++        items: &mut Vec<ItemId>,
++    ) {
++        use rustc_hir::def::DefKind;
++        use TransItemSourceKind as K;
++        let hax_def = |ctx: &Self, def_id: rustc_hir::def_id::DefId| -> hax::DefId {
++            def_id.sinto(&ctx.hax_state)
++        };
++        let (def_id, kind) = match resolved {
++            Resolved::Def(def_id) => {
++                self.coverage_roots.push(def_id);
++                if matches!(self.tcx.def_kind(def_id), DefKind::Closure) {
++                    (def_id, K::Type)
++                } else {
++                    let hax_def_id = hax_def(self, def_id);
++                    match self.base_kind_for_item(&hax_def_id) {
++                        Some(K::Module | K::InherentImpl) | None => {
++                            def_ids.push(def_id);
++                            self.enqueue_module_item(&hax_def_id);
++                            return;
++                        }
++                        Some(kind) => (def_id, kind),
++                    }
++                }
++            }
++            Resolved::ClosureImpl(def_id, kind) => {
++                (def_id, K::TraitImpl(TraitImplSource::Closure(kind)))
++            }
++            Resolved::ClosureMethod(def_id, kind) => (def_id, K::ClosureMethod(kind)),
++            Resolved::ClosureAsFn(def_id) => (def_id, K::ClosureAsFnCast),
++            Resolved::DefaultedMethod(def_id, name) => (
++                def_id,
++                K::DefaultedMethod(
++                    TraitImplSource::Normal,
++                    TraitItemName(name.to_string().into()),
++                ),
++            ),
++            Resolved::VTable(def_id) => (def_id, K::VTable),
++            Resolved::VTableInstance(def_id, closure) => (
++                def_id,
++                K::VTableInstance(match closure {
++                    Some(kind) => TraitImplSource::Closure(kind),
++                    None => TraitImplSource::Normal,
++                }),
++            ),
++            Resolved::ImplicitDestruct(def_id) => {
++                (def_id, K::TraitImpl(TraitImplSource::ImplicitDestruct))
++            }
++            Resolved::DropInPlace(def_id) => (
++                def_id,
++                K::DropInPlaceMethod(Some(TraitImplSource::ImplicitDestruct)),
++            ),
++            Resolved::Promoted(def_id, index) => {
++                let promoted = hax_def(self, def_id).make_promoted_child(
++                    &self.hax_state,
++                    rustc_middle::mir::Promoted::from_u32(index),
++                );
++                let src = TransItemSource::polymorphic(&promoted, K::Global);
++                if let Some(id) = self.register_and_enqueue::<ItemId>(&None, src) {
++                    items.push(id);
++                }
++                return;
++            }
++        };
++        let src = TransItemSource::polymorphic(&hax_def(self, def_id), kind);
++        if let Some(id) = self.register_and_enqueue::<ItemId>(&None, src) {
++            items.push(id);
++        }
++    }
++
+     /// When `CHARON_COVERAGE_REPORT` names a file, write the auditable root/translation coverage
+     /// of this run as JSON: per crate, the definitions enumerated as roots; and per crate and
+     /// item kind, the items that were translated, those processed without producing an item, and
+     /// those registered as references but never needed (unused methods, unneeded vtables).
++    /// `start_from_selected` lists what each start-from selection selected, with the names and
++    /// canonical patterns the items have before the transformation passes.
+     /// `write_start_from_coverage` completes it once the transformation passes have run.
+-    pub fn write_coverage_report(&self) {
++    pub fn write_coverage_report(&self, start_from_roots: &[StartFromSelection]) {
+         let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
+             return;
+         };
+@@ -457,7 +551,41 @@ impl<'tcx> TranslateCtx<'tcx> {
+                 names.sort();
+             }
+         }
++        let fmt = self.translated.into_fmt();
++        let selected = start_from_roots
++            .iter()
++            .map(|selection| {
++                let items = selection
++                    .items
++                    .iter()
++                    .map(|id| {
++                        let name = self.translated.item_name(*id);
++                        // Whether the pattern spells out the name of the selected item (rather
++                        // than one of its prefixes).
++                        let spells_name = NamePattern::parse(&selection.label).is_ok_and(|pat| {
++                            name.is_some_and(|name| {
++                                pat.elems.len() == name.name.len()
++                                    && pat.matches(&self.translated, name)
++                            })
++                        });
++                        serde_json::json!({
++                            "id": id.to_string(),
++                            "name": name.map(|name| name.with_ctx(&fmt).to_string()),
++                            "pattern": name
++                                .and_then(|name| NamePattern::canonical(&self.translated, name))
++                                .map(|pat| pat.to_string()),
++                            "pattern_spells_name": spells_name,
++                        })
++                    })
++                    .collect_vec();
++                serde_json::json!({
++                    "pattern": selection.label,
++                    "items": items,
++                })
++            })
++            .collect_vec();
+         let report = serde_json::json!({
++            "start_from_selected": selected,
+             "roots": roots,
+             "translated": translated,
+             "processed_without_item": without_item,
+@@ -952,16 +1080,35 @@ pub fn translate<'tcx>(
+     ctx.register_target_info();
+ 
+     // Start translating from the selected items.
++    let mut exact_resolver: Option<ExactResolver<'_>> = None;
+     for start_from in ctx.options.start_from.clone() {
+         match start_from {
+             StartFrom::Pattern { pattern, strict } => {
+-                match super::resolve_path::def_path_def_ids(&ctx.hax_state, &pattern, strict) {
+-                    Ok(resolved) => {
+-                        ctx.start_from_def_ids.push((
+-                            pattern.to_string(),
+-                            strict,
+-                            resolved.clone(),
+-                        ));
++                // `resolve_path` follows rustc paths, including re-exports, but ignores
++                // disambiguators and cannot name the items that are not rustc paths (closures,
++                // impl blocks inside a path, ...). Patterns it cannot resolve are resolved
++                // exactly, as Charon names (e.g. the canonical patterns of `CHARON_CALLGRAPH`).
++                let uses_disambiguators = pattern.elems.iter().any(|elem| {
++                    matches!(
++                        elem,
++                        PatElem::Ident {
++                            disambiguator: Some(_),
++                            ..
++                        }
++                    )
++                });
++                let path_result = if uses_disambiguators {
++                    Err(anyhow::anyhow!(
++                        "path `{pattern}` does not correspond to any item"
++                    ))
++                } else {
++                    super::resolve_path::def_path_def_ids(&ctx.hax_state, &pattern, strict)
++                };
++                let label = pattern.to_string();
++                match path_result {
++                    Ok(resolved) if !resolved.is_empty() => {
++                        ctx.start_from_def_ids
++                            .push((label, strict, resolved.clone(), Vec::new()));
+                         for def_id in resolved {
+                             if !def_id.is_local() && def_id.is_crate_root() {
+                                 // An external crate root: its nameable children miss impls and
+@@ -974,12 +1121,66 @@ pub fn translate<'tcx>(
+                             ctx.enqueue_module_item(&def_id);
+                         }
+                     }
+-                    Err(err) => {
+-                        register_error!(
+-                            ctx,
+-                            Span::dummy(),
+-                            "when processing starting pattern `{pattern}`: {err}"
+-                        );
++                    path_result => {
++                        // Only paths from a crate root are Charon names.
++                        let exact_tried =
++                            matches!(pattern.elems.first(), Some(PatElem::Ident { .. }));
++                        let exact = if !exact_tried {
++                            Ok(Vec::new())
++                        } else if ctx.options.monomorphize_with_hax {
++                            Err(anyhow::anyhow!(
++                                "exact patterns are not supported with `--monomorphize`"
++                            ))
++                        } else {
++                            exact_resolver
++                                .get_or_insert_with(|| ExactResolver::new(tcx))
++                                .resolve(&pattern)
++                        };
++                        match (exact, path_result) {
++                            (Ok(found), _) if !found.is_empty() => {
++                                let mut def_ids = Vec::new();
++                                let mut items = Vec::new();
++                                for resolved in found {
++                                    ctx.enqueue_exact_start_from(
++                                        resolved,
++                                        &mut def_ids,
++                                        &mut items,
++                                    );
++                                }
++                                ctx.start_from_def_ids
++                                    .push((label, strict, def_ids, items));
++                            }
++                            (_, Ok(_)) if !strict => {
++                                ctx.start_from_def_ids
++                                    .push((label, strict, Vec::new(), Vec::new()));
++                            }
++                            (exact, path_result) => {
++                                let path_err = match path_result {
++                                    Err(err) => err.to_string(),
++                                    Ok(_) => format!("path `{pattern}` does not correspond to any item"),
++                                };
++                                let msg = match exact {
++                                    _ if uses_disambiguators => {
++                                        format!("no item has the name `{pattern}`")
++                                    }
++                                    Err(err) => format!("{path_err} (as an exact name: {err})"),
++                                    Ok(_) if exact_tried => {
++                                        format!("{path_err}, and no item has this exact name")
++                                    }
++                                    Ok(_) => path_err,
++                                };
++                                if strict {
++                                    register_error!(
++                                        ctx,
++                                        Span::dummy(),
++                                        "when processing starting pattern `{pattern}`: {msg}"
++                                    );
++                                } else {
++                                    ctx.start_from_def_ids
++                                        .push((label, strict, Vec::new(), Vec::new()));
++                                }
++                            }
++                        }
+                     }
+                 }
+             }
+@@ -1001,8 +1202,12 @@ pub fn translate<'tcx>(
+                 for ldid in tcx.hir_crate_items(()).definitions() {
+                     add_if_attr_matches(ldid)
+                 }
+-                ctx.start_from_def_ids
+-                    .push((format!("#[{attr_name}]"), true, selected));
++                ctx.start_from_def_ids.push((
++                    format!("#[{attr_name}]"),
++                    true,
++                    selected,
++                    Vec::new(),
++                ));
+             }
+             StartFrom::Pub => {
+                 let mut selected = Vec::new();
+@@ -1019,7 +1224,7 @@ pub fn translate<'tcx>(
+                     add_if_matches(ldid)
+                 }
+                 ctx.start_from_def_ids
+-                    .push(("pub".to_string(), true, selected));
++                    .push(("pub".to_string(), true, selected, Vec::new()));
+             }
+         }
+     }
+@@ -1054,8 +1259,9 @@ pub fn translate<'tcx>(
+     // Remove methods not marked as "used". They are never called and we made sure not to translate
+     // them. This removes them from the traits and impls.
+     ctx.remove_unused_methods();
+-    ctx.write_coverage_report();
+     let start_from_roots = ctx.start_from_roots();
++    ctx.write_coverage_report(&start_from_roots);
++    ctx.write_callgraph();
+ 
+     // Return the context, dropping the hax state and rustc `tcx`.
+     Ok(TransformCtx {
+@@ -1070,8 +1276,6 @@ pub fn translate<'tcx>(
+ /// selection yields in the final output: `start_from` lists, per selection, the items it
+ /// selected and whether each is declared (in `ordered_decls`).
+ pub fn write_start_from_coverage(ctx: &TransformCtx) {
+-    use charon_lib::pretty::FmtWithCtx;
+-    use charon_lib::pretty::formatter::IntoFormatter;
+     let Some(path) = std::env::var_os("CHARON_COVERAGE_REPORT") else {
+         return;
+     };
+diff --git a/src/bin/charon-driver/translate/translate_ctx.rs b/src/bin/charon-driver/translate/translate_ctx.rs
+index 245e765..8139ae7 100644
+--- a/src/bin/charon-driver/translate/translate_ctx.rs
++++ b/src/bin/charon-driver/translate/translate_ctx.rs
+@@ -77,8 +77,9 @@ pub struct TranslateCtx<'tcx> {
+     /// The definitions `--start-from` patterns enumerated, for the coverage report.
+     pub coverage_roots: Vec<rustc_hir::def_id::DefId>,
+     /// For each start-from selection: its label, whether it is strict (see
+-    /// `StartFromSelection::strict`), and the definitions it resolved to.
+-    pub start_from_def_ids: Vec<(String, bool, Vec<rustc_hir::def_id::DefId>)>,
++    /// `StartFromSelection::strict`), the definitions it resolved to, and the items an exact
++    /// pattern resolved to (see `resolve_exact`).
++    pub start_from_def_ids: Vec<(String, bool, Vec<rustc_hir::def_id::DefId>, Vec<ItemId>)>,
+     /// The items registered as module items: start-from items and, recursively, the contents of
+     /// the modules and inherent impls among them.
+     pub module_item_ids: HashSet<ItemId>,
+diff --git a/src/bin/charon/cli.rs b/src/bin/charon/cli.rs
+index 414c7d6..edcf980 100644
+--- a/src/bin/charon/cli.rs
++++ b/src/bin/charon/cli.rs
+@@ -30,12 +30,55 @@ pub struct PrettyPrintArgs {
+     pub file: PathBuf,
+ }
+ 
++/// Options that read name patterns from files. They are handled by this binary, which appends the
++/// patterns to `--start-from`/`--opaque`, so that they don't change the serialized options.
++#[derive(clap::Args, Debug)]
++pub struct PatternFiles {
++    /// Same as `--start-from` for each line of the file (one pattern per line; blank lines and
++    /// lines starting with `#` are ignored). Every pattern must select an item, e.g. the
++    /// `pattern`s of a `CHARON_CALLGRAPH` dump.
++    #[clap(long, value_name("FILE"))]
++    pub start_from_file: Vec<PathBuf>,
++    /// Same as `--opaque` for each line of the file (one pattern per line; blank lines and lines
++    /// starting with `#` are ignored).
++    #[clap(long, value_name("FILE"))]
++    pub opaque_file: Vec<PathBuf>,
++}
++
++impl PatternFiles {
++    /// Append the patterns of the files to `options`.
++    pub fn apply(&self, options: &mut CliOpts) -> anyhow::Result<()> {
++        use anyhow::Context;
++        let read = |path: &PathBuf, dest: &mut Vec<String>| -> anyhow::Result<()> {
++            let text = std::fs::read_to_string(path)
++                .with_context(|| format!("cannot read pattern file {}", path.display()))?;
++            dest.extend(
++                text.lines()
++                    .map(str::trim)
++                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
++                    .map(str::to_owned),
++            );
++            Ok(())
++        };
++        for path in &self.start_from_file {
++            read(path, &mut options.start_from)?;
++        }
++        for path in &self.opaque_file {
++            read(path, &mut options.opaque)?;
++        }
++        Ok(())
++    }
++}
++
+ /// Usage: `charon cargo [charon options] -- [rustc options]`
+ #[derive(clap::Args, Debug)]
+ pub struct RustcArgs {
+     #[command(flatten)]
+     pub opts: CliOpts,
+ 
++    #[command(flatten)]
++    pub pattern_files: PatternFiles,
++
+     /// Args that `rustc` accepts.
+     #[arg(last = true)]
+     pub rustc: Vec<String>,
+@@ -47,6 +90,9 @@ pub struct CargoArgs {
+     #[command(flatten)]
+     pub opts: CliOpts,
+ 
++    #[command(flatten)]
++    pub pattern_files: PatternFiles,
++
+     /// Args that `cargo build` accepts.
+     #[arg(last = true)]
+     pub cargo: Vec<String>,
+diff --git a/src/bin/charon/main.rs b/src/bin/charon/main.rs
+index e9a42f3..b05bf0b 100644
+--- a/src/bin/charon/main.rs
++++ b/src/bin/charon/main.rs
+@@ -63,6 +63,7 @@ pub fn main() -> Result<()> {
+         }
+         Charon::Cargo(subcmd_cargo) => {
+             let mut options = subcmd_cargo.opts;
++            subcmd_cargo.pattern_files.apply(&mut options)?;
+             let targets = std::mem::take(&mut options.targets);
+             if targets.is_empty() {
+                 translate_with_cargo(options, subcmd_cargo.cargo)?
+@@ -76,6 +77,7 @@ pub fn main() -> Result<()> {
+         }
+         Charon::Rustc(mut subcmd_rustc) => {
+             let mut options = subcmd_rustc.opts;
++            subcmd_rustc.pattern_files.apply(&mut options)?;
+             options.rustc_args.append(&mut subcmd_rustc.rustc);
+             let targets = std::mem::take(&mut options.targets);
+             if targets.is_empty() {
+diff --git a/tests/callgraph.rs b/tests/callgraph.rs
+new file mode 100644
+index 0000000..f96d57b
+--- /dev/null
++++ b/tests/callgraph.rs
+@@ -0,0 +1,144 @@
++//! `CHARON_CALLGRAPH`: the canonical pattern of every dumped item selects exactly that item when
++//! fed back to `--start-from-file`.
++use anyhow::{Context, Result, ensure};
++use assert_cmd::prelude::{CommandCargoExt, OutputAssertExt};
++use serde_json::Value;
++use std::collections::HashMap;
++use std::path::Path;
++use std::process::Command;
++
++const CODE: &str = r#"
++pub trait Shape {
++    fn area(&self) -> u32;
++    fn double(&self) -> u32 { self.area() * 2 }
++}
++pub struct Sq(pub u32);
++pub struct Pair<T>(pub T, pub T);
++impl Shape for Sq { fn area(&self) -> u32 { self.0 * self.0 } }
++impl Shape for (u8, u16) { fn area(&self) -> u32 { self.0 as u32 + self.1 as u32 } }
++impl<T: Shape> Shape for Pair<T> { fn area(&self) -> u32 { self.0.area() + self.1.area() } }
++impl Shape for Pair<u8> { fn area(&self) -> u32 { 0 } }
++impl Sq { pub fn new(x: u32) -> Self { Sq(x) } }
++impl Sq { pub fn side(&self) -> u32 { self.0 } }
++impl<T> Pair<T> { pub fn first(&self) -> &T { &self.0 } }
++pub const LIMIT: u32 = 10;
++pub static COUNT: u32 = 3;
++const _: () = { impl Sq { pub fn hidden(&self) -> u32 { 1 } } };
++pub fn apply<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 { f(x) }
++pub fn user(v: &[u32]) -> u32 {
++    fn helper(x: u32) -> u32 { x + LIMIT }
++    let a = apply(|x| x + 1, 2);
++    let k = 5;
++    let b = apply(move |x| x * k, 3);
++    let s = Sq::new(helper(a + b));
++    let p = Pair(Sq(1), Sq(2));
++    let t: (u8, u16) = (1, 2);
++    let mut m = 0;
++    let mut inc = |y: u32| m += y;
++    inc(1);
++    v.iter().map(|x| x + 1).sum::<u32>() + s.double() + s.side() + s.hidden() + p.double()
++        + p.first().area() + t.area() + COUNT + m + Pair(0u8, 1u8).area()
++}
++"#;
++
++fn charon(dir: &Path, envs: &[(&str, &Path)], extra: &[&str]) -> Result<()> {
++    Command::cargo_bin("charon")?
++        .envs(envs.iter().copied())
++        .args(["rustc", "--preset=aeneas", "--no-serialize"])
++        .args(extra)
++        .arg("--")
++        .arg(dir.join("test_crate.rs"))
++        .args(["--crate-type=rlib", "--edition=2021"])
++        .assert()
++        .try_success()?;
++    Ok(())
++}
++
++#[test]
++fn callgraph_patterns_round_trip() -> Result<()> {
++    let dir = tempfile::TempDir::new()?;
++    let dir = dir.path();
++    std::fs::write(dir.join("test_crate.rs"), CODE)?;
++
++    let graph_path = dir.join("graph.json");
++    charon(dir, &[("CHARON_CALLGRAPH", &graph_path)], &[])?;
++    let graph: Value = serde_json::from_str(&std::fs::read_to_string(&graph_path)?)?;
++    ensure!(graph["format"] == "charon-callgraph" && graph["version"] == 1);
++    let items = graph["items"].as_array().context("items")?;
++    let by_name: HashMap<&str, &Value> = items
++        .iter()
++        .map(|item| (item["name"].as_str().unwrap(), item))
++        .collect();
++    let index_of = |name: &str| by_name[name]["index"].as_u64().unwrap();
++    let contains = |item: &Value, field: &str, index: u64| {
++        item[field]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|i| i.as_u64() == Some(index))
++    };
++
++    // Edges come from bodies and signatures; globals include their initializer.
++    let user = by_name["test_crate::user"];
++    ensure!(contains(user, "deps", index_of("test_crate::user::helper")));
++    ensure!(contains(user, "deps", index_of("test_crate::COUNT")));
++    ensure!(contains(
++        by_name["test_crate::user::helper"],
++        "deps",
++        index_of("test_crate::LIMIT")
++    ));
++    // Name patterns match prefixes: the pattern of `user` also matches its closures.
++    ensure!(contains(user, "pattern_also_matches", index_of("test_crate::user::closure")));
++    // `@` keeps the generic impl from matching the `Pair<u8>` one.
++    let generic_impl = by_name["test_crate::{impl test_crate::Shape for test_crate::Pair<T>}"];
++    ensure!(generic_impl["pattern"] == "test_crate::{impl test_crate::Shape for test_crate::Pair<@>}");
++    ensure!(!contains(
++        generic_impl,
++        "pattern_also_matches",
++        index_of("test_crate::{impl test_crate::Shape for test_crate::Pair<u8>}")
++    ));
++
++    // Feed every pattern back as a start-from selection.
++    let mut expected = Vec::new();
++    for item in items {
++        if item["source"] == "synthetic" || item["removed_by_passes"] == true {
++            continue;
++        }
++        let pattern = item["pattern"]
++            .as_str()
++            .with_context(|| format!("no pattern for {}: {}", item["name"], item["pattern_error"]))?;
++        expected.push(pattern.to_owned());
++    }
++    let patterns_path = dir.join("patterns.txt");
++    std::fs::write(&patterns_path, expected.join("\n"))?;
++    let coverage_path = dir.join("coverage.json");
++    charon(
++        dir,
++        &[("CHARON_COVERAGE_REPORT", &coverage_path)],
++        &["--start-from-file", patterns_path.to_str().unwrap()],
++    )?;
++    let coverage: Value = serde_json::from_str(&std::fs::read_to_string(&coverage_path)?)?;
++    let declared: HashMap<&str, bool> = coverage["start_from"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .flat_map(|sel| sel["items"].as_array().unwrap())
++        .map(|item| (item["id"].as_str().unwrap(), item["declared"] == true))
++        .collect();
++    let selected = coverage["start_from_selected"].as_array().unwrap();
++    ensure!(selected.len() == expected.len());
++    for (pattern, selection) in expected.iter().zip(selected) {
++        ensure!(selection["pattern"] == pattern.as_str());
++        let items = selection["items"].as_array().unwrap();
++        ensure!(
++            items.len() == 1 && items[0]["pattern_spells_name"] == true,
++            "`{pattern}` selected {items:?}"
++        );
++        ensure!(
++            declared[items[0]["id"].as_str().unwrap()],
++            "`{pattern}` selected an undeclared item"
++        );
++    }
++    ensure!(expected.len() > 60, "only {} patterns", expected.len());
++    Ok(())
++}
+diff --git a/tests/help-output.txt b/tests/help-output.txt
+index 65e1264..69dc479 100644
+--- a/tests/help-output.txt
++++ b/tests/help-output.txt
+@@ -185,5 +185,11 @@ Options:
+           - soteria
+           - tests
+ 
++      --start-from-file <FILE>
++          Same as `--start-from` for each line of the file (one pattern per line; blank lines and lines starting with `#` are ignored). Every pattern must select an item, e.g. the `pattern`s of a `CHARON_CALLGRAPH` dump
++
++      --opaque-file <FILE>
++          Same as `--opaque` for each line of the file (one pattern per line; blank lines and lines starting with `#` are ignored)
++
+   -h, --help
+           Print help (see a summary with '-h')
+diff --git a/tests/ui/filtering/opaque-file.out b/tests/ui/filtering/opaque-file.out
+new file mode 100644
+index 0000000..bfe7319
+--- /dev/null
++++ b/tests/ui/filtering/opaque-file.out
+@@ -0,0 +1,401 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::marker::Destruct
++#[lang_item("destruct")]
++pub trait Destruct<Self>
++{
++    fn drop_in_place = core::marker::Destruct::drop_in_place<Self>
++    non-dyn-compatible
++}
++
++unsafe fn core::marker::Destruct::drop_in_place<Self>(_1: *mut Self)
++= <opaque>
++
++// Full name: core::marker::Tuple
++#[lang_item("tuple_trait")]
++pub trait Tuple<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Args>
++    parent_clause2 : [@TraitClause2]: Tuple<Args>
++    parent_clause3 : [@TraitClause3]: Sized<Self::Output>
++    type Output
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self::Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: FnOnce<Self, Args>
++    parent_clause2 : [@TraitClause2]: Sized<Args>
++    parent_clause3 : [@TraitClause3]: Tuple<Args>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self::parent_clause1::Output>
++}
++
++// Full name: core::ops::function::Fn
++#[lang_item("fn")]
++pub trait Fn<Self, Args>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: FnMut<Self, Args>
++    parent_clause2 : [@TraitClause2]: Sized<Args>
++    parent_clause3 : [@TraitClause3]: Tuple<Args>
++    fn call<'_0_1> = core::ops::function::Fn::call<'_0_1, Self, Args>[Self]
++    vtable: core::ops::function::Fn::{vtable}<Args, Self::parent_clause1::parent_clause1::Output>
++}
++
++pub fn core::ops::function::Fn::call<'_0, Self, Args>(_1: &'_0 Self, _2: Args) -> @TraitClause0::parent_clause1::parent_clause1::Output
++where
++    [@TraitClause0]: Fn<Self, Args>,
++= <opaque>
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args>(_1: &'_0 mut Self, _2: Args) -> @TraitClause0::parent_clause1::Output
++where
++    [@TraitClause0]: FnMut<Self, Args>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args>(_1: Self, _2: Args) -> @TraitClause0::Output
++where
++    [@TraitClause0]: FnOnce<Self, Args>,
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Shape
++pub trait Shape<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    fn area<'_0_1> = test_crate::Shape::area<'_0_1, Self>[Self]
++    vtable: test_crate::Shape::{vtable}
++}
++
++pub fn test_crate::Shape::area<'_0, Self>(_1: &'_0 Self) -> u32
++where
++    [@TraitClause0]: Shape<Self>,
++= <method_without_default_body>
++
++// Full name: test_crate::Pair
++pub struct Pair<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  T,
++  T,
++}
++
++// Full name: test_crate::{impl Shape for Pair<T>[@TraitClause0]}::area
++pub fn {impl Shape for Pair<T>[@TraitClause0]}::area<'_0, T>(_1: &'_0 Pair<T>[@TraitClause0]) -> u32
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Shape<T>,
++= <opaque>
++
++// Full name: test_crate::{impl Shape for Pair<T>[@TraitClause0]}
++impl<T> Shape for Pair<T>[@TraitClause0]
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Shape<T>,
++{
++    parent_clause0 = {built_in impl MetaSized for Pair<T>[@TraitClause0]}
++    fn area<'_0_1> = {impl Shape for Pair<T>[@TraitClause0]}::area<'_0_1, T>[@TraitClause0, @TraitClause1]
++    vtable: {impl Shape for Pair<T>[@TraitClause0]}::{vtable}<T>[@TraitClause0, @TraitClause1]
++}
++
++// Full name: test_crate::{impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area
++pub fn {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area<'_0>(self_1: &'_0 Pair<u8>[{built_in impl Sized for u8}]) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'1 Pair<u8>[{built_in impl Sized for u8}]; // arg #1
++
++    _0 = const 0 : u32
++    return
++}
++
++// Full name: test_crate::{impl Shape for Pair<u8>[{built_in impl Sized for u8}]}
++impl Shape for Pair<u8>[{built_in impl Sized for u8}] {
++    parent_clause0 = {built_in impl MetaSized for Pair<u8>[{built_in impl Sized for u8}]}
++    fn area<'_0_1> = {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area<'_0_1>
++    vtable: {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::{vtable}
++}
++
++struct test_crate::user::closure#1 {}
++
++// Full name: test_crate::user::{impl Fn<(u32,)> for test_crate::user::closure#1}::call
++fn {impl Fn<(u32,)> for test_crate::user::closure#1}::call<'_0>(_1: &'_0 test_crate::user::closure#1, _2: (u32,)) -> u32
++= <opaque>
++
++struct test_crate::user::closure {}
++
++// Full name: test_crate::user::{impl Fn<(u32,)> for test_crate::user::closure}::call
++fn {impl Fn<(u32,)> for test_crate::user::closure}::call<'_0>(_1: &'_0 test_crate::user::closure, tupled_args_2: (u32,)) -> u32
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::user::closure; // arg #1
++    let tupled_args_2: (u32,); // arg #2
++    let y_3: u32; // local
++    let _4: u32; // anonymous local
++    let _5: u32; // anonymous local
++
++    storage_live(y_3)
++    storage_live(_5)
++    y_3 = move tupled_args_2.0
++    storage_live(_4)
++    _4 = copy y_3
++    _5 = copy _4 panic.+ const 1 : u32
++    _0 = move _5
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::user
++pub fn user(x_1: u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: u32; // arg #1
++    let f_2: test_crate::user::closure; // local
++    let g_3: test_crate::user::closure#1; // local
++    let _4: u32; // anonymous local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: &'1 test_crate::user::closure; // anonymous local
++    let _8: (u32,); // anonymous local
++    let _9: u32; // anonymous local
++    let _10: u32; // anonymous local
++    let _11: &'3 test_crate::user::closure#1; // anonymous local
++    let _12: (u32,); // anonymous local
++    let _13: u32; // anonymous local
++    let _14: u32; // anonymous local
++    let _15: u32; // anonymous local
++    let _16: &'5 Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++    let _17: u32; // anonymous local
++    let _18: u32; // anonymous local
++    let _19: &'7 Pair<Pair<u8>[{built_in impl Sized for u8}]>[{built_in impl Sized for Pair<u8>[{built_in impl Sized for u8}]}]; // anonymous local
++    let _20: u32; // anonymous local
++    let _21: &'8 Pair<Pair<u8>[{built_in impl Sized for u8}]>[{built_in impl Sized for Pair<u8>[{built_in impl Sized for u8}]}]; // anonymous local
++    let _22: &'9 Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++    let _23: &'20 Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++    let _24: Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++    let _25: &'21 Pair<Pair<u8>[{built_in impl Sized for u8}]>[{built_in impl Sized for Pair<u8>[{built_in impl Sized for u8}]}]; // anonymous local
++    let _26: Pair<Pair<u8>[{built_in impl Sized for u8}]>[{built_in impl Sized for Pair<u8>[{built_in impl Sized for u8}]}]; // anonymous local
++    let _27: Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++    let _28: Pair<u8>[{built_in impl Sized for u8}]; // anonymous local
++
++    storage_live(_14)
++    storage_live(_17)
++    storage_live(_20)
++    storage_live(_21)
++    storage_live(_22)
++    storage_live(f_2)
++    f_2 = test_crate::user::closure {  }
++    storage_live(g_3)
++    g_3 = test_crate::user::closure#1 {  }
++    storage_live(_4)
++    storage_live(_5)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = &f_2
++    storage_live(_8)
++    storage_live(_9)
++    _9 = copy x_1
++    _8 = (move _9,)
++    _6 = {impl Fn<(u32,)> for test_crate::user::closure}::call<'11>(move _7, move _8)
++    storage_dead(_9)
++    storage_dead(_8)
++    storage_dead(_7)
++    storage_live(_10)
++    storage_live(_11)
++    _11 = &g_3
++    storage_live(_12)
++    storage_live(_13)
++    _13 = copy x_1
++    _12 = (move _13,)
++    _10 = {impl Fn<(u32,)> for test_crate::user::closure#1}::call<'13>(move _11, move _12)
++    storage_dead(_13)
++    storage_dead(_12)
++    storage_dead(_11)
++    _14 = copy _6 panic.+ copy _10
++    storage_live(_23)
++    storage_live(_24)
++    _24 = Pair { 0: const 0 : u8, 1: const 1 : u8 }
++    _23 = &_24
++    _5 = move _14
++    storage_dead(_10)
++    storage_dead(_6)
++    storage_live(_15)
++    storage_live(_16)
++    _22 = move _23
++    _16 = &(*_22)
++    _15 = {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area<'16>(move _16)
++    storage_dead(_16)
++    _17 = copy _5 panic.+ copy _15
++    storage_live(_25)
++    storage_live(_26)
++    storage_live(_27)
++    storage_live(_28)
++    _27 = Pair { 0: const 0 : u8, 1: const 0 : u8 }
++    _28 = Pair { 0: const 1 : u8, 1: const 1 : u8 }
++    _26 = Pair { 0: move _27, 1: move _28 }
++    _25 = &_26
++    _4 = move _17
++    storage_dead(_15)
++    storage_dead(_5)
++    storage_live(_18)
++    storage_live(_19)
++    _21 = move _25
++    _19 = &(*_21)
++    _18 = {impl Shape for Pair<T>[@TraitClause0]}::area<'19, Pair<u8>[{built_in impl Sized for u8}]>[{built_in impl Sized for Pair<u8>[{built_in impl Sized for u8}]}, {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}](move _19)
++    storage_dead(_19)
++    _20 = copy _4 panic.+ copy _18
++    _0 = move _20
++    storage_dead(_18)
++    storage_dead(_4)
++    storage_dead(g_3)
++    storage_dead(f_2)
++    return
++}
++
++// Full name: test_crate::user::{impl FnMut<(u32,)> for test_crate::user::closure}::call_mut
++fn {impl FnMut<(u32,)> for test_crate::user::closure}::call_mut<'_0>(state_1: &'_0 mut test_crate::user::closure, args_2: (u32,)) -> u32
++{
++    let _0: u32; // return
++    let state_1: &'_0 mut test_crate::user::closure; // arg #1
++    let args_2: (u32,); // arg #2
++    let _3: &'0 test_crate::user::closure; // anonymous local
++
++    storage_live(_3)
++    _3 = &(*state_1)
++    _0 = {impl Fn<(u32,)> for test_crate::user::closure}::call<'2>(move _3, move args_2)
++    return
++}
++
++// Full name: test_crate::user::closure::{impl Destruct for test_crate::user::closure}::drop_in_place
++unsafe fn {impl Destruct for test_crate::user::closure}::drop_in_place(_1: *mut test_crate::user::closure)
++= <missing>
++
++// Full name: test_crate::user::closure::{impl Destruct for test_crate::user::closure}
++impl Destruct for test_crate::user::closure {
++    fn drop_in_place = {impl Destruct for test_crate::user::closure}::drop_in_place
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl FnOnce<(u32,)> for test_crate::user::closure}::call_once
++fn {impl FnOnce<(u32,)> for test_crate::user::closure}::call_once(_1: test_crate::user::closure, _2: (u32,)) -> u32
++{
++    let _0: u32; // return
++    let _1: test_crate::user::closure; // arg #1
++    let _2: (u32,); // arg #2
++    let _3: &'1 mut test_crate::user::closure; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(u32,)> for test_crate::user::closure}::call_mut<'3>(move _3, move _2)
++    drop[{impl Destruct for test_crate::user::closure}] _1
++    return
++}
++
++// Full name: test_crate::user::{impl FnOnce<(u32,)> for test_crate::user::closure}
++impl FnOnce<(u32,)> for test_crate::user::closure {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure}
++    parent_clause1 = {built_in impl Sized for (u32,)}
++    parent_clause2 = {built_in impl Tuple for (u32,)}
++    parent_clause3 = {built_in impl Sized for u32}
++    type Output = u32
++    fn call_once = {impl FnOnce<(u32,)> for test_crate::user::closure}::call_once
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl FnMut<(u32,)> for test_crate::user::closure}
++impl FnMut<(u32,)> for test_crate::user::closure {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure}
++    parent_clause1 = {impl FnOnce<(u32,)> for test_crate::user::closure}
++    parent_clause2 = {built_in impl Sized for (u32,)}
++    parent_clause3 = {built_in impl Tuple for (u32,)}
++    fn call_mut<'_0_1> = {impl FnMut<(u32,)> for test_crate::user::closure}::call_mut<'_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl Fn<(u32,)> for test_crate::user::closure}
++impl Fn<(u32,)> for test_crate::user::closure {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure}
++    parent_clause1 = {impl FnMut<(u32,)> for test_crate::user::closure}
++    parent_clause2 = {built_in impl Sized for (u32,)}
++    parent_clause3 = {built_in impl Tuple for (u32,)}
++    fn call<'_0_1> = {impl Fn<(u32,)> for test_crate::user::closure}::call<'_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl FnOnce<(u32,)> for test_crate::user::closure#1}::call_once
++fn {impl FnOnce<(u32,)> for test_crate::user::closure#1}::call_once(_1: test_crate::user::closure#1, _2: (u32,)) -> u32
++= <opaque>
++
++// Full name: test_crate::user::{impl FnOnce<(u32,)> for test_crate::user::closure#1}
++impl FnOnce<(u32,)> for test_crate::user::closure#1 {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure#1}
++    parent_clause1 = {built_in impl Sized for (u32,)}
++    parent_clause2 = {built_in impl Tuple for (u32,)}
++    parent_clause3 = {built_in impl Sized for u32}
++    type Output = u32
++    fn call_once = {impl FnOnce<(u32,)> for test_crate::user::closure#1}::call_once
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl FnMut<(u32,)> for test_crate::user::closure#1}::call_mut
++fn {impl FnMut<(u32,)> for test_crate::user::closure#1}::call_mut<'_0>(_1: &'_0 mut test_crate::user::closure#1, _2: (u32,)) -> u32
++= <opaque>
++
++// Full name: test_crate::user::{impl FnMut<(u32,)> for test_crate::user::closure#1}
++impl FnMut<(u32,)> for test_crate::user::closure#1 {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure#1}
++    parent_clause1 = {impl FnOnce<(u32,)> for test_crate::user::closure#1}
++    parent_clause2 = {built_in impl Sized for (u32,)}
++    parent_clause3 = {built_in impl Tuple for (u32,)}
++    fn call_mut<'_0_1> = {impl FnMut<(u32,)> for test_crate::user::closure#1}::call_mut<'_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::user::{impl Fn<(u32,)> for test_crate::user::closure#1}
++impl Fn<(u32,)> for test_crate::user::closure#1 {
++    parent_clause0 = {built_in impl MetaSized for test_crate::user::closure#1}
++    parent_clause1 = {impl FnMut<(u32,)> for test_crate::user::closure#1}
++    parent_clause2 = {built_in impl Sized for (u32,)}
++    parent_clause3 = {built_in impl Tuple for (u32,)}
++    fn call<'_0_1> = {impl Fn<(u32,)> for test_crate::user::closure#1}::call<'_0_1>
++    non-dyn-compatible
++}
++
++
++
+diff --git a/tests/ui/filtering/opaque-file.patterns b/tests/ui/filtering/opaque-file.patterns
+new file mode 100644
+index 0000000..cf8c444
+--- /dev/null
++++ b/tests/ui/filtering/opaque-file.patterns
+@@ -0,0 +1,4 @@
++test_crate::{impl test_crate::Shape for test_crate::Pair<@>}::area
++test_crate::user::{impl core::ops::function::FnOnce<Tuple<u32>> for test_crate::user::closure#1}::call_once
++test_crate::user::{impl core::ops::function::FnMut<Tuple<u32>> for test_crate::user::closure#1}::call_mut
++test_crate::user::{impl core::ops::function::Fn<Tuple<u32>> for test_crate::user::closure#1}::call
+diff --git a/tests/ui/filtering/opaque-file.rs b/tests/ui/filtering/opaque-file.rs
+new file mode 100644
+index 0000000..0c2c8bf
+--- /dev/null
++++ b/tests/ui/filtering/opaque-file.rs
+@@ -0,0 +1,23 @@
++//@ charon-arg=--opaque-file=tests/ui/filtering/opaque-file.patterns
++// `--opaque-file` patterns work like `--opaque` ones. Canonical patterns distinguish the impl
++// blocks of a generic type (`@` is a type parameter) and closures (`#N`).
++pub trait Shape {
++    fn area(&self) -> u32;
++}
++pub struct Pair<T>(pub T, pub T);
++impl<T: Shape> Shape for Pair<T> {
++    fn area(&self) -> u32 {
++        self.0.area() + self.1.area()
++    }
++}
++impl Shape for Pair<u8> {
++    fn area(&self) -> u32 {
++        0
++    }
++}
++
++pub fn user(x: u32) -> u32 {
++    let f = |y: u32| y + 1;
++    let g = |y: u32| y * 2;
++    f(x) + g(x) + Pair(0u8, 1u8).area() + Pair(Pair(0u8, 0u8), Pair(1u8, 1u8)).area()
++}
+diff --git a/tests/ui/filtering/start-from-canonical.out b/tests/ui/filtering/start-from-canonical.out
+new file mode 100644
+index 0000000..8eb684c
+--- /dev/null
++++ b/tests/ui/filtering/start-from-canonical.out
+@@ -0,0 +1,264 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::marker::Destruct
++#[lang_item("destruct")]
++pub trait Destruct<Self>
++{
++    fn drop_in_place = core::marker::Destruct::drop_in_place<Self>
++    non-dyn-compatible
++}
++
++unsafe fn core::marker::Destruct::drop_in_place<Self>(_1: *mut Self)
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Shape
++pub trait Shape<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    fn area<'_0_1> = test_crate::Shape::area<'_0_1, Self>[Self]
++    fn double<'_0_1> = test_crate::Shape::double<'_0_1, Self>[Self]
++    vtable: test_crate::Shape::{vtable}
++}
++
++pub fn test_crate::Shape::area<'_0, Self>(_1: &'_0 Self) -> u32
++where
++    [@TraitClause0]: Shape<Self>,
++= <method_without_default_body>
++
++pub fn test_crate::Shape::double<'_0, Self>(self_1: &'_0 Self) -> u32
++where
++    [@TraitClause0]: Shape<Self>,
++{
++    let _0: u32; // return
++    let self_1: &'1 Self; // arg #1
++    let _2: u32; // anonymous local
++    let _3: &'2 Self; // anonymous local
++    let _4: u32; // anonymous local
++
++    storage_live(_4)
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*self_1) with_metadata(copy self_1.metadata)
++    _2 = @TraitClause0::area<'4>(move _3)
++    storage_dead(_3)
++    _4 = copy _2 panic.* const 2 : u32
++    _0 = move _4
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::Sq
++pub struct Sq {
++  u32,
++}
++
++// Full name: test_crate::Pair
++pub struct Pair<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  T,
++  T,
++}
++
++// Full name: test_crate::{impl Shape for (u8, u16)}::area
++pub fn {impl Shape for (u8, u16)}::area<'_0>(self_1: &'_0 (u8, u16)) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'1 (u8, u16); // arg #1
++    let _2: u32; // anonymous local
++    let _3: u8; // anonymous local
++    let _4: u32; // anonymous local
++    let _5: u16; // anonymous local
++    let _6: u32; // anonymous local
++
++    storage_live(_6)
++    storage_live(_2)
++    storage_live(_3)
++    _3 = copy (*self_1).0
++    _2 = cast<u8, u32>(move _3)
++    storage_dead(_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = copy (*self_1).1
++    _4 = cast<u16, u32>(move _5)
++    storage_dead(_5)
++    _6 = copy _2 panic.+ copy _4
++    _0 = move _6
++    storage_dead(_4)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::{impl Shape for Pair<T>[@TraitClause0]}::area
++pub fn {impl Shape for Pair<T>[@TraitClause0]}::area<'_0, T>(self_1: &'_0 Pair<T>[@TraitClause0]) -> u32
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Shape<T>,
++{
++    let _0: u32; // return
++    let self_1: &'1 Pair<T>[@TraitClause0]; // arg #1
++    let _2: u32; // anonymous local
++    let _3: &'3 T; // anonymous local
++    let _4: u32; // anonymous local
++    let _5: &'4 T; // anonymous local
++    let _6: u32; // anonymous local
++
++    storage_live(_6)
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &((*self_1)).0
++    _2 = @TraitClause1::area<'6>(move _3)
++    storage_dead(_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &((*self_1)).1
++    _4 = @TraitClause1::area<'8>(move _5)
++    storage_dead(_5)
++    _6 = copy _2 panic.+ copy _4
++    _0 = move _6
++    storage_dead(_4)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::{impl Shape for Pair<T>[@TraitClause0]}::double
++pub fn {impl Shape for Pair<T>[@TraitClause0]}::double<'_0, T>(self_1: &'_0 Pair<T>[@TraitClause0]) -> u32
++where
++    [@TraitClause0]: Sized<T>,
++    [@TraitClause1]: Shape<T>,
++{
++    let _0: u32; // return
++    let self_1: &'1 Pair<T>[@TraitClause0]; // arg #1
++    let _2: u32; // anonymous local
++    let _3: &'2 Pair<T>[@TraitClause0]; // anonymous local
++    let _4: u32; // anonymous local
++
++    storage_live(_4)
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*self_1)
++    _2 = {impl Shape for Pair<T>[@TraitClause0]}::area<'4, T>[@TraitClause0, @TraitClause1](move _3)
++    storage_dead(_3)
++    _4 = copy _2 panic.* const 2 : u32
++    _0 = move _4
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::{impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area
++pub fn {impl Shape for Pair<u8>[{built_in impl Sized for u8}]}::area<'_0>(self_1: &'_0 Pair<u8>[{built_in impl Sized for u8}]) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'1 Pair<u8>[{built_in impl Sized for u8}]; // arg #1
++
++    _0 = const 0 : u32
++    return
++}
++
++// Full name: test_crate::{Pair<T>[@TraitClause0]}::first
++pub fn first<'_0, T>(self_1: &'_0 Pair<T>[@TraitClause0]) -> &'_0 T
++where
++    [@TraitClause0]: Sized<T>,
++{
++    let _0: &'1 T; // return
++    let self_1: &'3 Pair<T>[@TraitClause0]; // arg #1
++    let _2: &'4 T; // anonymous local
++
++    storage_live(_2)
++    _2 = &((*self_1)).0
++    _0 = &(*_2)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::_::{Sq}::hidden
++pub fn hidden<'_0>(self_1: &'_0 Sq) -> u32
++{
++    let _0: u32; // return
++    let self_1: &'1 Sq; // arg #1
++
++    _0 = const 1 : u32
++    return
++}
++
++// Full name: test_crate::user::helper
++fn helper(x_1: u32) -> u32
++{
++    let _0: u32; // return
++    let x_1: u32; // arg #1
++    let _2: u32; // anonymous local
++    let _3: u32; // anonymous local
++
++    storage_live(_3)
++    storage_live(_2)
++    _2 = copy x_1
++    _3 = copy _2 panic.+ const 1 : u32
++    _0 = move _3
++    storage_dead(_2)
++    return
++}
++
++struct test_crate::user::closure {}
++
++// Full name: test_crate::user::{impl Fn<(u32,)> for test_crate::user::closure}::call
++fn {impl Fn<(u32,)> for test_crate::user::closure}::call<'_0>(_1: &'_0 test_crate::user::closure, tupled_args_2: (u32,)) -> u32
++{
++    let _0: u32; // return
++    let _1: &'1 test_crate::user::closure; // arg #1
++    let tupled_args_2: (u32,); // arg #2
++    let x_3: u32; // local
++    let _4: u32; // anonymous local
++    let _5: u32; // anonymous local
++
++    storage_live(x_3)
++    storage_live(_5)
++    x_3 = move tupled_args_2.0
++    storage_live(_4)
++    _4 = copy x_3
++    _5 = copy _4 panic.+ const 1 : u32
++    _0 = move _5
++    storage_dead(_4)
++    return
++}
++
++struct test_crate::user::closure#1 {
++  u32,
++}
++
++// Full name: test_crate::user::closure#1::{impl Destruct for test_crate::user::closure#1}::drop_in_place
++unsafe fn {impl Destruct for test_crate::user::closure#1}::drop_in_place(_1: *mut test_crate::user::closure#1)
++= <missing>
++
++// Full name: test_crate::user::closure#1::{impl Destruct for test_crate::user::closure#1}
++impl Destruct for test_crate::user::closure#1 {
++    fn drop_in_place = {impl Destruct for test_crate::user::closure#1}::drop_in_place
++    non-dyn-compatible
++}
++
++
++
+diff --git a/tests/ui/filtering/start-from-canonical.patterns b/tests/ui/filtering/start-from-canonical.patterns
+new file mode 100644
+index 0000000..de77dc7
+--- /dev/null
++++ b/tests/ui/filtering/start-from-canonical.patterns
+@@ -0,0 +1,7 @@
++# Canonical patterns, one per line.
++test_crate::{impl test_crate::Shape for test_crate::Pair<u8>}::area
++test_crate::{impl test_crate::Shape for test_crate::Pair<@>}::double
++test_crate::{impl test_crate::Pair<@>}::first
++test_crate::user::closure#1
++test_crate::user::{impl core::ops::function::Fn<Tuple<u32>> for test_crate::user::closure#0}::call
++test_crate::user::helper
+diff --git a/tests/ui/filtering/start-from-canonical.rs b/tests/ui/filtering/start-from-canonical.rs
+new file mode 100644
+index 0000000..75d8226
+--- /dev/null
++++ b/tests/ui/filtering/start-from-canonical.rs
+@@ -0,0 +1,66 @@
++//@ charon-arg=--start-from-file=tests/ui/filtering/start-from-canonical.patterns
++//@ charon-arg=--start-from=test_crate::{impl test_crate::Shape for Tuple<u8, u16>}::area,test_crate::_#0::{impl test_crate::Sq}::hidden
++// Canonical name patterns (as `CHARON_CALLGRAPH` dumps them) select exactly the item they name:
++// the nested items and closures of a selected function are not selected with it, and `@`
++// (a type parameter) and `#N` (a disambiguator) tell apart impl blocks and closures that `_` and
++// plain names would confuse. A list of patterns may contain commas inside brackets.
++pub trait Shape {
++    fn area(&self) -> u32;
++    fn double(&self) -> u32 {
++        self.area() * 2
++    }
++}
++pub struct Sq(pub u32);
++pub struct Pair<T>(pub T, pub T);
++
++impl Shape for Sq {
++    fn area(&self) -> u32 {
++        self.0 * self.0
++    }
++}
++impl Shape for (u8, u16) {
++    fn area(&self) -> u32 {
++        self.0 as u32 + self.1 as u32
++    }
++}
++impl<T: Shape> Shape for Pair<T> {
++    fn area(&self) -> u32 {
++        self.0.area() + self.1.area()
++    }
++}
++impl Shape for Pair<u8> {
++    fn area(&self) -> u32 {
++        0
++    }
++}
++impl<T> Pair<T> {
++    pub fn first(&self) -> &T {
++        &self.0
++    }
++}
++impl Pair<u16> {
++    pub fn sum(&self) -> u16 {
++        self.0 + self.1
++    }
++}
++const _: () = {
++    impl Sq {
++        pub fn hidden(&self) -> u32 {
++            1
++        }
++    }
++};
++
++pub fn apply<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 {
++    f(x)
++}
++
++pub fn user() -> u32 {
++    fn helper(x: u32) -> u32 {
++        x + 1
++    }
++    let a = apply(|x| x + 1, 2);
++    let k = 5;
++    let b = apply(move |x| x * k, 3);
++    helper(a + b)
++}
+diff --git a/tests/ui/filtering/start-from-file-errors.out b/tests/ui/filtering/start-from-file-errors.out
+new file mode 100644
+index 0000000..62424bd
+--- /dev/null
++++ b/tests/ui/filtering/start-from-file-errors.out
+@@ -0,0 +1,25 @@
++error: when processing starting pattern `test_crate::{impl test_crate::Pair<u8>}::first`: `--start-from` only supports impl patterns if they're the first element of the path, and no item has this exact name
++  --> tests/ui/filtering/start-from-file-errors.rs:13:3
++   |
++13 | }
++   |  ^
++
++error: when processing starting pattern `test_crate::user::closure#1`: no item has the name `test_crate::user::closure#1`
++  --> tests/ui/filtering/start-from-file-errors.rs:13:3
++   |
++13 | }
++   |  ^
++
++error: when processing starting pattern `test_crate::missing`: path `test_crate::missing` does not correspond to any item, and no item has this exact name
++  --> tests/ui/filtering/start-from-file-errors.rs:13:3
++   |
++13 | }
++   |  ^
++
++error: when processing starting pattern `test_crate::user::{impl core::ops::function::Fn<Tuple<u32>> for test_crate::user::closure#0}::call_mut`: `--start-from` only supports impl patterns if they're the first element of the path, and no item has this exact name
++  --> tests/ui/filtering/start-from-file-errors.rs:13:3
++   |
++13 | }
++   |  ^
++
++ERROR Code failed to compile
+diff --git a/tests/ui/filtering/start-from-file-errors.patterns b/tests/ui/filtering/start-from-file-errors.patterns
+new file mode 100644
+index 0000000..9c7dc29
+--- /dev/null
++++ b/tests/ui/filtering/start-from-file-errors.patterns
+@@ -0,0 +1,6 @@
++test_crate::{impl test_crate::Pair<@>}::first
++test_crate::{impl test_crate::Pair<u8>}::first
++test_crate::user::closure#0
++test_crate::user::closure#1
++test_crate::missing
++test_crate::user::{impl core::ops::function::Fn<Tuple<u32>> for test_crate::user::closure#0}::call_mut
+diff --git a/tests/ui/filtering/start-from-file-errors.rs b/tests/ui/filtering/start-from-file-errors.rs
+new file mode 100644
+index 0000000..843ae2e
+--- /dev/null
++++ b/tests/ui/filtering/start-from-file-errors.rs
+@@ -0,0 +1,13 @@
++//@ known-failure
++//@ charon-arg=--start-from-file=tests/ui/filtering/start-from-file-errors.patterns
++// Every pattern of a `--start-from-file` must select an item; each one that does not is reported.
++pub struct Pair<T>(pub T, pub T);
++impl<T> Pair<T> {
++    pub fn first(&self) -> &T {
++        &self.0
++    }
++}
++pub fn user() -> u32 {
++    let f = |y: u32| y + 1;
++    f(1)
++}
+diff --git a/tests/ui/filtering/start_from_errors.out b/tests/ui/filtering/start_from_errors.out
+index 1bbec7b..4974f9c 100644
+--- a/tests/ui/filtering/start_from_errors.out
++++ b/tests/ui/filtering/start_from_errors.out
+@@ -1,8 +1,8 @@
+ error: failed to parse pattern `std::iter:once` (expected eof at :once)
+ 
+-error: when processing starting pattern `start_from_errors::module1`: path `start_from_errors` does not correspond to any item; did you mean `crate::start_from_errors`?
++error: when processing starting pattern `start_from_errors::module1`: path `start_from_errors` does not correspond to any item; did you mean `crate::start_from_errors`?, and no item has this exact name
+ 
+-error: when processing starting pattern `module2`: path `module2` does not correspond to any item; did you mean `crate::module2`?
++error: when processing starting pattern `module2`: path `module2` does not correspond to any item; did you mean `crate::module2`?, and no item has this exact name
+ 
+ error: Cannot register item `core::ops::deref::Deref::Target` with kind `AssocTy`
+  --> /rustc/library/core/src/ops/deref.rs:144:5
+@@ -22,7 +22,7 @@ error: when processing starting pattern `{impl crate::Trait<_> for _}`: `--start
+ error: when processing starting pattern `{impl crate::Trait for crate::Type}::missing_method`: path `{impl crate::Trait for crate::Type}::missing_method` does not correspond to any item
+  --> /rustc/library/core/src/ops/deref.rs:0:1
+ 
+-error: when processing starting pattern `crate::{impl crate::Trait for crate::Type}`: `--start-from` only supports impl patterns if they're the first element of the path
++error: when processing starting pattern `crate::{impl crate::Trait for crate::Type}`: `--start-from` only supports impl patterns if they're the first element of the path, and no item has this exact name
+  --> /rustc/library/core/src/ops/deref.rs:0:1
+ 
+ ERROR Code failed to compile

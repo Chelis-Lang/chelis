@@ -1,0 +1,20 @@
+# aeneas integration step 14 after cba11f3beb: commit 626fe2ece3b49b9ce40ba69b67ef6c3e1b58f01a
+# first parent 777dd803792386e5dd625b1f384463ddbe43a4d3
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# extract: reserve the Lean keyword matches
+#
+# A Rust local named matches was emitted as a Lean binder and failed to parse.
+
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index 338e462..5895b6c 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -1178,6 +1178,7 @@ let keywords () =
+           "macro";
+           "macro_rules";
+           "match";
++          "matches";
+           "mut";
+           "mutual";
+           "name";
