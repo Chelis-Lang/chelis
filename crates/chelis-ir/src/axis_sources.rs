@@ -3322,16 +3322,30 @@ fn caller_witness_for_axis(
 }
 
 /// Whether `owner`'s `axis` is an ABI input axis read through administrative
-/// carriers only, with no invocation witness observing it. Such an axis has
-/// no body producer: a literal result claim on it is an interface-entry
-/// obligation of that input (spec/04-type-system.md section 4.7), and no other
-/// owner exists to carry it.
+/// carriers only, with no invocation witness observing it and no claim of its
+/// own declaration (a wildcard or anonymous extent). Such an axis has no body
+/// producer: a literal result claim on it is an interface-entry obligation of
+/// that input (spec/04-type-system.md section 4.7), and no other owner exists
+/// to carry it. An input axis that declares a claim already has its entry
+/// check; the checker has made the result literal agree with it.
 pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, axis: usize) -> bool {
-    matches!(
-        literal_result_interface_observation(dag, owner, axis),
-        Some(observation @ LiteralResultInterfaceObservation::InputAxis { .. })
-            if observation.entry_axis(dag).is_some()
-    )
+    let Some(LiteralResultInterfaceObservation::InputAxis {
+        load,
+        axis: input_axis,
+    }) = literal_result_interface_observation(dag, owner, axis)
+    else {
+        return false;
+    };
+    LiteralResultInterfaceObservation::InputAxis {
+        load,
+        axis: input_axis,
+    }
+    .entry_axis(dag)
+    .is_some()
+        && dag
+            .get(load)
+            .and_then(|node| node.output_type.dims.get(input_axis))
+            .is_some_and(|dim| axis_claim(dim).is_none())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
