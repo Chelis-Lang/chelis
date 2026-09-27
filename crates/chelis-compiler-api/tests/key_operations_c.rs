@@ -1413,40 +1413,44 @@ fn a_draw_whose_operand_rows_disagree_with_its_keys_traps_in_c_as_in_eval() {
     let cases = [
         (
             Short::DropoutData,
-            "extent `m`: claimed = 3, dropout input 0 axis 0 = 2",
-            "dropout",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
         (
             Short::DropoutRate,
-            "extent `m`: claimed = 3, dropout input 1 axis 0 = 2",
-            "dropout",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
         (
             Short::DropoutActivation,
-            "extent `m`: claimed = 3, dropout input 3 axis 0 = 2",
-            "dropout",
+            "extent `m`: claimed = 3, not axis 0 = 2",
+            "not",
         ),
         (
             Short::UniformTemplate,
-            "extent `m`: claimed = 3, uniform_like input 0 axis 0 = 2",
-            "uniform_like",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
         (
             Short::UniformHigh,
-            "extent `m`: claimed = 3, uniform_like input 2 axis 0 = 2",
-            "uniform_like",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
         (
             Short::ReplayCotangent,
-            "extent `m`: claimed = 3, dropout input 0 axis 0 = 2",
-            "dropout",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
         (
             Short::AdjointCotangent,
-            "extent `m`: claimed = 3, uniform_like input 1 axis 0 = 2",
-            "uniform_like",
+            "extent `m`: claimed = 3, neg axis 0 = 2",
+            "neg",
         ),
     ];
+    // Since chelis#2512 the short operand's restamp from `[p]` to `[m]` owns
+    // the comparison (spec/04 section 4.7, runtime_extents.md C6.2), so both
+    // lanes trap in that `neg` or `not` first; the draw's own row check is
+    // defence in depth that no verified graph now reaches.
     for (short, line, op) in cases {
         let report = format!("{line}\nnumeric trap: domain in {op} at i64");
         let dag = short_operand_draw(short);
@@ -1738,11 +1742,14 @@ fn a_fold_in_whose_key_and_index_disagree_traps_in_c_as_in_eval() {
             ]
         }
     };
+    // Since chelis#2512 the operand's restamp from `[p]` to `[m]` owns the
+    // comparison (spec/04 section 4.7, runtime_extents.md C6.2), so both lanes
+    // trap in that `neg` first; `fold_in`'s own check is defence in depth.
     for (index_first, line) in [
-        (true, "extent `m`: claimed = 2, fold_in input 1 axis 0 = 3"),
-        (false, "extent `m`: claimed = 3, fold_in input 1 axis 0 = 2"),
+        (true, "extent `m`: claimed = 2, neg axis 0 = 3"),
+        (false, "extent `m`: claimed = 2, neg axis 0 = 3"),
     ] {
-        let report = format!("{line}\nnumeric trap: domain in fold_in at i64");
+        let report = format!("{line}\nnumeric trap: domain in neg at i64");
         let dag = build(index_first);
         let inputs3 = inputs(index_first, 3);
         assert_eq!(
@@ -2276,4 +2283,65 @@ fn the_hip_build_admits_only_a_with_seed_draws_key() {
             }
         }
     }
+}
+
+/// Since chelis#2512 a verified graph cannot hand `fold_in` an index whose
+/// rows disagree with its keys: the restamp that used to carry the
+/// disagreement now traps first. Below the verifier, an anonymous-extent
+/// operand still reaches `fold_in`'s own row check in the DAG evaluator,
+/// which stays as defence in depth.
+#[test]
+fn below_the_verifier_fold_in_still_checks_its_index_rows_against_its_keys() {
+    let mut dag = Dag::new();
+    let keys = load_m(&mut dag, "k", &[], Prim::Key);
+    let loaded = dag.add_node(
+        RiscOp::Load { name: "j".into() },
+        vec![],
+        TensorType {
+            dims: named_dims("p", &[]),
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Neg,
+        vec![loaded],
+        TensorType {
+            dims: named_dims("*", &[]),
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let folded = dag.add_node(
+        RiscOp::FoldIn,
+        vec![keys, indices],
+        TensorType {
+            dims: named_dims("m", &[]),
+            precision: Prim::Key,
+        },
+        None,
+    );
+    dag.add_root(folded);
+    let values = [
+        ("k", Input::Keys(vec![2], vec![1, 2])),
+        ("j", Input::Ints(vec![3], vec![-5, -6, -7])),
+    ]
+    .iter()
+    .map(|(name, input)| {
+        (
+            *name,
+            TensorValue::from_storage(input.shape().to_vec(), input.storage()),
+        )
+    })
+    .collect::<UnordMap<_, _>>();
+    let result =
+        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
+            values.get(name).cloned()
+        });
+    assert_eq!(
+        result.err().as_deref(),
+        Some(
+            "extent `m`: claimed = 2, fold_in input 1 axis 0 = 3\nnumeric trap: domain in fold_in at i64"
+        )
+    );
 }

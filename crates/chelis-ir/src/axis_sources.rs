@@ -1207,10 +1207,13 @@ impl ExtentOrigin {
 fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
     let mut local: Option<ExtentOrigin> = None;
     let mut literal: Option<ExtentOrigin> = None;
-    // A restating axis claims the name without declaring it; its forwarded
-    // extent is what the name's guard compares. It supplies the value only
-    // when nothing else carries the name, where no class can form.
+    // A guarded restating axis claims the name without declaring it; its
+    // forwarded extent is what the name's guard compares, and so is every
+    // axis that forwards it further. It supplies the value only when nothing
+    // else carries the name. An unguarded restamp, alone in its scope,
+    // declares the name as any other first occurrence does.
     let mut restated: Option<ExtentOrigin> = None;
+    let guarded_restamps = guarded_restamp_axes(dag);
     for node in dag.nodes() {
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if !matches!(dim, DimInfo::Named(other, _) if other == name) {
@@ -1219,7 +1222,7 @@ fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
             let Some(origin) = resolve_axis_extent(dag, node.id, axis) else {
                 continue;
             };
-            if restamps_input_axis(dag, node.id, axis) {
+            if forwards_a_guarded_restamp(dag, node.id, axis, &guarded_restamps) {
                 restated = restated.or(Some(origin));
                 continue;
             }
@@ -1474,6 +1477,60 @@ fn restamps_input_axis(dag: &Dag, node: NodeId, axis: usize) -> bool {
         .and_then(|input| input.output_type.dims.get(usize::try_from(read).ok()?))
         .and_then(axis_claim)
         .is_some_and(|input_claim| input_claim != claim)
+}
+
+/// The restamping axes that a runtime-dimension class guards: those whose
+/// class has another member in the same scope. A restamp alone in its scope
+/// has nothing to compare against.
+fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
+    if !dag.nodes().iter().any(|node| {
+        (0..node.output_type.dims.len()).any(|axis| restamps_input_axis(dag, node.id, axis))
+    }) {
+        return Vec::new();
+    }
+    derive_runtime_dim_classes(dag)
+        .into_iter()
+        .flat_map(|class| class.members)
+        .filter(|member| restamps_input_axis(dag, member.node, member.axis))
+        .map(|member| (member.node, member.axis))
+        .collect()
+}
+
+/// Whether `(node, axis)` is a guarded restamp or forwards one unchanged
+/// through pass-through axes.
+fn forwards_a_guarded_restamp(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    guarded: &[(NodeId, usize)],
+) -> bool {
+    if guarded.is_empty() {
+        return false;
+    }
+    let (mut node, mut axis) = (node, axis);
+    for _ in 0..dag.len() {
+        if guarded.contains(&(node, axis)) {
+            return true;
+        }
+        let Some(owner) = dag.get(node) else {
+            return false;
+        };
+        if sets_axis(&owner.op, axis) {
+            return false;
+        }
+        let Some(AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(read),
+        }) = output_axis_sources(dag, node).get(axis).cloned()
+        else {
+            return false;
+        };
+        let (Some(next), Ok(read)) = (owner.inputs.get(input), usize::try_from(read)) else {
+            return false;
+        };
+        (node, axis) = (*next, read);
+    }
+    false
 }
 
 /// The claim stamped on one output axis, or `None` when the axis carries no
