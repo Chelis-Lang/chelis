@@ -142,12 +142,15 @@ gives the same tensor, so `kaiming_uniform(key_from_seed(7i64), w, 4.0)` is repr
 initialising two tensors takes two keys, for example the halves of one `split_key`. A draw
 in a conditional branch that does not run is not evaluated.
 
-Each randomized function is written in two layers inside its module: a sampling layer that
-draws from the key (`normal_like_sample(k, template)`), and a pure layer that turns the
-draws into the result (`normal_like_given(units, template, mean, std)`), so
-`normal_like(k, template, mean, std)` is the pure layer applied to the sampling layer's
-draws. The layers are private to the module; the exported function taking the key first is
-the public surface.
+`normal_like`, `kaiming_uniform`, `xavier_uniform` and `trunc_normal` are each written in
+two layers inside their module: a draw from the key, and a pure layer that turns the draws
+into the result. `normal_like(k, template, mean, std)` is
+`normal_like_given(units, template, mean, std)` applied to `normal_like_sample(k, template)`;
+the two uniform initializers apply `kaiming_uniform_given` and `xavier_uniform_given` to a
+unit `uniform_like` draw, and `trunc_normal` applies `trunc_normal_given` to a
+`normal_like` draw. `kaiming_normal` and `xavier_normal` call `normal_like` directly. The
+layers are private to their modules; the exported function taking the key first is the
+public surface.
 
 ### Sorting and scanning
 

@@ -87,7 +87,7 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class TensorValue:
-    """A decoded wire tensor (execution wire v3, spec/10 §3.2).
+    """A decoded wire tensor (execution wire v4, spec/10 §3.2).
 
     ``dtype`` is the element dtype tag (``f64``/``f32``/``f16``/``bf16``/
     ``int64``/``int32``/``int16``/``int8``/``bool``/``key``); ``data`` carries the
@@ -350,7 +350,7 @@ def eval(
     """Evaluate Chelis source.
 
     Tensor inputs cross the boundary as per-dtype stored-bit payloads (execution
-    wire v3): the numpy array's dtype selects the wire tag. Integers and float
+    wire v4): the numpy array's dtype selects the wire tag. Integers and float
     bits stay exact end-to-end. uint8/uint16/uint32 widen
     losslessly to int16/int32/int64; u64 and unmapped float widths raise
     `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
@@ -646,7 +646,7 @@ def _execution_value(payload: dict[str, Any]) -> Any:
     return ()
 
 
-# numpy kind/itemsize -> execution wire v3 dtype tag. Unsigned widths that
+# numpy kind/itemsize -> execution wire v4 dtype tag. Unsigned widths that
 # fit exactly in the next signed family widen losslessly; u64 and every
 # other unmapped dtype are rejected rather than falling through an f64
 # funnel.

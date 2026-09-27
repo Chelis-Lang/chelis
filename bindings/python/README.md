@@ -9,7 +9,7 @@ Current guarantees:
 - `chelis.check(...)`, `compile(...)`, `desugar(...)`, `decompile(...)`, `validate(...)`
   share the same compiler implementation as Tide through `chelis-compiler-api`
 - `chelis.from_dlpack(...)` is CPU-only; unsupported GPU tensors fail as `ValueError`
-- `chelis.eval(...)` copies inputs through execution wire v3's exact dtype
+- `chelis.eval(...)` copies inputs through execution wire v4's exact dtype
   carriers. Float payloads use fixed-width lowercase IEEE bit strings, preserving
   signed zero and every NaN payload. Scalars return their declared NumPy integer
   or float type; `bf16` uses `ml_dtypes.bfloat16`. Tensor results carry the dtype
