@@ -22,7 +22,8 @@
 //! `CompiledContext` contains only checker-success artifacts. Construction
 //! rejects diagnostics before it creates a library proof. Decode verifies the
 //! cache identity and payload integrity. It also checks the type-environment
-//! relationship. It reruns the remaining semantic checks and the lower phase.
+//! relationship, re-runs the lower phase and compares it against the stored
+//! lowering, and adopts the stored effect and linearity results (chelis#2558).
 //! Then, it restores that proof. The provisional `TypeResolutionEnv` is serde-skipped.
 //! A later stacked check reconstructs it from validated ADT and alias definitions.
 //! Rejected declaration headers cannot persist in either compiler cache.
@@ -32,7 +33,7 @@
 
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
-use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph_cached};
+use chelis_reef::{EntryImports, PreparedReefGraph, SourceDigest, prepare_reef_graph_for_entries};
 use chelis_types::{CheckedProgram, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -205,18 +206,17 @@ impl CompiledContextWire {
     ///
     /// The precondition is [`CompiledContext::decode_authenticated`]'s: the
     /// bytes were compared against a digest that did not travel with them. Under
-    /// it, this reconstructs the producer's exact value. The transmitted
-    /// `CheckedProgram` is already the output of the effect and linearity
-    /// checkers, and rerunning them over it reproduces it byte for byte, so the
-    /// reruns `Deserialize` performs would establish nothing here. The lowered
-    /// library is re-derived rather than adopted, which keeps
-    /// `chelis_pipeline_core::LoweredLibrary`'s rule that only `lower_library`
-    /// can construct one, and leaves this route trusting a single transmitted
-    /// artifact instead of two.
+    /// it, this reconstructs the producer's exact value. The library is bound
+    /// exactly as `Deserialize` binds it; the lowered library is re-derived
+    /// rather than adopted, which keeps `chelis_pipeline_core::LoweredLibrary`'s
+    /// rule that only `lower_library` can construct one. The comparison of that
+    /// re-derivation against the transmitted lowering, which `Deserialize`
+    /// performs, is omitted: the out-of-band digest already rejects every payload
+    /// but the producer's.
     fn into_authenticated_context(self) -> Result<CompiledContext, String> {
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::adopt_authenticated_library(self.type_env, self.library_checked)
+            chelis_pipeline_core::bind_cached_library(self.type_env, self.library_checked)
                 .map_err(|rejection| rejection.to_string())?;
         if self.library_dag.library_proof_id() != library.program().library_proof_id() {
             return Err("the lowered library does not match the checked library".to_string());
@@ -240,7 +240,7 @@ impl<'de> Deserialize<'de> for CompiledContext {
         let wire = CompiledContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
                 .map_err(serde::de::Error::custom)?;
         if wire.library_dag.library_proof_id() != library.program().library_proof_id() {
             return Err(serde::de::Error::custom(
@@ -307,11 +307,14 @@ impl CompiledContext {
     /// Reconstruct from bytes of unknown provenance.
     ///
     /// Every integrity claim available here comes out of the same bytes, so this
-    /// route re-derives the library from the decoded `CheckedProgram` and
-    /// compares the result against the transmitted lowered payload. That detects
-    /// a payload whose parts no longer agree with each other. It cannot detect a
-    /// payload that is internally consistent but was never produced from the
-    /// sources it claims; nothing carried inside the bytes can.
+    /// route re-lowers the decoded `CheckedProgram` and compares the result
+    /// against the transmitted lowered payload. That detects a payload whose
+    /// parts no longer agree with each other. It cannot detect a payload that is
+    /// internally consistent but was never produced from the sources it claims;
+    /// nothing carried inside the bytes can. The effect and linearity results
+    /// the program carries are adopted, not recomputed (chelis#2558): the build
+    /// identity pins them to a producer running this compiler, which ran both
+    /// checkers before writing.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
             .and_then(CacheEnvelope::into_context)
@@ -329,9 +332,9 @@ impl CompiledContext {
     /// compilation by the same build produced, because that one is internally
     /// consistent (chelis#2257). This route rejects both.
     ///
-    /// Given that, the effect and linearity reruns and the lowered-payload
-    /// comparison have nothing left to establish here: they recompute a value
-    /// equal to the transmitted one, as
+    /// Given that, the lowered-payload comparison has nothing left to establish
+    /// here, and it is the only step this route omits: both routes bind the
+    /// transmitted checked program the same way, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
@@ -512,10 +515,26 @@ impl CompiledContext {
     /// shares name+version+source bytes, or a cache file written by a
     /// differently-built `chelis` binary — is treated as a clean miss
     /// (`Ok(None)`), never a stale hit.
+    ///
+    /// This form serves entries that are package modules; see
+    /// [`Self::load_if_fresh_for_entries`].
     pub fn load_if_fresh(
+        path: &Path,
+        reef_home: &Path,
+        package_dir: &Path,
+    ) -> Result<Option<Self>, CacheError> {
+        Self::load_if_fresh_for_entries(path, reef_home, package_dir, &EntryImports::none())
+    }
+
+    /// [`Self::load_if_fresh`] for a caller that will also run `entries`
+    /// against the context (chelis#2558). They choose the chelis-std modules
+    /// the live graph links, and the source digests name that set, so a
+    /// context linked for other entries is a clean miss.
+    pub fn load_if_fresh_for_entries(
         path: &Path,
         _reef_home: &Path,
         package_dir: &Path,
+        entries: &EntryImports,
     ) -> Result<Option<Self>, CacheError> {
         // Read the entire file into memory before any decode work — no
         // streaming-decode windows where a half-written tail looks like
@@ -537,7 +556,8 @@ impl CompiledContext {
         // Recompute the source hash from the live package_dir. If the file
         // was named with a hash prefix that collides with a different
         // package, the recomputed hash will not match → cache miss.
-        let live_graph = prepare_reef_graph_cached(package_dir).map_err(CacheError::Reef)?;
+        let live_graph =
+            prepare_reef_graph_for_entries(package_dir, entries).map_err(CacheError::Reef)?;
         let live_digests = live_graph.source_digests().map_err(CacheError::Reef)?;
         let live_hash = ContextHash::from_digests(&live_digests);
         if envelope.source_hash != live_hash {
@@ -643,9 +663,14 @@ impl CompiledContext {
 /// The fallback path is `Ok` even if the post-compile `save` fails (the
 /// compile itself succeeded; surface a stderr warning and continue with
 /// the in-memory context). The next invocation will retry the save.
+///
+/// `entries` are the imports of every entry the caller will run against the
+/// context (chelis#2558). The context links only the chelis-std modules the
+/// package and those entries reach, and is cached per such set.
 pub fn load_or_compile_for_package(
     reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
 ) -> Result<CompiledContext, CompilerError> {
     // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
@@ -661,7 +686,7 @@ pub fn load_or_compile_for_package(
     let cache_dir = if reef_home.as_os_str().is_empty() {
         match crate::stdlib_cache::cache_dir_for("compiled") {
             Some(dir) => dir,
-            None => return compile_reef_context(reef_home, package_dir),
+            None => return compile_reef_context_for_entries(reef_home, package_dir, entries),
         }
     } else {
         reef_home.join(".cache").join("compiled")
@@ -670,7 +695,7 @@ pub fn load_or_compile_for_package(
     // mandatory pre-work for both the cache probe AND a full compile, so
     // we always pay it. On Coral-shape packages this is ~5s; the savings
     // come from skipping the rest of `compile_reef_context` on a hit.
-    let live_graph = match prepare_reef_graph_cached(package_dir) {
+    let live_graph = match prepare_reef_graph_for_entries(package_dir, entries) {
         Ok(g) => g,
         Err(e) => return Err(reef_error(&e)),
     };
@@ -700,7 +725,7 @@ pub fn load_or_compile_for_package(
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
     // Corrupt / version-skewed / hash-mismatched files fall through to a
     // full compile + overwrite, with a stderr breadcrumb for the operator.
-    match CompiledContext::load_if_fresh(&cache_path, reef_home, package_dir) {
+    match CompiledContext::load_if_fresh_for_entries(&cache_path, reef_home, package_dir, entries) {
         Ok(Some(ctx)) => return Ok(ctx),
         Ok(None) => {}
         // A cancelled load judged nothing: propagate the cancellation and
@@ -724,7 +749,7 @@ pub fn load_or_compile_for_package(
     // The save is best-effort — if it fails, the compile result is still
     // usable for this invocation; only the next invocation pays the cold
     // cost again.
-    let ctx = compile_reef_context(reef_home, package_dir)?;
+    let ctx = compile_reef_context_for_entries(reef_home, package_dir, entries)?;
     if let Err(e) = ctx.save(&cache_path)
         && verbose_corruption_to_stderr
     {
@@ -771,12 +796,18 @@ pub enum ContextLoadPath {
 pub fn load_or_compile_with_local_registry_fallback(
     reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
 ) -> Result<(CompiledContext, ContextLoadPath), CompilerError> {
-    match load_or_compile_for_package(reef_home, package_dir, verbose_corruption_to_stderr) {
+    match load_or_compile_for_package(
+        reef_home,
+        package_dir,
+        entries,
+        verbose_corruption_to_stderr,
+    ) {
         Ok(context) => Ok((context, ContextLoadPath::Cached)),
         Err(err) if is_local_registry_hash_gap(&err) => {
-            compile_reef_context(reef_home, package_dir)
+            compile_reef_context_for_entries(reef_home, package_dir, entries)
                 .map(|context| (context, ContextLoadPath::LocalRegistryFallback))
         }
         Err(err) => Err(err),
@@ -1006,6 +1037,7 @@ impl CacheEnvelope {
 
     fn into_context(self) -> Result<CompiledContext, CacheError> {
         self.check_build_and_embedded_digest()?;
+        poll_cancellation_before_payload_decode()?;
         let context: CompiledContext =
             bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
         self.check_envelope_agreement(&context)?;
@@ -1019,9 +1051,8 @@ impl CacheEnvelope {
     /// says the bytes are self-consistent; this one says they are the bytes the
     /// producer wrote, because a rewriter who recomputed the embedded digest
     /// cannot also reach into the channel `expected` arrived on. Given that, the
-    /// wire is deserialized straight into its context: the effect and linearity
-    /// reruns `into_context` performs would recompute a value equal to the one
-    /// transmitted, which is what
+    /// wire is deserialized straight into its context without the
+    /// lowered-payload comparison `into_context` performs, which is what
     /// `both_decode_routes_reconstruct_identical_contexts` locks.
     fn into_authenticated_context(
         self,
@@ -1034,6 +1065,7 @@ impl CacheEnvelope {
                 actual: hex_prefix(&actual_payload_sha, 32),
             });
         }
+        poll_cancellation_before_payload_decode()?;
         let wire: CompiledContextWire =
             bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
         let context = wire.into_authenticated_context().map_err(|e| {
@@ -1048,9 +1080,23 @@ impl CacheEnvelope {
     }
 }
 
-/// Classify a payload decode failure. Reconstruction polls the cancel token,
-/// so once cancellation is requested a failed decode is the abandonment, not
-/// evidence about the bytes (chelis#2617).
+/// Observe a tripped cancel token before paying for a payload decode.
+///
+/// Reconstruction binds the cached library without rerunning the checkers
+/// (chelis#2558), which were the decode's main polling site, so a load
+/// abandoned before it starts is reported here, as a cancellation rather than
+/// as a result about the bytes (chelis#2617). The re-lowering inside the
+/// decode can still observe the token; `payload_decode_error` classifies that.
+fn poll_cancellation_before_payload_decode() -> Result<(), CacheError> {
+    if chelis_types::cancellation_requested() {
+        return Err(CacheError::Cancelled);
+    }
+    Ok(())
+}
+
+/// Classify a payload decode failure. The re-lowering inside the decode polls
+/// the cancel token, so once cancellation is requested a failed decode is the
+/// abandonment, not evidence about the bytes (chelis#2617).
 fn payload_decode_error(error: &bincode::Error) -> CacheError {
     if chelis_types::cancellation_requested() {
         CacheError::Cancelled
@@ -1170,9 +1216,8 @@ pub enum CacheError {
     /// recomputing the live source hash for invalidation. The string
     /// is whatever `chelis_reef` returned.
     Reef(String),
-    /// Cancellation was requested while the payload was being decoded
-    /// (chelis#2617). Decoding reruns effect and linearity checking, which
-    /// polls the cancel token, so an abandoned decode says nothing about the
+    /// Cancellation was requested before or during the payload decode
+    /// (chelis#2617), so the load was abandoned and says nothing about the
     /// file. Callers propagate the cancellation and leave the file in place;
     /// this is never reported as an unusable cache.
     Cancelled,
@@ -1279,8 +1324,20 @@ fn sanitize_path_component(s: &str) -> String {
 /// `_reef_home` is currently unused; reserved for the Phase I disk-cache
 /// key (the cache lives under `$CHELIS_REEF_HOME/.cache/compiled/...`).
 pub fn compile_reef_context(
+    reef_home: &Path,
+    package_dir: &Path,
+) -> Result<CompiledContext, CompilerError> {
+    compile_reef_context_for_entries(reef_home, package_dir, &EntryImports::none())
+}
+
+/// [`compile_reef_context`] for a caller that will also run `entries`
+/// against the context: it links, and checks, every chelis-std module the
+/// package or those entries reach and no other (chelis#2558).
+/// `compile_reef_context` itself serves entries that are package modules.
+pub fn compile_reef_context_for_entries(
     _reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
 ) -> Result<CompiledContext, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
     // (internal-name-mangled), so the reserved linker-name rejection is
@@ -1312,7 +1369,8 @@ pub fn compile_reef_context(
     // lives in `chelis-types`; `prepare_reef_graph_cached` itself is
     // filesystem work and is not covered.
     bail_if_cancelled("reef")?;
-    let reef_state = prepare_reef_graph_cached(package_dir).map_err(|e| reef_error(&e))?;
+    let reef_state =
+        prepare_reef_graph_for_entries(package_dir, entries).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
     bail_if_cancelled("check")?;
     let digests = reef_state

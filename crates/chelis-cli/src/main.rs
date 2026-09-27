@@ -2009,6 +2009,11 @@ fn prepare_eval_in_context(
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
+    // chelis#2558: the context links only the chelis-std modules the package
+    // and this source import, so the source's imports are collected first.
+    // `detect_eval_package_root` routed here only because the source parsed.
+    let entries =
+        chelis_reef::EntryImports::from_surf_source(source).map_err(EvalInContextError::Compile)?;
     // Phase K: route through `load_or_compile_for_package` so the disk
     // cache amortizes cold-compile cost across invocations. On a hit
     // (source unchanged since last run), the library compile is skipped
@@ -2016,19 +2021,23 @@ fn prepare_eval_in_context(
     // the result for next time. `verbose=true` so an operator with a
     // corrupt cache file sees a stderr breadcrumb instead of a silent
     // recompile.
-    let context =
-        match chelis_compiler_api::load_or_compile_for_package(&reef_home, package_root, true) {
-            Ok(ctx) => ctx,
-            Err(err) => {
-                let msg = err
-                    .errors
-                    .iter()
-                    .map(|d| d.message.clone())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Err(EvalInContextError::Compile(msg));
-            }
-        };
+    let context = match chelis_compiler_api::load_or_compile_for_package(
+        &reef_home,
+        package_root,
+        &entries,
+        true,
+    ) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            let msg = err
+                .errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(EvalInContextError::Compile(msg));
+        }
+    };
     let result =
         match chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target) {
             Ok(result) => result,
@@ -7157,21 +7166,32 @@ fn cmd_test(
     let reef_home_path = env::var("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let context =
-        match chelis_compiler_api::load_or_compile_for_package(&reef_home_path, &cwd, true) {
-            Ok(context) => context,
-            Err(err) if is_local_registry_hash_unsupported(&err) => {
-                chelis_compiler_api::compile_reef_context(&reef_home_path, &cwd).map_err(|err| {
-                    format!("compile test context: {}", compiler_error_messages(&err))
-                })?
-            }
-            Err(err) => {
-                return Err(format!(
-                    "compile test context: {}",
-                    compiler_error_messages(&err)
-                ));
-            }
-        };
+    // chelis#2558: the context links only the chelis-std modules the package
+    // and the discovered test files import, and every worker runs its files
+    // against this one context.
+    let test_entries = test_entry_imports(&test_files);
+    let context = match chelis_compiler_api::load_or_compile_for_package(
+        &reef_home_path,
+        &cwd,
+        &test_entries,
+        true,
+    ) {
+        Ok(context) => context,
+        Err(err) if is_local_registry_hash_unsupported(&err) => {
+            chelis_compiler_api::compile_reef_context_for_entries(
+                &reef_home_path,
+                &cwd,
+                &test_entries,
+            )
+            .map_err(|err| format!("compile test context: {}", compiler_error_messages(&err)))?
+        }
+        Err(err) => {
+            return Err(format!(
+                "compile test context: {}",
+                compiler_error_messages(&err)
+            ));
+        }
+    };
     let (context_bytes, context_digest) = context.encode_for_handoff()?;
     drop(context);
     let context_handoff = CompiledContextHandoff::new(
@@ -8551,6 +8571,21 @@ fn preflight_test_selection(
     }
 }
 
+/// The modules `files` import (chelis#2558). A file that cannot be read or
+/// parsed contributes nothing: it cannot run against any context, and its
+/// worker reports the read or parse failure as that file's result.
+fn test_entry_imports<P: AsRef<Path>>(files: &[P]) -> chelis_reef::EntryImports {
+    let mut imports = chelis_reef::EntryImports::none();
+    for file in files {
+        if let Ok(source) = fs::read_to_string(file.as_ref())
+            && let Ok(decls) = chelis_surf::parser::parse_str(&source)
+        {
+            imports.add_decls(&decls);
+        }
+    }
+    imports
+}
+
 fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
     if target.is_file() {
         if target.extension().and_then(|e| e.to_str()) != Some("ch") {
@@ -9274,7 +9309,7 @@ fn cmd_internal_test_file(
         std::process::abort();
     }
 
-    let exec_context = load_test_execution_context()?;
+    let exec_context = load_test_execution_context(&[file])?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -9345,7 +9380,10 @@ fn cmd_internal_test_file(
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
-fn load_test_execution_context() -> Result<TestExecutionContext, String> {
+/// `files` are the worker's test files. Only the fallback without a handed
+/// off context reads them, to link the chelis-std modules they import
+/// (chelis#2558); a handed-off context was built for every discovered file.
+fn load_test_execution_context(files: &[&Path]) -> Result<TestExecutionContext, String> {
     // Phase H: when the parent populates `CHELIS_TEST_COMPILED_CONTEXT`,
     // load the bincode-encoded `CompiledContext` from the path it points
     // at. Workers used to run `prepare_reef_graph` per file, paying the
@@ -9402,7 +9440,9 @@ fn load_test_execution_context() -> Result<TestExecutionContext, String> {
         }
         _ => {
             let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
-            let graph = chelis_reef::prepare_reef_graph(&cwd)?;
+            let graph = chelis_reef::prepare_reef_graph(&cwd)?
+                .covering(&test_entry_imports(files))?
+                .into_owned();
             Ok(TestExecutionContext::ReefGraph(Box::new(graph)))
         }
     }
@@ -9454,7 +9494,12 @@ fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i3
     {
         std::process::abort();
     }
-    let exec_context = load_test_execution_context()?;
+    let manifest_files = manifest
+        .files
+        .iter()
+        .map(|file| file.file.as_path())
+        .collect::<Vec<_>>();
+    let exec_context = load_test_execution_context(&manifest_files)?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();

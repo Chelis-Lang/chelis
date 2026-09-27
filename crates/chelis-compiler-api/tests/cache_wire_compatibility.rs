@@ -573,3 +573,280 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
             .expect("the producer's own bytes must authenticate");
     }
 }
+
+/// The byte range a positional payload's `CheckedProgram` occupies, given the
+/// encoded length of the fields before it.
+fn checked_program_range(payload: &[u8], prefix_len: usize) -> std::ops::Range<usize> {
+    let program: chelis_types::CheckedProgram =
+        bincode::deserialize(&payload[prefix_len..]).expect("the checked program decodes");
+    let program_len = bincode::serialized_size(&program).expect("size the checked program");
+    prefix_len..prefix_len + usize::try_from(program_len).expect("the program fits in memory")
+}
+
+/// Rewrite the fixture's `1.0000000000000002f64` literal to `1.0f64` inside
+/// `range` only. The needle is the literal's Deep atom encoding. The lowered
+/// library carries Deep definitions too, so the edit is confined to the
+/// checked program by the range, not by the needle.
+fn change_program_literal_within(payload: &mut [u8], range: std::ops::Range<usize>) {
+    let old = bincode::serialize(&chelis_deep::Atom::Float(1.000_000_000_000_000_2)).unwrap();
+    let new = bincode::serialize(&chelis_deep::Atom::Float(1.0)).unwrap();
+    assert_eq!(old.len(), new.len());
+    let start = range.start
+        + payload[range]
+            .windows(old.len())
+            .position(|window| window == old)
+            .expect("the checked program carries the fixture literal");
+    payload[start..start + new.len()].copy_from_slice(&new);
+}
+
+/// chelis#2558: the stdlib and compiled-context cache decoders adopt the
+/// producer's effect and linearity results rather than rerunning those
+/// checkers, so what rejects an edit to a cached library body there is the
+/// comparison between the checked program and its transmitted lowering. The
+/// numeric-bits control above edits constants in the lowered DAG; this one
+/// confines the edit to the `CheckedProgram` half of the payload, so the
+/// lowering is left exactly as the producer wrote it, the envelope digest is
+/// recomputed, and the re-lowered program must disagree with it on every disk
+/// route that carries a lowering. The dependency route, which carries none, is
+/// `caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation`.
+#[test]
+fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recomputed() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = migrated_v018(&format!(
+        "{}{}",
+        historical_producer::NUMERIC_SOURCE,
+        historical_producer::WITNESS_SOURCE
+    ));
+    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let context = build_stdlib_context(&decls).unwrap();
+    let key = stdlib_cache_key(&decls, [0x5a; 32]);
+    let std_path = directory.path().join("numeric.tc");
+    cache_envelope::save(&std_path, key, &context).unwrap();
+    let std_bytes = fs::read(&std_path).unwrap();
+    let package = directory.path().join("package");
+    historical_producer::package_fixture(&package);
+    migrate_historical_package_for_current_compiler(&package);
+    let reef_home = directory.path().join("reef-home");
+    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let compiled_bytes = compiled.encode().unwrap();
+    let compiled_path = directory.path().join("numeric.ctx");
+    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
+    let magic_len = compiled_bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap()
+        + 1;
+    {
+        let mut envelope: SharedFixtureEnvelope =
+            bincode::deserialize(std_bytes.strip_prefix(std_magic).unwrap()).unwrap();
+        let type_env: chelis_types::TypeEnv = bincode::deserialize(&envelope.payload).unwrap();
+        let prefix_len = usize::try_from(bincode::serialized_size(&type_env).unwrap()).unwrap();
+        let range = checked_program_range(&envelope.payload, prefix_len);
+        change_program_literal_within(&mut envelope.payload, range);
+        envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+        let mut changed = std_magic.to_vec();
+        changed.extend(bincode::serialize(&envelope).unwrap());
+        fs::write(&std_path, changed).unwrap();
+        let error = cache_envelope::load::<StdLibContext>(&std_path, key).unwrap_err();
+        assert!(
+            matches!(error, cache_envelope::CacheError::Decode(ref message) if message.contains("lowered library payload")),
+            "{error}"
+        );
+
+        let mut envelope: ContextFixtureEnvelope =
+            bincode::deserialize(&compiled_bytes[magic_len..]).unwrap();
+        let prefix: (
+            chelis_compiler_api::ContextHash,
+            chelis_compiler_api::CacheIdentity,
+            chelis_reef::PreparedReefGraph,
+            chelis_types::TypeEnv,
+        ) = bincode::deserialize(&envelope.payload).unwrap();
+        let prefix_len = usize::try_from(bincode::serialized_size(&prefix).unwrap()).unwrap();
+        let range = checked_program_range(&envelope.payload, prefix_len);
+        change_program_literal_within(&mut envelope.payload, range);
+        envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+        let mut changed = compiled_bytes[..magic_len].to_vec();
+        changed.extend(bincode::serialize(&envelope).unwrap());
+        fs::write(&compiled_path, &changed).unwrap();
+        let error = CompiledContext::decode(&changed).unwrap_err();
+        assert!(error.contains("lowered library payload"), "{error}");
+        let error =
+            CompiledContext::load_if_fresh(&compiled_path, &reef_home, &package).unwrap_err();
+        assert!(
+            matches!(error, CacheError::Decode(ref message) if message.contains("lowered library payload")),
+            "{error}"
+        );
+    }
+}
+
+/// A dependency whose `settle` consumes `x` through `realize` and then uses
+/// `w`, so renaming that use of `w` to `x` is a use after consume.
+const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
+    def settle(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = {\n  \
+    y = realize(x)\n  mul(w, y)\n}\n";
+
+/// chelis#2558 review: a typecheck cache payload that carries no lowering
+/// has nothing to compare its checked program against, so an edit confined to
+/// the program under a recomputed checksum can only be caught by the effect
+/// and linearity checkers. The decoders of such payloads therefore keep
+/// rerunning them: the dependency typecheck cache (`LibraryContext`), whose
+/// wire never carries a lowering, and a `StdLibContext` whose optional
+/// lowering is absent. In each, one use of `w` in `settle` is renamed to `x`,
+/// which `realize` has already consumed, and the resealed entry must be
+/// rejected as a linearity violation rather than bound.
+#[test]
+fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
+    let directory = tempfile::tempdir().unwrap();
+    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+
+    let empty_stdlib = build_stdlib_context(&[]).unwrap();
+    let dependency = build_library_context(&empty_stdlib, &decls)
+        .unwrap()
+        .expect("the dependency must compose");
+    let dependency_key = library_cache_key(&decls, [0x5a; 32]);
+    let dependency_path = directory.path().join("dependency.tc");
+    cache_envelope::save(&dependency_path, dependency_key, &dependency).unwrap();
+    let dependency_bytes = fs::read(&dependency_path).unwrap();
+    assert_linearity_edit_is_rejected::<LibraryContext>(
+        "dependency typecheck cache",
+        &dependency_path,
+        dependency_key,
+        &dependency_bytes,
+    );
+
+    // The same library as a standard library, with its stored lowering
+    // replaced by `None`: the payload's third field is the `Option`, and
+    // bincode spells `None` as one zero byte.
+    let stdlib = build_stdlib_context(&decls).unwrap();
+    assert!(
+        stdlib.library_dag().is_some(),
+        "the fixture must lower, so removing the lowering is the edit this control makes"
+    );
+    let stdlib_key = stdlib_cache_key(&decls, [0x5a; 32]);
+    let stdlib_path = directory.path().join("stdlib.tc");
+    cache_envelope::save(&stdlib_path, stdlib_key, &stdlib).unwrap();
+    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
+    let mut envelope: SharedFixtureEnvelope = bincode::deserialize(
+        fs::read(&stdlib_path)
+            .unwrap()
+            .strip_prefix(std_magic)
+            .unwrap(),
+    )
+    .unwrap();
+    let (type_env, program, lowering): (
+        chelis_types::TypeEnv,
+        chelis_types::CheckedProgram,
+        Option<chelis_ir::lower::LoweredLibrary>,
+    ) = bincode::deserialize(&envelope.payload).unwrap();
+    assert!(lowering.is_some());
+    let program_end =
+        usize::try_from(bincode::serialized_size(&(&type_env, &program)).unwrap()).unwrap();
+    let lowering_end =
+        program_end + usize::try_from(bincode::serialized_size(&lowering).unwrap()).unwrap();
+    let mut payload = envelope.payload[..program_end].to_vec();
+    payload.extend(bincode::serialize(&None::<chelis_ir::lower::LoweredLibrary>).unwrap());
+    payload.extend_from_slice(&envelope.payload[lowering_end..]);
+    envelope.payload = payload;
+    envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+    let mut stdlib_bytes = std_magic.to_vec();
+    stdlib_bytes.extend(bincode::serialize(&envelope).unwrap());
+    fs::write(&stdlib_path, &stdlib_bytes).unwrap();
+    let unlowered = cache_envelope::load::<StdLibContext>(&stdlib_path, stdlib_key)
+        .unwrap()
+        .expect("the stdlib entry without a lowering must still hit");
+    assert!(unlowered.library_dag().is_none());
+    assert_linearity_edit_is_rejected::<StdLibContext>(
+        "stdlib typecheck cache without a lowering",
+        &stdlib_path,
+        stdlib_key,
+        &stdlib_bytes,
+    );
+}
+
+/// Try renaming every occurrence of `w` inside the checked program of the
+/// typecheck cache entry `original`, which the untouched file must hit.
+///
+/// Which occurrence is the body's use rather than a binder or other metadata
+/// is a detail of the Deep encoding, so an edit counts when the linearity
+/// checker, run directly over the edited program, reports the use after
+/// consume. Every such edit, resealed, must be rejected by the load with the
+/// linearity checker's diagnostic, and at least one must exist.
+fn assert_linearity_edit_is_rejected<T: cache_envelope::CachePayload>(
+    label: &str,
+    path: &Path,
+    key: [u8; 32],
+    original: &[u8],
+) {
+    fs::write(path, original).unwrap();
+    cache_envelope::load::<T>(path, key)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{label}: the untouched entry must hit"));
+    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
+    let envelope: SharedFixtureEnvelope =
+        bincode::deserialize(original.strip_prefix(std_magic).unwrap()).unwrap();
+    let type_env: chelis_types::TypeEnv = bincode::deserialize(&envelope.payload).unwrap();
+    let prefix_len = usize::try_from(bincode::serialized_size(&type_env).unwrap()).unwrap();
+    let range = checked_program_range(&envelope.payload, prefix_len);
+    let old = bincode::serialize(&chelis_deep::Atom::Name("w".into())).unwrap();
+    let new = bincode::serialize(&chelis_deep::Atom::Name("x".into())).unwrap();
+    assert_eq!(old.len(), new.len());
+    let positions: Vec<usize> = envelope.payload[range.clone()]
+        .windows(old.len())
+        .enumerate()
+        .filter(|(_, window)| *window == old.as_slice())
+        .map(|(offset, _)| range.start + offset)
+        .collect();
+    assert!(
+        !positions.is_empty(),
+        "{label}: the checked program must name `w`, or this control edits nothing"
+    );
+
+    let mut violating_edits = 0;
+    for position in positions {
+        let mut edited: SharedFixtureEnvelope =
+            bincode::deserialize(original.strip_prefix(std_magic).unwrap()).unwrap();
+        edited.payload[position..position + new.len()].copy_from_slice(&new);
+        let (_, program): (chelis_types::TypeEnv, chelis_types::CheckedProgram) =
+            bincode::deserialize(&edited.payload).unwrap();
+        let violates = {
+            let _linked = chelis_types::install_linked_program_guard();
+            chelis_effects::check_program(&program)
+                .ok()
+                .and_then(|effected| chelis_types::check_linearity(&effected).err())
+                .is_some_and(|errors| {
+                    errors.iter().any(|error| {
+                        matches!(
+                            error.kind,
+                            chelis_types::errors::CheckErrorKind::UseAfterConsume
+                        )
+                    })
+                })
+        };
+        if !violates {
+            continue;
+        }
+        violating_edits += 1;
+        edited.payload_sha256 = Sha256::digest(&edited.payload).into();
+        let mut changed = std_magic.to_vec();
+        changed.extend(bincode::serialize(&edited).unwrap());
+        fs::write(path, changed).unwrap();
+        let error = match cache_envelope::load::<T>(path, key) {
+            Ok(Some(_)) => panic!(
+                "{label}: an entry edited at byte {position} into a use after consume, then \
+                 resealed, was accepted; nothing re-derived its linearity results"
+            ),
+            Ok(None) => panic!("{label}: the edit must not change the entry's key"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, cache_envelope::CacheError::Decode(ref message)
+                if message.contains("was already consumed by realize")),
+            "{label}: the rejection must be the linearity checker's: {error}"
+        );
+    }
+    assert!(
+        violating_edits > 0,
+        "{label}: no rename of `w` to `x` produced a use after consume, so this control does \
+         not reach the decoder's linearity rerun"
+    );
+}

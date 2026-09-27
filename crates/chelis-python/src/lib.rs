@@ -39,6 +39,7 @@ use chelis_compiler_api::{
     find_package_root_for_input, load_or_compile_with_local_registry_fallback,
     surf_source_has_import,
 };
+use chelis_reef::EntryImports;
 use chelis_vocab::RuntimeDType;
 use libloading::Library;
 use pyo3::create_exception;
@@ -892,7 +893,14 @@ fn reject_blank_project_root(root: &Path) -> Result<(), CompileAndLoadError> {
 /// Build (or load from cache) the compiled reef context for `root`, mapping a
 /// missing/invalid `reef.toml` to an actionable message that names
 /// `project_root=`. Verbose corruption logging is off (bindings run silent).
-fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError> {
+///
+/// `entries` are the imports of the source that will run against the
+/// context: it links only the chelis-std modules the package and that source
+/// reach (chelis#2558).
+fn load_reef_context(
+    root: &Path,
+    entries: &EntryImports,
+) -> Result<CompiledContext, CompileAndLoadError> {
     reject_blank_project_root(root)?;
     if !root.join("reef.toml").exists() {
         return Err(CompileAndLoadError::Message(format!(
@@ -908,7 +916,7 @@ fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError
     // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
     // `prepare_eval` instead — a divergence to watch if the CLI paths are
     // later unified).
-    load_or_compile_with_local_registry_fallback(&reef_home, root, false)
+    load_or_compile_with_local_registry_fallback(&reef_home, root, entries, false)
         .map(|(context, _path)| context)
         .map_err(CompileAndLoadError::Compiler)
 }
@@ -972,6 +980,17 @@ fn resolve_compile_reef_root(
     }
 }
 
+/// The modules a Surf `source` imports, parsed before its context loads
+/// (chelis#2558). A source that does not parse imports nothing here: the
+/// compile against the context then reports its parse error in the shape
+/// callers already receive.
+fn surf_entry_imports(source: &str) -> EntryImports {
+    match EntryImports::from_surf_source(source) {
+        Ok(imports) => imports,
+        Err(_) => EntryImports::none(),
+    }
+}
+
 /// Evaluate `source` against the reef context at `root`, threading `bindings`
 /// through (issue #816). Backs `eval(..., project_root=...)`.
 fn run_eval_in_context_job(
@@ -979,7 +998,7 @@ fn run_eval_in_context_job(
     source: &str,
     bindings: BTreeMap<String, TensorValue>,
 ) -> Result<EvalResult, CompileAndLoadError> {
-    let context = load_reef_context(root)?;
+    let context = load_reef_context(root, &surf_entry_imports(source))?;
     eval_in_context_with_bindings(&context, source, bindings).map_err(CompileAndLoadError::Compiler)
 }
 
@@ -1020,7 +1039,12 @@ fn run_compile_and_load_job(
         && surf_source_has_import(&source);
     let artifact = match &reef_root {
         Some(root) => {
-            let context = load_reef_context(root)?;
+            // A Deep source carries no reef `import` declarations.
+            let entries = match job.source_kind {
+                SourceKind::Surf => surf_entry_imports(&source),
+                SourceKind::Deep => EntryImports::none(),
+            };
+            let context = load_reef_context(root, &entries)?;
             compile_for_execution_in_context(
                 &context,
                 &source,
@@ -3714,6 +3738,56 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         assert!(
             message.contains("project_root= is empty"),
             "expected the explicit empty-project_root rejection, got: {message}"
+        );
+    }
+
+    // chelis#2558: a context links only the standard-library modules its
+    // package and the evaluated source import, so `load_reef_context` must
+    // parse the source before it loads. The package imports nothing; the
+    // source imports `Std.Io.Json`.
+    #[test]
+    fn eval_in_context_source_reaches_past_the_package_imports() {
+        let ver = chelis_compiler_api::COMPILER_VERSION;
+        let runtime_manifest = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std/reef.toml"),
+        )
+        .expect("read the chelis-std manifest");
+        let runtime_version = runtime_manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("version = "))
+            .expect("the chelis-std manifest names its version")
+            .trim_matches('"');
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "[package]\nname = \"proj\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Proj\"\n\n[dependencies]\nchelis-std = {{ version = \"{runtime_version}\" }}\n"
+            ),
+        )
+        .expect("write reef.toml");
+        fs::write(
+            root.join("src/main.ch"),
+            "module Proj.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
+        )
+        .expect("write main");
+        let result = run_eval_in_context_job(
+            &root,
+            "import Std.Io.Json (try_parse_json)\n\
+             bench = match try_parse_json(\"{}\") with {\n  \
+             | Some(_) => cast(1, i64)\n  | None => cast(0, i64)\n}\n",
+            BTreeMap::new(),
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(CompileAndLoadError::Message(m)) => panic!("eval failed: {m}"),
+            Err(CompileAndLoadError::Compiler(e)) => panic!("eval failed: {e:?}"),
+        };
+        let rendered = serde_json::to_string(&result.roots).expect("render roots");
+        assert_eq!(
+            rendered,
+            r#"[{"node_id":0,"name":"bench","value":{"type":"scalar","value":{"dtype":"int64","value":1}}}]"#
         );
     }
 

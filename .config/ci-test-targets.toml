@@ -568,9 +568,11 @@ name = "issue_1801_wildcard_absorption"
 package = "chelis-ir"
 name = "vmap"
 
-# chelis#2211: the authenticated worker handoff skips the effect and linearity
-# reruns, which is sound only while rerunning them reproduces the transmitted
-# program. This target holds the test that says so, and the scan that keeps the
+# chelis#2211, chelis#2558: the authenticated worker handoff and the disk
+# decoders that compare a stored lowering (the compiled context and the stdlib
+# typecheck cache) skip the effect and linearity reruns, which is sound only
+# while rerunning them reproduces the stored program. This target holds the
+# test that says so for each cache layer, and the scan that keeps the
 # unauthenticated route out of shipped code, so it runs on every candidate
 # rather than waiting for package expansion.
 [[standing_target]]
