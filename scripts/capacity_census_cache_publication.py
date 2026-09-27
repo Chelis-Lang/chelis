@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -160,10 +161,9 @@ def validate_compile_outcomes(outcomes):
     for case, row in zip(COMPILE_CASES, outcomes, strict=True):
         # Rustc can emit many secondary notes. Keep the primary error visible
         # in the CI log without printing an unbounded compiler transcript.
-        error_at = row.stderr.find("error[")
-        if error_at < 0:
-            error_at = row.stderr.find("error:")
-        excerpt = row.stderr[max(error_at, 0):][:3500] or "<empty>"
+        first_error = re.search(r"(?m)^error(?:\[[^\n]+\])?:", row.stderr)
+        excerpt = row.stderr[first_error.start() if first_error else 0:][:3500]
+        excerpt = excerpt or "<empty>"
         require(
             (row.returncode == 0) == case.success,
             f"wrong compile outcome: {case.name}; rustc stderr "
