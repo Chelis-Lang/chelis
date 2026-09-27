@@ -1653,174 +1653,14 @@ impl PreparedReefGraph {
     ) -> Result<Vec<SourceDigest>, String> {
         let mut digests = Vec::new();
         for package in self.graph.packages.values() {
-            let source_root = &package.source_root;
-            let manifest_path = source_root.join("reef.toml");
-            let manifest_bytes = fs::read(&manifest_path)
-                .map_err(|e| format!("read manifest `{}`: {e}", manifest_path.display()))?;
-            if validate_graph_against_snapshot {
-                let snapshot_manifest: ReefManifest =
-                    toml::from_str(std::str::from_utf8(&manifest_bytes).map_err(|error| {
-                        format!(
-                            "manifest `{}` is not UTF-8: {error}",
-                            manifest_path.display()
-                        )
-                    })?)
-                    .map_err(|error| {
-                        format!(
-                            "parse manifest snapshot `{}`: {error}",
-                            manifest_path.display()
-                        )
-                    })?;
-                if snapshot_manifest != package.manifest {
-                    return Err(format!(
-                        "manifest `{}` changed while its graph was prepared",
-                        manifest_path.display()
-                    ));
-                }
-            }
-            digests.push(SourceDigest {
-                package_name: package.id.name.clone(),
-                package_version: package.id.version.clone(),
-                module_name: "<manifest::reef.toml>".to_string(),
-                sha256: Sha256::digest(&manifest_bytes).into(),
-            });
-            let canonical_package_root = source_root.canonicalize().map_err(|error| {
-                format!(
-                    "canonicalize package source root `{}`: {error}",
-                    source_root.display()
-                )
-            })?;
-            let mut seen_module_paths = BTreeSet::new();
-            for declared_root in std::iter::once("src").chain(
-                package
-                    .manifest
-                    .package
-                    .additional_sources
-                    .iter()
-                    .map(String::as_str),
-            ) {
-                let abs_root = canonical_package_root.join(declared_root);
-                if !abs_root.exists() {
-                    continue;
-                }
-                let canonical_abs_root = abs_root.canonicalize().map_err(|error| {
-                    format!(
-                        "canonicalize declared source root `{}`: {error}",
-                        abs_root.display()
-                    )
-                })?;
-                if !canonical_abs_root.starts_with(&canonical_package_root) {
-                    return Err(format!(
-                        "declared source root `{}` escapes package root `{}`",
-                        abs_root.display(),
-                        canonical_package_root.display()
-                    ));
-                }
-                for entry in WalkDir::new(&abs_root).follow_links(false) {
-                    let entry = entry.map_err(|error| {
-                        format!(
-                            "walk declared source root `{}`: {error}",
-                            abs_root.display()
-                        )
-                    })?;
-                    if !entry.file_type().is_file()
-                        || entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch")
-                    {
-                        continue;
-                    }
-                    let canonical_file = entry.path().canonicalize().map_err(|error| {
-                        format!(
-                            "canonicalize source file `{}`: {error}",
-                            entry.path().display()
-                        )
-                    })?;
-                    if !canonical_file.starts_with(&canonical_abs_root) {
-                        return Err(format!(
-                            "source file `{}` escapes declared source root `{}`",
-                            entry.path().display(),
-                            canonical_abs_root.display()
-                        ));
-                    }
-                    let rel =
-                        entry
-                            .path()
-                            .strip_prefix(&canonical_package_root)
-                            .map_err(|error| {
-                                format!(
-                                    "source file `{}` is outside package root `{}`: {error}",
-                                    entry.path().display(),
-                                    canonical_package_root.display()
-                                )
-                            })?;
-                    let path_hex = rel
-                        .as_os_str()
-                        .as_encoded_bytes()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    let bytes = fs::read(entry.path()).map_err(|error| {
-                        format!("read source file `{}`: {error}", entry.path().display())
-                    })?;
-                    if validate_graph_against_snapshot {
-                        let rel_in_declared_root = entry
-                            .path()
-                            .strip_prefix(&abs_root)
-                            .map_err(|error| {
-                                format!(
-                                    "source file `{}` is outside declared root `{}`: {error}",
-                                    entry.path().display(),
-                                    abs_root.display()
-                                )
-                            })?
-                            .to_path_buf();
-                        let module = package
-                            .modules
-                            .values()
-                            .find(|module| {
-                                module.source_root == declared_root
-                                    && module.file_rel == rel_in_declared_root
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "source inventory gained `{}` while its graph was prepared",
-                                    entry.path().display()
-                                )
-                            })?;
-                        let source = std::str::from_utf8(&bytes).map_err(|error| {
-                            format!(
-                                "source file `{}` is not UTF-8: {error}",
-                                entry.path().display()
-                            )
-                        })?;
-                        let parsed = chelis_surf::parser::parse_str(source)
-                            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
-                        let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
-                            return Err(format!(
-                                "{} must contain exactly one top-level module declaration",
-                                entry.path().display()
-                            ));
-                        };
-                        if name != &module.module_name || decls != &module.decls {
-                            return Err(format!(
-                                "source file `{}` changed while its graph was prepared",
-                                entry.path().display()
-                            ));
-                        }
-                        seen_module_paths.insert((declared_root.to_string(), rel_in_declared_root));
-                    }
-                    digests.push(SourceDigest {
-                        package_name: package.id.name.clone(),
-                        package_version: package.id.version.clone(),
-                        module_name: format!("<source::{path_hex}>"),
-                        sha256: Sha256::digest(&bytes).into(),
-                    });
-                }
-            }
-            if validate_graph_against_snapshot && seen_module_paths.len() != package.modules.len() {
-                return Err(format!(
-                    "source inventory for `{}` v{} lost a module while its graph was prepared",
-                    package.id.name, package.id.version
-                ));
+            match package.source.filesystem_root() {
+                Some(source_root) => Self::push_filesystem_source_digests(
+                    package,
+                    source_root,
+                    validate_graph_against_snapshot,
+                    &mut digests,
+                )?,
+                None => push_bundled_runtime_source_digests(package, &mut digests)?,
             }
             for (module_name, identity) in [
                 (
@@ -1862,6 +1702,181 @@ impl PreparedReefGraph {
                 .then_with(|| a.module_name.cmp(&b.module_name))
         });
         Ok(digests)
+    }
+
+    /// Digest rows for a package whose sources live on disk under
+    /// `source_root`: its manifest and every `.ch` file under a declared
+    /// source root. With `validate_graph_against_snapshot`, the files must
+    /// still match the modules the graph was prepared from.
+    fn push_filesystem_source_digests(
+        package: &LoadedPackage,
+        source_root: &Path,
+        validate_graph_against_snapshot: bool,
+        digests: &mut Vec<SourceDigest>,
+    ) -> Result<(), String> {
+        let manifest_path = source_root.join("reef.toml");
+        let manifest_bytes = fs::read(&manifest_path)
+            .map_err(|e| format!("read manifest `{}`: {e}", manifest_path.display()))?;
+        if validate_graph_against_snapshot {
+            let snapshot_manifest: ReefManifest =
+                toml::from_str(std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                    format!(
+                        "manifest `{}` is not UTF-8: {error}",
+                        manifest_path.display()
+                    )
+                })?)
+                .map_err(|error| {
+                    format!(
+                        "parse manifest snapshot `{}`: {error}",
+                        manifest_path.display()
+                    )
+                })?;
+            if snapshot_manifest != package.manifest {
+                return Err(format!(
+                    "manifest `{}` changed while its graph was prepared",
+                    manifest_path.display()
+                ));
+            }
+        }
+        digests.push(SourceDigest {
+            package_name: package.id.name.clone(),
+            package_version: package.id.version.clone(),
+            module_name: "<manifest::reef.toml>".to_string(),
+            sha256: Sha256::digest(&manifest_bytes).into(),
+        });
+        let canonical_package_root = source_root.canonicalize().map_err(|error| {
+            format!(
+                "canonicalize package source root `{}`: {error}",
+                source_root.display()
+            )
+        })?;
+        let mut seen_module_paths = BTreeSet::new();
+        for declared_root in std::iter::once("src").chain(
+            package
+                .manifest
+                .package
+                .additional_sources
+                .iter()
+                .map(String::as_str),
+        ) {
+            let abs_root = canonical_package_root.join(declared_root);
+            if !abs_root.exists() {
+                continue;
+            }
+            let canonical_abs_root = abs_root.canonicalize().map_err(|error| {
+                format!(
+                    "canonicalize declared source root `{}`: {error}",
+                    abs_root.display()
+                )
+            })?;
+            if !canonical_abs_root.starts_with(&canonical_package_root) {
+                return Err(format!(
+                    "declared source root `{}` escapes package root `{}`",
+                    abs_root.display(),
+                    canonical_package_root.display()
+                ));
+            }
+            for entry in WalkDir::new(&abs_root).follow_links(false) {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "walk declared source root `{}`: {error}",
+                        abs_root.display()
+                    )
+                })?;
+                if !entry.file_type().is_file()
+                    || entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch")
+                {
+                    continue;
+                }
+                let canonical_file = entry.path().canonicalize().map_err(|error| {
+                    format!(
+                        "canonicalize source file `{}`: {error}",
+                        entry.path().display()
+                    )
+                })?;
+                if !canonical_file.starts_with(&canonical_abs_root) {
+                    return Err(format!(
+                        "source file `{}` escapes declared source root `{}`",
+                        entry.path().display(),
+                        canonical_abs_root.display()
+                    ));
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(&canonical_package_root)
+                    .map_err(|error| {
+                        format!(
+                            "source file `{}` is outside package root `{}`: {error}",
+                            entry.path().display(),
+                            canonical_package_root.display()
+                        )
+                    })?;
+                let path_hex = inventory_path_hex(rel);
+                let bytes = fs::read(entry.path()).map_err(|error| {
+                    format!("read source file `{}`: {error}", entry.path().display())
+                })?;
+                if validate_graph_against_snapshot {
+                    let rel_in_declared_root = entry
+                        .path()
+                        .strip_prefix(&abs_root)
+                        .map_err(|error| {
+                            format!(
+                                "source file `{}` is outside declared root `{}`: {error}",
+                                entry.path().display(),
+                                abs_root.display()
+                            )
+                        })?
+                        .to_path_buf();
+                    let module = package
+                        .modules
+                        .values()
+                        .find(|module| {
+                            module.source_root == declared_root
+                                && module.file_rel == rel_in_declared_root
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "source inventory gained `{}` while its graph was prepared",
+                                entry.path().display()
+                            )
+                        })?;
+                    let source = std::str::from_utf8(&bytes).map_err(|error| {
+                        format!(
+                            "source file `{}` is not UTF-8: {error}",
+                            entry.path().display()
+                        )
+                    })?;
+                    let parsed = chelis_surf::parser::parse_str(source)
+                        .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+                    let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
+                        return Err(format!(
+                            "{} must contain exactly one top-level module declaration",
+                            entry.path().display()
+                        ));
+                    };
+                    if name != &module.module_name || decls != &module.decls {
+                        return Err(format!(
+                            "source file `{}` changed while its graph was prepared",
+                            entry.path().display()
+                        ));
+                    }
+                    seen_module_paths.insert((declared_root.to_string(), rel_in_declared_root));
+                }
+                digests.push(SourceDigest {
+                    package_name: package.id.name.clone(),
+                    package_version: package.id.version.clone(),
+                    module_name: format!("<source::{path_hex}>"),
+                    sha256: Sha256::digest(&bytes).into(),
+                });
+            }
+        }
+        if validate_graph_against_snapshot && seen_module_paths.len() != package.modules.len() {
+            return Err(format!(
+                "source inventory for `{}` v{} lost a module while its graph was prepared",
+                package.id.name, package.id.version
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the (name, version) pair of the *root* package backing this
@@ -1933,10 +1948,6 @@ struct LoadedPackage {
     manifest: ReefManifest,
     modules: BTreeMap<String, ModuleSource>,
     source: LoadedSourceKind,
-    /// Package root backing `modules`, including the extracted-cache root for
-    /// `LocalRegistry`. Retaining this path makes registry source bytes
-    /// content-addressable (chelis#924).
-    source_root: PathBuf,
     /// Published identities are cache determinants for registry/bundled
     /// packages. These fields stay unconditional for bincode stability.
     archive_sha256: Option<String>,
@@ -1961,11 +1972,39 @@ struct LoadedPackage {
     remote_origin: Option<String>,
 }
 
+/// Where a package's sources come from. Every on-disk variant carries the
+/// package root backing its modules, including the extracted-cache root for
+/// `LocalRegistry`; retaining it makes those source bytes
+/// content-addressable (chelis#924).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum LoadedSourceKind {
-    Root,
-    Path { relative: String },
-    LocalRegistry,
+    Root {
+        root: PathBuf,
+    },
+    Path {
+        relative: String,
+        root: PathBuf,
+    },
+    LocalRegistry {
+        root: PathBuf,
+    },
+    /// The chelis-std runtime embedded in this compiler. It has no
+    /// filesystem location, so no per-process path can enter a prepared
+    /// graph or a cache that embeds one (chelis#2616); its source bytes are
+    /// the embedded archive's.
+    Bundled,
+}
+
+impl LoadedSourceKind {
+    /// The package root on disk, or `None` for the bundled runtime.
+    fn filesystem_root(&self) -> Option<&Path> {
+        match self {
+            Self::Root { root } | Self::Path { root, .. } | Self::LocalRegistry { root } => {
+                Some(root)
+            }
+            Self::Bundled => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2286,7 +2325,9 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // v5 combines that V4 lineage with chelis#1247's independent V3 payload, whose
 // declarations can carry dimension-valued nominal arguments. Either preceding
 // branch format clean-misses before positional bincode decoding.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
+// v6 (chelis#2616): a package's filesystem root moved into its source kind,
+// and the bundled runtime gained a `Bundled` kind with no location.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 6;
 const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
@@ -5535,6 +5576,16 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
                 copy_package_source(&dep_root, &dep_dir)?;
             }
+            LockSource::Bundled { .. } => {
+                // chelis-std is compiler-bundled; write the embedded bytes.
+                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
+                chelis_std_bundle::extract_into(&dep_dir)?;
+            }
+            LockSource::LocalRegistry { .. } if is_bundled_runtime(&dep.name, &dep.version) => {
+                // A pre-`Bundled` lockfile spelling of the runtime.
+                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
+                chelis_std_bundle::extract_into(&dep_dir)?;
+            }
             LockSource::LocalRegistry { .. } => {
                 // Load from registry cache and copy extracted source
                 let installed =
@@ -5552,15 +5603,7 @@ pub fn export_bundle(package_root: &Path, output_dir: &Path) -> Result<BundleMan
                 let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
                 copy_package_source(&installed.root, &dep_dir)?;
             }
-            LockSource::Bundled { .. } => {
-                // chelis-std is compiler-bundled; extract embedded bytes
-                let installed = load_bundled_chelis_std().map_err(|e| match e {
-                    LoadRegistryError::Other(s) => s,
-                    _ => "failed to load bundled chelis-std".to_string(),
-                })?;
-                let dep_dir = output_dir.join(format!("{}-{}", dep.name, dep.version));
-                copy_package_source(&installed.root, &dep_dir)?;
-            }
+
             LockSource::Binary { .. } => {
                 // Item 11: a binary artifact has no source tree to
                 // materialize into the source bundle. It is still recorded
@@ -5956,8 +5999,13 @@ pub fn artifact_install_path(name: &str) -> Result<PathBuf, String> {
 fn read_manifest(path: &Path) -> Result<ReefManifest, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let manifest = toml::from_str::<ReefManifest>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    parse_manifest(&text, &path.display().to_string())
+}
+
+/// Parse and validate manifest text; `label` names its origin in errors.
+fn parse_manifest(text: &str, label: &str) -> Result<ReefManifest, String> {
+    let manifest = toml::from_str::<ReefManifest>(text)
+        .map_err(|e| format!("failed to parse {label}: {e}"))?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -6042,8 +6090,9 @@ fn reconstruct_graph_from_lockfile(
             id: lock.package.clone(),
             manifest: root_manifest,
             modules: root_modules,
-            source: LoadedSourceKind::Root,
-            source_root: root.to_path_buf(),
+            source: LoadedSourceKind::Root {
+                root: root.to_path_buf(),
+            },
             archive_sha256: None,
             shell_sha256: None,
             shell: None,
@@ -6056,11 +6105,8 @@ fn reconstruct_graph_from_lockfile(
         // Migration: an old lockfile may record `chelis-std` as
         // `LocalRegistry`. Per Phase A § Architectural Decision 8,
         // log a one-line warning; the next call to `build_lockfile`
-        // rewrites the entry to the `Bundled` form. The module-loading
-        // path itself still flows through the local registry (the
-        // bytes are already there) — `Bundled` is, in this wave, an
-        // auditability annotation on the lockfile, not a separate
-        // loader path.
+        // rewrites the entry to the `Bundled` form. Either spelling of
+        // the bundled version loads the embedded runtime.
         if matches!(&dep.source, LockSource::LocalRegistry { .. })
             && dep.name == CHELIS_STD_PACKAGE_NAME
         {
@@ -6070,18 +6116,20 @@ fn reconstruct_graph_from_lockfile(
             );
         }
         match &dep.source {
+            // chelis-std is the language runtime and ships bundled inside
+            // the chelis binary (`crates/chelis-std-bundle`). No
+            // `$CHELIS_REEF_HOME` access, no installer prerequisite, and no
+            // filesystem location (chelis#2616).
+            LockSource::Bundled { .. } | LockSource::LocalRegistry { .. }
+                if is_bundled_runtime(&dep.name, &dep.version) =>
+            {
+                packages.insert(dep.name.clone(), bundled_runtime_package()?);
+            }
             LockSource::Bundled { .. } => {
-                // chelis-std is the language runtime and ships
-                // bundled inside the chelis binary
-                // (`crates/chelis-std-bundle`). `load_registry_package`
-                // special-cases the runtime: when name == chelis-std
-                // and the requested version matches the bundled
-                // version, it returns the embedded bytes immediately.
-                // No `$CHELIS_REEF_HOME` access, no installer
-                // prerequisite. The fallback through the local-
-                // registry path only fires on a version mismatch,
-                // which soft-verify should already have caught
-                // upstream.
+                // A `Bundled` entry whose version this compiler does not
+                // bundle. Soft-verify should already have caught it
+                // upstream; the local-registry lookup produces the
+                // mismatch error.
                 let dep_name = dep.name.clone();
                 let dep_version = dep.version.clone();
                 let dep_name_t = dep_name.clone();
@@ -6121,8 +6169,9 @@ fn reconstruct_graph_from_lockfile(
                         },
                         manifest: dep_manifest,
                         modules: dep_modules,
-                        source: LoadedSourceKind::LocalRegistry,
-                        source_root: installed.root,
+                        source: LoadedSourceKind::LocalRegistry {
+                            root: installed.root,
+                        },
                         archive_sha256: Some(archive_sha256),
                         shell_sha256: Some(shell_sha256),
                         shell: Some(installed.shell),
@@ -6153,8 +6202,8 @@ fn reconstruct_graph_from_lockfile(
                         modules: dep_modules,
                         source: LoadedSourceKind::Path {
                             relative: path.clone(),
+                            root: dep_root,
                         },
-                        source_root: dep_root,
                         archive_sha256: None,
                         shell_sha256: None,
                         shell: None,
@@ -6224,8 +6273,9 @@ fn reconstruct_graph_from_lockfile(
                         },
                         manifest: dep_manifest,
                         modules: dep_modules,
-                        source: LoadedSourceKind::LocalRegistry,
-                        source_root: installed.root,
+                        source: LoadedSourceKind::LocalRegistry {
+                            root: installed.root,
+                        },
                         archive_sha256: Some(archive_sha256),
                         shell_sha256: Some(shell_sha256),
                         shell: Some(installed.shell),
@@ -6530,8 +6580,9 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
     };
     resolve_package_recursive(
         &root_id.name,
-        root.to_path_buf(),
-        LoadedSourceKind::Root,
+        LoadedSourceKind::Root {
+            root: root.to_path_buf(),
+        },
         None,
         None,
         &mut packages,
@@ -6553,7 +6604,6 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
 #[allow(clippy::too_many_arguments)]
 fn resolve_package_recursive(
     package_name: &str,
-    root: PathBuf,
     source: LoadedSourceKind,
     maybe_shell: Option<ShellPackage>,
     remote_origin: Option<String>,
@@ -6570,6 +6620,12 @@ fn resolve_package_recursive(
         return Ok(());
     }
 
+    // The bundled runtime is inserted by the caller, never resolved from a
+    // manifest on disk.
+    let root = source
+        .filesystem_root()
+        .ok_or_else(|| format!("package `{package_name}` has no manifest on disk to resolve"))?
+        .to_path_buf();
     stack.push(package_name.to_string());
     let manifest = read_manifest(&root.join("reef.toml"))?;
     if manifest.package.name != package_name {
@@ -6599,7 +6655,6 @@ fn resolve_package_recursive(
         manifest: manifest.clone(),
         modules,
         source: source.clone(),
-        source_root: root.clone(),
         archive_sha256: maybe_shell
             .as_ref()
             .map(|shell| shell.archive_sha256.clone()),
@@ -6624,8 +6679,10 @@ fn resolve_package_recursive(
                 let relative = path.to_string();
                 resolve_package_recursive(
                     dep_name,
-                    dep_root,
-                    LoadedSourceKind::Path { relative },
+                    LoadedSourceKind::Path {
+                        relative,
+                        root: dep_root,
+                    },
                     None,
                     None,
                     packages,
@@ -6656,6 +6713,15 @@ fn resolve_package_recursive(
                              compiler whose bundled runtime matches your declaration."
                         ));
                     }
+                    // The declared version is the bundled one: the runtime
+                    // comes from the compiler, never from the registry.
+                    if !packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
+                        packages.insert(
+                            CHELIS_STD_PACKAGE_NAME.to_string(),
+                            bundled_runtime_package()?,
+                        );
+                    }
+                    continue;
                 }
                 // Item 8 insertion point: missing-from-registry deps
                 // route through the auto-fetch decision before bailing.
@@ -6669,8 +6735,9 @@ fn resolve_package_recursive(
                 let dep_origin = installed.remote_origin.clone();
                 resolve_package_recursive(
                     dep_name,
-                    installed.root,
-                    LoadedSourceKind::LocalRegistry,
+                    LoadedSourceKind::LocalRegistry {
+                        root: installed.root,
+                    },
                     Some(installed.shell),
                     dep_origin,
                     packages,
@@ -6698,48 +6765,164 @@ struct InstalledPackage {
     remote_origin: Option<String>,
 }
 
-/// Process-stable cache of the chelis-std bundle's extracted layout.
-/// First call extracts the embedded archive into a `tempfile::TempDir`
-/// whose lifetime is tied to this `OnceLock` (i.e. the duration of
-/// the process). Subsequent calls reuse the same on-disk root.
-///
-/// `tempfile::TempDir` cleans up at drop, so the extracted tree is
-/// removed when the process exits — no stale state outlives a build
-/// invocation.
-static CHELIS_STD_BUNDLE_ROOT: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
+/// Package-relative label the bundled runtime's diagnostics name in place
+/// of a filesystem path.
+const BUNDLED_RUNTIME_LABEL: &str = "<bundled chelis-std>";
+
+/// The embedded chelis-std archive, decompressed in memory once per process
+/// (chelis#2616). The bundled runtime has no filesystem location: its
+/// modules are parsed from these bytes and its source digests are computed
+/// from them, so a prepared graph carries no per-process path and nothing is
+/// written to disk.
+static BUNDLED_RUNTIME_FILES: std::sync::OnceLock<Result<BTreeMap<PathBuf, Vec<u8>>, String>> =
     std::sync::OnceLock::new();
 
-/// Extract the embedded chelis-std bytes (if not already extracted
-/// for this process), decode the embedded shell, and return them
-/// shaped like a normal [`InstalledPackage`].
-///
-/// The returned `root` is a process-lifetime tempdir under the OS
-/// tempdir (typically `/tmp`), with the chelis-std reef-package
-/// layout: `reef.toml`, `src/`, etc. `load_package_modules` walks
-/// this exactly the same way it walks a registry-cached extract.
-///
-/// `remote_origin` is `None` because there is no remote origin for
-/// the runtime — its bytes come from the compiler binary itself.
-fn load_bundled_chelis_std() -> Result<InstalledPackage, LoadRegistryError> {
-    let dir_result = CHELIS_STD_BUNDLE_ROOT.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("chelis-std-bundle-")
-            .tempdir()
-            .map_err(|e| format!("failed to create chelis-std bundle tempdir: {e}"))?;
-        chelis_std_bundle::extract_into(dir.path())?;
-        Ok(dir)
-    });
-    let dir = dir_result
+fn bundled_runtime_files() -> Result<&'static BTreeMap<PathBuf, Vec<u8>>, String> {
+    BUNDLED_RUNTIME_FILES
+        .get_or_init(chelis_std_bundle::archive_files)
         .as_ref()
-        .map_err(|e| LoadRegistryError::Other(e.clone()))?;
-    let shell = chelis_shell::decode_shell(chelis_std_bundle::CHELIS_STD_SHELL).map_err(|e| {
-        LoadRegistryError::Other(format!("failed to decode embedded chelis-std shell: {e}"))
-    })?;
-    Ok(InstalledPackage {
-        root: dir.path().to_path_buf(),
+        .map_err(Clone::clone)
+}
+
+/// The bundled runtime's package sources, parsed once per process.
+struct BundledRuntime {
+    manifest: ReefManifest,
+    modules: BTreeMap<String, ModuleSource>,
+    shell: ShellPackage,
+    shell_sha256: String,
+}
+
+static BUNDLED_RUNTIME: std::sync::OnceLock<Result<BundledRuntime, String>> =
+    std::sync::OnceLock::new();
+
+fn load_bundled_runtime() -> Result<BundledRuntime, String> {
+    let files = bundled_runtime_files()?;
+    let manifest = bundled_runtime_manifest(files)?;
+    if manifest.package.name != CHELIS_STD_PACKAGE_NAME
+        || manifest.package.version != BUNDLED_CHELIS_STD_VERSION
+    {
+        return Err(format!(
+            "the bundled runtime manifest names `{}` `{}`, expected `{CHELIS_STD_PACKAGE_NAME}` `{BUNDLED_CHELIS_STD_VERSION}`",
+            manifest.package.name, manifest.package.version
+        ));
+    }
+    let mut sources = Vec::new();
+    for declared_root in declared_source_roots(&manifest) {
+        for (path, bytes) in files {
+            let Some(rel) = bundled_runtime_source_rel(path, declared_root) else {
+                continue;
+            };
+            let display = format!("{BUNDLED_RUNTIME_LABEL}/{}", path.display());
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|error| format!("{display} is not UTF-8: {error}"))?;
+            sources.push(PackageSourceFile {
+                source_root: declared_root.to_string(),
+                rel: rel.to_path_buf(),
+                display,
+                text,
+            });
+        }
+    }
+    let modules = modules_from_source_files(BUNDLED_RUNTIME_LABEL, &manifest, sources)?;
+    let shell = chelis_shell::decode_shell(chelis_std_bundle::CHELIS_STD_SHELL)
+        .map_err(|e| format!("failed to decode embedded chelis-std shell: {e}"))?;
+    let shell_sha256 = shell_package_sha256(&shell)?;
+    Ok(BundledRuntime {
+        manifest,
+        modules,
         shell,
+        shell_sha256,
+    })
+}
+
+fn bundled_runtime_manifest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<ReefManifest, String> {
+    let bytes = files
+        .get(Path::new("reef.toml"))
+        .ok_or_else(|| format!("{BUNDLED_RUNTIME_LABEL} has no reef.toml"))?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| format!("{BUNDLED_RUNTIME_LABEL}/reef.toml is not UTF-8: {error}"))?;
+    parse_manifest(text, &format!("{BUNDLED_RUNTIME_LABEL}/reef.toml"))
+}
+
+/// The path of a bundled `.ch` file relative to `declared_root`, or `None`
+/// when the archive entry is not a source file under that root.
+fn bundled_runtime_source_rel<'a>(path: &'a Path, declared_root: &str) -> Option<&'a Path> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("ch") {
+        return None;
+    }
+    path.strip_prefix(declared_root).ok()
+}
+
+/// Whether `(name, version)` names the runtime this compiler bundles.
+fn is_bundled_runtime(name: &str, version: &str) -> bool {
+    name == CHELIS_STD_PACKAGE_NAME && version == BUNDLED_CHELIS_STD_VERSION
+}
+
+/// The bundled runtime as a graph package. Its source is
+/// [`LoadedSourceKind::Bundled`], which carries no filesystem location.
+fn bundled_runtime_package() -> Result<LoadedPackage, String> {
+    let runtime = BUNDLED_RUNTIME
+        .get_or_init(load_bundled_runtime)
+        .as_ref()
+        .map_err(Clone::clone)?;
+    Ok(LoadedPackage {
+        id: PackageId {
+            name: runtime.manifest.package.name.clone(),
+            version: runtime.manifest.package.version.clone(),
+        },
+        manifest: runtime.manifest.clone(),
+        modules: runtime.modules.clone(),
+        source: LoadedSourceKind::Bundled,
+        archive_sha256: Some(runtime.shell.archive_sha256.clone()),
+        shell_sha256: Some(runtime.shell_sha256.clone()),
+        shell: Some(runtime.shell.clone()),
         remote_origin: None,
     })
+}
+
+/// Digest rows for the bundled runtime, identical in shape to the rows
+/// [`PreparedReefGraph::push_filesystem_source_digests`] produces for an
+/// extracted copy of the same archive: the manifest, then every `.ch` file
+/// under a declared source root keyed by its package-relative path. The
+/// bytes come from the embedded archive, never from disk.
+fn push_bundled_runtime_source_digests(
+    package: &LoadedPackage,
+    digests: &mut Vec<SourceDigest>,
+) -> Result<(), String> {
+    let files = bundled_runtime_files()?;
+    let manifest = files
+        .get(Path::new("reef.toml"))
+        .ok_or_else(|| format!("{BUNDLED_RUNTIME_LABEL} has no reef.toml"))?;
+    digests.push(SourceDigest {
+        package_name: package.id.name.clone(),
+        package_version: package.id.version.clone(),
+        module_name: "<manifest::reef.toml>".to_string(),
+        sha256: Sha256::digest(manifest).into(),
+    });
+    for declared_root in declared_source_roots(&package.manifest) {
+        for (path, bytes) in files {
+            if bundled_runtime_source_rel(path, declared_root).is_none() {
+                continue;
+            }
+            digests.push(SourceDigest {
+                package_name: package.id.name.clone(),
+                package_version: package.id.version.clone(),
+                module_name: format!("<source::{}>", inventory_path_hex(path)),
+                sha256: Sha256::digest(bytes).into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Hex of a package-relative inventory path's bytes, the stable spelling a
+/// source digest row uses for the file it covers.
+fn inventory_path_hex(rel: &Path) -> String {
+    rel.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 /// Typed result for [`load_registry_package`]. Item 8 introduces this
@@ -6779,24 +6962,10 @@ impl LoadRegistryError {
 }
 
 fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, LoadRegistryError> {
-    // Phase A correction: chelis-std is the language runtime and ships
-    // bundled inside the chelis binary. Serve from the embedded bytes
-    // before consulting the on-disk registry. This makes the runtime
-    // reachable on a machine that has *no* `$CHELIS_REEF_HOME` at all
-    // — the bytes come from `include_bytes!()` in
-    // `chelis-std-bundle`, not from the filesystem.
-    //
-    // Falls through to the local-registry path if the requested
-    // version disagrees with the bundled version. Soft-verify in
-    // `resolve_package_recursive` already errors before we get here
-    // when an explicit declaration mismatches, so this fallback is
-    // defensive — it should never fire in practice. If it does, the
-    // local-registry path will produce the standard
-    // `MissingFromIndex` / mismatch errors.
-    if name == CHELIS_STD_PACKAGE_NAME && version == chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION {
-        return load_bundled_chelis_std();
-    }
-
+    // The bundled chelis-std runtime never reaches this function: graph
+    // construction loads it from the compiler (`bundled_runtime_package`)
+    // before consulting any registry, so a registry lookup for chelis-std
+    // happens only for a version this compiler does not bundle.
     let registry_root = registry_root().map_err(LoadRegistryError::Other)?;
     let index = read_registry_index(&registry_root).map_err(LoadRegistryError::Other)?;
     let Some(expected) = index
@@ -7179,10 +7348,13 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
                 };
             }
             let source = match &package.source {
-                LoadedSourceKind::Path { relative } => LockSource::Path {
+                LoadedSourceKind::Path { relative, .. } => LockSource::Path {
                     path: relative.clone(),
                 },
-                LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
+                // Unreachable through the name check above, which records
+                // the runtime with the bundled archive and shell digests.
+                LoadedSourceKind::Bundled => LockSource::bundled_for_current_compiler(),
+                LoadedSourceKind::LocalRegistry { .. } => LockSource::LocalRegistry {
                     remote_origin: package.remote_origin.clone(),
                 },
                 // `Root` is a defensive fallback for the build-lockfile
@@ -7190,7 +7362,7 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
                 // If it ever shows up here, treat it as an unrecorded
                 // local-registry source so the lockfile stays well-
                 // formed.
-                LoadedSourceKind::Root => LockSource::LocalRegistry {
+                LoadedSourceKind::Root { .. } => LockSource::LocalRegistry {
                     remote_origin: None,
                 },
             };
@@ -7312,33 +7484,43 @@ fn binary_lock_entry(
     })
 }
 
+/// The declared source roots of a package, relative to its root: `src`
+/// first, then each `additional_sources` entry (validated
+/// empty/distinct/safe by `validate_manifest`).
+fn declared_source_roots(manifest: &ReefManifest) -> impl Iterator<Item = &str> {
+    std::iter::once("src").chain(
+        manifest
+            .package
+            .additional_sources
+            .iter()
+            .map(String::as_str),
+    )
+}
+
+/// One `.ch` source file of a package, read from disk or from the bundled
+/// runtime's archive.
+struct PackageSourceFile {
+    /// The declared source root the file sits under.
+    source_root: String,
+    /// Path relative to that declared root.
+    rel: PathBuf,
+    /// Location named in diagnostics.
+    display: String,
+    text: String,
+}
+
 fn load_package_modules(
     root: &Path,
     manifest: &ReefManifest,
 ) -> Result<BTreeMap<String, ModuleSource>, String> {
-    // src/ remains mandatory; the additional-roots loop runs after
-    // confirming src/ exists so the loop body stays uniform.
+    // src/ remains mandatory; additional roots are optional.
     let src_root = root.join("src");
     if !src_root.exists() {
         return Err(format!("{} is missing src/", root.display()));
     }
 
-    // Walk every declared source root: src/ first, then each entry from
-    // manifest.package.additional_sources (validated empty/distinct/safe
-    // by validate_manifest before we get here).
-    let roots: Vec<&str> = std::iter::once("src")
-        .chain(
-            manifest
-                .package
-                .additional_sources
-                .iter()
-                .map(|s| s.as_str()),
-        )
-        .collect();
-
-    let mut modules: BTreeMap<String, ModuleSource> = BTreeMap::new();
-    let mut total_files = 0usize;
-    for source_root_name in &roots {
+    let mut sources = Vec::new();
+    for source_root_name in declared_source_roots(manifest) {
         let abs_root = root.join(source_root_name);
         // Additional roots are optional: a manifest may declare
         // additional_sources = ["properties"] with no properties/ dir
@@ -7355,95 +7537,111 @@ fn load_package_modules(
             if entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch") {
                 continue;
             }
-            total_files += 1;
             let rel = entry
                 .path()
                 .strip_prefix(&abs_root)
                 .map_err(|e| e.to_string())?
                 .to_path_buf();
-            // CRITICAL: for non-src roots, prepend the source root name to
-            // the relative path before validation. validate_module_path
-            // strips the source-root prefix entirely from path-to-module
-            // derivation, so without prepending,
-            //   <root>/src/foo.ch         (rel = foo.ch)            -> prefix.foo
-            //   <root>/properties/foo.ch  (rel would be foo.ch too) -> prefix.foo
-            // would collide. Prepending makes the second case
-            //   rel_for_validation = properties/foo.ch  -> prefix.properties.foo
-            // The author of properties/foo.ch must declare
-            // `module <Prefix>.Properties.Foo` — convention follows the
-            // same path-to-module rule, just with the root name as the
-            // first segment for non-src roots.
-            let rel_for_validation = if *source_root_name == "src" {
-                rel.clone()
-            } else {
-                Path::new(source_root_name).join(&rel)
-            };
-            let decls = chelis_surf::parser::parse_str(
-                &fs::read_to_string(entry.path()).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-            let module_decl = match decls.as_slice() {
-                [Decl::Module { name, decls, .. }] => (name.clone(), decls.clone()),
-                _ => {
-                    return Err(format!(
-                        "{} must contain exactly one top-level module declaration",
-                        entry.path().display()
-                    ));
-                }
-            };
-            validate_source_signature_pairs(&module_decl.1, &module_decl.0)?;
-            validate_module_path(
-                &manifest.package.module_prefix,
-                &module_decl.0,
-                &rel_for_validation,
-            )?;
-            let exports = compute_exports(&module_decl.1);
-            let symbols = collect_symbol_kinds(&module_decl.1);
-            if exports
-                .iter()
-                .any(|name| matches!(symbols.get(name), Some(SymbolKind::Macro)))
-            {
+            sources.push(PackageSourceFile {
+                source_root: source_root_name.to_string(),
+                rel,
+                display: entry.path().display().to_string(),
+                text: fs::read_to_string(entry.path()).map_err(|e| e.to_string())?,
+            });
+        }
+    }
+    modules_from_source_files(&root.display().to_string(), manifest, sources)
+}
+
+/// Parse and validate a package's source files into its module table.
+/// `package_label` names the package in the no-sources error.
+fn modules_from_source_files(
+    package_label: &str,
+    manifest: &ReefManifest,
+    sources: Vec<PackageSourceFile>,
+) -> Result<BTreeMap<String, ModuleSource>, String> {
+    let mut modules: BTreeMap<String, ModuleSource> = BTreeMap::new();
+    let total_files = sources.len();
+    for source in sources {
+        let PackageSourceFile {
+            source_root: source_root_name,
+            rel,
+            display,
+            text,
+        } = source;
+        // CRITICAL: for non-src roots, prepend the source root name to
+        // the relative path before validation. validate_module_path
+        // strips the source-root prefix entirely from path-to-module
+        // derivation, so without prepending,
+        //   <root>/src/foo.ch         (rel = foo.ch)            -> prefix.foo
+        //   <root>/properties/foo.ch  (rel would be foo.ch too) -> prefix.foo
+        // would collide. Prepending makes the second case
+        //   rel_for_validation = properties/foo.ch  -> prefix.properties.foo
+        // The author of properties/foo.ch must declare
+        // `module <Prefix>.Properties.Foo` — convention follows the
+        // same path-to-module rule, just with the root name as the
+        // first segment for non-src roots.
+        let rel_for_validation = if source_root_name == "src" {
+            rel.clone()
+        } else {
+            Path::new(&source_root_name).join(&rel)
+        };
+        let decls = chelis_surf::parser::parse_str(&text).map_err(|e| format!("{display}: {e}"))?;
+        let module_decl = match decls.as_slice() {
+            [Decl::Module { name, decls, .. }] => (name.clone(), decls.clone()),
+            _ => {
                 return Err(format!(
-                    "cross-package macro exports are deferred in 3a; module {} exports a macro",
-                    module_decl.0
+                    "{display} must contain exactly one top-level module declaration"
                 ));
             }
-            // Belt-and-suspenders against any case the rel-prepending
-            // missed: BTreeMap::insert returns Some(prev) on a duplicate
-            // key. The rel-prepending should already prevent cross-root
-            // collisions, but a duplicate module-name across roots
-            // (e.g. two `module Pkg.Foo` declared with mismatched paths)
-            // is still a hard error.
-            let module_name = module_decl.0.clone();
-            let new_source = ModuleSource {
-                package_name: manifest.package.name.clone(),
-                module_name: module_decl.0,
-                decls: module_decl.1,
-                file_rel: rel,
-                source_root: (*source_root_name).to_string(),
-                exports,
-                symbols,
-            };
-            if let Some(prev) = modules.insert(module_name.clone(), new_source) {
-                return Err(format!(
-                    "duplicate module `{module_name}` across source roots: \
-                     `{}/{}` and `{}/{}`",
-                    prev.source_root,
-                    prev.file_rel.display(),
-                    source_root_name,
-                    entry
-                        .path()
-                        .strip_prefix(&abs_root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| entry.path().display().to_string())
-                ));
-            }
+        };
+        validate_source_signature_pairs(&module_decl.1, &module_decl.0)?;
+        validate_module_path(
+            &manifest.package.module_prefix,
+            &module_decl.0,
+            &rel_for_validation,
+        )?;
+        let exports = compute_exports(&module_decl.1);
+        let symbols = collect_symbol_kinds(&module_decl.1);
+        if exports
+            .iter()
+            .any(|name| matches!(symbols.get(name), Some(SymbolKind::Macro)))
+        {
+            return Err(format!(
+                "cross-package macro exports are deferred in 3a; module {} exports a macro",
+                module_decl.0
+            ));
+        }
+        // Belt-and-suspenders against any case the rel-prepending
+        // missed: BTreeMap::insert returns Some(prev) on a duplicate
+        // key. The rel-prepending should already prevent cross-root
+        // collisions, but a duplicate module-name across roots
+        // (e.g. two `module Pkg.Foo` declared with mismatched paths)
+        // is still a hard error.
+        let module_name = module_decl.0.clone();
+        let new_source = ModuleSource {
+            package_name: manifest.package.name.clone(),
+            module_name: module_decl.0,
+            decls: module_decl.1,
+            file_rel: rel.clone(),
+            source_root: source_root_name.clone(),
+            exports,
+            symbols,
+        };
+        if let Some(prev) = modules.insert(module_name.clone(), new_source) {
+            return Err(format!(
+                "duplicate module `{module_name}` across source roots: \
+                 `{}/{}` and `{}/{}`",
+                prev.source_root,
+                prev.file_rel.display(),
+                source_root_name,
+                rel.display()
+            ));
         }
     }
     if total_files == 0 {
         return Err(format!(
-            "{} has no .ch source files under src/{}",
-            root.display(),
+            "{package_label} has no .ch source files under src/{}",
             if manifest.package.additional_sources.is_empty() {
                 String::new()
             } else {
@@ -8846,7 +9044,9 @@ fn build_name_resolver(
         // Local helpers remain in module_internal; importing a sibling module
         // does not grant access to its explicitly unexported bindings (#1878).
         let allowed_exports = match import_package.source {
-            LoadedSourceKind::LocalRegistry if import_pkg != module.package_name => {
+            LoadedSourceKind::LocalRegistry { .. } | LoadedSourceKind::Bundled
+                if import_pkg != module.package_name =>
+            {
                 dep_public_exports(
                     dep_shells
                         .get(&import_pkg)
@@ -12645,7 +12845,7 @@ version = "0.1.0"
         // Bundled stdlib modules also import siblings, without a dependency
         // shell for their own package. They still use the same export boundary.
         let mut graph = load_package_graph_for_eval(root).unwrap();
-        graph.packages.get_mut("demo").unwrap().source = LoadedSourceKind::LocalRegistry;
+        graph.packages.get_mut("demo").unwrap().source = LoadedSourceKind::Bundled;
         let maps = build_internal_maps(&graph);
         let module = &graph.packages["demo"].modules["Demo.Client"];
         let resolver = build_name_resolver(module, &graph, &maps, &BTreeMap::new()).unwrap();
@@ -13111,8 +13311,9 @@ module_prefix = "RegistryLib"
                 },
                 manifest,
                 modules,
-                source: LoadedSourceKind::LocalRegistry,
-                source_root: registry_root,
+                source: LoadedSourceKind::LocalRegistry {
+                    root: registry_root,
+                },
                 archive_sha256: Some("archive-a".to_string()),
                 shell_sha256: Some("shell-a".to_string()),
                 shell: None,
@@ -13399,9 +13600,68 @@ module_prefix = "RegistryLib"
         );
     }
 
+    /// chelis#2616: the bundled runtime is read from the embedded archive in
+    /// memory, and its modules and digest rows are exactly those an extracted
+    /// copy of the same archive yields. The rows therefore keep the
+    /// chelis-std source digest, and every typecheck-cache key built on it,
+    /// unchanged while the package loses its filesystem location.
+    #[test]
+    fn bundled_runtime_matches_an_extracted_copy_without_a_location() {
+        let extracted = tempdir().expect("tempdir");
+        chelis_std_bundle::extract_into(extracted.path()).expect("extract bundle");
+        let manifest = read_manifest(&extracted.path().join("reef.toml")).expect("manifest");
+        let on_disk_modules = load_package_modules(extracted.path(), &manifest).expect("modules");
+
+        let bundled = bundled_runtime_package().expect("bundled runtime");
+        assert!(matches!(bundled.source, LoadedSourceKind::Bundled));
+        assert!(bundled.source.filesystem_root().is_none());
+        assert_eq!(bundled.manifest, manifest);
+        assert_eq!(
+            bundled.modules.keys().collect::<Vec<_>>(),
+            on_disk_modules.keys().collect::<Vec<_>>()
+        );
+        for (name, module) in &bundled.modules {
+            let on_disk = &on_disk_modules[name];
+            assert_eq!(module.decls, on_disk.decls, "{name} decls");
+            assert_eq!(module.file_rel, on_disk.file_rel, "{name} file_rel");
+            assert_eq!(
+                module.source_root, on_disk.source_root,
+                "{name} source_root"
+            );
+            assert_eq!(module.exports, on_disk.exports, "{name} exports");
+        }
+
+        let mut bundled_rows = Vec::new();
+        push_bundled_runtime_source_digests(&bundled, &mut bundled_rows).expect("bundled rows");
+        let mut on_disk_rows = Vec::new();
+        PreparedReefGraph::push_filesystem_source_digests(
+            &bundled,
+            extracted.path(),
+            true,
+            &mut on_disk_rows,
+        )
+        .expect("on-disk rows");
+        let key = |row: &SourceDigest| (row.module_name.clone(), row.sha256);
+        let mut bundled_rows = bundled_rows.iter().map(key).collect::<Vec<_>>();
+        let mut on_disk_rows = on_disk_rows.iter().map(key).collect::<Vec<_>>();
+        bundled_rows.sort();
+        on_disk_rows.sort();
+        assert_eq!(bundled_rows.len(), 1 + bundled.modules.len());
+        assert_eq!(bundled_rows, on_disk_rows);
+
+        let encoded = bincode::serialize(&bundled).expect("encode bundled package");
+        let extracted_path = extracted.path().to_string_lossy();
+        assert!(
+            !encoded
+                .windows(extracted_path.len())
+                .any(|window| window == extracted_path.as_bytes()),
+            "the bundled package must carry no filesystem path"
+        );
+    }
+
     #[test]
     fn prepared_graph_cache_version_tracks_both_branch_formats() {
-        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 5);
+        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 6);
     }
 
     #[test]
@@ -13432,7 +13692,7 @@ module_prefix = "RegistryLib"
         let error = load_prepared_graph_cache(&cache_path, &root)
             .expect_err("preceding positional payload must be rejected before decode");
         assert!(
-            error.contains("format version 4 unsupported (expected 5)"),
+            error.contains("format version 5 unsupported (expected 6)"),
             "unexpected version diagnostic: {error}"
         );
     }

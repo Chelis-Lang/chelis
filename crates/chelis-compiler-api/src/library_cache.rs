@@ -80,7 +80,10 @@ use std::path::{Path, PathBuf};
 
 use crate::cache_envelope;
 use crate::compiler::CompilerError;
-use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
+use crate::stdlib_cache::{
+    StdLibContext, TypecheckCacheLoad, cache_disabled, classify_typecheck_cache_load,
+    typecheck_cache_dir,
+};
 
 /// Internal struct-format version. Bumped when [`LibraryContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
@@ -365,10 +368,15 @@ pub fn load_or_build_library_context(
     };
     let cache_path = library_cache_path(&cache_dir, key);
 
-    match cache_envelope::load::<LibraryContext>(&cache_path, key) {
-        Ok(Some(ctx)) => return Ok(Some(ctx)),
-        Ok(None) => {}
-        Err(e) => {
+    match classify_typecheck_cache_load(cache_envelope::load::<LibraryContext>(&cache_path, key)) {
+        TypecheckCacheLoad::Hit(ctx) => return Ok(Some(ctx)),
+        TypecheckCacheLoad::Miss => {}
+        TypecheckCacheLoad::Cancelled => {
+            return Err(crate::compiler::cancelled_stage_error(
+                "dependency typecheck cache",
+            ));
+        }
+        TypecheckCacheLoad::Unusable(e) => {
             eprintln!(
                 "chelis: dependency typecheck cache at {} unusable ({e}); \
                  rebuilding and overwriting",

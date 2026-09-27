@@ -409,6 +409,8 @@ fn load_if_fresh_rejects_a_torn_write_in_the_identity_region() {
             | CacheError::Reef(_),
         ) => { /* acceptable: any "do not use these bytes" signal */ }
         Err(CacheError::Encode(e)) => panic!("encode error is impossible on the load path: {e}"),
+        // No cancel token is installed, so nothing can have been abandoned.
+        Err(CacheError::Cancelled) => panic!("a load with no cancel token cannot be cancelled"),
         // The disk-cache load path has no out-of-band digest to compare
         // against -- that absence is the whole reason it re-derives
         // (chelis#2211) -- so this variant arriving here would mean the two
@@ -546,8 +548,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 37, "the running binary expects format version 37");
-            assert_ne!(stored, 37, "the forged version must differ from 37");
+            assert_eq!(expected, 38, "the running binary expects format version 38");
+            assert_ne!(stored, 38, "the forged version must differ from 38");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape

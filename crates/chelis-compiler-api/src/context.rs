@@ -703,6 +703,13 @@ pub fn load_or_compile_for_package(
     match CompiledContext::load_if_fresh(&cache_path, reef_home, package_dir) {
         Ok(Some(ctx)) => return Ok(ctx),
         Ok(None) => {}
+        // A cancelled load judged nothing: propagate the cancellation and
+        // leave the file alone (chelis#2617).
+        Err(CacheError::Cancelled) => {
+            return Err(crate::compiler::cancelled_stage_error(
+                "compiled context cache",
+            ));
+        }
         Err(e) => {
             if verbose_corruption_to_stderr {
                 eprintln!(
@@ -886,7 +893,12 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// trapping integer reduction, empty reduced axis, runtime movement bound or
 /// extent claim is a trap seed, so a cached lowered library's claim carriers
 /// and retained dead nodes change meaning while their bincode shape does not.
-const CACHE_FORMAT_VERSION: u32 = 37;
+/// V38 (chelis#2413, chelis#2616): V37's formats, plus the embedded prepared
+/// graph's package source kinds carrying their filesystem roots, the bundled
+/// runtime having none. That change shipped on main as V31, a number the
+/// explicit-key switch's unshipped intermediate state had already used, so
+/// the merged format takes the next number above both.
+const CACHE_FORMAT_VERSION: u32 = 38;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -994,11 +1006,8 @@ impl CacheEnvelope {
 
     fn into_context(self) -> Result<CompiledContext, CacheError> {
         self.check_build_and_embedded_digest()?;
-        let context: CompiledContext = bincode::deserialize(&self.payload).map_err(|e| {
-            CacheError::Decode(format!(
-                "CompiledContext decode (envelope/version match but inner shape changed): {e}"
-            ))
-        })?;
+        let context: CompiledContext =
+            bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
         self.check_envelope_agreement(&context)?;
         Ok(context)
     }
@@ -1025,16 +1034,30 @@ impl CacheEnvelope {
                 actual: hex_prefix(&actual_payload_sha, 32),
             });
         }
-        let wire: CompiledContextWire = bincode::deserialize(&self.payload).map_err(|e| {
-            CacheError::Decode(format!(
-                "CompiledContext decode (envelope/version match but inner shape changed): {e}"
-            ))
+        let wire: CompiledContextWire =
+            bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
+        let context = wire.into_authenticated_context().map_err(|e| {
+            if chelis_types::cancellation_requested() {
+                CacheError::Cancelled
+            } else {
+                CacheError::Decode(e)
+            }
         })?;
-        let context = wire
-            .into_authenticated_context()
-            .map_err(CacheError::Decode)?;
         self.check_envelope_agreement(&context)?;
         Ok(context)
+    }
+}
+
+/// Classify a payload decode failure. Reconstruction polls the cancel token,
+/// so once cancellation is requested a failed decode is the abandonment, not
+/// evidence about the bytes (chelis#2617).
+fn payload_decode_error(error: &bincode::Error) -> CacheError {
+    if chelis_types::cancellation_requested() {
+        CacheError::Cancelled
+    } else {
+        CacheError::Decode(format!(
+            "CompiledContext decode (envelope/version match but inner shape changed): {error}"
+        ))
     }
 }
 
@@ -1147,6 +1170,12 @@ pub enum CacheError {
     /// recomputing the live source hash for invalidation. The string
     /// is whatever `chelis_reef` returned.
     Reef(String),
+    /// Cancellation was requested while the payload was being decoded
+    /// (chelis#2617). Decoding reruns effect and linearity checking, which
+    /// polls the cancel token, so an abandoned decode says nothing about the
+    /// file. Callers propagate the cancellation and leave the file in place;
+    /// this is never reported as an unusable cache.
+    Cancelled,
 }
 
 impl fmt::Display for CacheError {
@@ -1184,6 +1213,10 @@ impl fmt::Display for CacheError {
                 inner.fingerprint_hex()
             ),
             CacheError::Reef(msg) => write!(f, "cache invalidation reef error: {msg}"),
+            // The sentinel, so a caller that only sees flattened text (the
+            // `decode` routes return `String`) still classifies the failure
+            // as a cancellation.
+            CacheError::Cancelled => f.write_str(chelis_types::EVAL_CANCELLED_MSG),
         }
     }
 }
@@ -1597,7 +1630,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 37);
+        assert_eq!(CACHE_FORMAT_VERSION, 38);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
