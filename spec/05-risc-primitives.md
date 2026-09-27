@@ -1074,10 +1074,12 @@ path.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `key_from_seed` | `(i64) -> key` | The root key of a seed ([05-OP-69]) |
-| `split_key` | `(key) -> (key, key)` | Two child keys ([05-OP-70]) |
-| `split_keys` | `(key, i64) -> tensor[n, key]` | `n` child keys ([05-OP-71]) |
-| `fold_in` | `(key, i64) -> key` | The child key of an integer ([05-OP-72]) |
+| `key_from_seed` | `(i64) -> key`; `(tensor[D,i64]) -> tensor[D,key]` | The root key of a seed ([05-OP-69]) |
+| `split_key` | `(key) -> (key, key)`; `(tensor[D,key]) -> (tensor[D,key], tensor[D,key])` | Two child keys ([05-OP-70]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]`; `(tensor[D,key], i64) -> tensor[D ++ [n],key]` | `n` child keys ([05-OP-71]) |
+| `fold_in` | `(key, i64) -> key`; `(tensor[D,key], tensor[D,i64]) -> tensor[D,key]` | The child key of an integer ([05-OP-72]) |
+
+(The tensor forms are not fully implemented; see chelis#2656.)
 
 > **[05-RNG-2]** A key is a 64-bit word. For a key `k` and a 64-bit word
 > `j`, `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`, where
