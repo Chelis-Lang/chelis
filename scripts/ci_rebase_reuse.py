@@ -226,15 +226,14 @@ def _frontier_flags(
 
 
 def _candidate_parents(repository_path: Path, candidate_sha: str) -> list[str]:
-    raw = _git(
-        repository_path,
-        "show",
-        "-s",
-        "--format=%P",
-        candidate_sha,
-    ).stdout.decode().strip()
-    parents = raw.split()
-    if len(parents) != 2 or any(not SHA.fullmatch(parent) for parent in parents):
+    # `git show` hides parents of a shallow graft even though the commit
+    # object retains them. The candidate identity verifier reads raw headers
+    # for this same checkout shape; use that authenticated representation.
+    try:
+        parents = identity._commit_parents(repository_path, candidate_sha)
+    except identity.IdentityError as error:
+        raise ReuseError(f"invalid current synthetic candidate parents: {error}") from error
+    if len(parents) != 2:
         raise ReuseError("current synthetic candidate must have exactly two parents")
     return parents
 
