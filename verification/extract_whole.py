@@ -1266,7 +1266,8 @@ UNEMITTED_CATEGORIES = {
     "native_shell": "FCIS imperative shell (verification/native_shell.json): opaque in every "
                     "chunk, never extracted",
     "model_default": "provided-method copy (Charon defaulted_method) of a trait whose Lean model "
-                     "declares the method with a default (defaultMethods): Aeneas "
+                     "declares the method with a default (defaultMethods) or models the provided "
+                     "method itself (`<trait>::<method>`): Aeneas "
                      "(PrePasses.resolve_modeled_defaults) drops the copy, and the emitted "
                      "implementation's dictionary uses the model default",
     "vtable": "vtable instance of a dyn-compatible trait implementation (Charon VTableInstance): "
@@ -1396,7 +1397,9 @@ def item_statuses(plan: dict, results: list[dict], models: dict[str, str],
             else:
                 row[0] = "missing"
     # A provided-method copy is dropped for its model's default only in an emitted
-    # implementation (whose dictionary then takes the default).
+    # implementation (whose dictionary then takes the default), when the trait's model
+    # provides the method: as a field with a default, or as the standalone model of the
+    # provided method (`<trait>::<method>`, e.g. `core::error::Error::source`).
     impl_status = {(row[3], row[4]): row[0] for row in rows}
     for row, item in deferred:
         path = split_top(item["name"])
@@ -1405,7 +1408,9 @@ def item_statuses(plan: dict, results: list[dict], models: dict[str, str],
         if len(path) > 1 and path[-2].startswith("{"):
             body = path[-2][1:-1]
             trait = type_head(split_top(body[5:] if body.startswith("impl ") else body, " for ")[0])[0]
-        modeled = bool(method and trait and method.group(1) in trait_defaults.get(normalize_pattern(trait), ()))
+        modeled = bool(method and trait and (
+            method.group(1) in trait_defaults.get(normalize_pattern(trait), ())
+            or normalize_pattern(f"{trait}::{method.group(1)}") in models))
         impl_emitted = impl_status.get(("trait_impl", "::".join(path[:-1]))) == "emitted"
         row[0] = "model_default" if modeled and impl_emitted else "missing"
     misplaced = []

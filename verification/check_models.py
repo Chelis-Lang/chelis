@@ -63,6 +63,8 @@ MODELS = {
     "retain_closure_state": "RetainClosureState",
     "str_pattern_models": "StrPatternModels",
     "iterator_consumer_models": "IteratorConsumerModels",
+    "owned_rev_models": "OwnedRevModels",
+    "provided_method_models": "ProvidedMethodModels",
     "collection_std_models": "CollectionStdModels",
 }
 
@@ -83,6 +85,14 @@ MODEL_EDITIONS = {"join_shared_projection": "2024"}
 
 # These regressions require a restricted root, rather than all local items.
 MODEL_ROOTS = {
+    # The provided-method copies are roots, as in the whole-core chunks (every item of a crate).
+    "provided_method_models": (
+        "provided_method_models::widen",
+        "provided_method_models::{impl core::clone::Clone for provided_method_models::Span}",
+        "provided_method_models::{impl core::clone::Clone for provided_method_models::Span}::clone_from",
+        "provided_method_models::{impl core::error::Error for provided_method_models::ParseError}",
+        "provided_method_models::{impl core::error::Error for provided_method_models::ParseError}::source",
+    ),
     "retain_closure_state": (
         "retain_closure_state::{impl retain_closure_state::Subst}::take_operand_gates_on",
         "retain_closure_state::cancel_shape_checks",
