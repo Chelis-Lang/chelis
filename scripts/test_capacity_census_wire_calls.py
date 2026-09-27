@@ -17,6 +17,34 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class BindingInvocationTargetControls(unittest.TestCase):
+    def test_binding_scopes_share_only_their_dependency_target(self):
+        from capacity_census_wire_calls import invocation_target_for_scope
+
+        target = ROOT / "target/agents/binding-target-control"
+        self.assertEqual(
+            invocation_target_for_scope(target, "compiler-json"),
+            invocation_target_for_scope(target, "native-bindings"),
+        )
+        self.assertNotEqual(
+            invocation_target_for_scope(target, None),
+            invocation_target_for_scope(target, "compiler-json"),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown compiled boundary scope"):
+            invocation_target_for_scope(target, "unknown")
+
+    def test_binding_scopes_use_the_same_current_source_driver(self):
+        from capacity_census_wire_calls import build_binding_driver
+
+        target = ROOT / "target/agents/binding-target-control"
+        expected = target / "binding-invocations-driver"
+        with patch(
+            "capacity_census_wire_calls.build_driver", return_value=expected
+        ) as build:
+            self.assertEqual(build_binding_driver(ROOT, target), expected)
+        build.assert_called_once_with(ROOT, expected)
+
+
 class DriverBuildControls(unittest.TestCase):
     def setUp(self):
         from capacity_census_wire_calls import DRIVER
@@ -242,7 +270,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     ):
         from capacity_census_wire_calls import _construction_dependency_artifact
 
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
 
         def artifact_id(path, _root):
             if artifact_id_calls is not None:
@@ -355,7 +383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     def test_construction_dependency_uses_the_compiler_selected_serde_json_artifact(
         self,
     ):
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
         old = self.artifact(
             "serde_json@1.0.149",
             "serde_json",
@@ -431,7 +459,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     ):
         from capacity_census_wire_calls import _construction_dependency_artifact
 
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
         pyo3 = self.artifact(
             "pyo3@0.24.2",
             "pyo3",
@@ -502,7 +530,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             artifact_id.assert_not_called()
 
     def test_construction_dependency_rejects_physical_target_escapes(self):
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
         traversal = self.artifact(
             "serde_json@1.0.149",
             "serde_json",
@@ -542,7 +570,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             self.assertEqual(artifact_id_calls, [])
 
     def test_construction_dependency_rejects_target_symlink_outside_root(self):
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
         outside = self.root.parent / f"{self.root.name}-outside-target"
         outside.mkdir()
         self.addCleanup(shutil.rmtree, outside)
@@ -575,7 +603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     def test_construction_dependency_requires_exact_compiler_api_package(self):
         from capacity_census_wire_calls import _construction_dependency_artifact
 
-        invocation_target = self.root / "target/compiler-json-invocations/cargo"
+        invocation_target = self.root / "target/binding-invocations/cargo"
         expected = self.artifact(
             "chelis-compiler-api@0.18.10",
             "chelis_compiler_api",
