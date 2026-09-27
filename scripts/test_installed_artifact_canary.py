@@ -11,6 +11,8 @@ import tarfile
 import tempfile
 import unittest
 
+import yaml
+
 from scripts import installed_artifact_canary as canary
 
 
@@ -83,7 +85,7 @@ class ArtifactTests(unittest.TestCase):
                                  ("chelis-dev-abcd1234/lib/runtime", b"runtime")])
         mapped = self.root / "mapped.tar.gz"
         canary.installer_archive(original, mapped, candidate=True,
-                                 version="0.18.6", slug="darwin-arm64")
+                                 version="0.18.6", build="darwin-arm64")
         self.assertEqual(canary.archive_inventory(mapped), canary.archive_inventory(original))
         with tarfile.open(mapped) as archive:
             self.assertEqual(archive.getnames(), [
@@ -91,7 +93,7 @@ class ArtifactTests(unittest.TestCase):
                 "chelis-v0.18.6-darwin-arm64/lib/runtime"])
         released = self.root / "released.tar.gz"
         canary.installer_archive(original, released, candidate=False,
-                                 version="0.18.6", slug="darwin-arm64")
+                                 version="0.18.6", build="darwin-arm64")
         self.assertEqual(original.read_bytes(), released.read_bytes())
 
     def test_candidate_mapping_is_explicit_and_source_bound(self) -> None:
@@ -100,18 +102,20 @@ class ArtifactTests(unittest.TestCase):
                                              "darwin-arm64"),
                          "chelis-dev-abcd1234-darwin-arm64.tar.gz")
         self.assertEqual(canary.archive_name("0.18.6", "v0.18.6", sha,
-                                             "linux-x86_64"),
-                         "chelis-v0.18.6-linux-x86_64.tar.gz")
-        for version, label, source, slug in [
+                                             "linux-x86_64-glibc2.31"),
+                         "chelis-v0.18.6-linux-x86_64-glibc2.31.tar.gz")
+        for version, label, source, build in [
             ("0.18.6", "dev-ffffffff", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.5", sha, "darwin-arm64"),
             ("../bad", "v0.18.6", sha, "darwin-arm64"),
             ("0.18.6", "v0.18.6", "unknown", "darwin-arm64"),
             ("0.18.6", "v0.18.6", sha, "other"),
+            # chelisup never installs the Linux build that needs glibc 2.39.
+            ("0.18.6", "v0.18.6", sha, "linux-x86_64"),
         ]:
-            with self.subTest(label=label, version=version, source=source, slug=slug):
+            with self.subTest(label=label, version=version, source=source, build=build):
                 with self.assertRaises(ValueError):
-                    canary.archive_name(version, label, source, slug)
+                    canary.archive_name(version, label, source, build)
 
 
 class ProcessTests(unittest.TestCase):
@@ -170,6 +174,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("scripts/installed_artifact_canary.py", gate)
         self.assertIn("if: always()", gate)
         self.assertIn("if-no-files-found: error", gate)
+
+    def test_each_canary_downloads_the_build_chelisup_installs(self) -> None:
+        # A canary given another build fails only once a release runs it.
+        workflow = yaml.safe_load((canary.ROOT / ".github/workflows/release.yml").read_text())
+        job = workflow["jobs"]["installed-artifact-canary"]
+        artifacts = {row["slug"]: row["artifact"] for row in job["strategy"]["matrix"]["include"]}
+        self.assertEqual(artifacts, {slug: f"chelis-{build}"
+                                     for slug, build in canary.PLATFORMS.values()})
+        downloads = [step["with"]["name"] for step in job["steps"]
+                     if step.get("uses", "").startswith("actions/download-artifact@")]
+        self.assertEqual(downloads, ["${{ matrix.artifact }}"] * 2)
 
 
 if __name__ == "__main__":

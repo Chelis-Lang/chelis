@@ -90,9 +90,9 @@ pub fn run_cli() -> i32 {
 
 fn cmd_install(store: &Store, version: &str) -> i32 {
     match install::install(store, version) {
-        Ok(install::InstallOutcome::Installed { version, slug }) => {
+        Ok(install::InstallOutcome::Installed { version, build }) => {
             println!(
-                "installed chelis {version} ({slug}) into {}",
+                "installed chelis {version} ({build}) into {}",
                 store.toolchain_dir(&version).display()
             );
             println!(

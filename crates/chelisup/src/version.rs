@@ -7,7 +7,7 @@
 //! error) and re-exports the security gate:
 //!
 //! - [`validate_install_version`] is strict `X.Y.Z` (digits only), because
-//!   `install` builds a release-asset name from it (`chelis-vX.Y.Z-<slug>.tar.gz`)
+//!   `install` builds a release-asset name from it (`chelis-vX.Y.Z-<build>.tar.gz`)
 //!   and a non-version there is a user typo we should reject loudly.
 //! - [`is_safe_path_component`] is the security gate applied to every version
 //!   joined into a filesystem path during resolution. A resolved version can
@@ -27,6 +27,16 @@ pub fn validate_install_version(v: &str) -> Result<(), String> {
         Err(format!(
             "malformed version {v:?}; expected X.Y.Z (for example 0.12.0)"
         ))
+    }
+}
+
+/// A validated `X.Y.Z` as numbers, so releases order numerically (0.10.0
+/// after 0.7.24).
+pub(crate) fn release_triple(v: &str) -> Result<(u64, u64, u64), String> {
+    let mut parts = v.split('.').map(str::parse::<u64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => Ok((major, minor, patch)),
+        _ => Err(format!("malformed version {v:?}; expected X.Y.Z")),
     }
 }
 

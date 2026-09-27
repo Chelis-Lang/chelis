@@ -8,8 +8,10 @@ use common::{bin, build_fixture_tarball, run_cli};
 use std::path::Path;
 use std::process::Command;
 
-fn slug() -> &'static str {
-    chelisup::install::detect_slug().expect("host platform must be supported in CI")
+/// The release build `install` downloads for `version` on this host.
+fn build(version: &str) -> String {
+    let slug = chelisup::install::detect_slug().expect("host platform must be supported in CI");
+    chelisup::install::release_build(version, slug).unwrap()
 }
 
 fn stdout(out: &std::process::Output) -> String {
@@ -33,7 +35,7 @@ fn install(home: &Path, release: &Path, version: &str) -> std::process::Output {
 fn install_from_local_fixture_populates_store_and_seeds_default() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
 
     let out = install(home.path(), release.path(), "0.1.0");
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -54,7 +56,7 @@ fn install_from_local_fixture_populates_store_and_seeds_default() {
 fn install_is_idempotent() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
 
     assert!(
         install(home.path(), release.path(), "0.1.0")
@@ -97,6 +99,48 @@ fn install_missing_asset_is_a_loud_error() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_installs_the_glibc_2_31_build_from_0_7_24() {
+    // 0.7.23 publishes no glibc-2.31 build and installs its linux-x86_64
+    // build. From 0.7.24 the linux-x86_64 build, which needs a newer glibc,
+    // is never installed.
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    for version in ["0.7.23", "0.7.24"] {
+        build_fixture_tarball(release.path(), version, "linux-x86_64");
+    }
+
+    let old = install(home.path(), release.path(), "0.7.23");
+    assert!(old.status.success(), "stderr: {}", stderr(&old));
+    assert!(
+        stdout(&old).contains("installed chelis 0.7.23 (linux-x86_64) into"),
+        "stdout: {}",
+        stdout(&old)
+    );
+
+    let refused = install(home.path(), release.path(), "0.7.24");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains(
+            "release asset chelis-v0.7.24-linux-x86_64-glibc2.31.tar.gz not found under \
+             CHELISUP_RELEASE_BASE"
+        ),
+        "stderr: {}",
+        stderr(&refused)
+    );
+    assert!(!home.path().join("toolchains/0.7.24").exists());
+
+    build_fixture_tarball(release.path(), "0.7.24", "linux-x86_64-glibc2.31");
+    let new = install(home.path(), release.path(), "0.7.24");
+    assert!(new.status.success(), "stderr: {}", stderr(&new));
+    assert!(
+        stdout(&new).contains("installed chelis 0.7.24 (linux-x86_64-glibc2.31) into"),
+        "stdout: {}",
+        stdout(&new)
+    );
+}
+
 #[test]
 fn installed_shim_resolves_and_runs_the_toolchain() {
     if !common::python3_available() {
@@ -105,7 +149,7 @@ fn installed_shim_resolves_and_runs_the_toolchain() {
     }
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
     assert!(
         install(home.path(), release.path(), "0.1.0")
             .status
@@ -129,7 +173,7 @@ fn installed_shim_resolves_and_runs_the_toolchain() {
 fn list_installed_and_which_reflect_the_store() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
     assert!(
         install(home.path(), release.path(), "0.1.0")
             .status
@@ -177,7 +221,7 @@ fn which_is_loud_when_pin_is_not_installed() {
 fn uninstall_removes_toolchain_and_unsets_default() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
     assert!(
         install(home.path(), release.path(), "0.1.0")
             .status
@@ -207,7 +251,7 @@ fn default_to_uninstalled_version_is_rejected() {
 fn self_uninstall_removes_shims_but_keeps_toolchains() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
-    build_fixture_tarball(release.path(), "0.1.0", slug());
+    build_fixture_tarball(release.path(), "0.1.0", &build("0.1.0"));
     assert!(
         install(home.path(), release.path(), "0.1.0")
             .status

@@ -54,15 +54,15 @@ pub fn write_default(home: &Path, version: &str) {
     fs::write(home.join("default"), format!("{version}\n")).unwrap();
 }
 
-/// Build a release-tarball fixture `chelis-v<ver>-<slug>.tar.gz` under
-/// `release_dir`, whose top-level `chelis-v<ver>-<slug>/bin/chelis` is
+/// Build a release-tarball fixture `chelis-v<ver>-<build>.tar.gz` under
+/// `release_dir`, whose top-level `chelis-v<ver>-<build>/bin/chelis` is
 /// the fake toolchain. This is what `CHELISUP_RELEASE_BASE` serves.
-pub fn build_fixture_tarball(release_dir: &Path, version: &str, slug: &str) -> PathBuf {
+pub fn build_fixture_tarball(release_dir: &Path, version: &str, build: &str) -> PathBuf {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
     fs::create_dir_all(release_dir).unwrap();
-    let top = format!("chelis-v{version}-{slug}");
+    let top = format!("chelis-v{version}-{build}");
 
     // Stage the unpacked layout on disk so the tar entries carry real
     // file modes (the fake `chelis` is executable).
