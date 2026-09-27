@@ -107,7 +107,8 @@ sync` (if `[chelis-src]`) → `reef doctor` summary.
   overwrite the shim and the installer with the compiler.
 - **The guard is compile-time.** chelisup's `install`, `ensure_shim_installed`,
   `uninstall`, and `self_uninstall` are `pub(crate)` (only chelisup's own
-  `cli.rs` calls them; the sole external use is the pure `detect_slug` helper).
+  `cli.rs` calls them; the only external uses are the pure asset-naming helpers
+  `detect_slug`, `release_build` and `asset_name`, from `reef_setup.rs`).
   Any in-process reference from another crate is an `E0603` build error caught
   by the normal clippy/build/test stages. Do NOT widen that visibility to
   `pub`; keep the call-site comment and the test asserting the shim stays
@@ -146,7 +147,9 @@ so a bogus token stays `InvalidSubcommand` and the hint still fires.
 
 - `CHELIS_HOME` — isolate the whole store to a tempdir.
 - `CHELISUP_RELEASE_BASE` — read the toolchain tarball
-  (`chelis-vX.Y.Z-<slug>.tar.gz`, gzip) from a local dir instead of GitHub.
+  (`chelis-vX.Y.Z-<build>.tar.gz`, gzip; name it with
+  `chelisup::install::asset_name` and `release_build`, since on Linux the build
+  is `linux-x86_64-glibc2.31`) from a local dir instead of GitHub.
 - `CHELISUP_GITHUB_BASE_API`, `CHELISUP_REPO` — wiremock the GitHub REST path.
 - `CHELISUP_BIN` — point `reef setup` at a specific `chelisup` binary.
 - `CHELIS_REEF_GITHUB_BASE_API`, `CHELIS_SRC_REMOTE`, `CHELIS_SRC_HOME` — the

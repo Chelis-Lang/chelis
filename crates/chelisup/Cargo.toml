@@ -21,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 serde_json = "1"
 # The chelis toolchain release asset is a gzip tarball
-# (`chelis-vX.Y.Z-<slug>.tar.gz`), not the zstd archive reef uses for
+# (`chelis-vX.Y.Z-<build>.tar.gz`), not the zstd archive reef uses for
 # shells, so gzip decode is required here.
 flate2 = "1"
 tar = "0.4"
