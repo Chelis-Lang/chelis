@@ -6,7 +6,8 @@
 //! command line: a linearity violation in a library module the entry reaches
 //! fails `chelis test`, `chelis check` and `chelis eval --file` on a cold cache
 //! and after a warm one, leaves no cache entry behind, and restoring the source
-//! hits the entry written before the edit.
+//! hits the entry written before the edit. The explicit-key rule has the same
+//! cold and warm coverage: reusing a key after `split_key` fails on every route.
 
 use assert_cmd::Command;
 use std::collections::BTreeMap;
@@ -23,6 +24,15 @@ const INVALID_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
      def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n";
 
 const VIOLATION: &str = "already consumed by realize";
+
+const VALID_KEY_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
+     def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  k = key_from_seed(7i64)\n  (a, b) = split_key(k)\n  _ = fold_in(a, 1i64)\n  _ = fold_in(b, 2i64)\n  realize(x)\n}\n";
+
+/// The second `split_key(k)` consumes the same key as the first.
+const INVALID_KEY_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
+     def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  k = key_from_seed(7i64)\n  _ = split_key(k)\n  _ = split_key(k)\n  realize(x)\n}\n";
+
+const KEY_VIOLATION: &str = "key-carrying variable `k` was already consumed by call to `split_key`";
 
 fn write_file(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -142,7 +152,7 @@ const ENTRIES: [&[&str]; 3] = [
     &["eval", "--file", "probe.ch"],
 ];
 
-fn assert_every_entry_rejects(root: &Path, home: &Path, when: &str) {
+fn assert_every_entry_rejects(root: &Path, home: &Path, when: &str, violation: &str) {
     for args in ENTRIES {
         let (ok, output) = chelis(root, home, args);
         assert!(
@@ -151,8 +161,8 @@ fn assert_every_entry_rejects(root: &Path, home: &Path, when: &str) {
             args.join(" ")
         );
         assert!(
-            output.contains(VIOLATION),
-            "`chelis {}` must report the linearity violation {when}: {output}",
+            output.contains(violation),
+            "`chelis {}` must report the violation {when}: {output}",
             args.join(" ")
         );
     }
@@ -163,7 +173,7 @@ fn a_reached_linearity_violation_fails_on_a_cold_cache_and_writes_no_context() {
     let (dir, root) = package(INVALID_OPS);
     let home = dir.path().join("home");
 
-    assert_every_entry_rejects(&root, &home, "on a cold cache");
+    assert_every_entry_rejects(&root, &home, "on a cold cache", VIOLATION);
     let files = cache_files(&home);
     assert!(
         compiled_contexts(&files).is_empty(),
@@ -189,7 +199,7 @@ fn a_reached_linearity_violation_fails_after_a_warm_cache_and_the_restored_sourc
     );
 
     write_file(&ops, INVALID_OPS);
-    assert_every_entry_rejects(&root, &home, "after a warm cache");
+    assert_every_entry_rejects(&root, &home, "after a warm cache", VIOLATION);
     assert_eq!(
         cache_files(&home),
         warm,
@@ -197,6 +207,60 @@ fn a_reached_linearity_violation_fails_after_a_warm_cache_and_the_restored_sourc
     );
 
     write_file(&ops, VALID_OPS);
+    for args in ENTRIES {
+        let (ok, output) = chelis(&root, &home, args);
+        assert!(
+            ok,
+            "`chelis {}` must pass once the source is restored: {output}",
+            args.join(" ")
+        );
+    }
+    assert_eq!(
+        cache_files(&home),
+        warm,
+        "the restored source must hit the entries written before the edit, not rebuild them"
+    );
+}
+
+#[test]
+fn a_reached_key_reuse_fails_on_a_cold_cache_and_writes_no_context() {
+    let (dir, root) = package(INVALID_KEY_OPS);
+    let home = dir.path().join("home");
+
+    assert_every_entry_rejects(&root, &home, "on a cold cache", KEY_VIOLATION);
+    let files = cache_files(&home);
+    assert!(
+        compiled_contexts(&files).is_empty(),
+        "a rejected key-reusing library must not be written as a compiled context: {files:?}"
+    );
+}
+
+#[test]
+fn a_reached_key_reuse_fails_after_a_warm_cache_and_the_restored_source_hits() {
+    let (dir, root) = package(VALID_KEY_OPS);
+    let home = dir.path().join("home");
+    let ops = root.join("mylib/src/ops.ch");
+
+    for args in ENTRIES {
+        let (ok, output) = chelis(&root, &home, args);
+        assert!(ok, "`chelis {}` must pass: {output}", args.join(" "));
+    }
+    let warm = cache_files(&home);
+    assert_eq!(
+        compiled_contexts(&warm).len(),
+        1,
+        "the valid key-using package must leave exactly one compiled context: {warm:?}"
+    );
+
+    write_file(&ops, INVALID_KEY_OPS);
+    assert_every_entry_rejects(&root, &home, "after a warm cache", KEY_VIOLATION);
+    assert_eq!(
+        cache_files(&home),
+        warm,
+        "the edited, rejected sources must neither add nor rewrite a cache entry"
+    );
+
+    write_file(&ops, VALID_KEY_OPS);
     for args in ENTRIES {
         let (ok, output) = chelis(&root, &home, args);
         assert!(
