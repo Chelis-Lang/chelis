@@ -1350,25 +1350,24 @@ fn assert_direct_tail_list_projection(native: bool) {
     }
 }
 
-fn assert_projection_without_origin_fails_explicitly(native: bool) {
+fn assert_append_projection_is_attributed_to_append(native: bool) {
     let source = "def choose[n](x: tensor[n, 4, f32]) -> tensor[3, f32] = {\n\
                   empty: List[tensor[*, f32]] = []\n\
                   grown = append(empty, diagonal(x, 0i32, 1i32))\n\
                   index(grown, 0i64)\n\
                   }\n\
                   out = choose(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]))\n";
+    // spec/04 section 4.7 (chelis#2598): `append` produces every tensor in
+    // the list it returns, so the projection is attributed to `append`, not
+    // guessed from `index` and not left without provenance.
     let (ok, output) = run(source, native);
     assert!(!ok, "{source}\n{output}");
-    assert!(
-        output.contains(
-            "host runtime: pending result claim reached a tensor without producer provenance"
-        ),
-        "{output}"
-    );
+    assert_claim(&output, "append", 2);
     assert!(
         !output.contains("numeric trap: domain in index"),
         "{output}"
     );
+    assert!(!output.contains("without producer provenance"), "{output}");
 }
 
 fn assert_option_projection_provenance(native: bool) {
@@ -1920,13 +1919,13 @@ fn c_direct_tail_list_projection_retains_selected_producer() {
 }
 
 #[test]
-fn eval_projection_without_origin_fails_instead_of_guessing_index() {
-    assert_projection_without_origin_fails_explicitly(false);
+fn eval_append_projection_is_attributed_to_append_not_index() {
+    assert_append_projection_is_attributed_to_append(false);
 }
 
 #[test]
-fn c_projection_without_origin_fails_instead_of_guessing_index() {
-    assert_projection_without_origin_fails_explicitly(true);
+fn c_append_projection_is_attributed_to_append_not_index() {
+    assert_append_projection_is_attributed_to_append(true);
 }
 
 #[test]

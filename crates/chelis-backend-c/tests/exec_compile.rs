@@ -10094,3 +10094,233 @@ fn issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c() {
         assert_zero_geometry_both_lanes(dag, &[("x", &[3, 2])], &[&[2, 3]], true);
     }
 }
+
+/// chelis#2512, spec/04 section 4.7: `x: [n]` forwarded by `neg` under the
+/// name `m`, added to `z: [m]`. Nothing in the interface relates `x`'s axis
+/// to `z`'s; the equality comes only from `neg`'s output being stamped `[m]`,
+/// so the comparison is a guard owned by `neg`. It runs at `neg`'s source
+/// position, after an independent earlier trap and before `neg` allocates,
+/// and fails as `numeric trap: domain in neg at i64`.
+fn restamped_extent_dag(neg_first: bool, earlier_overflow: bool) -> Dag {
+    let named = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let load = |dag: &mut Dag, name: &str, ty: TensorType| {
+        dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
+    };
+    let mut roots = Vec::new();
+    if earlier_overflow {
+        let w = load(
+            &mut dag,
+            "w",
+            TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: Prim::Int64,
+            },
+        );
+        let overflow = dag.add_node(
+            RiscOp::Neg,
+            vec![w],
+            TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        roots.push(overflow);
+    }
+    let (negated, loaded_z) = if neg_first {
+        let x = load(&mut dag, "x", named("n"));
+        let negated = dag.add_node(RiscOp::Neg, vec![x], named("m"), None);
+        (negated, load(&mut dag, "z", named("m")))
+    } else {
+        let loaded_z = load(&mut dag, "z", named("m"));
+        let x = load(&mut dag, "x", named("n"));
+        (
+            dag.add_node(RiscOp::Neg, vec![x], named("m"), None),
+            loaded_z,
+        )
+    };
+    roots.push(dag.add_node(RiscOp::Add, vec![negated, loaded_z], named("m"), None));
+    dag.set_roots(roots);
+    dag
+}
+
+fn restamped_extent_eval(dag: &Dag, x: &[f64], z: &[f64]) -> Result<Vec<f64>, String> {
+    let mut inputs = chelis_unord::UnordMap::new();
+    inputs.insert(
+        "x".to_string(),
+        TensorValue::from_vec(vec![x.len()], x.to_vec()),
+    );
+    inputs.insert(
+        "z".to_string(),
+        TensorValue::from_vec(vec![z.len()], z.to_vec()),
+    );
+    inputs.insert(
+        "w".to_string(),
+        typed_value(typed_storage(
+            Prim::Int64,
+            chelis_types::RawTensor::Int(vec![i64::MIN]),
+        )),
+    );
+    let values = eval_tensor(dag, &inputs)?;
+    Ok(values[dag.roots().last().expect("sum root")].to_f64_lossy_vec())
+}
+
+fn restamped_extent_c(dag: &Dag, function: &str, x: &[f32], z: &[f32]) -> String {
+    let result = codegen(dag, function).expect("restamped extent codegen");
+    let slot = |name: &str| result.input_labels.iter().position(|label| label == name);
+    let values = |data: &[f32]| {
+        data.iter()
+            .map(|value| format!("{value:?}f"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let n_in = result.input_labels.len();
+    let n_out = dag.roots().len();
+    let w_input = match slot("w") {
+        Some(w_slot) => format!(
+            "static int64_t w_data[] = {{ INT64_MIN }};\n    inputs[{w_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ 1 }}, CHELIS_DTYPE_I64, w_data, sizeof w_data);"
+        ),
+        None => String::new(),
+    };
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    static float x_data[] = {{ {x_values} }};
+    static float z_data[] = {{ {z_values} }};
+    chelis_tensor *inputs[{n_in}];
+    {w_input}
+    inputs[{x_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {x_len} }}, CHELIS_DTYPE_F32, x_data, sizeof x_data);
+    inputs[{z_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {z_len} }}, CHELIS_DTYPE_F32, z_data, sizeof z_data);
+    chelis_tensor *outputs[{n_out}] = {{ NULL }};
+    {function}(inputs, {n_in}, outputs, {n_out});
+    chelis_read_view view = chelis_tensor_read_view(outputs[{n_out} - 1]);
+    for (int64_t i = 0; i < view.count; ++i) printf("%g ", ((const float *)view.data)[i]);
+    puts("completed");
+    return 0;
+}}
+"#,
+        x_values = values(x),
+        z_values = values(z),
+        x_slot = slot("x").expect("x slot"),
+        z_slot = slot("z").expect("z slot"),
+        x_len = x.len(),
+        z_len = z.len(),
+    );
+    let name = format!("{function}_{}_{}", x.len(), z.len());
+    let run = compile_and_capture_run(&name, &result.c_source, &harness);
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    )
+}
+
+/// The trap and context lines a failing run printed, in order.
+fn extent_trap_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.starts_with("extent `") || line.starts_with("numeric trap:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// chelis#2512 REGRESSION TEST: at base neither lane compared the restamped
+/// axis at `neg`; compiled C trapped later in `add`'s operand check and the
+/// evaluator reported an untyped shape mismatch.
+#[test]
+fn issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation() {
+    let mut failures = Vec::new();
+    for neg_first in [true, false] {
+        for (x, z) in [
+            (&[1.0f32, 2.0][..], &[1.0f32, 2.0, 3.0][..]),
+            (&[1.0, 2.0, 3.0, 4.0][..], &[1.0, 2.0, 3.0][..]),
+        ] {
+            let dag = restamped_extent_dag(neg_first, false);
+            let expected = vec![
+                format!(
+                    "extent `m`: claimed = {}, neg axis 0 = {}",
+                    z.len(),
+                    x.len()
+                ),
+                "numeric trap: domain in neg at i64".to_string(),
+            ];
+            let function = if neg_first {
+                "restamped_extent_neg_first"
+            } else {
+                "restamped_extent_z_first"
+            };
+            let compiled = restamped_extent_c(&dag, function, x, z);
+            if compiled.contains("completed") || extent_trap_lines(&compiled) != expected {
+                failures.push(format!(
+                    "C, neg first {neg_first}, x {}, z {}: {compiled}",
+                    x.len(),
+                    z.len()
+                ));
+            }
+            let widen = |data: &[f32]| data.iter().map(|v| f64::from(*v)).collect::<Vec<_>>();
+            match restamped_extent_eval(&dag, &widen(x), &widen(z)) {
+                Err(error) if extent_trap_lines(&error) == expected => {}
+                other => failures.push(format!(
+                    "eval, neg first {neg_first}, x {}, z {}: {other:?}",
+                    x.len(),
+                    z.len()
+                )),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Negative parity: agreeing extents run on both lanes.
+#[test]
+fn issue_2512_an_agreeing_restamped_axis_runs() {
+    for neg_first in [true, false] {
+        let dag = restamped_extent_dag(neg_first, false);
+        let function = if neg_first {
+            "restamped_extent_ok_neg_first"
+        } else {
+            "restamped_extent_ok_z_first"
+        };
+        let compiled = restamped_extent_c(&dag, function, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]);
+        assert!(
+            compiled.contains("9 18 27 completed"),
+            "neg first {neg_first}: {compiled}"
+        );
+        assert_eq!(
+            restamped_extent_eval(&dag, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]),
+            Ok(vec![9.0, 18.0, 27.0]),
+            "neg first {neg_first}"
+        );
+    }
+}
+
+/// Placement (spec/04 section 4.7): the guard is `neg`'s, not an entry
+/// guard, so an independent overflow earlier in source order is observed
+/// first on both lanes.
+#[test]
+fn issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard() {
+    let dag = restamped_extent_dag(true, true);
+    let expected = vec!["numeric trap: overflow in neg at i64".to_string()];
+    let compiled = restamped_extent_c(
+        &dag,
+        "restamped_extent_after_overflow",
+        &[1.0, 2.0],
+        &[1.0, 2.0, 3.0],
+    );
+    assert_eq!(extent_trap_lines(&compiled), expected, "{compiled}");
+    let evaluated = restamped_extent_eval(&dag, &[1.0, 2.0], &[1.0, 2.0, 3.0]);
+    assert_eq!(
+        evaluated
+            .as_ref()
+            .err()
+            .map(|error| extent_trap_lines(error)),
+        Some(expected),
+        "{evaluated:?}"
+    );
+}

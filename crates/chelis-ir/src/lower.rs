@@ -2209,6 +2209,7 @@ pub(crate) fn try_lower_staged_host_region(
         // parameter witness for each binder and give an eligible same-shape
         // producer the same ownership it has outside staging.
         ctx.signature_is_authored = true;
+        ctx.declaration_root_claim = true;
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
         ctx.validate_local_ascription_token_ownership();
         ctx.preserve_declared_result(&result, result_claim, None);
@@ -2321,6 +2322,7 @@ fn lower_subexpr_program_inner_impl(
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
     ctx.prepare_local_ascription_tokens(expr, None);
+    ctx.declaration_root_claim = authored_signature;
     let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
     ctx.validate_local_ascription_token_ownership();
     // chelis#1374/#1376: an exported kernel carries its own declared result
@@ -2564,7 +2566,8 @@ fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
     format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
 }
 
-pub(crate) fn extent_binder_label(binder: &str) -> String {
+/// The printable spelling of a dimension binder in trap context.
+pub fn extent_binder_label(binder: &str) -> String {
     let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
         return binder.to_owned();
     };
@@ -7073,6 +7076,13 @@ struct LowerCtx<'program> {
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
     inlining_active: usize,
+    /// Set by a definition's own kernel or staged-region lowering for its root
+    /// result claim, and consumed by the first `lower_expr_with_claim`. Only
+    /// that claim may own an unwitnessed input pass-through as an entry guard:
+    /// the invocation's entry is its own. A callee inlined into another
+    /// kernel has no entry of its own there, and a guard at the caller's
+    /// entry would run unconditionally and before earlier effects.
+    declaration_root_claim: bool,
     /// Parameter names whose declared type is `t-fn` — used by
     /// `resolve_callable_expr_inner` to distinguish a fn-typed parameter
     /// reference (legitimate `CallableExpr::Parameter`) from a truly
@@ -7207,6 +7217,7 @@ impl<'program> LowerCtx<'program> {
             linearity,
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
+            declaration_root_claim: false,
             fn_typed_params: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
@@ -8653,6 +8664,7 @@ impl<'program> LowerCtx<'program> {
         // install its own same-spelled binders. A function expression resolves
         // its declaration only after lower_fn has installed its parameters.
         let function = stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn);
+        let declaration_root = std::mem::take(&mut self.declaration_root_claim);
         let requirements = claim
             .into_iter()
             .filter(|_| !function)
@@ -8702,12 +8714,19 @@ impl<'program> LowerCtx<'program> {
                 // literal obligation even outside generic/helper lowering.
                 // Stamping that literal onto the carrier's input would turn
                 // the body's result claim into a signature requirement.
+                // At a definition's own root, an axis read unchanged from an
+                // input the invocation does not witness has no other owner:
+                // without the token, the claim would be dropped (chelis#2608).
                 if literal
                     && (self.literal_result_claim_ownership
                         == LiteralResultClaimOwnership::AuthoredTensorHelper
                         || (authored_result_claim
                             && (self.same_shape_result_owner_is_admitted(id, axis)
-                                || self.runtime_carrier_result_owner_is_admitted(id, axis))))
+                                || self.runtime_carrier_result_owner_is_admitted(id, axis)
+                                || (declaration_root
+                                    && crate::axis_sources::result_axis_is_unwitnessed_input_axis(
+                                        &self.dag, id, axis,
+                                    )))))
                     && self.literal_result_token_owner_is_admitted(id, axis)
                 {
                     let value = match &self.dag.get(required).expect("literal requirement").op {

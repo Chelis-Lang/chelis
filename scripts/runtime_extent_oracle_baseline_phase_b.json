@@ -1,7 +1,19 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "d2d66372ff7de5727aa735f1c8562315cdde4f302bb871bd092ae96f88b9e91d",
+  "corpus_sha256": "e3b2963f23bd954ad00c4a56e61654b26bb14d2d7635de26d0e1a03a703d3226",
   "rows": [
+    {
+      "id": "claim.combinator_result.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
+    {
+      "id": "claim.combinator_result.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
     {
       "id": "claim.literal.identity_root.c",
       "baseline": "silent_unguarded",
@@ -49,6 +61,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.literal.unwitnessed_pass_through.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.unwitnessed_pass_through.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
     },
     {
       "id": "claim.local_ascription.activation_identity",
@@ -639,6 +663,18 @@
       "receipt": "wire_issue_2110_local_ascription.local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
     },
     {
+      "id": "claim.named.host_result.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.named.host_result.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
       "id": "claim.named.nested_fresh_result.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -685,6 +721,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer"
+    },
+    {
+      "id": "claim.restamped_axis.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation"
+    },
+    {
+      "id": "claim.restamped_axis.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation"
     },
     {
       "id": "claim.same_shape.agreeing.c",
