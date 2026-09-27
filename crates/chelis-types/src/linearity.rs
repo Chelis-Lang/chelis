@@ -3054,6 +3054,127 @@ pub fn free_runtime_variables(expr: &Expr) -> Vec<String> {
     free_vars(expr, &[])
 }
 
+/// `expr` with each free runtime variable in `renames` respelled, under the
+/// binding rules [`free_runtime_variables`] reads (chelis#2619). A reference
+/// a binder inside `expr` captures keeps its spelling, so the two agree on
+/// which occurrences are free by construction.
+pub fn rename_free_runtime_variables(expr: &Expr, renames: &BTreeMap<String, String>) -> Expr {
+    if renames.is_empty() {
+        return expr.clone();
+    }
+    rename_free_vars(expr, renames, &mut Vec::new())
+}
+
+fn rename_free_vars(
+    expr: &Expr,
+    renames: &BTreeMap<String, String>,
+    bound: &mut Vec<UnordSet<String>>,
+) -> Expr {
+    let children = |children: &[Expr], bound: &mut Vec<UnordSet<String>>| -> Vec<Expr> {
+        children
+            .iter()
+            .map(|child| rename_free_vars(child, renames, bound))
+            .collect()
+    };
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta.metadata.clone(),
+                expr: Box::new(rename_free_vars(&meta.expr, renames, bound)),
+            },
+            *span,
+        ),
+        Expr::BareList(items, span) => Expr::BareList(children(items, bound), *span),
+        Expr::UnknownForm(data) => {
+            let mut renamed = data.as_ref().clone();
+            renamed.children = children(&data.children, bound);
+            Expr::UnknownForm(Box::new(renamed))
+        }
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            let kids = node.children_slice();
+            let rebuilt = |renamed: Vec<Expr>| Expr::node(tag, node.meta().clone(), renamed, *span);
+            if !is_runtime_expression_tag(tag) || !decoded_shape_is_valid(tag, kids.len()) {
+                return rebuilt(children(kids, bound));
+            }
+            match tag {
+                DeepTag::Var => {
+                    let respelled = kids
+                        .first()
+                        .and_then(symbol_name)
+                        .filter(|name| !bound.iter().rev().any(|scope| scope.contains(*name)))
+                        .and_then(|name| renames.get(name));
+                    match respelled {
+                        Some(to) => {
+                            let mut renamed = kids.to_vec();
+                            renamed[0] = Expr::Atom(Atom::Name(to.clone()), kids[0].span());
+                            rebuilt(renamed)
+                        }
+                        None => expr.clone(),
+                    }
+                }
+                DeepTag::Fn if kids.len() >= 2 => {
+                    bound.push(param_names(&kids[0]).into_iter().collect());
+                    let mut renamed = kids.to_vec();
+                    renamed[1] = rename_free_vars(&kids[1], renames, bound);
+                    bound.pop();
+                    rebuilt(renamed)
+                }
+                DeepTag::Let if kids.len() >= 2 => {
+                    let mut let_scope = UnordSet::new();
+                    let mut renamed = kids.to_vec();
+                    if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
+                        let mut binds = bind_kids.to_vec();
+                        let mut index = 0;
+                        while index + 1 < binds.len() {
+                            binds[index + 1] =
+                                rename_free_vars(&bind_kids[index + 1], renames, bound);
+                            if let Some(name) = symbol_name(&bind_kids[index]) {
+                                let_scope.insert(name.to_string());
+                            }
+                            index += 2;
+                        }
+                        if let Expr::Node(bind, bind_span) = &kids[0] {
+                            renamed[0] =
+                                Expr::node(bind.tag(), bind.meta().clone(), binds, *bind_span);
+                        }
+                    }
+                    bound.push(let_scope);
+                    renamed[1] = rename_free_vars(&kids[1], renames, bound);
+                    bound.pop();
+                    rebuilt(renamed)
+                }
+                DeepTag::Match if !kids.is_empty() => {
+                    let mut renamed = Vec::with_capacity(kids.len());
+                    renamed.push(rename_free_vars(&kids[0], renames, bound));
+                    for arm in kids.iter().skip(1) {
+                        let (Some(arm_kids), Expr::Node(arm_node, arm_span)) =
+                            (tagged_children(arm, DeepTag::Arm), arm)
+                        else {
+                            renamed.push(rename_free_vars(arm, renames, bound));
+                            continue;
+                        };
+                        bound.push(pattern_names(&arm_kids[0]).into_iter().collect());
+                        let mut arm_renamed = arm_kids.to_vec();
+                        arm_renamed[1] = rename_free_vars(&arm_kids[1], renames, bound);
+                        arm_renamed[2] = rename_free_vars(&arm_kids[2], renames, bound);
+                        bound.pop();
+                        renamed.push(Expr::node(
+                            arm_node.tag(),
+                            arm_node.meta().clone(),
+                            arm_renamed,
+                            *arm_span,
+                        ));
+                    }
+                    rebuilt(renamed)
+                }
+                _ => rebuilt(children(kids, bound)),
+            }
+        }
+    }
+}
+
 fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut UnordSet<String>) {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => {

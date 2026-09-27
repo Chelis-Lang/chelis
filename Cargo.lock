@@ -866,6 +866,7 @@ dependencies = [
  "libc",
  "memmap2",
  "num-bigint",
+ "sha2",
 ]
 
 [[package]]

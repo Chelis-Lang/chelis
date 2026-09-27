@@ -252,6 +252,12 @@ def compile_and_load(
     scalar-signature entry (e.g.
     ``def main(s: f32, ...) -> f32``) is not a compiled tensor kernel — wrap scalars as
     ``tensor[1, f32]``; use :func:`eval` for scalar results.
+
+    The library links the runtime this extension was built with, staged beside it. A
+    development build of the extension first checks that the runtime's sources in its
+    checkout are unchanged since the build, and otherwise raises ``ChelisError`` naming
+    the changed files; rebuild the extension to continue. A set ``CHELIS_RUNTIME_DIR``
+    also raises ``ChelisError``.
     """
 
     if project_root is True:

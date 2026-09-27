@@ -135,6 +135,40 @@ packages = ["chelis-types"]
 reason = "binder diagnostic owner-key changes require the complete chelis-types integration owner set"
 tracking_issue = "chelis#1854"
 
+# chelis#1354: the runtime's build record must declare every input of its
+# compilation. A change anywhere in the runtime closure or the lockfile can add
+# an input, so it requires the runtime bundle's integration targets, including
+# the dep-info completeness test.
+[[required_package_rule]]
+prefix = "Cargo.lock"
+packages = ["chelis-runtime-bundle"]
+reason = "the workspace lockfile is a declared runtime source input whose record the bundle checks"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-abi/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-runtime/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-unord/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-vocab/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
 # chelis#1582: package-resolved scalar callables stay lexical under vmap, with
 # exact evaluator/native-C agreement and unimported-name rejection controls.
 [[standing_target]]
@@ -2847,9 +2881,10 @@ packages = [
   "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
   "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
   "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
-  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
-  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
-  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+  "chelis-runtime", "chelis-runtime-bundle", "chelis-shell",
+  "chelis-std-bundle", "chelis-surf", "chelis-tide", "chelis-types",
+  "chelis-unord", "chelis-validate", "chelis-version", "chelis-vocab",
+  "chelisup", "tree-sitter-chelis",
 ]
 
 [[path_rule]]

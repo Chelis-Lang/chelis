@@ -1,14 +1,23 @@
 //! The runtime a Chelis compiler carries (`spec/08-backends.md` §2.1).
 //!
-//! The CLI depends on this crate. It embeds the runtime static archive produced
-//! by the `chelis-runtime` compilation that the same build links, and stages
-//! that archive with the public headers of the same compilation. Nothing here
-//! searches for a runtime: a runtime archive left in a build directory by
-//! another configuration or commit is never read, and no build path is carried.
+//! The CLI and the Python extension depend on this crate. It embeds the runtime
+//! static archive produced by the `chelis-runtime` compilation that the same
+//! build links, and stages that archive with the public headers of the same
+//! compilation. Nothing here searches for a runtime: a runtime archive left in a
+//! build directory by another configuration or commit is never read.
+//!
+//! A development build carries the path of the checkout it was compiled from
+//! and, before staging, checks the declared sources of its runtime against that
+//! checkout. A build with the `sealed` feature carries no build path and reads
+//! no checkout.
+
+#[cfg(not(feature = "sealed"))]
+mod freshness;
 
 use chelis_runtime_bundle_macro::runtime_archive;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -60,6 +69,69 @@ pub enum RuntimeError {
         #[source]
         source: io::Error,
     },
+    #[error("{0}")]
+    StaleSources(StaleSources),
+    #[error(
+        "this development build of chelis checks its runtime against the checkout it was \
+         built from, {}, which cannot be read: {source}. Rebuild chelis in a Chelis checkout, \
+         or build a distribution with the `sealed-runtime` feature",
+        .checkout.display()
+    )]
+    CheckoutUnavailable {
+        checkout: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "this development build of chelis carries a runtime compiled without its declared \
+         sources ({}), so it cannot check them against a checkout. Build chelis with Cargo \
+         in a Chelis checkout, or build a distribution with the `sealed-runtime` feature",
+        .missing.join(", ")
+    )]
+    UnrecordedSources { missing: Vec<String> },
+    #[error("the carried runtime's build record has a malformed line `{line}`")]
+    MalformedBuildRecord { line: String },
+}
+
+/// Declared runtime sources in a development checkout that differ from the
+/// build record of the runtime the build carries, by path relative to the
+/// checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleSources {
+    /// The checkout the build was compiled from.
+    pub checkout: PathBuf,
+    /// Recorded files whose bytes changed.
+    pub changed: Vec<String>,
+    /// Recorded files that no longer exist.
+    pub removed: Vec<String>,
+    /// Files in a declared directory that the record does not name.
+    pub added: Vec<String>,
+}
+
+impl fmt::Display for StaleSources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            formatter,
+            "the runtime this development build of chelis carries is older than its sources \
+             in {}:",
+            self.checkout.display()
+        )?;
+        for (kind, paths) in [
+            ("changed", &self.changed),
+            ("removed", &self.removed),
+            ("added", &self.added),
+        ] {
+            for path in paths {
+                writeln!(formatter, "  {kind}: {path}")?;
+            }
+        }
+        write!(
+            formatter,
+            "Rebuild chelis (`cargo build` for the CLI, `maturin develop` for the Python \
+             extension). If Cargo reports nothing to rebuild, touch the changed and added files \
+             and rebuild again"
+        )
+    }
 }
 
 /// The files one successful staging published.
@@ -73,8 +145,20 @@ pub struct StagedRuntime {
     pub receipt: PathBuf,
 }
 
+/// Run the checks [`stage`] makes before it writes anything, so a caller can
+/// fail before other work: a set [`RUNTIME_DIR_VARIABLE`] fails, and a
+/// development build fails when the declared sources of the runtime it carries
+/// changed in its checkout after the build (`spec/08-backends.md` §2.1). A
+/// sealed build reads no checkout.
+pub fn preflight() -> Result<(), RuntimeError> {
+    reject_runtime_dir()?;
+    #[cfg(not(feature = "sealed"))]
+    freshness::check_carried_sources()?;
+    Ok(())
+}
+
 /// Fail when [`RUNTIME_DIR_VARIABLE`] is set in this process's environment.
-pub fn reject_runtime_dir() -> Result<(), RuntimeError> {
+fn reject_runtime_dir() -> Result<(), RuntimeError> {
     reject_runtime_dir_value(std::env::var_os(RUNTIME_DIR_VARIABLE))
 }
 
@@ -96,11 +180,12 @@ pub fn carried_sha256() -> Result<String, RuntimeError> {
 
 /// Stage the carried runtime archive and the public runtime headers into `dir`.
 ///
-/// Each file is written beside its final name and renamed into place; the
-/// archive is read back and verified against the carried digest first. The
-/// receipt is written last, so a failed attempt leaves no receipt behind.
+/// [`preflight`] runs first. Each file is written beside its final name and
+/// renamed into place; the archive is read back and verified against the
+/// carried digest first. The receipt is written last, so a failed attempt
+/// leaves no receipt behind.
 pub fn stage(dir: &Path) -> Result<StagedRuntime, RuntimeError> {
-    reject_runtime_dir()?;
+    preflight()?;
     stage_carried(dir, CARRIED)
 }
 
