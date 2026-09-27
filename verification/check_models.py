@@ -77,6 +77,7 @@ MODELS = {
     "iter_order_models": "IterOrderModels",
     "collection_convert_models": "CollectionConvertModels",
     "str_convert_models": "StrConvertModels",
+    "fmt_hex_char_models": "FmtHexCharModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
