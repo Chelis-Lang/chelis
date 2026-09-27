@@ -29,11 +29,13 @@ owned local items the coverage audit expects. Items that cannot be roots
 (synthetic items, impls that Charon's passes remove) are owned but not rooted.
 
 The FCIS imperative shell (verification/native_shell.json) is never extracted:
-the dumps and every chunk make its patterns opaque, no chunk owns its items,
-and the plan's `native_shell` section lists, per shell pattern, its kind, its
-local items and `core_dependents` (the non-shell local items with a deps edge
-into it). A shell pattern that selects no local item, or other local items than
-the `members` its entry pins, rejects the plan.
+every chunk makes its patterns opaque and no chunk owns its items. The dumps
+make them opaque too, except the entries that pin their members: Charon does
+not enumerate the items nested in an opaque item (an anonymous const's impls),
+so those are dumped transparent. The plan's `native_shell` section lists, per
+shell pattern, its kind, its local items and `core_dependents` (the non-shell
+local items with a deps edge into it). A shell pattern that selects no local
+item, or other local items than the `members` its entry pins, rejects the plan.
 
 Chains: `default` extracts all crates with default features. `lowering-trace`
 enables the feature on chelis-ir and chelis-pipeline-core; their chunks get the
@@ -289,6 +291,13 @@ def plan_crate(dump: dict, crate: str, first_chunk: int, budget: int, item_weigh
     return chunks, sorted(unowned)
 
 
+def dump_opaque_patterns(shell: list[dict]) -> list[str]:
+    """The shell patterns a dump makes opaque: all but the entries that pin their
+    members, whose nested members Charon enumerates only when they are transparent
+    (the pinning check needs them). Chunks make every shell pattern opaque."""
+    return sorted(item["pattern"] for item in shell if "members" not in item)
+
+
 def dump_crate(crate: str, work: Path, args, runner: Runner, target: Path,
                chain: dict) -> tuple[dict, dict, list[dict]]:
     """The callgraph of every local item of `crate`. With --allow-charon-errors
@@ -300,7 +309,7 @@ def dump_crate(crate: str, work: Path, args, runner: Runner, target: Path,
     package = PACKAGES[crate]
     shell = dumps / "native-shell.opaque"
     if not shell.is_file():
-        shell.write_text("".join(f"{item['pattern']}\n" for item in load_native_shell()))
+        shell.write_text("".join(f"{pattern}\n" for pattern in dump_opaque_patterns(load_native_shell())))
     clean_package(runner, args.charon, package, target, dumps / f"{crate}.clean.log")
     command = charon_command(args.charon, package=package, features=chain["features"].get(crate, []),
                              llbc=dumps / f"{crate}.llbc", target=target,
@@ -354,7 +363,7 @@ def main() -> None:
     stamp = {"charon_identity": charon["identity"], "sources_sha256": sources, "chain": args.chain,
              "charon_options": list(CHARON_OPTIONS), "features": chain["features"],
              "allow_charon_errors": args.allow_charon_errors,
-             "native_shell_opaque": sorted(item["pattern"] for item in shell)}
+             "native_shell_opaque": dump_opaque_patterns(shell)}
     measurements = {}
     dumps = {}
     dump_errors: dict[str, list] = {}
