@@ -1854,7 +1854,7 @@ fn c_aggregate_origin_arena_is_fresh_for_repeated_public_calls() {
         .args(["-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer"])
         .args(&toolchain.compile_flags)
         .arg("harness.c")
-        .args(["-L.", "-lchelis_runtime"])
+        .arg("libchelis_runtime.a")
         .args(&toolchain.link_flags)
         .args(["-fsanitize=address", "-o", "arena_lifetime"])
         .output()

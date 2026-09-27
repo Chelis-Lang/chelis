@@ -150,7 +150,7 @@ impl Built {
         command.args(&toolchain.compile_flags);
         command.arg(&self.unit);
         command.arg("driver.c");
-        command.args(["-L.", "-lchelis_runtime"]);
+        command.arg("libchelis_runtime.a");
         command.args(&toolchain.link_flags);
         command.args(["-o", "prog"]);
         let compiled = command.output().expect("host compiler should run");

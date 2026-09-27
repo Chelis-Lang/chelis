@@ -3,9 +3,6 @@
 //! These tests compile and execute generated C. Source-shape assertions are
 //! only negative controls for the historical f32/fmaxf/fminf implementations.
 
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod runtime_archive;
-
 mod common;
 mod support;
 
@@ -17,9 +14,7 @@ use chelis_types::types::Prim;
 use chelis_types::{RawTensor, StorageView, finalize_tensor};
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 use support::codegen;
 
 fn tensor(dims: &[usize], precision: Prim) -> TensorType {
@@ -36,72 +31,10 @@ fn symbolic_vector(name: &str, precision: Prim) -> TensorType {
     }
 }
 
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    std::env::current_exe()
-        .expect("current test executable")
-        .parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("test executable lives under target/debug/deps")
-}
-
-fn newest_runtime_archive(deps: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest = None;
-    let entries = match fs::read_dir(deps) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let metadata = entry.metadata()?;
-            if metadata.len() == 0 {
-                continue;
-            }
-            let modified = metadata.modified()?;
-            if newest
-                .as_ref()
-                .is_none_or(|(current, _): &(std::time::SystemTime, PathBuf)| modified > *current)
-            {
-                newest = Some((modified, entry.path()));
-            }
-        }
-    }
-    Ok(newest.map(|(_, path)| path))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    if let Some(path) = runtime_archive::explicit() {
-        return path;
-    }
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let debug = target_debug_dir();
-        newest_runtime_archive(&debug.join("deps"))
-            .expect("scan runtime archives")
-            .or_else(|| {
-                let status = Command::new(env!("CARGO"))
-                    .args(["build", "-p", "chelis-runtime", "--lib"])
-                    .status()
-                    .expect("build chelis-runtime");
-                assert!(status.success(), "build chelis-runtime static library");
-                newest_runtime_archive(&debug.join("deps")).expect("rescan runtime archives")
-            })
-            .expect("non-empty libchelis_runtime-*.a exists")
-    })
-    .clone()
-}
-
 fn compile_and_run(name: &str, source: &str, harness: &str) -> Output {
     let probe = common::probe_dir(&format!("issue_1281_{name}"));
     let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir).expect("stage the carried runtime");
     fs::write(dir.join("kernel.c"), source).expect("write generated C");
     fs::write(dir.join("main.c"), harness).expect("write C harness");
     let binary = dir.join("probe");
@@ -110,10 +43,10 @@ fn compile_and_run(name: &str, source: &str, harness: &str) -> Output {
         .arg("-O2")
         .arg("-std=c11")
         .arg("-I")
-        .arg(runtime_include_dir())
+        .arg(dir)
         .arg(dir.join("kernel.c"))
         .arg(dir.join("main.c"))
-        .arg(runtime_lib_path())
+        .arg(&staged.archive)
         .args(["-lm", "-lpthread", "-ldl", "-o"])
         .arg(&binary);
     if cfg!(target_arch = "x86_64") {

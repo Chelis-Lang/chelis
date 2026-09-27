@@ -32,52 +32,8 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(sentinel.read_bytes(), b'foreign execution receipt')
 
-    def test_runtime_archive_requires_current_cargo_artifact_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            archive = root / 'target/debug/libchelis_runtime.a'
-            archive.parent.mkdir(parents=True)
-            archive.write_bytes(b'current artifact')
-            packet = {'reason': 'compiler-artifact',
-                      'manifest_path': str(root / 'crates/chelis-runtime/Cargo.toml'),
-                      'target': {'name': 'chelis_runtime', 'kind': ['rlib', 'staticlib'],
-                                 'src_path': str(root / 'crates/chelis-runtime/src/lib.rs')},
-                      'features': ['ownership-ledger'], 'filenames': [str(archive)]}
-            with mock.patch.object(oracle, 'ROOT', root), mock.patch.dict(oracle.os.environ, {}, clear=True):
-                self.assertEqual(oracle.runtime_artifact(json.dumps(packet)), archive.resolve())
-                for defect in ('absent', 'ambiguous', 'other_source', 'other_target', 'missing_file', 'missing_ledger'):
-                    changed = copy.deepcopy(packet)
-                    if defect == 'other_source': changed['target']['src_path'] = '/old/src/lib.rs'
-                    if defect == 'other_target': changed['filenames'] = ['/old/libchelis_runtime.a']
-                    if defect == 'missing_file': changed['filenames'][0] += '-absent.a'
-                    if defect == 'missing_ledger': changed['features'] = []
-                    text = json.dumps(changed)
-                    if defect == 'absent': text = '{}'
-                    if defect == 'ambiguous': text += '\n' + text
-                    with self.subTest(defect=defect), self.assertRaises(oracle.OracleFailure):
-                        oracle.runtime_artifact(text)
-                evidence = root / 'evidence'
-                evidence.mkdir()
-                with mock.patch.object(oracle, 'command', return_value=json.dumps(packet)) as build:
-                    with oracle.runtime_pin(evidence) as receipt:
-                        pinned = evidence / 'runtime/libchelis_runtime.a'
-                        # Only the exact file is named; chelis build rejects a directory.
-                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_LIB'], str(pinned))
-                        self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
-                        self.assertEqual(list(receipt['pinned_artifact']), [str(pinned)])
-                    self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
-                    self.assertNotIn('CHELIS_RUNTIME_LIB', oracle.os.environ)
-                    inherited = root / 'inherited'
-                    inherited.mkdir()
-                    with mock.patch.dict(oracle.os.environ, {'CHELIS_RUNTIME_DIR': str(root / 'foreign')}):
-                        with self.assertRaisesRegex(oracle.OracleFailure, 'Unset CHELIS_RUNTIME_DIR'):
-                            with oracle.runtime_pin(inherited):
-                                self.fail('an inherited runtime directory reached pinned execution')
-                        self.assertNotIn('CHELIS_RUNTIME_LIB', oracle.os.environ)
-                    self.assertEqual(build.call_count, 1, 'a rejected pin must start no process')
-
-    def test_native_controls_pin_exact_archives_and_reject_a_runtime_directory(self):
-        watched = ('CHELIS_RUNTIME_DIR', 'CHELIS_RUNTIME_LIB', 'CHELIS_TEST_CC')
+    def test_native_controls_reject_a_runtime_directory_and_a_missing_compiler(self):
+        watched = ('CHELIS_RUNTIME_DIR', 'CHELIS_TEST_CC')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             junit = root / 'junit.xml'
@@ -95,8 +51,7 @@ class ReceiptTests(unittest.TestCase):
                     if label == 'run':
                         self.assertEqual(expected_exit, 100)
                         suite, case = current['control']['required'][0].rsplit('::', 1)
-                        text = {'empty-runtime-archive': 'undefined reference to `chelis_alloc`',
-                                'missing-c-compiler': 'No such file or directory'}.get(kind) or runtime_directory(evidence)
+                        text = {'missing-c-compiler': 'No such file or directory'}.get(kind) or runtime_directory(evidence)
                         junit.write_text(f'<testsuites><testsuite name="{suite}"><testcase name="{case}">'
                                          f'<failure>{escape(text)}</failure></testcase></testsuite></testsuites>')
                     return '{}'
@@ -104,7 +59,6 @@ class ReceiptTests(unittest.TestCase):
                 with (mock.patch.object(oracle, 'command', side_effect=command),
                       mock.patch.object(oracle, 'selection', side_effect=lambda packet, root, expected: (expected, {})),
                       mock.patch.object(oracle, 'junit_path', return_value=junit),
-                      mock.patch.dict(oracle.os.environ, {'CHELIS_RUNTIME_LIB': 'pinned'}),
                       redirect_stdout(io.StringIO())):
                     oracle.os.environ.pop('CHELIS_RUNTIME_DIR', None)
                     oracle.os.environ.pop('CHELIS_TEST_CC', None)
@@ -112,7 +66,6 @@ class ReceiptTests(unittest.TestCase):
                         return oracle.execute_native_controls(evidence), observed
                     finally:
                         self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
-                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_LIB'], 'pinned')
 
             def rejected(evidence):
                 bad = evidence / 'empty-runtime'
@@ -125,16 +78,14 @@ class ReceiptTests(unittest.TestCase):
             empty = evidence / 'empty-runtime/libchelis_runtime.a'
             self.assertEqual(empty.read_bytes(), b'!<arch>\n')
             expected = {
-                'empty-runtime-archive': {'CHELIS_RUNTIME_DIR': None, 'CHELIS_RUNTIME_LIB': str(empty), 'CHELIS_TEST_CC': None},
-                'runtime-directory-rejected': {'CHELIS_RUNTIME_DIR': str(empty.parent), 'CHELIS_RUNTIME_LIB': 'pinned', 'CHELIS_TEST_CC': None},
-                'missing-c-compiler': {'CHELIS_RUNTIME_DIR': None, 'CHELIS_RUNTIME_LIB': 'pinned',
-                                       'CHELIS_TEST_CC': str(evidence / 'missing-compiler')},
+                'runtime-directory-rejected': {'CHELIS_RUNTIME_DIR': str(empty.parent), 'CHELIS_TEST_CC': None},
+                'missing-c-compiler': {'CHELIS_RUNTIME_DIR': None, 'CHELIS_TEST_CC': str(evidence / 'missing-compiler')},
             }
             self.assertEqual({kind for _, kind, _ in observed}, set(expected))
             for label, kind, environment in observed:
                 with self.subTest(label=label, kind=kind):
                     self.assertEqual(environment, expected[kind] if label == 'run' else
-                                     {'CHELIS_RUNTIME_DIR': None, 'CHELIS_RUNTIME_LIB': 'pinned', 'CHELIS_TEST_CC': None})
+                                     {'CHELIS_RUNTIME_DIR': None, 'CHELIS_TEST_CC': None})
             # A CLI that honors the directory fails at the linker; one that both
             # rejects and links is not a rejection before staging.
             honored = lambda evidence: 'undefined reference to `chelis_alloc`'
@@ -248,19 +199,6 @@ class ReceiptTests(unittest.TestCase):
                     'PYO3_PYTHON': str(fallback),
                     'VIRTUAL_ENV': prefix,
                 })
-                scoped = oracle.command(
-                    [oracle.sys.executable, '-c', 'import os; print(os.environ.get("CHELIS_RUNTIME_DIR"))'],
-                    root,
-                    root / 'scoped',
-                    'environment',
-                    scoped_environment={'CHELIS_RUNTIME_DIR': str(root / 'pinned')},
-                )
-                self.assertEqual(scoped.strip(), str(root / 'pinned'))
-                self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
-                self.assertEqual(
-                    json.loads((root / 'scoped/environment.process.json').read_text())['scoped_environment'],
-                    {'CHELIS_RUNTIME_DIR': str(root / 'pinned')},
-                )
                 with mock.patch.dict(
                     oracle.os.environ,
                     {'PYO3_PYTHON': str(root / 'missing-python')},

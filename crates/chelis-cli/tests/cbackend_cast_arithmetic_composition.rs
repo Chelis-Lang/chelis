@@ -33,100 +33,13 @@
 //!   * `cast(add(t, t), f64)` arithmetic-then-cast (widening at end)
 
 mod common;
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod runtime_archive;
 
 use assert_cmd::Command;
 use common::authored_c_symbol;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
-#[test]
-fn runtime_archive_materialization_is_safe_within_one_process() {
-    let source_root = target_debug_dir();
-    let source_deps = source_root.join("deps");
-    let source = fs::read_dir(&source_deps)
-        .expect("read source deps")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                name.starts_with("libchelis_runtime-") && name.ends_with(".a")
-            })
-        })
-        .expect("hashed runtime archive");
-
-    let sandbox = tempdir().expect("runtime materialization sandbox");
-    let deps = sandbox.path().join("deps");
-    fs::create_dir(&deps).expect("create sandbox deps");
-    fs::copy(&source, deps.join(source.file_name().unwrap())).expect("seed hashed archive");
-    let canonical = sandbox.path().join("libchelis_runtime.a");
-
-    std::thread::scope(|scope| {
-        let mut threads = Vec::new();
-        for _ in 0..16 {
-            threads.push(scope.spawn(|| ensure_runtime_static_lib(&canonical)));
-        }
-        for thread in threads {
-            thread.join().expect("materialization thread").unwrap();
-        }
-    });
-
-    assert!(
-        canonical.is_file(),
-        "canonical runtime archive was not created"
-    );
-}
 
 fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
@@ -152,11 +65,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
 }
 
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> String {
-    let canonical = runtime_archive::explicit().unwrap_or_else(|| {
-        let archive = target_debug_dir().join("libchelis_runtime.a");
-        ensure_runtime_static_lib(&archive).expect("materialize libchelis_runtime.a");
-        archive
-    });
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join("test_bin");
     let compile = StdCommand::new("gcc")
@@ -169,7 +78,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> Stri
             main_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",

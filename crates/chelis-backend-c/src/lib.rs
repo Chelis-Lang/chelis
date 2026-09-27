@@ -7,9 +7,6 @@ mod generated_header;
 mod host_abi;
 mod host_emit;
 pub mod memory;
-#[cfg(test)]
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod test_runtime_archive;
 pub mod toolchain;
 
 pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
@@ -440,7 +437,6 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::Command;
-    use std::{env, fs};
 
     fn codegen(
         dag: &Dag,
@@ -541,113 +537,16 @@ mod tests {
         }
     }
 
-    fn runtime_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
+    /// Stage the runtime this test build carries, with its public headers, into
+    /// `dst` (spec/08-backends.md §2.1). Nothing is looked up in a build
+    /// directory: the bundle writes its own verified bytes.
+    fn stage_runtime(dst: &std::path::Path) {
+        chelis_runtime_bundle::stage(dst).expect("stage the carried runtime");
     }
 
-    fn runtime_views_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../chelis-runtime/include/chelis_runtime_views.h")
-    }
-
-    fn runtime_dtype_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../chelis-runtime/include/chelis_runtime_dtype.h")
-    }
-
-    fn runtime_blas_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_blas.h")
-    }
-
-    fn runtime_simd_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_simd.h")
-    }
-
-    fn runtime_math_header_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_math.h")
-    }
-
-    fn runtime_library_path() -> PathBuf {
-        if let Some(archive) = crate::test_runtime_archive::explicit() {
-            return archive;
-        }
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir.join("../..");
-        let configured_target = env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .map(|path| {
-                if path.is_absolute() {
-                    path
-                } else {
-                    workspace_root.join(path)
-                }
-            });
-        let mut candidates = Vec::new();
-        if let Some(target) = configured_target {
-            candidates.push(target.join("debug/deps"));
-            candidates.push(target.join("release/deps"));
-        }
-        candidates.push(workspace_root.join("target/debug/deps"));
-        candidates.push(workspace_root.join("target/release/deps"));
-        // `cargo test` leaves many libchelis_runtime-<hash>.a artifacts from
-        // historical builds in target/{debug,release}/deps. Using `find` on
-        // that directory is nondeterministic and easily lands on a stale
-        // library that predates the newest symbols (we hit this when adding
-        // chelis_fill_f64). Pick the freshest matching artifact by mtime so
-        // symbol-level changes in the runtime crate are always visible to
-        // the backend-c integration harness.
-        fn newest_runtime_archive(dir: &std::path::Path) -> Option<PathBuf> {
-            let entries = fs::read_dir(dir).ok()?;
-            let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if !(name.starts_with("libchelis_runtime") && name.ends_with(".a")) {
-                    continue;
-                }
-                let Ok(meta) = entry.metadata() else { continue };
-                let Ok(mtime) = meta.modified() else { continue };
-                match &best {
-                    Some((_, best_mtime)) if *best_mtime >= mtime => {}
-                    _ => best = Some((path, mtime)),
-                }
-            }
-            best.map(|(path, _)| path)
-        }
-        if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR")
-            && let Some(path) = newest_runtime_archive(std::path::Path::new(&dir))
-        {
-            return path;
-        }
-        for dir in &candidates {
-            if let Some(path) = newest_runtime_archive(dir) {
-                return path;
-            }
-        }
-        panic!("could not locate libchelis_runtime.a for backend-c tests");
-    }
-
-    fn copy_runtime_artifacts(dst: &std::path::Path) {
-        let h_src = std::fs::read_to_string(runtime_header_path()).unwrap();
-        write_temp_file(dst, "chelis_runtime.h", &h_src);
-        let views_h_src = std::fs::read_to_string(runtime_views_header_path()).unwrap();
-        write_temp_file(dst, "chelis_runtime_views.h", &views_h_src);
-        let dtype_h_src = std::fs::read_to_string(runtime_dtype_header_path()).unwrap();
-        write_temp_file(dst, "chelis_runtime_dtype.h", &dtype_h_src);
-        let blas_h_src = std::fs::read_to_string(runtime_blas_header_path()).unwrap();
-        write_temp_file(dst, "chelis_blas.h", &blas_h_src);
-        let simd_h_src = std::fs::read_to_string(runtime_simd_header_path()).unwrap();
-        write_temp_file(dst, "chelis_simd.h", &simd_h_src);
-        let math_h_src = std::fs::read_to_string(runtime_math_header_path()).unwrap();
-        write_temp_file(dst, "chelis_math.h", &math_h_src);
-        std::fs::copy(runtime_library_path(), dst.join("libchelis_runtime.a")).unwrap();
-    }
-
+    /// Link the runtime `stage_runtime` wrote into `dir`, by exact path.
     fn add_runtime_link(cmd: &mut Command, dir: &std::path::Path) {
-        cmd.arg(format!("-L{}", dir.display()));
-        cmd.arg("-lchelis_runtime");
+        cmd.arg(dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME));
         cmd.args(
             crate::toolchain::runtime_toolchain(crate::toolchain::CodegenRequirements::default())
                 .link_flags,
@@ -1271,7 +1170,7 @@ mod tests {
     #[test]
     fn runtime_compiles_standalone() {
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(
             tmp.path(),
             "main.c",
@@ -1297,7 +1196,7 @@ mod tests {
     #[test]
     fn runtime_view_free_is_safe() {
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         let main_c = r#"
 #include "chelis_runtime.h"
 int main(void) {
@@ -1358,7 +1257,7 @@ int main(void) {
         let result = codegen(&dag, "test_add").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = r#"
@@ -1411,7 +1310,7 @@ int main() {
         let result = codegen_with_options(dag, func_name, options).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = format!(
@@ -1654,7 +1553,7 @@ int main() {{
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = format!(
@@ -2336,7 +2235,7 @@ int main(int argc, char **argv) {{
 "#
         );
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", source);
         write_temp_file(tmp.path(), "main.c", &driver);
         let binary = tmp.path().join("probe");
@@ -2615,7 +2514,7 @@ int main(int argc, char **argv) {{
 
         let result = codegen(&dag, "test_sparse").unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let mut input_lines = Vec::new();
         input_lines.push(format!(
@@ -3227,7 +3126,7 @@ int main(void) {{
         let result = codegen(&dag, "test_multi").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -3277,7 +3176,7 @@ int main(void) {
         let result = codegen(&dag, "test_load_copy").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -3427,7 +3326,7 @@ int main(void) {
         assert!(!result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -3797,7 +3696,7 @@ int main(void) {
             .unwrap();
 
             let tmp = tempfile::tempdir().unwrap();
-            copy_runtime_artifacts(tmp.path());
+            stage_runtime(tmp.path());
             write_temp_file(tmp.path(), "model.c", &result.c_source);
 
             // Build the main harness: fill a with 0.5, b with 0.5, expect exp(1.0)=e^1.
@@ -3893,7 +3792,7 @@ int main(void) {{
         .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         // Build input initializers from the test vectors. Issue #252
@@ -4057,7 +3956,7 @@ int main(void) {{
         .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         // Input: x[i] = 0.3 * i + 0.1 (non-trivial, spans SIMD + tail)
@@ -4281,7 +4180,7 @@ int main(void) {{
         let src = &result.c_source;
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "lib.c", src);
 
         let so_path = tmp.path().join("lib.so");
@@ -4494,7 +4393,7 @@ int main(void) {{
         let result = codegen(dag, func_name).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        copy_runtime_artifacts(tmp.path());
+        stage_runtime(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = format!(

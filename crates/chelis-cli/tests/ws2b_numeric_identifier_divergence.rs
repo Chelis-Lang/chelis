@@ -41,65 +41,6 @@ use tempfile::tempdir;
 // Harness (mirrors issue_352_captured_global_c_emit.rs)
 // -----------------------------------------------------------------------------
 
-/// Locate `target/debug/` from the test binary's path. The test binary
-/// lives at `<target>/debug/deps/<binary>`, so `..` twice yields the
-/// debug dir.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// When `chelis-runtime` is built as a dev-dependency, cargo only emits the
-/// hashed staticlib in `target/debug/deps/`; the test cc invocation links
-/// against the conventional `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
 /// Run `chelis build --target c` on `source`, returning the build dir.
 fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
@@ -128,8 +69,12 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
 /// asserting on the outcome; returns the compiler `Output` and the path the
 /// binary lands at on success.
 fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, PathBuf) {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
+    assert!(
+        runtime.is_file(),
+        "`chelis build` did not stage the carried runtime at {}",
+        runtime.display()
+    );
 
     // Resolve the host toolchain the way `chelis build` and the other CLI test
     // harnesses (rank_poly_tier3.rs, parity.rs) do, so the link command carries
@@ -158,7 +103,7 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
         .arg("-I")
         .arg(build_dir.to_str().unwrap())
         .arg(kernel_c.to_str().unwrap())
-        .arg(canonical.to_str().unwrap())
+        .arg(runtime.to_str().unwrap())
         .args(&toolchain.link_flags)
         .arg("-o")
         .arg(bin.to_str().unwrap());

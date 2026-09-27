@@ -25,9 +25,7 @@ use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
@@ -39,88 +37,6 @@ const F16_TOL: f64 = 1e-3;
 // Test harness (mirrors dtype_matrix_bf16_f16.rs; cannot share because
 // integration tests do not share modules without an explicit `mod`).
 // ---------------------------------------------------------------------
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
 
 fn gcc_available() -> bool {
     Command::new("gcc")
@@ -136,21 +52,10 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, main_c: &str) -> Stri
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let args: Vec<String> = vec![
         "-O2".into(),
         "-std=c11".into(),

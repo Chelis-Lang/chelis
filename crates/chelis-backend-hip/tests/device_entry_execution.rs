@@ -284,10 +284,8 @@ fn compile_source(
     mutation: Option<&str>,
 ) -> Executable {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let archive = env::var_os("CHELIS_RUNTIME_LIB").map(PathBuf::from)
-        .expect("CHELIS_RUNTIME_LIB must identify the exact-head owned archive; this fixture never starts Cargo");
-    assert!(archive.is_absolute() && archive.is_file());
     let directory = tempfile::tempdir().unwrap();
+    let staged = chelis_runtime_bundle::stage(directory.path()).expect("stage the carried runtime");
     if mutation == Some("return-borrow") {
         let old = "outputs[0] = chelis_device_tensor_clone(inputs[0]);";
         assert!(source.contains(old));
@@ -351,13 +349,13 @@ fn compile_source(
         .arg("-I")
         .arg(root.join("runtime"))
         .arg("-I")
-        .arg(root.join("../chelis-runtime/include"))
+        .arg(directory.path())
         .arg(directory.path().join("model.cpp"))
         .arg(directory.path().join("kernels.cpp"))
         .arg(root.join("runtime/chelis_device_owner.cpp"))
         .arg(sdk.join("runtime.cpp"))
         .arg(sdk.join(main))
-        .arg(archive)
+        .arg(&staged.archive)
         .args(["-lpthread", "-lm"]);
     if cfg!(target_os = "macos") {
         command.arg("-liconv");
@@ -406,7 +404,7 @@ fn run(executable: &Executable, mode: &str, success: bool) {
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_owned_escapes() {
     for rank in [0, 1, 8, 9, 33] {
         let executable = compile(rank, false, None);
@@ -423,7 +421,7 @@ fn generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_ow
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order() {
     for operation in 0..4 {
         for precision in [Prim::Int32, Prim::Int64] {
@@ -443,7 +441,7 @@ fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() {
     for mutation in ["flat-sparse-indices", "flat-sparse-initialization"] {
         run(
@@ -460,7 +458,7 @@ fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() 
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn generated_blas_preparation_materializes_both_strided_operands_in_planned_storage() {
     let executable = compile_source(blas_model(), "blas_main.cpp", &[], None);
     run(&executable, "positive", true);
@@ -478,7 +476,7 @@ fn generated_blas_preparation_materializes_both_strided_operands_in_planned_stor
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn empty_escapes_still_complete_nonempty_intermediate_work_before_teardown() {
     let defines = [
         "-DTEST_RANK=1".into(),
@@ -503,7 +501,7 @@ fn empty_escapes_still_complete_nonempty_intermediate_work_before_teardown() {
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn generated_entry_mutations_cannot_return_borrows_or_truncate_kernel_coordinate_arrays() {
     run(
         &compile(33, false, Some("return-borrow")),

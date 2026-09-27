@@ -16,134 +16,19 @@
 //!
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16`.
 
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod runtime_archive;
-
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
 
 const BF16_TOL: f64 = 1e-2;
 const F16_TOL: f64 = 1e-3;
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    // Use a PID-suffixed tmp filename so concurrent test binaries (this
-    // file and exec_compile.rs both call into this helper, and nextest
-    // runs them in parallel) do not race on a shared tmp path. Each
-    // process writes its own tmp and renames into the shared canonical
-    // location; last writer wins, but the content is identical so the
-    // race is harmless. Without the PID, two processes that interleave
-    // `fs::copy` and `fs::rename` produce an ENOENT on the second
-    // rename because the first rename moved the shared tmp away.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    // The rename can still race with another process renaming its own
-    // unique tmp into the same canonical path. On POSIX, rename onto an
-    // existing file is atomic, so this is fine. If a peer beat us to
-    // it, treat NotFound from a follow-up cleanup as benign.
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = match fs::read_dir(deps_dir) {
-        Ok(it) => it,
-        // Truly cold target dirs may not have `deps/` yet; let the
-        // caller fall through to the explicit `cargo build` fallback.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    if let Some(archive) = runtime_archive::explicit() {
-        return archive;
-    }
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
 
 /// Build a C source + main harness, gcc-compile, run, return stdout.
 /// Panics on compile or runtime failure with the generated C attached.
@@ -158,21 +43,10 @@ fn compile_and_run_kernel(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let mut args: Vec<String> = vec![
         "-O2".into(),
         "-std=c11".into(),

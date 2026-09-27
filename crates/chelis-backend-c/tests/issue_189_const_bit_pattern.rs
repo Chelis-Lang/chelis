@@ -192,121 +192,17 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
 // ---------------------------------------------------------------
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    if let Ok(entries) = fs::read_dir(&deps_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy().to_string();
-            if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-                let meta = entry.metadata()?;
-                let mtime = meta.modified()?;
-                if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
-                    newest = Some((mtime, entry.path()));
-                }
-            }
-        }
-    }
-    let hashed = match newest {
-        Some((_, p)) => p,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            let entries = fs::read_dir(&deps_dir)?;
-            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy().to_string();
-                if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-                    let meta = entry.metadata()?;
-                    let mtime = meta.modified()?;
-                    if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
-                        newest = Some((mtime, entry.path()));
-                    }
-                }
-            }
-            newest
-                .map(|(_, p)| p)
-                .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
-        }
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        ensure_runtime_static_lib(&canonical).unwrap_or_else(|e| {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {e}",
-                canonical.display()
-            )
-        });
-        canonical
-    })
-    .clone()
-}
 
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
     let probe = common::probe_dir(&format!("issue189_{test_name}"));
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let compile = Command::new("gcc")
         .args([
             "-O2",

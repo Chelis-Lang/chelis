@@ -233,66 +233,6 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-hip manual tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    support::stage_device_runtime(dst);
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
-}
-
 fn require_hipcc() {
     let output = Command::new("hipcc")
         .arg("--version")
@@ -585,7 +525,8 @@ fn compile_and_run_output_and_inputs(
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -605,8 +546,7 @@ fn compile_and_run_output_and_inputs(
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -650,7 +590,8 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -670,8 +611,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -821,7 +761,8 @@ int main(void) {{
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(tmp.path(), "main.cpp", &main_cpp);
     let bin_path = tmp.path().join("gpu_direct_arithmetic_bits");
@@ -831,8 +772,7 @@ int main(void) {{
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -886,7 +826,8 @@ fn compile_and_run_output_cases(
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -906,8 +847,7 @@ fn compile_and_run_output_cases(
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -1048,7 +988,8 @@ fn compile_and_run_output_f32_bits(dag: &Dag, func_name: &str) -> Vec<u32> {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     let main_cpp = format!(
         r#"#include "chelis_runtime.h"
@@ -1082,8 +1023,7 @@ int main(void) {{
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -1128,7 +1068,8 @@ fn compile_and_run_output_f64_bits(dag: &Dag, func_name: &str) -> Vec<u64> {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     let main_cpp = format!(
         r#"#include "chelis_runtime.h"
@@ -1162,8 +1103,7 @@ int main(void) {{
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -3696,7 +3636,8 @@ fn compile_and_run_single_output_f64(
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -3716,8 +3657,7 @@ fn compile_and_run_single_output_f64(
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -4294,7 +4234,8 @@ fn compile_and_run_single_output_typed_i64(
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
 
     let mut input_setup = Vec::new();
@@ -4357,8 +4298,7 @@ int main(void) {{
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
     compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -5246,7 +5186,8 @@ fn count_input_with_a_non_bool_payload_traps_at_the_runtime_write_boundary() {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -5281,8 +5222,7 @@ int main(void) {{
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);

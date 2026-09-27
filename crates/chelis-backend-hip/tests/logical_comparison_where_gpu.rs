@@ -9,7 +9,6 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, LogicalKind, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,55 +65,11 @@ fn width_mask(precision: Prim) -> u64 {
     }
 }
 
-fn runtime_library_path() -> PathBuf {
-    let mut candidates = Vec::new();
-    if let Ok(target) = env::var("CARGO_TARGET_DIR") {
-        let target = PathBuf::from(target);
-        candidates.push(target.join("debug/deps"));
-        candidates.push(target.join("release/deps"));
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest.join("../../target/debug/deps"));
-    candidates.push(manifest.join("../../target/release/deps"));
-    candidates
-        .into_iter()
-        .filter_map(|directory| fs::read_dir(directory).ok())
-        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-        })
-        .max_by_key(|path| {
-            fs::metadata(path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-        })
-        .expect("could not locate libchelis_runtime.a")
-}
-
-fn stage_runtime(directory: &Path) {
+fn stage_hip_support(directory: &Path) {
     support::stage_device_runtime(directory);
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let hip_header = manifest.join("runtime/chelis_hip_runtime.h");
     fs::copy(hip_header, directory.join("chelis_hip_runtime.h")).expect("stage HIP header");
-    let include = manifest.join("../chelis-runtime/include");
-    for name in [
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        fs::copy(include.join(name), directory.join(name))
-            .unwrap_or_else(|error| panic!("stage {name}: {error}"));
-    }
-    fs::copy(
-        runtime_library_path(),
-        directory.join("libchelis_runtime.a"),
-    )
-    .expect("stage runtime library");
 }
 
 fn build_main(
@@ -214,7 +169,8 @@ fn compile_and_run_shaped(
     let result = codegen_hip(dag, function).expect("HIP codegen");
     assert_eq!(result.output_labels.len(), outputs.len());
     let temp = tempfile::tempdir().expect("tempdir");
-    stage_runtime(temp.path());
+    stage_hip_support(temp.path());
+    let staged = chelis_runtime_bundle::stage(temp.path()).expect("stage the carried runtime");
     fs::write(temp.path().join("model.cpp"), &result.c_source).expect("write model");
     fs::write(
         temp.path().join("main.cpp"),
@@ -229,8 +185,7 @@ fn compile_and_run_shaped(
         .arg(temp.path().join("main.cpp"))
         .arg(temp.path().join("model.cpp"))
         .arg(temp.path().join("chelis_device_owner.cpp"))
-        .arg(format!("-L{}", temp.path().display()))
-        .arg("-lchelis_runtime")
+        .arg(&staged.archive)
         .arg("-lpthread")
         .arg("-ldl")
         .args(&result.link_flags)

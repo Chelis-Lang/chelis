@@ -64,59 +64,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
-/// Locate `target/debug/` from the test binary's path.  Mirrors the
-/// helper in `cbackend_cast_memcpy.rs` and `cbackend_reshape_memcpy.rs`.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Mirror of `cbackend_reshape_memcpy::ensure_runtime_static_lib`.
-/// `chelis-runtime` is built as a dev-dependency, so cargo only emits
-/// the hashed staticlib in `target/debug/deps/`; the gcc-link step
-/// expects `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
 /// Run `chelis eval --file` on the source program.  Returns stdout
 /// trimmed of trailing whitespace.  Asserts the eval call succeeds.
 fn chelis_eval(source: &str, fn_name: &str) -> String {
@@ -161,8 +108,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> (tempfile::TempDir, PathBuf) {
 /// gcc-compile the emitted C and run the resulting binary, returning
 /// stdout trimmed of trailing whitespace.
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join(fn_name);
     let compile = StdCommand::new("gcc")
@@ -174,7 +120,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> Stri
             kernel_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",
