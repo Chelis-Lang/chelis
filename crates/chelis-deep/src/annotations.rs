@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 pub use crate::ExtensionData;
 pub use crate::annotations_transform::MetadataName;
+use crate::identity::NodeIdentity;
 use crate::{Atom, DtypeFamily, Expr, RawExpr, Span, metadata::MetadataError};
 
 /// A value and its original syntax span.
@@ -533,7 +534,7 @@ macro_rules! core_inventory {
         }
         impl Metadata {
             $(pub fn $getter(&self) -> Option<&$payload> {
-                match self.storage.as_ref()?.core.get(&MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
+                match self.content()?.core.get(&MetadataKey::$variant)? { MetadataValue::$variant(v) => Some(v), _ => unreachable!("variant determines its key") }
             })+
         }
     };
@@ -577,6 +578,16 @@ struct Storage {
     extensions: ExtensionMap,
 }
 
+/// The one allocation behind non-empty metadata. `storage` is the annotation
+/// content, present exactly when the metadata held content before node
+/// identities existed; `identity` is the checker's node identity (see
+/// [`crate::identity`]), which is not content.
+#[derive(Clone, Default)]
+struct Slot {
+    storage: Option<Storage>,
+    identity: Option<NodeIdentity>,
+}
+
 /// Empty metadata occupies one pointer and allocates nothing.
 ///
 /// ```
@@ -612,9 +623,18 @@ struct Storage {
 /// let mut value = RuntimeExpression::try_new(Expr::Atom(Atom::Bool(true), Span::new(0, 0))).unwrap();
 /// value.0 = Expr::Atom(Atom::Name("unchecked".into()), Span::new(0, 0));
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Metadata {
-    storage: Option<Box<Storage>>,
+    storage: Option<Box<Slot>>,
+}
+/// Prints the annotation content only, exactly as the derived form did before
+/// the slot carried a node identity.
+impl std::fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Metadata")
+            .field("storage", &self.content())
+            .finish()
+    }
 }
 impl PartialEq for Metadata {
     fn eq(&self, other: &Self) -> bool {
@@ -631,6 +651,25 @@ impl From<MetadataValue> for Metadata {
     }
 }
 impl Metadata {
+    fn content(&self) -> Option<&Storage> {
+        self.storage.as_ref()?.storage.as_ref()
+    }
+    fn content_mut(&mut self) -> Option<&mut Storage> {
+        self.storage.as_mut()?.storage.as_mut()
+    }
+    fn content_or_insert(&mut self) -> &mut Storage {
+        self.storage
+            .get_or_insert_with(Default::default)
+            .storage
+            .get_or_insert_with(Default::default)
+    }
+    /// The checker-assigned identity of the node this metadata annotates.
+    pub fn node_identity(&self) -> Option<NodeIdentity> {
+        self.storage.as_ref()?.identity
+    }
+    pub(crate) fn set_node_identity(&mut self, identity: NodeIdentity) {
+        self.storage.get_or_insert_with(Default::default).identity = Some(identity);
+    }
     pub fn try_from_values(
         values: impl IntoIterator<Item = MetadataValue>,
     ) -> Result<Self, MetadataError> {
@@ -641,12 +680,11 @@ impl Metadata {
         Ok(metadata)
     }
     pub fn is_empty(&self) -> bool {
-        self.storage
-            .as_ref()
+        self.content()
             .is_none_or(|s| s.core.is_empty() && s.extensions.is_empty())
     }
     pub fn insert(&mut self, value: MetadataValue) -> Result<(), MetadataError> {
-        let storage = self.storage.get_or_insert_with(Default::default);
+        let storage = self.content_or_insert();
         if storage.core.contains_key(&value.key()) {
             return Err(invalid(
                 value.key().spelling(),
@@ -658,25 +696,22 @@ impl Metadata {
         Ok(())
     }
     pub fn replace(&mut self, value: MetadataValue) -> Option<MetadataValue> {
-        self.storage
-            .get_or_insert_with(Default::default)
-            .core
-            .insert(value.key(), value)
+        self.content_or_insert().core.insert(value.key(), value)
     }
     pub fn remove(&mut self, key: MetadataKey) -> Option<MetadataValue> {
-        self.storage.as_mut()?.core.remove(&key)
+        self.content_mut()?.core.remove(&key)
     }
     pub fn values(&self) -> impl Iterator<Item = &MetadataValue> {
-        self.storage.iter().flat_map(|s| s.core.values())
+        self.content().into_iter().flat_map(|s| s.core.values())
     }
     pub fn extensions(&self) -> &ExtensionMap {
         static EMPTY: ExtensionMap = ExtensionMap {
             values: BTreeMap::new(),
         };
-        self.storage.as_ref().map_or(&EMPTY, |s| &s.extensions)
+        self.content().map_or(&EMPTY, |s| &s.extensions)
     }
     pub fn extensions_mut(&mut self) -> &mut ExtensionMap {
-        &mut self.storage.get_or_insert_with(Default::default).extensions
+        &mut self.content_or_insert().extensions
     }
 
     /// Visit the live expression leaves and annotations of structural payloads.
