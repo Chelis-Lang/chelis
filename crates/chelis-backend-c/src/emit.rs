@@ -1068,202 +1068,46 @@ impl CEmitter {
         out
     }
 
+    /// Give every anonymous extent its identity by
+    /// [`chelis_ir::anonymous_dims::anonymous_axis_names`], in node order, so
+    /// an axis that reads another node's reads it already named. The runtime
+    /// `if` join reads the same rule to decide which arms share an extent.
     pub(crate) fn rename_anonymous_dims(dag: Dag) -> Dag {
-        use chelis_ir::dag::DimInfo;
-        fn is_anon(name: &str) -> bool {
-            name.is_empty() || name == "*"
-        }
-        // chelis#616 (soundness): a movement op with any NON-IDENTITY axis (a
-        // node-valued bound, a non-sentinel shrink, a stride step other than
-        // literal 1, or a non-zero pad) produces a FRESH output extent on that
-        // axis, which is NOT the input axis extent. The "copy first-input
-        // dims" shortcut below would clobber such an axis with the input's dim
-        // (e.g. propagate a shrink's `_anon_dim` onto a stride's output,
-        // making two different extents share one C variable), so skip it and
-        // let each anon axis get a fresh `_anon_dim_{id}_{axis}` that
-        // `emit_shrink`/`emit_stride`/`emit_pad` size from its own bounds.
-        // Mirrors the identity-only pass-through rule in
-        // `chelis_ir::dag::shape_source_for_axis`.
-        fn movement_alters_extents(op: &RiscOp) -> bool {
-            match op {
-                RiscOp::Shrink { bounds } => bounds
-                    .iter()
-                    .any(|(s, e)| !(s.as_lit() == Some(0) && matches!(e, RtDim::ToEnd))),
-                RiscOp::Pad { padding, .. } => padding
-                    .iter()
-                    .any(|(b, a)| !(b.as_lit() == Some(0) && a.as_lit() == Some(0))),
-                RiscOp::Stride { strides } => strides.iter().any(|s| s.as_lit() != Some(1)),
-                // A runtime reshape target's extent comes from its scalar,
-                // never from the input's dims.
-                RiscOp::Reshape { new_shape } => new_shape.iter().any(|d| d.node_input().is_some()),
-                _ => false,
-            }
-        }
-        fn rewrite_dim(id: NodeId, axis: usize, dim: &DimInfo) -> DimInfo {
-            match dim {
-                DimInfo::Named(name, size) if is_anon(name) => {
-                    DimInfo::Named(format!("_anon_dim_{}_{}", id.0, axis), *size)
-                }
-                other => other.clone(),
-            }
-        }
+        use chelis_ir::anonymous_dims::{
+            AnonymousAxisName, anonymous_axis_names, fresh_anonymous_dim,
+        };
         let mut out = dag;
         // DAG exposes no `nodes_mut`; rewrite by round-tripping replace_node.
         let ids: Vec<_> = out.nodes().iter().map(|n| n.id).collect();
         for id in ids {
-            if let Some(node) = out.get(id) {
-                let needs = node
-                    .output_type
-                    .dims
-                    .iter()
-                    .any(|d| matches!(d, DimInfo::Named(name, _) if is_anon(name)));
-                if !needs {
-                    continue;
-                }
-                let mut new_ty = node.output_type.clone();
-                if let RiscOp::Expand {
-                    axis: expanded_axis,
-                    ..
-                } = &node.op
-                    && !matches!(
-                        new_ty.dims.get(*expanded_axis),
-                        Some(DimInfo::Named(name, _)) if !is_anon(name)
-                    )
-                {
-                    // [05-MOV-1], #1619: the replaced/inserted axis reads
-                    // the size carrier; kept axes read their own operand
-                    // positions. Rank equality does not prove pass-through.
-                    // Numeric result claims remain independent of their
-                    // sources. An explicit name ON THE EXPANDED AXIS stays on
-                    // the existing path: preserving one without its unread
-                    // signature witness can newly execute an unchecked wrong
-                    // shape, and B2b-1 owns that scoped claim-transport
-                    // repair. chelis#1822: a real name on a BYSTANDER axis is
-                    // not that case. Testing every axis sent an `expand` whose
-                    // kept axis carries a signature binder to the pass-through
-                    // arm below, which copies the operand's PRE-EXPAND extent
-                    // onto the expanded axis, so `spec/05` section 2.4's
-                    // replacement was undone: the consumer then failed
-                    // ownership verification, or with no consumer the wrong
-                    // type reached codegen and the binary trapped while eval
-                    // returned the right answer.
-                    let sources = chelis_ir::output_axis_sources(&out, id);
-                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
-                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
-                            continue;
-                        }
-                        if let DimInfo::Named(_, Some(required)) = dim {
-                            // Anonymous spelling supplies no binder, but a
-                            // required number is still a literal claim.
-                            *dim = DimInfo::Lit(*required);
-                            continue;
-                        }
-                        use chelis_ir::AxisSource;
-                        let observed = match sources.get(axis) {
-                            Some(AxisSource::Literal { value }) => {
-                                usize::try_from(*value).ok().map(DimInfo::Lit)
-                            }
-                            Some(AxisSource::InputAxis {
-                                input,
-                                axis: RtAxis::Lit(source_axis),
-                            }) => node
-                                .inputs
-                                .get(*input)
-                                .and_then(|input| out.get(*input))
-                                .and_then(|input| {
-                                    input
-                                        .output_type
-                                        .dims
-                                        .get(usize::try_from(*source_axis).ok()?)
-                                })
-                                .cloned(),
-                            // A scalar size is read at execution. Give
-                            // that output its own symbol.
-                            Some(
-                                AxisSource::ScalarInput { .. }
-                                | AxisSource::OpComputed { .. }
-                                | AxisSource::ClassSupplied { .. }
-                                | AxisSource::ExternalAxis { .. },
-                            )
-                            | None => None,
-                        };
-                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
+            let Some(names) = anonymous_axis_names(&out, id) else {
+                continue;
+            };
+            let node = out.get(id).expect("named node exists");
+            let mut new_ty = node.output_type.clone();
+            new_ty.dims = names
+                .iter()
+                .enumerate()
+                .map(|(axis, name)| match *name {
+                    AnonymousAxisName::Own => node.output_type.dims[axis].clone(),
+                    AnonymousAxisName::Literal(extent) => chelis_ir::dag::DimInfo::Lit(extent),
+                    AnonymousAxisName::Of {
+                        node: source,
+                        axis: read,
+                    } => out
+                        .get(source)
+                        .expect("named source exists")
+                        .output_type
+                        .dims[read]
+                        .clone(),
+                    AnonymousAxisName::Fresh => {
+                        fresh_anonymous_dim(id, axis, &node.output_type.dims[axis])
                     }
-                } else if matches!(node.op, RiscOp::Permute { .. }) {
-                    // A permutation preserves extents but not their positions.
-                    // The generic same-rank pass-through arm below copies the
-                    // first input's dimensions positionally, which silently
-                    // undoes every non-identity permutation as soon as one
-                    // output axis is anonymous. Resolve each anonymous output
-                    // axis through the IR's structural axis-source mapping;
-                    // explicitly named axes already carry their destination
-                    // identity and stay untouched.
-                    let sources = chelis_ir::output_axis_sources(&out, id);
-                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
-                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
-                            continue;
-                        }
-                        if let DimInfo::Named(_, Some(required)) = dim {
-                            *dim = DimInfo::Lit(*required);
-                            continue;
-                        }
-                        let observed = match sources.get(axis) {
-                            Some(chelis_ir::AxisSource::InputAxis {
-                                input,
-                                axis: RtAxis::Lit(source_axis),
-                            }) => node
-                                .inputs
-                                .get(*input)
-                                .and_then(|input| out.get(*input))
-                                .and_then(|input| {
-                                    input
-                                        .output_type
-                                        .dims
-                                        .get(usize::try_from(*source_axis).ok()?)
-                                })
-                                .cloned(),
-                            _ => None,
-                        };
-                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
-                    }
-                } else if let RiscOp::Gather { axis } = &node.op
-                    && node.inputs.len() == 2
-                    && let (Some(values), Some(indices)) =
-                        (out.get(node.inputs[0]), out.get(node.inputs[1]))
-                    && *axis < values.output_type.dims.len()
-                {
-                    let mut dims = Vec::new();
-                    dims.extend_from_slice(&values.output_type.dims[..*axis]);
-                    dims.extend(indices.output_type.dims.iter().cloned());
-                    dims.extend_from_slice(&values.output_type.dims[*axis + 1..]);
-                    new_ty.dims = dims;
-                } else if !movement_alters_extents(&node.op)
-                    && let Some(first_input) = node.inputs.first().and_then(|input| out.get(*input))
-                    && first_input.output_type.dims.len() == new_ty.dims.len()
-                {
-                    new_ty.dims = first_input.output_type.dims.clone();
-                } else if node.inputs.is_empty()
-                    && let Some(shape_source) =
-                        node.shape_deps.first().and_then(|dep| out.get(*dep))
-                    && shape_source.output_type.dims.len() == new_ty.dims.len()
-                {
-                    // chelis#616: an input-less node (a `lower_if` mask Const)
-                    // shaped like a sibling records the relation as a
-                    // shape-dep; tie its wildcard dims to the sibling's
-                    // instead of fragmenting them into a sourceless anon dim.
-                    new_ty.dims = shape_source.output_type.dims.clone();
-                } else {
-                    new_ty.dims = new_ty
-                        .dims
-                        .iter()
-                        .enumerate()
-                        .map(|(axis, dim)| rewrite_dim(id, axis, dim))
-                        .collect();
-                }
-                let op = node.op.clone();
-                let inputs = node.inputs.clone();
-                out.replace_node(id, op, inputs, new_ty);
-            }
+                })
+                .collect();
+            let op = node.op.clone();
+            let inputs = node.inputs.clone();
+            out.replace_node(id, op, inputs, new_ty);
         }
         out
     }

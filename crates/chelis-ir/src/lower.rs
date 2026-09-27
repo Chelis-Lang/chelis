@@ -20560,8 +20560,13 @@ impl<'program> LowerCtx<'program> {
     /// Where the join condition takes its extent on each runtime axis of
     /// `out_ty`, when not from the `else` arm. An arm's extent is not read:
     /// where both arms' extents resolve to one origin that runs whenever the
-    /// join does, the condition reads that origin; where the arms' extents are not one
-    /// extent at all (the operand agreement `where` verifies,
+    /// join does, the condition reads that origin. Where the arms carry one
+    /// anonymous-extent identity, the one the C lane names them by
+    /// ([`crate::anonymous_dims::anonymous_axis_identity`]), the condition
+    /// reads the axis where that identity is decided, when it runs whenever
+    /// the join does, so it carries the arms' identity in C too. Where the
+    /// arms' extents are not one extent in either sense (the operand
+    /// agreement `where` verifies,
     /// [`crate::verify::axis_extents_semantically_equivalent`]), it is the
     /// larger of the arms' extents, raised to one where the arms' shapes
     /// differ on any such axis. The condition is then never empty when the
@@ -20569,8 +20574,9 @@ impl<'program> LowerCtx<'program> {
     /// its own shape ([05-OP-53]); where the arms agree it is their shape,
     /// which a condition mixed across `vmap` rows requires. Every input is an
     /// extent read, so `vmap` shares them. An axis whose extents are one
-    /// otherwise (one bound name, a checked named claim, one static extent)
-    /// keeps the `else` arm's extent.
+    /// otherwise (one bound name, a checked named claim, one static extent,
+    /// or one identity decided where the join does not run) keeps the `else`
+    /// arm's extent.
     fn join_condition_extents(
         &mut self,
         out_ty: &TensorType,
@@ -20616,7 +20622,25 @@ impl<'program> LowerCtx<'program> {
                 _ if crate::verify::axis_extents_semantically_equivalent(
                     &self.dag, then_node, else_node, axis, &arms,
                 ) => {}
-                _ => axes.push(axis),
+                _ => {
+                    let identity = |node| {
+                        crate::anonymous_dims::anonymous_axis_identity(&self.dag, node, axis)
+                    };
+                    match (identity(then_node), identity(else_node)) {
+                        (
+                            Some((then_dim, then_at, then_axis)),
+                            Some((else_dim, else_at, else_axis)),
+                        ) if then_dim == else_dim => {
+                            if let Some((node, read)) = [(else_at, else_axis), (then_at, then_axis)]
+                                .into_iter()
+                                .find(|(node, _)| runs_with_join(&self.dag, *node))
+                            {
+                                sources.insert(axis, JoinExtent::Origin { node, axis: read });
+                            }
+                        }
+                        _ => axes.push(axis),
+                    }
+                }
             }
         }
         let extent_ty = TensorType {

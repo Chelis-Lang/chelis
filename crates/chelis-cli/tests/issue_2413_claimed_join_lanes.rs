@@ -18,14 +18,17 @@
 //! Lanes: the host interpreter (`chelis eval --file` on `main`), the DAG
 //! evaluator (`selected` lowered as a tensor entry, as `exec_compile` runs
 //! it), and the whole program's C (`chelis build`, linked and run). A C
-//! build refusal is loud and accepted; a C run must agree. Every cell is
-//! collected before the assertion, so one red cell never hides a sibling.
+//! build refusal is loud and accepted, except for a cell C built at
+//! 096daea8c (the 40 shared-origin cells), which must still build; a C run
+//! must agree. Every cell is collected before the assertion, so one red cell
+//! never hides a sibling.
 //!
 //! Evidentiary status: REGRESSION TEST for the nine untaken `else` cells
 //! whose claim is 0 (six with an independent other arm, three with a shared
 //! origin), which returned an empty tensor in the host interpreter and the
 //! DAG evaluator at 44c9b23e7 (18 of 300 cell lanes); DISPOSITION LOCK for
-//! every other cell.
+//! every other cell, and for the C build rule (C built the same 40 cells at
+//! 096daea8c and 592dc55ce).
 use assert_cmd::Command;
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_types::types::Prim;
@@ -78,6 +81,10 @@ struct Cell {
     /// The DAG evaluator's inputs to `selected`.
     bindings: UnordMap<String, TensorValue>,
     expected: Expected,
+    /// C builds this cell: its arms are computed from one value outside the
+    /// join, which C names as one extent. At 096daea8c C built exactly these
+    /// cells, so a refusal of one is a regression, not a loud answer.
+    c_builds: bool,
 }
 
 #[derive(Debug)]
@@ -261,6 +268,7 @@ fn cell(then_claimed: bool, claim: Claim, taken: bool, source: Source, shared: b
         source: source_text,
         bindings,
         expected,
+        c_builds: shared,
     }
 }
 
@@ -423,7 +431,11 @@ fn disagreements(cells: &[Cell]) -> Vec<String> {
         let lanes = [
             ("H", host(directory.path(), &stem, &cell.source), false),
             ("E", dag(cell), false),
-            ("C", compiled(directory.path(), &stem, &cell.source), true),
+            (
+                "C",
+                compiled(directory.path(), &stem, &cell.source),
+                !cell.c_builds,
+            ),
         ];
         for (lane, outcome, refusal_is_loud) in lanes {
             if !agrees(&cell.expected, &outcome, refusal_is_loud) {
@@ -507,6 +519,7 @@ fn a_declared_join_extent_is_checked_against_the_taken_arm() {
                 claimed: 0,
                 actual: 3,
             },
+            c_builds: false,
         }
     });
     let failures = disagreements(&cells);
