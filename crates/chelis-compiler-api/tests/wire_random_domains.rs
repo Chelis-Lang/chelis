@@ -174,6 +174,43 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     rejects_domain(&derived, "is consumed twice");
 }
 
+/// A key tensor's extent is not key material (spec/10 §3.2): the codec
+/// admits an `extent_witness` and a `shape` reading a key tensor, which is
+/// not a use, so the key's draw is still its one use and a second draw is
+/// still rejected.
+///
+/// Evidentiary status: REGRESSION TEST. At `096daea8c` `lower` of `f`
+/// failed its schema stage ("key `ks` of `f` reaches input 0 of node 2").
+#[test]
+fn a_key_tensors_extent_read_is_not_a_use_on_the_wire() {
+    let source = "def f[n](ks: tensor[n, key], xs: tensor[n, f32]) -> tensor[n, f32] = vmap(fn (j: key, v: tensor[f32]) -> dropout(j, v, 0.5f32))(ks, xs)\n";
+    let dag = lower(source, "f");
+    accepts(&dag);
+    let dropout = first(&dag, "dropout");
+    let witness = first(&dag, "extent_witness");
+    let key = input(&dag, witness, 0);
+    assert_eq!(dag["nodes"][key]["op"], json!({"kind":"load","name":"ks"}));
+    // A `shape` read of the same key tensor, rooted beside the draw.
+    let mut shaped = dag.clone();
+    let id = push(
+        &mut shaped,
+        json!({"kind":"shape","axis":0}),
+        &[key],
+        &[],
+        "int64",
+    );
+    shaped["roots"].as_array_mut().unwrap().push(json!(id));
+    accepts(&shaped);
+    // A second draw of the key the first consumes.
+    let mut twice = dag.clone();
+    let mut second = dag["nodes"][dropout].clone();
+    let id = twice["nodes"].as_array().unwrap().len();
+    second["id"] = json!(id);
+    twice["nodes"].as_array_mut().unwrap().push(second);
+    twice["roots"].as_array_mut().unwrap().push(json!(id));
+    rejects_domain(&twice, "is consumed twice");
+}
+
 /// A key computed inside a lowered definition is used once: the draw that
 /// consumes it is its only reader, and no compiler-inserted `Drop` reads it
 /// again (a `Drop` of a key would be a second use and a key reaching an

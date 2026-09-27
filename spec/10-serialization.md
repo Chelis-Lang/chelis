@@ -355,7 +355,9 @@ output is a key under `S`: each of its uses consumes it under an activation
 whose `And` conjuncts include `S`'s, and each such requirement of its inputs
 that both arms include, or the constant `false`, and while it has any such
 requirement it is never a root. A key reaching any other operation or input,
-or a shape dependency, is a decode error.
+or a shape dependency, is a decode error, except that an `ExtentWitness` or
+`Shape` may read a key tensor at its tensor input: an extent is not key
+material, so that read is not a use and the key stays live.
 
 `KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor
 of that shape holding [05-OP-69]'s key of each element. `Split` carries its

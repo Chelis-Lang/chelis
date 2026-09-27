@@ -80,10 +80,14 @@ pub enum KeyAdmission {
     KeyParameter,
     /// A graph root: the key a graph returns to its caller.
     Root,
+    /// A read of a key tensor's extent: `shape` or `numel` in source, and an
+    /// `ExtentWitness` or `Shape` in the graph. The extent is not key
+    /// material, so the read is not a use and leaves the key live.
+    ExtentObservation,
 }
 
 impl KeyAdmission {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Primitive(KeyPrimitive::SplitKey),
         Self::Primitive(KeyPrimitive::SplitKeys),
         Self::Primitive(KeyPrimitive::FoldIn),
@@ -96,6 +100,7 @@ impl KeyAdmission {
         Self::RoutingCase,
         Self::KeyParameter,
         Self::Root,
+        Self::ExtentObservation,
     ];
 
     /// Whether the admitted operation stays an operation of the lowered
@@ -105,7 +110,9 @@ impl KeyAdmission {
     /// a graph operation.
     pub const fn in_graph(self) -> bool {
         match self {
-            Self::Primitive(_) | Self::Drop | Self::Join | Self::Root => true,
+            Self::Primitive(_) | Self::Drop | Self::Join | Self::Root | Self::ExtentObservation => {
+                true
+            }
             Self::Aggregate | Self::Move | Self::RoutingCase | Self::KeyParameter => false,
         }
     }
@@ -117,7 +124,7 @@ pub enum KeyRefusal {
     /// The operation's atom names no `key` (spec/04 section 1.1).
     NotNamed,
     /// The operation reads its operand and leaves it live: a borrow, a
-    /// copy, an observation ([04-LIN-9]).
+    /// copy, an observation of anything but its extent ([04-LIN-9]).
     Read,
     /// The builtin hands each value of `parameter` to its callback and also
     /// keeps it in its result, so one key would be used twice ([04-LIN-9]).
@@ -210,11 +217,16 @@ pub const fn tag_keys(tag: DeepTag) -> TagKeys {
     }
 }
 
+/// The builtins that read their tensor operand's extent and nothing else:
+/// [`KeyAdmission::ExtentObservation`] at operand 0.
+pub const EXTENT_OBSERVATIONS: [&str; 2] = ["shape", "numel"];
+
 /// The verdict of builtin `name`, under the sibling cases a call selects, on
 /// a key-carrying operand at zero-based `index`. A key primitive admits its
-/// key operand; any other builtin admits an operand only when every selected
-/// case routes that operand's type parameter to one consumer. A builtin with
-/// no sibling case (the Numeric domain alone) admits none.
+/// key operand, and an extent observation its tensor operand; any other
+/// builtin admits an operand only when every selected case routes that
+/// operand's type parameter to one consumer. A builtin with no sibling case
+/// (the Numeric domain alone) admits none.
 pub fn builtin_key_operand(
     name: &str,
     cases: &[BuiltinSiblingCaseId],
@@ -223,6 +235,13 @@ pub fn builtin_key_operand(
     if let Some(primitive) = KeyPrimitive::of_builtin(name) {
         return if index == KeyPrimitive::KEY_OPERAND {
             Ok(KeyAdmission::Primitive(primitive))
+        } else {
+            Err(KeyRefusal::NotNamed)
+        };
+    }
+    if EXTENT_OBSERVATIONS.contains(&name) {
+        return if index == 0 {
+            Ok(KeyAdmission::ExtentObservation)
         } else {
             Err(KeyRefusal::NotNamed)
         };

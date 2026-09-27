@@ -18290,7 +18290,15 @@ impl<'program> LowerCtx<'program> {
                     || crate::axis_sources::directly_owns_producer_claim(&self.dag, *witness)
             })
             .collect::<Vec<_>>();
-        if required.is_empty() {
+        // A key result keeps its own node: a carrier `Copy` of it would be the
+        // compiler-inserted copy [04-LIN-9] refuses, and a second producer of
+        // the key. Every check it would order is a trap seed, so the checks
+        // run whether or not the result reads them, as for a tuple result.
+        let returns_key = self
+            .dag
+            .get(id)
+            .is_some_and(|node| node.output_type.precision == Prim::Key);
+        if required.is_empty() || returns_key {
             return result;
         }
         // A block can return a value bound before the invocation. Attaching

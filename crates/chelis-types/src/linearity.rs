@@ -83,6 +83,19 @@ enum ConsumeKind {
     Structural,
 }
 
+/// What an application does with one operand under the key allow-list
+/// (`crate::key_admission`), when that operand carries a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOperand {
+    /// Refused, and already reported.
+    Refused,
+    /// Read for its extent only ([`KeyAdmission::ExtentObservation`]): the
+    /// key stays live.
+    ExtentRead,
+    /// Consumed by the call, as every other admitted operand is.
+    Consumed,
+}
+
 #[derive(Debug, Clone)]
 struct ConsumeSite {
     description: String,
@@ -1195,7 +1208,7 @@ impl Checker {
         {
             self.check_expr(func, scope);
         }
-        let refused = self.admit_key_operands(builtin_callee, expr, &children[1..], scope);
+        let verdicts = self.admit_key_operands(builtin_callee, expr, &children[1..], scope);
         let observational = children
             .first()
             .is_some_and(callee_is_observational_higher_order);
@@ -1208,12 +1221,19 @@ impl Checker {
         for (index, arg) in children.iter().enumerate().skip(1) {
             if let Some(borrowed) = borrow_inner(arg) {
                 self.check_borrow_arg(arg, borrowed, scope);
+            } else if is_var_expr(arg)
+                && self.expr_holds_key(arg, scope)
+                && verdicts[index - 1] == KeyOperand::ExtentRead
+            {
+                // [04-LIN-9]: a key tensor's extent is not key material, so
+                // reading it is not a use and leaves the key live.
+                self.read_var_expr(arg, scope);
             } else if is_var_expr(arg) && self.expr_holds_key(arg, scope) {
                 // [04-LIN-9]: a key holder is always consumed by a call. The
                 // arguments of a `grad(f)(..)` or `vmap(f)(..)` call are
                 // otherwise observed; a key argument is consumed there too.
                 // A callee position that only borrows cannot take one.
-                if !refused[index - 1]
+                if verdicts[index - 1] != KeyOperand::Refused
                     && !observational
                     && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
                 {
@@ -2134,6 +2154,20 @@ impl Checker {
             return;
         }
         let description = site.description.clone();
+        // Only an extent read reaches here with a key ([04-LIN-9]); no copy
+        // repairs it, so the diagnostic says where the extent read belongs.
+        if self.expr_holds_key(expr, scope) {
+            self.key_reuse(
+                expr,
+                format!(
+                    "the extent of key-carrying variable `{name}` is read {} after its key was \
+                     consumed by {description}; read a key tensor's extent before its one use \
+                     ([04-LIN-9])",
+                    diag_site(expr)
+                ),
+            );
+            return;
+        }
         let message = with_macro_provenance(
             expr,
             format!(
@@ -2514,18 +2548,19 @@ impl Checker {
     /// takes it through a key-typed parameter, whose type the type checker
     /// fixed ([04-LIN-10]). A borrow of a key is refused whatever the callee.
     /// Returns, per operand, whether it was refused, so no later rule reports
-    /// the same operand again.
+    /// the same operand again, or admitted as an extent read, which leaves
+    /// the key live.
     fn admit_key_operands(
         &mut self,
         builtin: Option<&str>,
         call: &Expr,
         args: &[Expr],
         scope: &LinearScope,
-    ) -> Vec<bool> {
+    ) -> Vec<KeyOperand> {
         let cases = builtin
             .map(|name| self.selected_cases(name, args, scope))
             .unwrap_or_default();
-        let mut refused = Vec::with_capacity(args.len());
+        let mut verdicts = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let verdict = if borrow_inner(arg).is_some() {
                 Err(KeyRefusal::Read)
@@ -2553,9 +2588,13 @@ impl Checker {
                 };
                 self.refuse_key_operand(operation, index, arg, refusal);
             }
-            refused.push(refuse);
+            verdicts.push(match verdict {
+                _ if refuse => KeyOperand::Refused,
+                Ok(KeyAdmission::ExtentObservation) => KeyOperand::ExtentRead,
+                _ => KeyOperand::Consumed,
+            });
         }
-        refused
+        verdicts
     }
 
     /// The one diagnostic for a key-carrying operand an operation refuses

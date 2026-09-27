@@ -957,6 +957,10 @@ pub enum KeyRole {
     /// A `Drop`, source `drop` ([05-OP-67]), which consumes the key at
     /// input 0 and produces no key a later node reads.
     Drop,
+    /// An `ExtentWitness` or a `Shape`, which reads the extent of the tensor
+    /// at input 0: a key tensor's extent is not key material, so the read is
+    /// not a use and leaves the key live ([04-LIN-9]).
+    ExtentObservation,
     /// A two-input `And`, read by the activation exclusivity rule.
     And,
     /// A `Not`, read by the activation exclusivity rule.
@@ -977,7 +981,11 @@ impl KeyRole {
     /// ([`Self::key_slots`]), and for any node that reads none.
     fn key_slot(self) -> Option<usize> {
         match self {
-            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } | Self::Drop => Some(0),
+            Self::Split { .. }
+            | Self::FoldIn
+            | Self::SplitN { .. }
+            | Self::Drop
+            | Self::ExtentObservation => Some(0),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
             Self::UniformLike => Some(3),
             Self::KeyFromSeed
@@ -1011,6 +1019,7 @@ impl KeyRole {
             Self::Drop => Some(KeyAdmission::Drop),
             Self::KeySelect => Some(KeyAdmission::Join),
             Self::Store => Some(KeyAdmission::Root),
+            Self::ExtentObservation => Some(KeyAdmission::ExtentObservation),
             Self::KeyFromSeed
             | Self::Load
             | Self::And
@@ -1078,6 +1087,7 @@ impl KeyRole {
             Self::DropoutReplay => "`dropout` replay",
             Self::UniformBoundAdjoint => "`uniform_like` bound adjoint",
             Self::Drop => "`drop`",
+            Self::ExtentObservation => "extent read",
             Self::Load
             | Self::Store
             | Self::And
@@ -1093,7 +1103,8 @@ impl KeyRole {
     }
 
     /// Whether reading the key at [`Self::key_slot`] consumes it. A replay
-    /// reads its forward draw's key without consuming it.
+    /// reads its forward draw's key, and an extent read its key tensor's
+    /// extent, without consuming it.
     fn consumes(self) -> bool {
         self.is_draw() || self.derives() || matches!(self, Self::KeySelect | Self::Drop)
     }
@@ -1199,6 +1210,7 @@ impl KeyGraph for Dag {
             Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
             Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
             Some(RiscOp::Drop) => KeyRole::Drop,
+            Some(RiscOp::ExtentWitness { .. } | RiscOp::Shape { .. }) => KeyRole::ExtentObservation,
             Some(RiscOp::Logical(crate::dag::LogicalKind::And)) => KeyRole::And,
             Some(RiscOp::Logical(crate::dag::LogicalKind::Not)) => KeyRole::Not,
             Some(RiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
@@ -1332,7 +1344,7 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 /// - V4: a key reaching any other operation or slot, or a dependency list,
 ///   is rejected: the slots are those of the key allow-list's graph
 ///   admissions ([`KeyRole::admission`]). Replays read their forward draw's
-///   key without consuming it.
+///   key, and extent reads their key tensor's extent, without consuming it.
 ///
 /// Each message names a key by [`KeyGraph::describe_key`] and a node by
 /// [`KeyGraph::describe_node`].
@@ -4334,6 +4346,80 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("is consumed twice"))
         );
+    }
+
+    /// [04-LIN-9], spec/10 §3.2: a key tensor's extent is not key material.
+    /// An `ExtentWitness` or a `Shape` reads a key tensor without a use, so
+    /// the key verifies beside one draw or as a root, and a second draw is
+    /// still its second use.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At `096daea8c` every row
+    /// reported "key `ks` of `f` reaches input 0 of node 1".
+    #[test]
+    fn an_extent_read_of_a_key_tensor_is_not_a_use() {
+        let errors = |observer: RiscOp, draws: usize, rooted: bool| {
+            let mut dag = Dag::new();
+            let f = dag.declare("f");
+            let ks = dag.add_node(
+                f,
+                RiscOp::Load { name: "ks".into() },
+                vec![],
+                tensor_ty(&[3], Prim::Key),
+                None,
+            );
+            let extent = dag.add_node(f, observer, vec![ks], tensor_ty(&[], Prim::Int64), None);
+            dag.add_root(extent);
+            let x = dag.add_node(
+                f,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                tensor_ty(&[3], Prim::F32),
+                None,
+            );
+            let rate = dag.add_node(
+                f,
+                RiscOp::synth_const(Prim::F32, 0.5),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            for _ in 0..draws {
+                let drawn = dag.add_node(
+                    f,
+                    RiscOp::Dropout,
+                    vec![x, rate, ks],
+                    tensor_ty(&[3], Prim::F32),
+                    None,
+                );
+                dag.add_root(drawn);
+            }
+            if rooted {
+                dag.add_root(ks);
+            }
+            let mut errors = Vec::new();
+            verify_key_rules(&dag, &mut errors);
+            errors
+        };
+        for observer in [
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "ks".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            RiscOp::Shape { axis: 0 },
+        ] {
+            assert_eq!(errors(observer.clone(), 1, false), Vec::<String>::new());
+            assert_eq!(errors(observer.clone(), 0, true), Vec::<String>::new());
+            let twice = errors(observer, 2, false);
+            assert!(
+                twice
+                    .iter()
+                    .any(|error| error.contains("is consumed twice")),
+                "{twice:?}"
+            );
+        }
     }
 
     /// A parameter's type is its declaration's: two declarations may each

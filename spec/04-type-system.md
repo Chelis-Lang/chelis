@@ -3158,7 +3158,10 @@ lexical binding, change which callable is selected, or memoize function results.
 > component at most once and leaves the tuple unusable as a whole; a field
 > access, which consumes the whole value; or `vmap` over a key axis, which
 > gives each row to one application. Reading a consumed key's bits again in
-> a backward pass or a checkpoint recomputation is not a use. A violation
+> a backward pass or a checkpoint recomputation is not a use. A key tensor's
+> extent is not key material, so `shape`, `numel` and a call's extent check
+> admit a key tensor and read its extent without a use, leaving the key live,
+> and like any read such a read precedes the key's consuming use. A violation
 > is a type error whose suggested repair derives fresh keys with
 > `split_key` or `split_keys` ([05-OP-70], [05-OP-71]), never `copy`.
 

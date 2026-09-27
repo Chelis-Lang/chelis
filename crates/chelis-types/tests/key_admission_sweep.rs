@@ -432,3 +432,61 @@ fn a_builtin_named_as_a_value_admits_a_key_only_where_a_call_would() {
         );
     }
 }
+
+/// A key tensor's extent is not key material ([04-LIN-9]): `shape` and
+/// `numel` admit a key-carrying operand at operand 0 as an extent read,
+/// which is not a use, so the key is still consumed exactly once afterwards.
+/// Their other operands admit none.
+///
+/// Evidentiary status: REGRESSION TEST. At `096daea8c` every positive was
+/// refused with "`shape` does not admit a key-carrying operand at argument
+/// 0" (or `numel`).
+#[test]
+fn an_extent_read_admits_a_key_tensor_and_leaves_the_key_live() {
+    for builtin in ["shape", "numel"] {
+        assert_eq!(
+            builtin_key_operand(builtin, &[], 0),
+            Ok(KeyAdmission::ExtentObservation)
+        );
+        assert!(builtin_key_operand(builtin, &[], 1).is_err(), "{builtin}");
+    }
+    for source in [
+        "def w(ks: tensor[2, key]) -> (i64, tensor[2, key]) = {\n  n = shape(ks, 0i32)\n  (n, ks)\n}\n",
+        "def w(ks: tensor[2, key]) -> (i64, tensor[2, key]) = {\n  n = numel(ks)\n  (n, ks)\n}\n",
+        "def w(ks: tensor[2, key], xs: tensor[2, f32]) -> (i64, tensor[2, f32]) = {\n  n = shape(ks, 0i32)\n  (n, vmap(fn (j: key, v: tensor[f32]) -> uniform_like(j, v, 0.0, 1.0))(ks, xs))\n}\n",
+    ] {
+        verdict(source).unwrap_or_else(|errors| panic!("{errors:?}\n{source}"));
+    }
+}
+
+/// Negative parity: an extent read is still a read, so it must precede the
+/// key's one use, and it does not license a second use.
+#[test]
+fn an_extent_read_neither_follows_nor_repeats_the_keys_one_use() {
+    let draw = "vmap(fn (j: key, v: tensor[f32]) -> uniform_like(j, v, 0.0, 1.0))";
+    for (source, fragment) in [
+        (
+            format!(
+                "def w(ks: tensor[2, key], xs: tensor[2, f32]) -> (tensor[2, f32], i64) = {{\n  ys = {draw}(ks, xs)\n  (ys, shape(ks, 0i32))\n}}\n"
+            ),
+            "the extent of key-carrying variable `ks` is read",
+        ),
+        (
+            format!(
+                "def w(ks: tensor[2, key], xs: tensor[2, f32]) = {{\n  n = numel(ks)\n  a = {draw}(ks, copy(xs))\n  (n, a, {draw}(ks, xs))\n}}\n"
+            ),
+            "key-carrying variable `ks` was already consumed",
+        ),
+    ] {
+        let errors = verdict(&source).expect_err(&source);
+        assert!(
+            errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::KeyReuse) && error.message.contains(fragment)
+            }),
+            "expected a KeyReuse containing {fragment:?}, got {errors:?}\n{source}"
+        );
+    }
+    let source = "def w(ks: tensor[2, key], k: key) -> i64 = {\n  _ = drop(ks)\n  shape(to_tensor([1.0]), k)\n}\n";
+    let errors = verdict(source).expect_err(source);
+    assert!(errors.iter().any(refuses_a_key), "{errors:?}\n{source}");
+}
