@@ -56,8 +56,11 @@ Spellings that are hard errors, not style:
   implicit currying, and juxtaposition stays rejected.
 - The unit value is `()`, the unit type is `unit`, and a singleton tuple is
   `(x,)`; that comma is semantic.
-- Effects carry exact casing: `Diff`, `Random`, `Accum`, `IO`, `Test`,
+- Effects carry exact casing: `Diff`, `Accum`, `IO`, `Test`,
   `Resource(...)`.
+- Randomness has no effect and no handler: a draw takes an explicit key,
+  `dropout(key_from_seed(42i64), x, 0.5f32)`. `with seed(...)` and
+  `! { Random }` are the typed `RetiredRandomness` parse error.
 - Non-primary transform arguments are named: `grad(f, wrt=x)`,
   `vmap(f, axis=n)`; axis zero is bare `vmap(f)`.
 - Pipe stages use first-argument insertion: `x |> f(y)` means `f(x, y)`. Use

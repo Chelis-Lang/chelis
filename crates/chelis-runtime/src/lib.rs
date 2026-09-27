@@ -988,6 +988,16 @@ pub struct chelis_scalar {
     pub bits: u64,
 }
 
+/// spec/08 section 2's published scalar key carrier,
+/// `typedef struct { uint64_t bits; } chelis_key;`: `bits` are the key's 64
+/// bits ([05-RNG-2]). The struct, not a bare integer, is the key's tag at the
+/// C boundary.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct chelis_key {
+    pub bits: u64,
+}
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct chelis_value_tag(pub u8);
@@ -2371,6 +2381,31 @@ pub extern "C" fn chelis_scalar_from_bits(dtype: chelis_dtype, bits: u64) -> che
     };
     validate_scalar(value, "chelis_scalar_from_bits");
     value
+}
+
+/// [05-OP-69] `key_from_seed`: the key whose 64 bits are the seed's
+/// two's-complement bits, with no mixing. Every `int64_t` is a valid seed.
+#[no_mangle]
+pub extern "C" fn chelis_key_from_seed(seed: i64) -> chelis_key {
+    chelis_key {
+        bits: u64::from_ne_bytes(seed.to_ne_bytes()),
+    }
+}
+
+/// [05-OBS-2]: a key's printed form, `key(` then its 64 bits as 16
+/// lowercase hex digits, then `)`. Byte-identical to the reference renderer
+/// `chelis_types::observation::format_key_bits`, locked by
+/// `tests/format_key_matches_reference.rs`; the production staticlib keeps
+/// no checker dependency.
+fn format_key_bits(bits: u64) -> String {
+    format!("key({bits:016x})")
+}
+
+/// [05-OBS-2]: a key's printed form. A key has no scalar carrier, so its
+/// text has its own entry point rather than [`chelis_string_from_scalar`].
+#[no_mangle]
+pub extern "C" fn chelis_string_from_key(key: chelis_key) -> chelis_string {
+    new_runtime_string(format_key_bits(key.bits))
 }
 
 #[no_mangle]
@@ -6257,8 +6292,6 @@ pub unsafe extern "C" fn chelis_tensor_where(
         (then_tensor, "where then tensor"),
         (else_tensor, "where else tensor"),
     ]);
-    require_same_tensor_shape_validated(cond, then_tensor, "where");
-    require_same_tensor_shape_validated(then_tensor, else_tensor, "where");
     require_bool_dtype(cond_dtype, "where condition");
     if dtype != else_dtype {
         runtime_fail!(
@@ -6267,9 +6300,38 @@ pub unsafe extern "C" fn chelis_tensor_where(
             diagnostic_dtype_name(else_dtype)
         );
     }
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked,
+    // so a condition selecting one branch everywhere yields that branch, and
+    // an empty condition yields an empty result of its own shape.
+    let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
+    let (mut then_selected, mut else_selected) = (false, false);
+    for i in 0..(*cond).count() {
+        if (*p.add(i)).get() {
+            then_selected = true;
+        } else {
+            else_selected = true;
+        }
+    }
+    let shape_source = match (then_selected, else_selected) {
+        (true, false) => {
+            require_same_tensor_shape_validated(cond, then_tensor, "where");
+            then_tensor
+        }
+        (false, true) => {
+            require_same_tensor_shape_validated(cond, else_tensor, "where");
+            else_tensor
+        }
+        (false, false) => cond,
+        (true, true) => {
+            require_same_tensor_shape_validated(cond, then_tensor, "where");
+            require_same_tensor_shape_validated(then_tensor, else_tensor, "where");
+            then_tensor
+        }
+    };
     let out = chelis_alloc(
-        (*then_tensor).rank(),
-        (*then_tensor).shape().as_ptr(),
+        (*shape_source).rank(),
+        (*shape_source).shape().as_ptr(),
         dtype.id() as chelis_dtype,
     );
     let size = (*out).count();
@@ -6291,8 +6353,11 @@ pub unsafe extern "C" fn chelis_tensor_where(
             copy_tensor_element(pick, i as i64, out, i as i64, "where");
         }
     }
-    let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
-    where_copy(out, then_tensor, else_tensor, size, |i| (*p.add(i)).get());
+    if then_selected && else_selected {
+        where_copy(out, then_tensor, else_tensor, size, |i| (*p.add(i)).get());
+    } else {
+        where_copy(out, then_tensor, else_tensor, size, |_| then_selected);
+    }
     out
 }
 
@@ -7391,7 +7456,8 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
             let bits = *(tensor_data(t) as *const u16).add(i);
             format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
         }
-        RuntimeDType::Key => runtime_fail!("Domain: tensor formatting: a key has no text form"),
+        // [05-OBS-2]: a key element renders as its printed form.
+        RuntimeDType::Key => format_key_bits(*(tensor_data(t) as *const u64).add(i)),
     }
 }
 
@@ -7400,8 +7466,9 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
 const TENSOR_RENDER_LIMIT: usize = 32;
 
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
-    // Checked at entry, not per element, so an empty key tensor is rejected.
-    let [dtype] = validate_tensor_inputs([(t, "tensor formatting")]);
+    // Observation renders every active tensor element dtype, `key` included
+    // ([05-OBS-2]); the checker keeps keys out of `to_string` ([05-OP-25]).
+    let dtype = tensor_dtype(t, "tensor formatting");
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
     if (*t).rank() == 0 {

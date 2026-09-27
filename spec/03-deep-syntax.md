@@ -38,7 +38,7 @@ portable across Surf and Reef boundaries.
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
-| `effect` | `random` / `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
+| `effect` | `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
 | `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
 | `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
@@ -493,7 +493,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, i8, i16, i32, i64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, i8, i16, i32, i64, bool, string, key — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -753,6 +753,12 @@ the authored operand order for every operator (`spec/02-surf-syntax.md`
 §2). Multi-value constructors follow the same written-order rule: tuple,
 list, record, and record-update children evaluate left to right (§6.2's
 `kv` ordering restates this for records).
+
+A binding's initializer is evaluated where evaluation reaches the binding,
+whether or not the binding is read, so its traps are preserved; this holds for
+a `let` bind pair and for a top-level value declaration that a reached
+expression names. (This requirement is not fully implemented for every
+trapping operation; see chelis#2440.)
 
 Within a single primitive, elementwise and reduction evaluation order is
 owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section

@@ -872,3 +872,89 @@ pub fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
          is not emitted here:\n{emitted}"
     );
 }
+
+/// [05-RNG-2]'s key derivations and draw words, and the f32 arms of
+/// [05-OP-8] and [05-OP-37] over them, transcribed from
+/// `briefs/switch-design-probes/key_ref.py` (the design pass's transcription of
+/// `spec/design/randomness_explicit_keys.md`) and the spec/05 atom text. It
+/// shares no code with any lane, so expected draws come from the text, never
+/// from the implementation. `worked_values_match_key_ref_py` in
+/// `dropout_fixed_stream_cli.rs` pins it against `key_ref.py`'s printed values.
+pub mod key_ref {
+    pub fn splitmix64(x: u64) -> u64 {
+        let x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    }
+
+    // Spelled out from the definition rather than through `rotate_left`.
+    #[allow(clippy::manual_rotate)]
+    fn rotl64(x: u64, r: u32) -> u64 {
+        (x << r) | (x >> (64 - r))
+    }
+
+    /// `key_from_seed(seed)`: the seed's two's-complement bits, unmixed.
+    pub fn key_from_seed(seed: i64) -> u64 {
+        seed as u64
+    }
+
+    pub fn derive(k: u64, j: u64) -> u64 {
+        splitmix64(k ^ rotl64(splitmix64(j), 29))
+    }
+
+    /// `split_key(k) = (derive(k, 0), derive(k, 1))`.
+    pub fn split(k: u64) -> (u64, u64) {
+        (derive(k, 0), derive(k, 1))
+    }
+
+    /// `fold_in(k, n) = derive(derive(k, 2), n)`.
+    pub fn fold_in(k: u64, n: i64) -> u64 {
+        derive(derive(k, 2), n as u64)
+    }
+
+    /// `split_keys(k, n)`: row `j` is `fold_in(k, j)`.
+    pub fn split_n(k: u64, n: i64) -> Vec<u64> {
+        (0..n).map(|j| fold_in(k, j)).collect()
+    }
+
+    pub fn word(k: u64, i: u64) -> u64 {
+        splitmix64(k ^ rotl64(splitmix64(i), 41))
+    }
+
+    /// The high 53 bits of `word(k, i)` over 2^53, exact in f64.
+    pub fn unit(k: u64, i: u64) -> f64 {
+        (word(k, i) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// [05-OP-8] at f32: `fma(high - low, round_f32(u), low)`, one rounding.
+    pub fn uniform_f32(k: u64, count: usize, low: f32, high: f32) -> Vec<f32> {
+        (0..count as u64)
+            .map(|i| (high - low).mul_add(unit(k, i) as f32, low))
+            .collect()
+    }
+
+    /// [05-OP-8] at f64: `fma(high - low, u, low)`.
+    pub fn uniform_f64(k: u64, count: usize, low: f64, high: f64) -> Vec<f64> {
+        (0..count as u64)
+            .map(|i| (high - low).mul_add(unit(k, i), low))
+            .collect()
+    }
+
+    /// [05-OP-37] at f32: drop when `round_f32(u) < rate`, else
+    /// `input / (1 - rate)` with the denominator finalized first.
+    pub fn dropout_f32(k: u64, input: &[f32], rate: f32) -> Vec<f32> {
+        let denom = 1.0_f32 - rate;
+        input
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                if (unit(k, i as u64) as f32) < rate {
+                    0.0
+                } else {
+                    x / denom
+                }
+            })
+            .collect()
+    }
+}

@@ -10,10 +10,10 @@
 //! key rules V1 to V5, `grad`, the optimizer, and `vmap`.
 
 use chelis_ir::dag::{
-    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RandomDraw, RandomHandler, RiscOp, RtDim,
-    TensorType, UniformBound, record_runtime_dim_shape_deps,
+    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, Owner, RiscOp, RtDim, TensorType, UniformBound,
+    record_runtime_dim_shape_deps,
 };
-use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_ir::verify::verify;
@@ -23,7 +23,7 @@ use chelis_types::types::Prim;
 use chelis_types::{RandomKey, ScalarValue, scalar_from_i64};
 use chelis_unord::UnordMap;
 
-// ---- key_ref_ext.py: k = key(-3); (L, R) = split(k); F = fold_in(L, -5);
+// ---- key_ref_ext.py: k = key(-3); (L, R) = split(k, k_decl); F = fold_in(L, -5);
 // S = split_n(F, 3); G = fold_in(R, 9) ----
 
 const S_KEYS: [u64; 3] = [
@@ -103,13 +103,21 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
     }
 }
 
-fn node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, dims: &[usize], prim: Prim) -> NodeId {
-    dag.add_node(op, inputs, ty(dims, prim), None)
+fn node(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    dims: &[usize],
+    prim: Prim,
+) -> NodeId {
+    dag.add_node(decl, op, inputs, ty(dims, prim), None)
 }
 
-fn i64_const(dag: &mut Dag, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Int64, value).unwrap(),
         },
@@ -119,12 +127,32 @@ fn i64_const(dag: &mut Dag, value: i64) -> NodeId {
     )
 }
 
-fn float_const(dag: &mut Dag, prim: Prim, value: f64) -> NodeId {
-    node(dag, RiscOp::synth_const(prim, value), vec![], &[], prim)
+fn float_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64) -> NodeId {
+    node(
+        dag,
+        decl,
+        RiscOp::synth_const(prim, value),
+        vec![],
+        &[],
+        prim,
+    )
 }
 
-fn load(dag: &mut Dag, name: &str, dims: &[usize], prim: Prim) -> NodeId {
-    node(dag, RiscOp::Load { name: name.into() }, vec![], dims, prim)
+fn load(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    name: &str,
+    dims: &[usize],
+    prim: Prim,
+) -> NodeId {
+    node(
+        dag,
+        decl,
+        RiscOp::Load { name: name.into() },
+        vec![],
+        dims,
+        prim,
+    )
 }
 
 struct Chain {
@@ -134,11 +162,12 @@ struct Chain {
     g: NodeId,
 }
 
-fn build_chain(dag: &mut Dag) -> Chain {
-    let seed = i64_const(dag, -3);
-    let root = node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+fn build_chain(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> Chain {
+    let seed = i64_const(dag, decl, -3);
+    let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let left = node(
         dag,
+        decl,
         RiscOp::Split {
             branch: KeyBranch::Left,
         },
@@ -148,6 +177,7 @@ fn build_chain(dag: &mut Dag) -> Chain {
     );
     let right = node(
         dag,
+        decl,
         RiscOp::Split {
             branch: KeyBranch::Right,
         },
@@ -155,10 +185,18 @@ fn build_chain(dag: &mut Dag) -> Chain {
         &[],
         Prim::Key,
     );
-    let minus_five = i64_const(dag, -5);
-    let folded = node(dag, RiscOp::FoldIn, vec![left, minus_five], &[], Prim::Key);
+    let minus_five = i64_const(dag, decl, -5);
+    let folded = node(
+        dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![left, minus_five],
+        &[],
+        Prim::Key,
+    );
     let rows = node(
         dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -166,17 +204,14 @@ fn build_chain(dag: &mut Dag) -> Chain {
         &[3],
         Prim::Key,
     );
-    let nine = i64_const(dag, 9);
-    let g = node(dag, RiscOp::FoldIn, vec![right, nine], &[], Prim::Key);
+    let nine = i64_const(dag, decl, 9);
+    let g = node(dag, decl, RiscOp::FoldIn, vec![right, nine], &[], Prim::Key);
     Chain { rows, g }
 }
 
 fn run(dag: &Dag, inputs: &UnordMap<&str, TensorValue>) -> UnordMap<NodeId, TensorValue> {
     assert_eq!(verify(dag), Vec::<String>::new());
-    eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-        inputs.get(name).cloned()
-    })
-    .unwrap()
+    eval_tensor_roots_exact(dag, dag.roots(), |name| inputs.get(name).cloned()).unwrap()
 }
 
 fn stored_bits(value: &TensorValue) -> Vec<u64> {
@@ -217,7 +252,8 @@ const FLOATS: [Prim; 4] = [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64];
 #[test]
 fn the_key_chain_evaluates_to_the_reference_keys() {
     let mut dag = Dag::new();
-    let chain = build_chain(&mut dag);
+    let decl = dag.declare("test");
+    let chain = build_chain(&mut dag, decl);
     dag.add_root(chain.rows);
     dag.add_root(chain.g);
     let out = run(&dag, &UnordMap::new());
@@ -231,20 +267,23 @@ fn the_key_chain_evaluates_to_the_reference_keys() {
 fn chained_draws_match_the_reference_at_every_float_dtype() {
     for prim in FLOATS {
         let mut dag = Dag::new();
-        let chain = build_chain(&mut dag);
-        let template = load(&mut dag, "t", &[3, 4], prim);
-        let low = float_const(&mut dag, prim, 0.0);
-        let high = float_const(&mut dag, prim, 1.0);
+        let decl = dag.declare("test");
+        let chain = build_chain(&mut dag, decl);
+        let template = load(&mut dag, decl, "t", &[3, 4], prim);
+        let low = float_const(&mut dag, decl, prim, 0.0);
+        let high = float_const(&mut dag, decl, prim, 1.0);
         let batched = node(
             &mut dag,
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, chain.rows],
             &[3, 4],
             prim,
         );
-        let scalar_template = load(&mut dag, "s", &[4], prim);
+        let scalar_template = load(&mut dag, decl, "s", &[4], prim);
         let scalar = node(
             &mut dag,
+            decl,
             RiscOp::UniformLike,
             vec![scalar_template, low, high, chain.g],
             &[4],
@@ -274,19 +313,22 @@ fn chained_draws_match_the_reference_at_every_float_dtype() {
 
         // Dropout at rate 0.5 over rows [1, 2, 3, 4].
         let mut dag = Dag::new();
-        let chain = build_chain(&mut dag);
-        let x = load(&mut dag, "x", &[3, 4], prim);
-        let rate = float_const(&mut dag, prim, 0.5);
+        let decl = dag.declare("test");
+        let chain = build_chain(&mut dag, decl);
+        let x = load(&mut dag, decl, "x", &[3, 4], prim);
+        let rate = float_const(&mut dag, decl, prim, 0.5);
         let batched = node(
             &mut dag,
+            decl,
             RiscOp::Dropout,
             vec![x, rate, chain.rows],
             &[3, 4],
             prim,
         );
-        let xs = load(&mut dag, "xs", &[4], prim);
+        let xs = load(&mut dag, decl, "xs", &[4], prim);
         let scalar = node(
             &mut dag,
+            decl,
             RiscOp::Dropout,
             vec![xs, rate, chain.g],
             &[4],
@@ -329,11 +371,13 @@ fn a_batched_draw_equals_its_rows_drawn_with_scalar_keys() {
     // graphs that each fold one index into a fresh F give the rows.
     for prim in FLOATS {
         let mut batched_dag = Dag::new();
-        let chain = build_chain(&mut batched_dag);
-        let x = load(&mut batched_dag, "x", &[3, 5], prim);
-        let rate = float_const(&mut batched_dag, prim, 0.25);
+        let batched_dag_decl = batched_dag.declare("test");
+        let chain = build_chain(&mut batched_dag, batched_dag_decl);
+        let x = load(&mut batched_dag, batched_dag_decl, "x", &[3, 5], prim);
+        let rate = float_const(&mut batched_dag, batched_dag_decl, prim, 0.25);
         let batched = node(
             &mut batched_dag,
+            batched_dag_decl,
             RiscOp::Dropout,
             vec![x, rate, chain.rows],
             &[3, 5],
@@ -348,10 +392,19 @@ fn a_batched_draw_equals_its_rows_drawn_with_scalar_keys() {
         let mut stacked = Vec::new();
         for j in 0..3 {
             let mut dag = Dag::new();
-            let seed = i64_const(&mut dag, -3);
-            let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+            let decl = dag.declare("test");
+            let seed = i64_const(&mut dag, decl, -3);
+            let root = node(
+                &mut dag,
+                decl,
+                RiscOp::KeyFromSeed,
+                vec![seed],
+                &[],
+                Prim::Key,
+            );
             let left = node(
                 &mut dag,
+                decl,
                 RiscOp::Split {
                     branch: KeyBranch::Left,
                 },
@@ -359,26 +412,29 @@ fn a_batched_draw_equals_its_rows_drawn_with_scalar_keys() {
                 &[],
                 Prim::Key,
             );
-            let minus_five = i64_const(&mut dag, -5);
+            let minus_five = i64_const(&mut dag, decl, -5);
             let folded = node(
                 &mut dag,
+                decl,
                 RiscOp::FoldIn,
                 vec![left, minus_five],
                 &[],
                 Prim::Key,
             );
-            let index = i64_const(&mut dag, j);
+            let index = i64_const(&mut dag, decl, j);
             let row_key = node(
                 &mut dag,
+                decl,
                 RiscOp::FoldIn,
                 vec![folded, index],
                 &[],
                 Prim::Key,
             );
-            let x = load(&mut dag, "x", &[5], prim);
-            let rate = float_const(&mut dag, prim, 0.25);
+            let x = load(&mut dag, decl, "x", &[5], prim);
+            let rate = float_const(&mut dag, decl, prim, 0.25);
             let drawn = node(
                 &mut dag,
+                decl,
                 RiscOp::Dropout,
                 vec![x, rate, row_key],
                 &[5],
@@ -397,16 +453,17 @@ fn a_batched_draw_equals_its_rows_drawn_with_scalar_keys() {
 fn per_row_controls_and_activations_select_each_row_independently() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let chain = build_chain(&mut dag);
-    let x = load(&mut dag, "x", &[3, 4], prim);
-    let rates = load(&mut dag, "rates", &[3], prim);
-    let active = load(&mut dag, "active", &[3], Prim::Bool);
-    let drawn = node(
-        &mut dag,
+    let decl = dag.declare("test");
+    let chain = build_chain(&mut dag, decl);
+    let x = load(&mut dag, decl, "x", &[3, 4], prim);
+    let rates = load(&mut dag, decl, "rates", &[3], prim);
+    let active = load(&mut dag, decl, "active", &[3], Prim::Bool);
+    let drawn = dag.add_node(
+        Owner::new(decl, Some(active)),
         RiscOp::Dropout,
-        vec![x, rates, chain.rows, active],
-        &[3, 4],
-        prim,
+        vec![x, rates, chain.rows],
+        ty(&[3, 4], prim),
+        None,
     );
     dag.add_root(drawn);
     dag.add_root(chain.g);
@@ -442,12 +499,7 @@ fn per_row_controls_and_activations_select_each_row_independently() {
             ),
         ),
     ]);
-    assert!(
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |n| bad
-            .get(n)
-            .cloned())
-        .is_ok()
-    );
+    assert!(eval_tensor_roots_exact(&dag, dag.roots(), |n| bad.get(n).cloned()).is_ok());
     let trapping = UnordMap::from_iter([
         ("x", floats(prim, vec![3, 4], row.repeat(3))),
         ("rates", floats(prim, vec![3], vec![0.5, 2.0, 0.5])),
@@ -460,92 +512,88 @@ fn per_row_controls_and_activations_select_each_row_independently() {
         ),
     ]);
     let error =
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |n| {
-            trapping.get(n).cloned()
-        })
-        .unwrap_err();
+        eval_tensor_roots_exact(&dag, dag.roots(), |n| trapping.get(n).cloned()).unwrap_err();
     assert!(error.contains("dropout"), "{error}");
 }
 
 #[test]
 fn a_key_load_draws_with_its_bits_and_refuses_raw_ingress() {
-    // Oracle (c), eval lane: a draw keyed by a loaded key with bits
-    // ofDrawKey(s, c) equals the counter-stream draw of seed s, ordinal c.
-    for (seed, ordinal) in [(7i64, 0u64), (7, 1), (-1, 0), (0, 3)] {
+    // Oracle (c), eval lane: a draw keyed by a loaded key draws with the
+    // loaded bits, the same draw as `key_from_seed` of those bits.
+    for seed in [7i64, -1, 0, i64::MAX] {
         for prim in FLOATS {
             let row: Vec<f64> = (1..=6).map(f64::from).collect();
-            let mut counter = Dag::new();
-            let x = load(&mut counter, "x", &[6], prim);
-            let rate = float_const(&mut counter, prim, 0.3);
-            let seed_node = i64_const(&mut counter, seed);
-            // Draws in node order take ordinals 0, 1, ...; the last one here
-            // takes ordinal `ordinal`, and the earlier ones are roots too.
-            let mut drawn = x;
-            for index in 0..=ordinal {
-                let key = node(
-                    &mut counter,
-                    RiscOp::DrawKey {
-                        handler: RandomHandler::Scoped { instance: 0 },
-                        draw: RandomDraw::Dropout,
-                        dtype: prim,
-                    },
-                    vec![seed_node, rate],
-                    &[],
-                    Prim::Key,
-                );
-                drawn = node(
-                    &mut counter,
-                    RiscOp::Dropout,
-                    vec![x, rate, key],
-                    &[6],
-                    prim,
-                );
-                if index < ordinal {
-                    counter.add_root(drawn);
-                }
-            }
-            counter.add_root(drawn);
+            let mut seeded = Dag::new();
+            let seeded_decl = seeded.declare("test");
+            let x = load(&mut seeded, seeded_decl, "x", &[6], prim);
+            let rate = float_const(&mut seeded, seeded_decl, prim, 0.3);
+            let seed_node = i64_const(&mut seeded, seeded_decl, seed);
+            let key = node(
+                &mut seeded,
+                seeded_decl,
+                RiscOp::KeyFromSeed,
+                vec![seed_node],
+                &[],
+                Prim::Key,
+            );
+            let drawn = node(
+                &mut seeded,
+                seeded_decl,
+                RiscOp::Dropout,
+                vec![x, rate, key],
+                &[6],
+                prim,
+            );
+            seeded.add_root(drawn);
             let inputs = UnordMap::from_iter([("x", floats(prim, vec![6], row.clone()))]);
-            let counter_bits = stored_bits(&run(&counter, &inputs)[&drawn]);
+            let seeded_bits = stored_bits(&run(&seeded, &inputs)[&drawn]);
 
             let mut keyed = Dag::new();
-            let x = load(&mut keyed, "x", &[6], prim);
-            let rate = float_const(&mut keyed, prim, 0.3);
-            let key = load(&mut keyed, "k", &[], Prim::Key);
-            let drawn = node(&mut keyed, RiscOp::Dropout, vec![x, rate, key], &[6], prim);
+            let keyed_decl = keyed.declare("test");
+            let x = load(&mut keyed, keyed_decl, "x", &[6], prim);
+            let rate = float_const(&mut keyed, keyed_decl, prim, 0.3);
+            let key = load(&mut keyed, keyed_decl, "k", &[], Prim::Key);
+            let drawn = node(
+                &mut keyed,
+                keyed_decl,
+                RiscOp::Dropout,
+                vec![x, rate, key],
+                &[6],
+                prim,
+            );
             keyed.add_root(drawn);
-            let bridge = RandomKey::from_counter(seed as u64, ordinal);
+            let loaded =
+                RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap()).unwrap();
             let inputs = UnordMap::from_iter([
                 ("x", floats(prim, vec![6], row.clone())),
-                ("k", keys_value(vec![], vec![bridge])),
+                ("k", keys_value(vec![], vec![loaded])),
             ]);
             assert_eq!(
                 stored_bits(&run(&keyed, &inputs)[&drawn]),
-                counter_bits,
-                "seed {seed} ordinal {ordinal} {prim:?}"
+                seeded_bits,
+                "seed {seed} {prim:?}"
             );
         }
     }
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", &[2], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.3);
-    let key = load(&mut dag, "k", &[], Prim::Key);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", &[2], Prim::F32);
+    let rate = float_const(&mut dag, decl, Prim::F32, 0.3);
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, key],
         &[2],
         Prim::F32,
     );
     dag.add_root(drawn);
-    let error =
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            match name {
-                "x" => Some(floats(Prim::F32, vec![2], vec![1.0, 2.0])),
-                _ => Some(TensorValue::scalar(7.0)),
-            }
-        })
-        .unwrap_err();
+    let error = eval_tensor_roots_exact(&dag, dag.roots(), |name| match name {
+        "x" => Some(floats(Prim::F32, vec![2], vec![1.0, 2.0])),
+        _ => Some(TensorValue::scalar(7.0)),
+    })
+    .unwrap_err();
     assert!(error.contains("no raw numeric ingress"), "{error}");
 }
 
@@ -553,10 +601,19 @@ fn a_key_load_draws_with_its_bits_and_refuses_raw_ingress() {
 fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
     for (count, ok) in [(-1i64, false), (0, true), (2, true)] {
         let mut dag = Dag::new();
-        let seed = i64_const(&mut dag, 7);
-        let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
-        let n = load(&mut dag, "n", &[], Prim::Int64);
+        let decl = dag.declare("test");
+        let seed = i64_const(&mut dag, decl, 7);
+        let root = node(
+            &mut dag,
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            &[],
+            Prim::Key,
+        );
+        let n = load(&mut dag, decl, "n", &[], Prim::Int64);
         let rows = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: RtDim::Node(1),
             },
@@ -569,13 +626,12 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
         );
         dag.add_root(rows);
         assert_eq!(verify(&dag), Vec::<String>::new());
-        let result =
-            eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |_| {
-                Some(TensorValue::from_storage(
-                    vec![],
-                    finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![count])).unwrap(),
-                ))
-            });
+        let result = eval_tensor_roots_exact(&dag, dag.roots(), |_| {
+            Some(TensorValue::from_storage(
+                vec![],
+                finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![count])).unwrap(),
+            ))
+        });
         match ok {
             false => assert_eq!(
                 result.unwrap_err(),
@@ -598,14 +654,23 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
 /// those keys. `[05-OP-71]`'s count is the extent; `n` is a claim about it.
 fn split_declaring_n(count: RtDim, draw: bool) -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let seed = i64_const(&mut dag, 7);
-    let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 7);
+    let root = node(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        &[],
+        Prim::Key,
+    );
     let mut inputs = vec![root];
     if matches!(count, RtDim::Node(_)) {
-        inputs.push(load(&mut dag, "cnt", &[], Prim::Int64));
+        inputs.push(load(&mut dag, decl, "cnt", &[], Prim::Int64));
     }
     let n = || DimInfo::Named("n".into(), None);
     let rows = dag.add_node(
+        decl,
         RiscOp::SplitN { count },
         inputs,
         TensorType {
@@ -615,6 +680,7 @@ fn split_declaring_n(count: RtDim, draw: bool) -> (Dag, NodeId) {
         None,
     );
     let d = dag.add_node(
+        decl,
         RiscOp::Load { name: "d".into() },
         vec![],
         TensorType {
@@ -624,8 +690,9 @@ fn split_declaring_n(count: RtDim, draw: bool) -> (Dag, NodeId) {
         None,
     );
     let out = if draw {
-        let rate = float_const(&mut dag, Prim::F32, 0.5);
+        let rate = float_const(&mut dag, decl, Prim::F32, 0.5);
         let drawn = dag.add_node(
+            decl,
             RiscOp::Dropout,
             vec![d, rate, rows],
             TensorType {
@@ -656,9 +723,7 @@ fn eval_split(dag: &Dag, count: i64) -> Result<UnordMap<NodeId, TensorValue>, St
         ),
         ("d", floats(Prim::F32, vec![4, 2], vec![1.0; 8])),
     ]);
-    eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-        inputs.get(name).cloned()
-    })
+    eval_tensor_roots_exact(dag, dag.roots(), |name| inputs.get(name).cloned())
 }
 
 /// A count that disagrees with its declared, elsewhere-bound axis traps
@@ -708,7 +773,9 @@ fn a_split_count_that_disagrees_with_its_declared_extent_traps() {
 #[test]
 fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let key = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         TensorType {
@@ -718,6 +785,7 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
         None,
     );
     let rows = dag.add_node(
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(2),
         },
@@ -729,6 +797,7 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
         None,
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Load { name: "e".into() },
         vec![],
         TensorType {
@@ -746,9 +815,7 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
             ("k", keys_value(vec![3], vec![one; 3])),
             ("e", floats(Prim::F32, vec![b], vec![0.0; b])),
         ]);
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            inputs.get(name).cloned()
-        })
+        eval_tensor_roots_exact(&dag, dag.roots(), |name| inputs.get(name).cloned())
     };
     let error = run(2).unwrap_err();
     assert!(
@@ -763,28 +830,37 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
 // trap dead" ----
 
 /// A key-sourced draw validates its own rate, so a discarded one with an
-/// invalid rate still traps; with a valid rate the same graph succeeds.
+/// invalid rate still traps. With a valid literal rate it cannot trap
+/// (decisions section 6 item 5), so it is dead code the verifier reports as
+/// dangling, and the same graph succeeds.
 #[test]
 fn a_discarded_key_sourced_draw_with_an_invalid_rate_still_traps() {
     for (rate, traps) in [(1.5, true), (0.5, false)] {
         let mut dag = Dag::new();
-        let key = root_key(&mut dag);
-        let x = load(&mut dag, "x", &[4], Prim::F32);
-        let bad = float_const(&mut dag, Prim::F32, rate);
-        node(
+        let decl = dag.declare("test");
+        let key = root_key(&mut dag, decl);
+        let x = load(&mut dag, decl, "x", &[4], Prim::F32);
+        let bad = float_const(&mut dag, decl, Prim::F32, rate);
+        let draw = node(
             &mut dag,
+            decl,
             RiscOp::Dropout,
             vec![x, bad, key],
             &[4],
             Prim::F32,
         );
-        let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
+        let out = node(&mut dag, decl, RiscOp::Neg, vec![x], &[4], Prim::F32);
         dag.add_root(out);
-        assert_eq!(verify(&dag), Vec::<String>::new());
-        let result =
-            eval_tensor_roots_with_frame(&dag, &[out], &mut RandomFrame::unhandled(), |_| {
-                Some(floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
-            });
+        let dangling = (!traps).then(|| {
+            format!(
+                "node {} is dangling: it has no consumers and is not a DAG root",
+                draw.0
+            )
+        });
+        assert_eq!(verify(&dag), Vec::from_iter(dangling));
+        let result = eval_tensor_roots_exact(&dag, &[out], |_| {
+            Some(floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
+        });
         assert_eq!(result.is_err(), traps, "rate {rate}: {result:?}");
         if traps {
             assert!(
@@ -796,26 +872,28 @@ fn a_discarded_key_sourced_draw_with_an_invalid_rate_still_traps() {
 }
 
 /// Dead-code elimination keeps exactly the random nodes that can trap by
-/// themselves: a key-sourced draw and a runtime-count `SplitN`. A draw keyed
-/// by a `DrawKey` leaves its trap to that `DrawKey`, and a literal-count
-/// `SplitN` and a `FoldIn` cannot trap, so all three are removed when dead.
-/// The verifier draws the same line: only those three are dangling.
+/// themselves: a draw with a runtime rate and a runtime-count `SplitN`. A
+/// literal-count `SplitN` and a `FoldIn` cannot trap, so both are removed
+/// when dead. The verifier draws the same line: only those two are dangling.
 #[test]
 fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", &[4], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
-    let keyed = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", &[4], Prim::F32);
+    let rate = load(&mut dag, decl, "rate", &[], Prim::F32);
+    let keyed = root_key(&mut dag, decl);
     node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, keyed],
         &[4],
         Prim::F32,
     );
-    let n = load(&mut dag, "n", &[], Prim::Int64);
-    let counted = root_key(&mut dag);
+    let n = load(&mut dag, decl, "n", &[], Prim::Int64);
+    let counted = root_key(&mut dag, decl);
     dag.add_node(
+        decl,
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
@@ -826,9 +904,10 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
         },
         None,
     );
-    let literal = root_key(&mut dag);
+    let literal = root_key(&mut dag, decl);
     let literal_split = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(2),
         },
@@ -836,34 +915,17 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
         &[2],
         Prim::Key,
     );
-    let folded = root_key(&mut dag);
-    let three = i64_const(&mut dag, 3);
+    let folded = root_key(&mut dag, decl);
+    let three = i64_const(&mut dag, decl, 3);
     let fold = node(
         &mut dag,
+        decl,
         RiscOp::FoldIn,
         vec![folded, three],
         &[],
         Prim::Key,
     );
-    let drawn = node(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Inherited,
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![rate],
-        &[],
-        Prim::Key,
-    );
-    let bridged = node(
-        &mut dag,
-        RiscOp::Dropout,
-        vec![x, rate, drawn],
-        &[4],
-        Prim::F32,
-    );
-    let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
+    let out = node(&mut dag, decl, RiscOp::Neg, vec![x], &[4], Prim::F32);
     dag.add_root(out);
     let dangling = |id: NodeId| {
         format!(
@@ -871,10 +933,7 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
             id.0
         )
     };
-    assert_eq!(
-        verify(&dag),
-        vec![dangling(literal_split), dangling(fold), dangling(bridged)]
-    );
+    assert_eq!(verify(&dag), vec![dangling(literal_split), dangling(fold)]);
 
     let kept = dead_code_eliminate(&dag);
     assert_eq!(verify(&kept), Vec::<String>::new());
@@ -917,12 +976,21 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
 fn grad_keeps_a_discarded_key_sourced_draw_that_can_trap() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let x = load(&mut dag, "x", &[4], prim);
-    let bad = float_const(&mut dag, prim, 1.5);
-    node(&mut dag, RiscOp::Dropout, vec![x, bad, key], &[4], prim);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let x = load(&mut dag, decl, "x", &[4], prim);
+    let bad = float_const(&mut dag, decl, prim, 1.5);
+    node(
+        &mut dag,
+        decl,
+        RiscOp::Dropout,
+        vec![x, bad, key],
+        &[4],
+        prim,
+    );
     let total = node(
         &mut dag,
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: prim,
@@ -941,12 +1009,9 @@ fn grad_keeps_a_discarded_key_sourced_draw_that_can_trap() {
         "the discarded draw was pruned"
     );
     let gradient = grad.grad_nodes[&x];
-    let result = eval_tensor_roots_with_frame(
-        &grad.dag,
-        &[gradient],
-        &mut RandomFrame::unhandled(),
-        |_| Some(floats(prim, vec![4], vec![1.0, 2.0, 3.0, 4.0])),
-    );
+    let result = eval_tensor_roots_exact(&grad.dag, &[gradient], |_| {
+        Some(floats(prim, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
+    });
     assert!(
         result.unwrap_err().contains("numeric trap: domain"),
         "the retained draw must trap"
@@ -963,39 +1028,66 @@ fn assert_rejected(dag: &Dag, needle: &str) {
     );
 }
 
-fn root_key(dag: &mut Dag) -> NodeId {
-    let seed = i64_const(dag, 7);
-    node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
+fn root_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
+    let seed = i64_const(dag, decl, 7);
+    node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
 }
 
-fn draw(dag: &mut Dag, key: NodeId, active: Option<NodeId>) -> NodeId {
-    let x = load(dag, "x", &[4], Prim::F32);
-    let rate = float_const(dag, Prim::F32, 0.5);
-    let inputs = [x, rate, key].into_iter().chain(active).collect();
-    node(dag, RiscOp::Dropout, inputs, &[4], Prim::F32)
+fn draw(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    key: NodeId,
+    active: Option<NodeId>,
+) -> NodeId {
+    let x = load(dag, decl, "x", &[4], Prim::F32);
+    let rate = float_const(dag, decl, Prim::F32, 0.5);
+    dag.add_node(
+        Owner::new(decl, active),
+        RiscOp::Dropout,
+        vec![x, rate, key],
+        ty(&[4], Prim::F32),
+        None,
+    )
 }
 
-fn split(dag: &mut Dag, key: NodeId, branch: KeyBranch) -> NodeId {
-    node(dag, RiscOp::Split { branch }, vec![key], &[], Prim::Key)
+fn split(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, branch: KeyBranch) -> NodeId {
+    node(
+        dag,
+        decl,
+        RiscOp::Split { branch },
+        vec![key],
+        &[],
+        Prim::Key,
+    )
 }
 
 #[test]
 fn a_key_consumed_twice_is_rejected_for_every_consumer_kind() {
     // Two draws.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     for _ in 0..2 {
-        let drawn = draw(&mut dag, key, None);
+        let drawn = draw(&mut dag, decl, key, None);
         dag.add_root(drawn);
     }
     assert_rejected(&dag, "is consumed twice");
     // A fold and a split-n.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let three = i64_const(&mut dag, 3);
-    let folded = node(&mut dag, RiscOp::FoldIn, vec![key, three], &[], Prim::Key);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let three = i64_const(&mut dag, decl, 3);
+    let folded = node(
+        &mut dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![key, three],
+        &[],
+        Prim::Key,
+    );
     let rows = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(2),
         },
@@ -1008,26 +1100,37 @@ fn a_key_consumed_twice_is_rejected_for_every_consumer_kind() {
     assert_rejected(&dag, "is consumed twice");
     // A split and a fold on one parent.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let left = split(&mut dag, key, KeyBranch::Left);
-    let three = i64_const(&mut dag, 3);
-    let folded = node(&mut dag, RiscOp::FoldIn, vec![key, three], &[], Prim::Key);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let left = split(&mut dag, decl, key, KeyBranch::Left);
+    let three = i64_const(&mut dag, decl, 3);
+    let folded = node(
+        &mut dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![key, three],
+        &[],
+        Prim::Key,
+    );
     dag.add_root(left);
     dag.add_root(folded);
     assert_rejected(&dag, "is consumed twice");
     // Two lefts.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let first = split(&mut dag, key, KeyBranch::Left);
-    let second = split(&mut dag, key, KeyBranch::Left);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let first = split(&mut dag, decl, key, KeyBranch::Left);
+    let second = split(&mut dag, decl, key, KeyBranch::Left);
     dag.add_root(first);
     dag.add_root(second);
-    assert_rejected(&dag, "split twice for the Left branch");
+    assert_rejected(&dag, "split twice for one branch");
     // A split-n key reused by a draw after its derivation (consumed twice).
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     let rows = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(4),
         },
@@ -1035,7 +1138,7 @@ fn a_key_consumed_twice_is_rejected_for_every_consumer_kind() {
         &[4],
         Prim::Key,
     );
-    let drawn = draw(&mut dag, key, None);
+    let drawn = draw(&mut dag, decl, key, None);
     dag.add_root(rows);
     dag.add_root(drawn);
     assert_rejected(&dag, "is consumed twice");
@@ -1044,20 +1147,23 @@ fn a_key_consumed_twice_is_rejected_for_every_consumer_kind() {
 #[test]
 fn one_split_per_branch_a_key_root_and_a_key_load_are_accepted() {
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let left = split(&mut dag, key, KeyBranch::Left);
-    let right = split(&mut dag, key, KeyBranch::Right);
-    let drawn = draw(&mut dag, left, None);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let left = split(&mut dag, decl, key, KeyBranch::Left);
+    let right = split(&mut dag, decl, key, KeyBranch::Right);
+    let drawn = draw(&mut dag, decl, left, None);
     dag.add_root(drawn);
     dag.add_root(right);
     assert_eq!(verify(&dag), Vec::<String>::new());
     let mut dag = Dag::new();
-    let loaded = load(&mut dag, "k", &[], Prim::Key);
-    let drawn = draw(&mut dag, loaded, None);
+    let decl = dag.declare("test");
+    let loaded = load(&mut dag, decl, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, decl, loaded, None);
     dag.add_root(drawn);
     assert_eq!(verify(&dag), Vec::<String>::new());
     let mut dag = Dag::new();
-    let loaded = load(&mut dag, "k", &[], Prim::Key);
+    let decl = dag.declare("test");
+    let loaded = load(&mut dag, decl, "k", &[], Prim::Key);
     dag.add_root(loaded);
     assert_eq!(verify(&dag), Vec::<String>::new());
 }
@@ -1068,121 +1174,83 @@ fn one_split_per_branch_a_key_root_and_a_key_load_are_accepted() {
 fn a_root_and_every_load_of_one_parameter_count_as_uses_of_one_key() {
     // A loaded key that is returned and drawn with.
     let mut dag = Dag::new();
-    let loaded = load(&mut dag, "k", &[], Prim::Key);
-    let drawn = draw(&mut dag, loaded, None);
+    let decl = dag.declare("test");
+    let loaded = load(&mut dag, decl, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, decl, loaded, None);
     dag.add_root(drawn);
     dag.add_root(loaded);
     assert_rejected(&dag, "is a graph root and is also consumed");
     // A derived key that is returned and split.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let left = split(&mut dag, key, KeyBranch::Left);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let left = split(&mut dag, decl, key, KeyBranch::Left);
     dag.add_root(key);
     dag.add_root(left);
     assert_rejected(&dag, "is a graph root and is also consumed");
     // A key returned twice.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     dag.set_roots(vec![key, key]);
     assert_rejected(&dag, "is a graph root twice");
     // Two loads of one parameter, each drawn with.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     for _ in 0..2 {
-        let loaded = load(&mut dag, "k", &[], Prim::Key);
-        let drawn = draw(&mut dag, loaded, None);
+        let loaded = load(&mut dag, decl, "k", &[], Prim::Key);
+        let drawn = draw(&mut dag, decl, loaded, None);
         dag.add_root(drawn);
     }
     assert_rejected(&dag, "is consumed twice");
     // Two loads of one parameter, one drawn with and one returned.
     let mut dag = Dag::new();
-    let first = load(&mut dag, "k", &[], Prim::Key);
-    let second = load(&mut dag, "k", &[], Prim::Key);
-    let drawn = draw(&mut dag, first, None);
+    let decl = dag.declare("test");
+    let first = load(&mut dag, decl, "k", &[], Prim::Key);
+    let second = load(&mut dag, decl, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, decl, first, None);
     dag.add_root(drawn);
     dag.add_root(second);
     assert_rejected(&dag, "is a graph root and is also consumed");
     // Loads of two parameters are two keys.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     for name in ["k", "j"] {
-        let loaded = load(&mut dag, name, &[], Prim::Key);
-        let drawn = draw(&mut dag, loaded, None);
+        let loaded = load(&mut dag, decl, name, &[], Prim::Key);
+        let drawn = draw(&mut dag, decl, loaded, None);
         dag.add_root(drawn);
     }
     assert_eq!(verify(&dag), Vec::<String>::new());
 }
 
-/// A `DrawKey`'s key is the counter bridge's word for exactly its draw, and
-/// neither lane derives from it or returns it, so only a draw consumes it.
 #[test]
-fn a_draw_keys_key_feeds_only_a_draw() {
-    for consumer in ["split", "fold_in", "split_n", "root"] {
-        let mut dag = Dag::new();
-        let rate = float_const(&mut dag, Prim::F32, 0.5);
-        let bridged = node(
-            &mut dag,
-            RiscOp::DrawKey {
-                handler: RandomHandler::Inherited,
-                draw: RandomDraw::Dropout,
-                dtype: Prim::F32,
-            },
-            vec![rate],
-            &[],
-            Prim::Key,
-        );
-        match consumer {
-            "split" => {
-                let left = split(&mut dag, bridged, KeyBranch::Left);
-                let drawn = draw(&mut dag, left, None);
-                dag.add_root(drawn);
-            }
-            "fold_in" => {
-                let three = i64_const(&mut dag, 3);
-                let folded = node(
-                    &mut dag,
-                    RiscOp::FoldIn,
-                    vec![bridged, three],
-                    &[],
-                    Prim::Key,
-                );
-                let drawn = draw(&mut dag, folded, None);
-                dag.add_root(drawn);
-            }
-            "split_n" => {
-                let rows = node(
-                    &mut dag,
-                    RiscOp::SplitN {
-                        count: RtDim::Lit(4),
-                    },
-                    vec![bridged],
-                    &[4],
-                    Prim::Key,
-                );
-                dag.add_root(rows);
-            }
-            _ => dag.add_root(bridged),
-        }
-        assert_rejected(&dag, "a draw key's key feeds only its draw");
-    }
-}
-
-#[test]
-fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
+fn a_key_reaching_arithmetic_or_selection_is_rejected() {
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let other = root_key(&mut dag);
-    let added = node(&mut dag, RiscOp::Add, vec![key, other], &[], Prim::Key);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let other = root_key(&mut dag, decl);
+    let added = node(
+        &mut dag,
+        decl,
+        RiscOp::Add,
+        vec![key, other],
+        &[],
+        Prim::Key,
+    );
     dag.add_root(added);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
 
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let other = root_key(&mut dag);
-    let condition = load(&mut dag, "c", &[], Prim::Bool);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let other = root_key(&mut dag, decl);
+    let condition = load(&mut dag, decl, "c", &[], Prim::Bool);
     let selected = node(
         &mut dag,
+        decl,
         RiscOp::Where,
         vec![condition, key, other],
         &[],
@@ -1191,36 +1259,80 @@ fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
     dag.add_root(selected);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
     // `key` is an active tensor element dtype, but `where` names no `key`,
     // so its own scheme rejects key branches too, independently of V4.
     assert_rejected(&dag, "branches must use an active data element dtype");
+}
 
+/// [04-LIN-9], spec/10 §3.2: a shape dependency reads only its node's
+/// extent, which is not key material, so a node may name a key there, before
+/// or after the key's one use, and the key is still consumed exactly once.
+///
+/// Evidentiary status: REGRESSION TEST for the acceptance (at `96f5a4f9d`
+/// both accepting graphs failed with "takes the `key_from_seed` key at
+/// node 1 as a dependency"); the two rejections are locks.
+#[test]
+fn a_shape_dependency_on_a_key_observes_it_without_a_use() {
+    let observed = |second_draw: bool| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let key = root_key(&mut dag, decl);
+        let drawn = draw(&mut dag, decl, key, None);
+        let x = load(&mut dag, decl, "y", &[4], Prim::F32);
+        let negated = node(&mut dag, decl, RiscOp::Neg, vec![x], &[4], Prim::F32);
+        dag.node_mut(negated).unwrap().shape_deps.push(key);
+        dag.add_root(drawn);
+        dag.add_root(negated);
+        if second_draw {
+            let again = draw(&mut dag, decl, key, None);
+            dag.add_root(again);
+        }
+        dag
+    };
+    assert_eq!(verify(&observed(false)), Vec::<String>::new());
+    assert_rejected(&observed(true), "is consumed twice");
+
+    // A split's keys named as a shape dependency by their draw's result.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let drawn = draw(&mut dag, key, None);
-    let x = load(&mut dag, "y", &[4], Prim::F32);
-    let negated = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
-    dag.node_mut(negated).unwrap().shape_deps.push(key);
-    dag.add_root(drawn);
-    dag.add_root(negated);
-    assert_rejected(&dag, "as a dependency");
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let keys = node(
+        &mut dag,
+        decl,
+        RiscOp::SplitN {
+            count: RtDim::Lit(4),
+        },
+        vec![key],
+        &[4],
+        Prim::Key,
+    );
+    let drawn = draw(&mut dag, decl, keys, None);
+    let copied = node(&mut dag, decl, RiscOp::Copy, vec![drawn], &[4], Prim::F32);
+    dag.node_mut(copied).unwrap().shape_deps.push(keys);
+    dag.add_root(copied);
+    assert_eq!(verify(&dag), Vec::<String>::new());
+    let reused = draw(&mut dag, decl, keys, None);
+    dag.add_root(reused);
+    assert_rejected(&dag, "is consumed twice");
 }
 
 #[test]
 fn a_replay_must_read_its_own_forward_draws_key() {
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let other = root_key(&mut dag);
-    let forward = draw(&mut dag, key, None);
-    let other_forward = draw(&mut dag, other, None);
-    let g = load(&mut dag, "g", &[4], Prim::F32);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let other = root_key(&mut dag, decl);
+    let forward = draw(&mut dag, decl, key, None);
+    let other_forward = draw(&mut dag, decl, other, None);
+    let g = load(&mut dag, decl, "g", &[4], Prim::F32);
     let rate = dag.get(forward).unwrap().inputs[1];
     // The replay reads `other`'s key while claiming `forward`'s rate; the
     // two rates are distinct constants, so the mask contract changes.
     let replay = node(
         &mut dag,
+        decl,
         RiscOp::DropoutReplay,
         vec![g, rate, other],
         &[4],
@@ -1229,15 +1341,17 @@ fn a_replay_must_read_its_own_forward_draws_key() {
     for root in [forward, other_forward, replay] {
         dag.add_root(root);
     }
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
     // A replay of a key only a derivation consumed has no forward draw.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let left = split(&mut dag, key, KeyBranch::Left);
-    let g = load(&mut dag, "g", &[4], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let left = split(&mut dag, decl, key, KeyBranch::Left);
+    let g = load(&mut dag, decl, "g", &[4], Prim::F32);
+    let rate = float_const(&mut dag, decl, Prim::F32, 0.5);
     let replay = node(
         &mut dag,
+        decl,
         RiscOp::DropoutReplay,
         vec![g, rate, key],
         &[4],
@@ -1245,14 +1359,19 @@ fn a_replay_must_read_its_own_forward_draws_key() {
     );
     dag.add_root(left);
     dag.add_root(replay);
-    assert_rejected(&dag, "that no forward random primitive consumes");
+    assert_rejected(&dag, "which no forward random primitive consumes");
 }
 
 /// `lower_if`'s arm activations over the enclosing path `parent`.
-fn arms(dag: &mut Dag, parent: Option<NodeId>) -> (NodeId, NodeId, NodeId) {
-    let condition = load(dag, "c", &[], Prim::Bool);
+fn arms(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    parent: Option<NodeId>,
+) -> (NodeId, NodeId, NodeId) {
+    let condition = load(dag, decl, "c", &[], Prim::Bool);
     let not = node(
         dag,
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![condition],
         &[],
@@ -1263,6 +1382,7 @@ fn arms(dag: &mut Dag, parent: Option<NodeId>) -> (NodeId, NodeId, NodeId) {
         Some(parent) => {
             let then_arm = node(
                 dag,
+                decl,
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent, condition],
                 &[],
@@ -1270,6 +1390,7 @@ fn arms(dag: &mut Dag, parent: Option<NodeId>) -> (NodeId, NodeId, NodeId) {
             );
             let else_arm = node(
                 dag,
+                decl,
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent, not],
                 &[],
@@ -1284,10 +1405,11 @@ fn arms(dag: &mut Dag, parent: Option<NodeId>) -> (NodeId, NodeId, NodeId) {
 fn rule_v3_admits_exclusive_arms_and_rejects_overlapping_ones() {
     // Top-level arms: X and Not(X).
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let (_, then_arm, else_arm) = arms(&mut dag, None);
-    let a = draw(&mut dag, key, Some(then_arm));
-    let b = draw(&mut dag, key, Some(else_arm));
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let (_, then_arm, else_arm) = arms(&mut dag, decl, None);
+    let a = draw(&mut dag, decl, key, Some(then_arm));
+    let b = draw(&mut dag, decl, key, Some(else_arm));
     dag.add_root(a);
     dag.add_root(b);
     assert_eq!(verify(&dag), Vec::<String>::new());
@@ -1295,62 +1417,69 @@ fn rule_v3_admits_exclusive_arms_and_rejects_overlapping_ones() {
     // Nested: And(P, X) against And(P, Not X), and a third draw nested in
     // the then arm, And(And(P, X), Y), against the else arm.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let parent = load(&mut dag, "p", &[], Prim::Bool);
-    let (_, then_arm, else_arm) = arms(&mut dag, Some(parent));
-    let inner = load(&mut dag, "y", &[], Prim::Bool);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let parent = load(&mut dag, decl, "p", &[], Prim::Bool);
+    let (_, then_arm, else_arm) = arms(&mut dag, decl, Some(parent));
+    let inner = load(&mut dag, decl, "y", &[], Prim::Bool);
     let nested = node(
         &mut dag,
+        decl,
         RiscOp::Logical(LogicalKind::And),
         vec![then_arm, inner],
         &[],
         Prim::Bool,
     );
-    let a = draw(&mut dag, key, Some(nested));
-    let b = draw(&mut dag, key, Some(else_arm));
+    let a = draw(&mut dag, decl, key, Some(nested));
+    let b = draw(&mut dag, decl, key, Some(else_arm));
     dag.add_root(a);
     dag.add_root(b);
     assert_eq!(verify(&dag), Vec::<String>::new());
 
     // Two draws under the same arm, and under unrelated conditions, overlap.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let (_, then_arm, _) = arms(&mut dag, None);
-    let a = draw(&mut dag, key, Some(then_arm));
-    let b = draw(&mut dag, key, Some(then_arm));
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let (_, then_arm, _) = arms(&mut dag, decl, None);
+    let a = draw(&mut dag, decl, key, Some(then_arm));
+    let b = draw(&mut dag, decl, key, Some(then_arm));
     dag.add_root(a);
     dag.add_root(b);
     assert_rejected(&dag, "whose activations are not exclusive");
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let first = load(&mut dag, "c1", &[], Prim::Bool);
-    let second = load(&mut dag, "c2", &[], Prim::Bool);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let first = load(&mut dag, decl, "c1", &[], Prim::Bool);
+    let second = load(&mut dag, decl, "c2", &[], Prim::Bool);
     let not_second = node(
         &mut dag,
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![second],
         &[],
         Prim::Bool,
     );
-    let a = draw(&mut dag, key, Some(first));
-    let b = draw(&mut dag, key, Some(not_second));
+    let a = draw(&mut dag, decl, key, Some(first));
+    let b = draw(&mut dag, decl, key, Some(not_second));
     dag.add_root(a);
     dag.add_root(b);
     assert_rejected(&dag, "whose activations are not exclusive");
     // An activated draw beside an unactivated one is a double consume.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let (_, then_arm, _) = arms(&mut dag, None);
-    let a = draw(&mut dag, key, Some(then_arm));
-    let b = draw(&mut dag, key, None);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let (_, then_arm, _) = arms(&mut dag, decl, None);
+    let a = draw(&mut dag, decl, key, Some(then_arm));
+    let b = draw(&mut dag, decl, key, None);
     dag.add_root(a);
     dag.add_root(b);
     assert_rejected(&dag, "is consumed twice");
 }
 
-fn bool_const(dag: &mut Dag, value: bool) -> NodeId {
+fn bool_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: bool) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Bool, i64::from(value)).unwrap(),
         },
@@ -1373,10 +1502,7 @@ fn eval_roots(dag: &Dag) -> Vec<Vec<u64>> {
             ),
         ),
     ]);
-    let out = eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |n| {
-        inputs.get(n).cloned()
-    })
-    .unwrap();
+    let out = eval_tensor_roots_exact(dag, dag.roots(), |n| inputs.get(n).cloned()).unwrap();
     dag.roots()
         .iter()
         .map(|root| stored_bits(&out[root]))
@@ -1391,20 +1517,23 @@ fn rule_v3_holds_after_folding_a_constant_condition() {
     for condition in [true, false] {
         for nested in [false, true] {
             let mut dag = Dag::new();
-            let key = root_key(&mut dag);
-            let x = bool_const(&mut dag, condition);
+            let decl = dag.declare("test");
+            let key = root_key(&mut dag, decl);
+            let x = bool_const(&mut dag, decl, condition);
             let not = node(
                 &mut dag,
+                decl,
                 RiscOp::Logical(LogicalKind::Not),
                 vec![x],
                 &[],
                 Prim::Bool,
             );
             let (then_arm, else_arm) = if nested {
-                let parent = load(&mut dag, "p", &[], Prim::Bool);
+                let parent = load(&mut dag, decl, "p", &[], Prim::Bool);
                 let mut and = |arm| {
                     node(
                         &mut dag,
+                        decl,
                         RiscOp::Logical(LogicalKind::And),
                         vec![parent, arm],
                         &[],
@@ -1415,8 +1544,8 @@ fn rule_v3_holds_after_folding_a_constant_condition() {
             } else {
                 (x, not)
             };
-            let a = draw(&mut dag, key, Some(then_arm));
-            let b = draw(&mut dag, key, Some(else_arm));
+            let a = draw(&mut dag, decl, key, Some(then_arm));
+            let b = draw(&mut dag, decl, key, Some(else_arm));
             dag.add_root(a);
             dag.add_root(b);
             let case = format!("condition={condition} nested={nested}");
@@ -1439,19 +1568,21 @@ fn rule_v3_holds_after_folding_a_constant_condition() {
     // Two true constants are not exclusive, and a false one does not excuse
     // a draw that carries no activation.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let first = bool_const(&mut dag, true);
-    let second = bool_const(&mut dag, true);
-    let a = draw(&mut dag, key, Some(first));
-    let b = draw(&mut dag, key, Some(second));
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let first = bool_const(&mut dag, decl, true);
+    let second = bool_const(&mut dag, decl, true);
+    let a = draw(&mut dag, decl, key, Some(first));
+    let b = draw(&mut dag, decl, key, Some(second));
     dag.add_root(a);
     dag.add_root(b);
     assert_rejected(&dag, "whose activations are not exclusive");
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
-    let off = bool_const(&mut dag, false);
-    let a = draw(&mut dag, key, Some(off));
-    let b = draw(&mut dag, key, None);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
+    let off = bool_const(&mut dag, decl, false);
+    let a = draw(&mut dag, decl, key, Some(off));
+    let b = draw(&mut dag, decl, key, None);
     dag.add_root(a);
     dag.add_root(b);
     assert_rejected(&dag, "is consumed twice");
@@ -1462,8 +1593,10 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     // A key op fed an integer where a key belongs, and a seed of the wrong
     // integer width.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let seed = node(
         &mut dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Int32, 7).unwrap(),
         },
@@ -1471,21 +1604,38 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         &[],
         Prim::Int32,
     );
-    let key = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let key = node(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        &[],
+        Prim::Key,
+    );
     dag.add_root(key);
     assert_rejected(&dag, "reads the wrong operand dtype");
     // fold_in with unequal shapes: no broadcasting.
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3], Prim::Key);
-    let n = i64_const(&mut dag, 1);
-    let folded = node(&mut dag, RiscOp::FoldIn, vec![keys, n], &[3], Prim::Key);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3], Prim::Key);
+    let n = i64_const(&mut dag, decl, 1);
+    let folded = node(
+        &mut dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![keys, n],
+        &[3],
+        Prim::Key,
+    );
     dag.add_root(folded);
     assert_rejected(&dag, "element-wise over one exact shape");
     // split_keys whose declared count disagrees with its literal.
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     let rows = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1498,11 +1648,13 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     // V5: a key batch whose shape is not the data's leading shape, and a
     // control whose shape is no leading part of the key's.
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3], Prim::Key);
-    let x = load(&mut dag, "x", &[2, 4], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3], Prim::Key);
+    let x = load(&mut dag, decl, "x", &[2, 4], Prim::F32);
+    let rate = float_const(&mut dag, decl, Prim::F32, 0.5);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, keys],
         &[2, 4],
@@ -1514,11 +1666,13 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         "requires a key batch matching its data's leading axes",
     );
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3], Prim::Key);
-    let x = load(&mut dag, "x", &[3, 4], Prim::F32);
-    let rates = load(&mut dag, "r", &[4], Prim::F32);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3], Prim::Key);
+    let x = load(&mut dag, decl, "x", &[3, 4], Prim::F32);
+    let rates = load(&mut dag, decl, "r", &[4], Prim::F32);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rates, keys],
         &[3, 4],
@@ -1528,11 +1682,13 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     assert_rejected(&dag, "random control must be a value of the draw's dtype");
     // A rank-2 key batch is its data's leading two axes, in order.
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
-    let x = load(&mut dag, "x", &[2, 3], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3, 2], Prim::Key);
+    let x = load(&mut dag, decl, "x", &[2, 3], Prim::F32);
+    let rate = float_const(&mut dag, decl, Prim::F32, 0.5);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, keys],
         &[2, 3],
@@ -1545,11 +1701,13 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     );
     // A control shaped like the key's trailing axis, not a leading part.
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
-    let x = load(&mut dag, "x", &[3, 2, 4], Prim::F32);
-    let rates = load(&mut dag, "r", &[2], Prim::F32);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3, 2], Prim::Key);
+    let x = load(&mut dag, decl, "x", &[3, 2, 4], Prim::F32);
+    let rates = load(&mut dag, decl, "r", &[2], Prim::F32);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rates, keys],
         &[3, 2, 4],
@@ -1559,13 +1717,15 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     assert_rejected(&dag, "random control must be a value of the draw's dtype");
     // A bound adjoint's result shaped like no leading part of its key.
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
-    let t = load(&mut dag, "t", &[3, 2, 4], Prim::F32);
-    let g = load(&mut dag, "g", &[3, 2, 4], Prim::F32);
-    let low = float_const(&mut dag, Prim::F32, 0.0);
-    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3, 2], Prim::Key);
+    let t = load(&mut dag, decl, "t", &[3, 2, 4], Prim::F32);
+    let g = load(&mut dag, decl, "g", &[3, 2, 4], Prim::F32);
+    let low = float_const(&mut dag, decl, Prim::F32, 0.0);
+    let high = float_const(&mut dag, decl, Prim::F32, 1.0);
     let forward = node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         &[3, 2, 4],
@@ -1573,6 +1733,7 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     );
     let adjoint = node(
         &mut dag,
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::High,
         },
@@ -1601,9 +1762,11 @@ fn named_ty(names: &[&str], trailing: &[usize], prim: Prim) -> TensorType {
 /// a `UniformLike` of them declared `[rows, 4]`.
 fn uniform_declaring_rows(rows: usize) -> Dag {
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     let keys = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1611,11 +1774,12 @@ fn uniform_declaring_rows(rows: usize) -> Dag {
         &[3],
         Prim::Key,
     );
-    let t = load(&mut dag, "t", &[3, 4], Prim::F32);
-    let low = float_const(&mut dag, Prim::F32, 0.0);
-    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let t = load(&mut dag, decl, "t", &[3, 4], Prim::F32);
+    let low = float_const(&mut dag, decl, Prim::F32, 0.0);
+    let high = float_const(&mut dag, decl, Prim::F32, 1.0);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         &[rows, 4],
@@ -1629,9 +1793,11 @@ fn uniform_declaring_rows(rows: usize) -> Dag {
 /// and its high-bound adjoint over the cotangent `g` of type `cotangent`.
 fn bound_adjoint_over(cotangent: TensorType) -> Dag {
     let mut dag = Dag::new();
-    let key = root_key(&mut dag);
+    let decl = dag.declare("test");
+    let key = root_key(&mut dag, decl);
     let keys = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1639,19 +1805,27 @@ fn bound_adjoint_over(cotangent: TensorType) -> Dag {
         &[3],
         Prim::Key,
     );
-    let t = load(&mut dag, "t", &[3, 5], Prim::F32);
-    let low = float_const(&mut dag, Prim::F32, 0.0);
-    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let t = load(&mut dag, decl, "t", &[3, 5], Prim::F32);
+    let low = float_const(&mut dag, decl, Prim::F32, 0.0);
+    let high = float_const(&mut dag, decl, Prim::F32, 1.0);
     let forward = node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         &[3, 5],
         Prim::F32,
     );
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], cotangent, None);
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        cotangent,
+        None,
+    );
     let adjoint = node(
         &mut dag,
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::High,
         },
@@ -1689,21 +1863,25 @@ fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
     // result `[m]`.
     let named = |out: &str| {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let keys = dag.add_node(
+            decl,
             RiscOp::Load { name: "k".into() },
             vec![],
             named_ty(&["n"], &[], Prim::Key),
             None,
         );
         let t = dag.add_node(
+            decl,
             RiscOp::Load { name: "t".into() },
             vec![],
             named_ty(&["n"], &[4], Prim::F32),
             None,
         );
-        let low = float_const(&mut dag, Prim::F32, 0.0);
-        let high = float_const(&mut dag, Prim::F32, 1.0);
+        let low = float_const(&mut dag, decl, Prim::F32, 0.0);
+        let high = float_const(&mut dag, decl, Prim::F32, 1.0);
         let drawn = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![t, low, high, keys],
             named_ty(&[out], &[4], Prim::F32),
@@ -1721,13 +1899,21 @@ fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
     let key_op = "key operation must be element-wise over one exact shape";
     let unary = |op: RiscOp, operand: Prim, out: &str| {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "k".into() },
             vec![],
             named_ty(&["n"], &[], operand),
             None,
         );
-        let result = dag.add_node(op, vec![input], named_ty(&[out], &[], Prim::Key), None);
+        let result = dag.add_node(
+            decl,
+            op,
+            vec![input],
+            named_ty(&[out], &[], Prim::Key),
+            None,
+        );
         dag.add_root(result);
         dag
     };
@@ -1746,19 +1932,23 @@ fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
     );
     let fold = |indices: &str, out: &str| {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let keys = dag.add_node(
+            decl,
             RiscOp::Load { name: "k".into() },
             vec![],
             named_ty(&["n"], &[], Prim::Key),
             None,
         );
         let ns = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             named_ty(&[indices], &[], Prim::Int64),
             None,
         );
         let result = dag.add_node(
+            decl,
             RiscOp::FoldIn,
             vec![keys, ns],
             named_ty(&[out], &[], Prim::Key),
@@ -1790,11 +1980,12 @@ fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
 /// `[05-OP-71]` twice: `split_keys(split_keys(key(seed), 2)[i], 3)`, the
 /// `tensor[2, 3, key]` whose element `(i, j)` is key_ref.py's
 /// `split_n(split_n(key(seed), 2)[i], 3)[j]`.
-fn rank_two_keys(dag: &mut Dag, seed: i64) -> NodeId {
-    let seed = i64_const(dag, seed);
-    let root = node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+fn rank_two_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId {
+    let seed = i64_const(dag, decl, seed);
+    let root = node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     let rows = node(
         dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(2),
         },
@@ -1804,6 +1995,7 @@ fn rank_two_keys(dag: &mut Dag, seed: i64) -> NodeId {
     );
     node(
         dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1858,22 +2050,25 @@ fn rank_two_uniform_bits() -> Vec<u64> {
 fn a_rank_two_key_batch_draws_each_row_with_its_own_key() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let uniform_keys = rank_two_keys(&mut dag, 7);
-    let template = load(&mut dag, "t", &[2, 3, 4], prim);
-    let low = float_const(&mut dag, prim, 0.0);
-    let high = float_const(&mut dag, prim, 1.0);
+    let decl = dag.declare("test");
+    let uniform_keys = rank_two_keys(&mut dag, decl, 7);
+    let template = load(&mut dag, decl, "t", &[2, 3, 4], prim);
+    let low = float_const(&mut dag, decl, prim, 0.0);
+    let high = float_const(&mut dag, decl, prim, 1.0);
     let sampled = node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, uniform_keys],
         &[2, 3, 4],
         prim,
     );
-    let dropout_keys = rank_two_keys(&mut dag, 8);
-    let x = load(&mut dag, "x", &[2, 3, 4], prim);
-    let rates = load(&mut dag, "rates", &[2], prim);
+    let dropout_keys = rank_two_keys(&mut dag, decl, 8);
+    let x = load(&mut dag, decl, "x", &[2, 3, 4], prim);
+    let rates = load(&mut dag, decl, "rates", &[2], prim);
     let dropped = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rates, dropout_keys],
         &[2, 3, 4],
@@ -1902,12 +2097,14 @@ fn a_rank_two_key_batch_draws_each_row_with_its_own_key() {
 fn vmap_of_vmap_of_a_draw_verifies_and_draws_each_row_with_its_key() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let key = load(&mut dag, "k", &[], Prim::Key);
-    let template = load(&mut dag, "t", &[4], prim);
-    let low = float_const(&mut dag, prim, 0.0);
-    let high = float_const(&mut dag, prim, 1.0);
+    let decl = dag.declare("test");
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
+    let template = load(&mut dag, decl, "t", &[4], prim);
+    let low = float_const(&mut dag, decl, prim, 0.0);
+    let high = float_const(&mut dag, decl, prim, 1.0);
     let sampled = node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, key],
         &[4],
@@ -1933,11 +2130,13 @@ fn vmap_of_vmap_of_a_draw_verifies_and_draws_each_row_with_its_key() {
 fn vmap_of_a_batched_draw_verifies_and_keeps_each_rows_rate() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let keys = load(&mut dag, "k", &[3], Prim::Key);
-    let x = load(&mut dag, "x", &[3, 4], prim);
-    let rate = float_const(&mut dag, prim, 0.5);
+    let decl = dag.declare("test");
+    let keys = load(&mut dag, decl, "k", &[3], Prim::Key);
+    let x = load(&mut dag, decl, "x", &[3, 4], prim);
+    let rate = float_const(&mut dag, decl, prim, 0.5);
     let dropped = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, keys],
         &[3, 4],
@@ -1988,22 +2187,24 @@ fn a_rank_two_bound_adjoint_folds_each_group_of_rows_sharing_a_bound() {
     };
     for out_dims in [&[][..], &[2][..], &[2, 3][..]] {
         let mut dag = Dag::new();
-        let keys = rank_two_keys(&mut dag, 7);
-        let template = load(&mut dag, "t", &[2, 3, 4], prim);
-        let g = load(&mut dag, "g", &[2, 3, 4], prim);
+        let decl = dag.declare("test");
+        let keys = rank_two_keys(&mut dag, decl, 7);
+        let template = load(&mut dag, decl, "t", &[2, 3, 4], prim);
+        let g = load(&mut dag, decl, "g", &[2, 3, 4], prim);
         let (low, high) = if out_dims.is_empty() {
             (
-                float_const(&mut dag, prim, 0.0),
-                float_const(&mut dag, prim, 1.0),
+                float_const(&mut dag, decl, prim, 0.0),
+                float_const(&mut dag, decl, prim, 1.0),
             )
         } else {
             (
-                load(&mut dag, "lo", out_dims, prim),
-                load(&mut dag, "hi", out_dims, prim),
+                load(&mut dag, decl, "lo", out_dims, prim),
+                load(&mut dag, decl, "hi", out_dims, prim),
             )
         };
         let forward = node(
             &mut dag,
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, keys],
             &[2, 3, 4],
@@ -2011,6 +2212,7 @@ fn a_rank_two_bound_adjoint_folds_each_group_of_rows_sharing_a_bound() {
         );
         let adjoint = node(
             &mut dag,
+            decl,
             RiscOp::UniformBoundAdjoint {
                 bound: UniformBound::High,
             },
@@ -2040,31 +2242,40 @@ fn a_rank_two_bound_adjoint_folds_each_group_of_rows_sharing_a_bound() {
 #[test]
 fn a_key_constant_is_rejected_and_folding_keeps_derivations_symbolic() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let constant = node(
         &mut dag,
+        decl,
         RiscOp::Const {
-            value: ScalarValue::from_key(RandomKey::from_counter(7, 0)),
+            value: ScalarValue::from_key(
+                RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 7).unwrap()).unwrap(),
+            ),
         },
         vec![],
         &[],
         Prim::Key,
     );
-    let drawn = draw(&mut dag, constant, None);
+    let drawn = draw(&mut dag, decl, constant, None);
     dag.add_root(drawn);
-    assert_rejected(
-        &dag,
-        "only a key operation, a draw key or a Load produces one",
-    );
+    assert_rejected(&dag, "only a key operation, a join or a Load produces one");
 
     // Constant folding over literal seeds and indices leaves every key
     // operation in place, and CSE merges no two of them.
     let mut dag = Dag::new();
-    let a = root_key(&mut dag);
-    let b = root_key(&mut dag);
-    let three = i64_const(&mut dag, 3);
-    let folded = node(&mut dag, RiscOp::FoldIn, vec![a, three], &[], Prim::Key);
-    let x = draw(&mut dag, folded, None);
-    let y = draw(&mut dag, b, None);
+    let decl = dag.declare("test");
+    let a = root_key(&mut dag, decl);
+    let b = root_key(&mut dag, decl);
+    let three = i64_const(&mut dag, decl, 3);
+    let folded = node(
+        &mut dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![a, three],
+        &[],
+        Prim::Key,
+    );
+    let x = draw(&mut dag, decl, folded, None);
+    let y = draw(&mut dag, decl, b, None);
     dag.add_root(x);
     dag.add_root(y);
     constant_fold(&mut dag);
@@ -2088,11 +2299,13 @@ fn a_key_constant_is_rejected_and_folding_keeps_derivations_symbolic() {
 fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let chain = build_chain(&mut dag);
-    let x = load(&mut dag, "x", &[4], prim);
-    let rate = float_const(&mut dag, prim, 0.5);
+    let decl = dag.declare("test");
+    let chain = build_chain(&mut dag, decl);
+    let x = load(&mut dag, decl, "x", &[4], prim);
+    let rate = float_const(&mut dag, decl, prim, 0.5);
     let drawn = node(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![x, rate, chain.g],
         &[4],
@@ -2100,6 +2313,7 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
     );
     let axis_sum = node(
         &mut dag,
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: prim,
@@ -2115,11 +2329,10 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
     assert_eq!(verify(&grads), Vec::<String>::new());
     let gradient = grad.grad_nodes[&x];
     let row = vec![1.0, 2.0, 3.0, 4.0];
-    let out =
-        eval_tensor_roots_with_frame(&grads, &[gradient], &mut RandomFrame::unhandled(), |_| {
-            Some(floats(prim, vec![4], row.clone()))
-        })
-        .unwrap();
+    let out = eval_tensor_roots_exact(&grads, &[gradient], |_| {
+        Some(floats(prim, vec![4], row.clone()))
+    })
+    .unwrap();
     // d/dx sum(dropout(x)) keeps G's pattern with scale 1/(1-0.5) = 2.
     let expected: Vec<f64> = DROPOUT_KEPT[3]
         .iter()
@@ -2129,16 +2342,24 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
 }
 
 /// A runtime-count split declares its count axis `n`, which the data it
-/// batches also binds, but its value is a key, and no node takes a key as a
-/// dependency (V4). `grad`'s runtime-extent pass records none on it, whether
-/// the count is a parameter or read from the data with `shape(x, 0)`, and the
-/// backward graph verifies with the split still in it.
+/// batches also binds. `grad`'s runtime-extent pass records a shape
+/// dependency on the split from each later node of that extent, an
+/// observation of the keys' extent that is not a use ([04-LIN-9]), and none
+/// from the earlier data, whether the count is a parameter or read from the
+/// data with `shape(x, 0)`; the backward graph verifies with the split still
+/// in it.
+///
+/// Evidentiary status: LOCK. At `96f5a4f9d` the pass recorded no dependency
+/// on a key at all; without its earlier-declarer rule it records the data's
+/// forward dependency on the split, which the verifier refuses.
 #[test]
-fn grad_records_no_dependency_on_a_runtime_count_split() {
+fn grad_records_extent_dependencies_on_a_runtime_count_split() {
     for count_from_data in [false, true] {
         let prim = Prim::F32;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             named_ty(&["n"], &[4], prim),
@@ -2147,17 +2368,26 @@ fn grad_records_no_dependency_on_a_runtime_count_split() {
         let count = if count_from_data {
             node(
                 &mut dag,
+                decl,
                 RiscOp::Shape { axis: 0 },
                 vec![x],
                 &[],
                 Prim::Int64,
             )
         } else {
-            load(&mut dag, "c", &[], Prim::Int64)
+            load(&mut dag, decl, "c", &[], Prim::Int64)
         };
-        let seed = i64_const(&mut dag, 11);
-        let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+        let seed = i64_const(&mut dag, decl, 11);
+        let root = node(
+            &mut dag,
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            &[],
+            Prim::Key,
+        );
         let keys = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: RtDim::Node(1),
             },
@@ -2165,14 +2395,16 @@ fn grad_records_no_dependency_on_a_runtime_count_split() {
             named_ty(&["n"], &[], Prim::Key),
             None,
         );
-        let rate = float_const(&mut dag, prim, 0.5);
+        let rate = float_const(&mut dag, decl, prim, 0.5);
         let drawn = dag.add_node(
+            decl,
             RiscOp::Dropout,
             vec![x, rate, keys],
             named_ty(&["n"], &[4], prim),
             None,
         );
         let rows = dag.add_node(
+            decl,
             RiscOp::sum_default(1, prim).unwrap(),
             vec![drawn],
             named_ty(&["n"], &[], prim),
@@ -2180,6 +2412,7 @@ fn grad_records_no_dependency_on_a_runtime_count_split() {
         );
         let total = node(
             &mut dag,
+            decl,
             RiscOp::sum_default(0, prim).unwrap(),
             vec![rows],
             &[],
@@ -2195,11 +2428,15 @@ fn grad_records_no_dependency_on_a_runtime_count_split() {
             Vec::<String>::new(),
             "count from data: {count_from_data}"
         );
-        assert!(
-            recorded
-                .nodes()
-                .iter()
-                .all(|node| !node.shape_deps.contains(&keys)),
+        let observers = recorded
+            .nodes()
+            .iter()
+            .filter(|node| node.shape_deps.contains(&keys))
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observers,
+            [drawn, rows],
             "count from data: {count_from_data}"
         );
 
@@ -2221,15 +2458,31 @@ fn vmap_maps_key_rows_and_splits_every_row() {
     // mapped over a tensor[3, key] of S's rows.
     let prim = Prim::F32;
     let mut dag = Dag::new();
-    let key = load(&mut dag, "k", &[], Prim::Key);
-    let two = i64_const(&mut dag, 2);
-    let folded = node(&mut dag, RiscOp::FoldIn, vec![key, two], &[], Prim::Key);
-    let x = load(&mut dag, "x", &[4], prim);
-    let rate = float_const(&mut dag, prim, 0.5);
-    let drawn = node(&mut dag, RiscOp::Dropout, vec![x, rate, folded], &[4], prim);
-    let other = load(&mut dag, "k2", &[], Prim::Key);
+    let decl = dag.declare("test");
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
+    let two = i64_const(&mut dag, decl, 2);
+    let folded = node(
+        &mut dag,
+        decl,
+        RiscOp::FoldIn,
+        vec![key, two],
+        &[],
+        Prim::Key,
+    );
+    let x = load(&mut dag, decl, "x", &[4], prim);
+    let rate = float_const(&mut dag, decl, prim, 0.5);
+    let drawn = node(
+        &mut dag,
+        decl,
+        RiscOp::Dropout,
+        vec![x, rate, folded],
+        &[4],
+        prim,
+    );
+    let other = load(&mut dag, decl, "k2", &[], Prim::Key);
     let rows = node(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(2),
         },
@@ -2256,26 +2509,30 @@ fn vmap_maps_key_rows_and_splits_every_row() {
         ("k2", keys_value(vec![3], s.clone())),
         ("x", floats(prim, vec![3, 4], row.repeat(3))),
     ]);
-    let out = eval_tensor_roots_with_frame(
-        &batched,
-        batched.roots(),
-        &mut RandomFrame::unhandled(),
-        |name| inputs.get(name).cloned(),
-    )
-    .unwrap();
+    let out = eval_tensor_roots_exact(&batched, batched.roots(), |name| inputs.get(name).cloned())
+        .unwrap();
     let drawn_rows = out[&batched.roots()[0]].to_f64_lossy_vec();
     let split_rows = &out[&batched.roots()[1]];
     assert_eq!(split_rows.shape, vec![3, 2]);
     for (b, key) in s.iter().enumerate() {
         // Row b of the batched draw is the scalar draw keyed by fold_in(S[b], 2).
         let mut scalar = Dag::new();
-        let k = load(&mut scalar, "k", &[], Prim::Key);
-        let two = i64_const(&mut scalar, 2);
-        let folded = node(&mut scalar, RiscOp::FoldIn, vec![k, two], &[], Prim::Key);
-        let x = load(&mut scalar, "x", &[4], prim);
-        let rate = float_const(&mut scalar, prim, 0.5);
+        let scalar_decl = scalar.declare("test");
+        let k = load(&mut scalar, scalar_decl, "k", &[], Prim::Key);
+        let two = i64_const(&mut scalar, scalar_decl, 2);
+        let folded = node(
+            &mut scalar,
+            scalar_decl,
+            RiscOp::FoldIn,
+            vec![k, two],
+            &[],
+            Prim::Key,
+        );
+        let x = load(&mut scalar, scalar_decl, "x", &[4], prim);
+        let rate = float_const(&mut scalar, scalar_decl, prim, 0.5);
         let drawn = node(
             &mut scalar,
+            scalar_decl,
             RiscOp::Dropout,
             vec![x, rate, folded],
             &[4],
@@ -2298,40 +2555,16 @@ fn vmap_maps_key_rows_and_splits_every_row() {
 }
 
 #[test]
-fn vmap_refuses_to_broadcast_a_captured_key_or_a_draw_key() {
+fn vmap_refuses_to_broadcast_a_captured_key() {
     let mut dag = Dag::new();
-    let key = load(&mut dag, "k", &[], Prim::Key);
-    let drawn = draw(&mut dag, key, None);
+    let decl = dag.declare("test");
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, decl, key, None);
     dag.add_root(drawn);
     let captured = chelis_unord::UnordSet::from_iter(["k".to_string()]);
     let error = chelis_ir::vmap::vectorize_axis0_with_captures(&dag, DimInfo::Lit(3), &captured)
         .unwrap_err();
     assert!(error.contains("captured key"), "{error}");
-
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", &[4], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
-    let key = node(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Inherited,
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![rate],
-        &[],
-        Prim::Key,
-    );
-    let drawn = node(
-        &mut dag,
-        RiscOp::Dropout,
-        vec![x, rate, key],
-        &[4],
-        Prim::F32,
-    );
-    dag.add_root(drawn);
-    let error = vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap_err();
-    assert!(error.contains("draw key"), "{error}");
 }
 
 #[test]
@@ -2339,22 +2572,24 @@ fn a_batched_uniform_bound_adjoint_sums_shared_bounds_and_splits_per_row_bounds(
     let prim = Prim::F32;
     for per_row in [false, true] {
         let mut dag = Dag::new();
-        let chain = build_chain(&mut dag);
-        let template = load(&mut dag, "t", &[3, 4], prim);
-        let g = load(&mut dag, "g", &[3, 4], prim);
+        let decl = dag.declare("test");
+        let chain = build_chain(&mut dag, decl);
+        let template = load(&mut dag, decl, "t", &[3, 4], prim);
+        let g = load(&mut dag, decl, "g", &[3, 4], prim);
         let (low, high) = if per_row {
             (
-                load(&mut dag, "lo", &[3], prim),
-                load(&mut dag, "hi", &[3], prim),
+                load(&mut dag, decl, "lo", &[3], prim),
+                load(&mut dag, decl, "hi", &[3], prim),
             )
         } else {
             (
-                float_const(&mut dag, prim, 0.0),
-                float_const(&mut dag, prim, 1.0),
+                float_const(&mut dag, decl, prim, 0.0),
+                float_const(&mut dag, decl, prim, 1.0),
             )
         };
         let forward = node(
             &mut dag,
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, chain.rows],
             &[3, 4],
@@ -2363,6 +2598,7 @@ fn a_batched_uniform_bound_adjoint_sums_shared_bounds_and_splits_per_row_bounds(
         let out_dims: &[usize] = if per_row { &[3] } else { &[] };
         let adjoint = node(
             &mut dag,
+            decl,
             RiscOp::UniformBoundAdjoint {
                 bound: UniformBound::High,
             },
@@ -2414,6 +2650,61 @@ fn a_batched_uniform_bound_adjoint_sums_shared_bounds_and_splits_per_row_bounds(
         } else {
             let all: Vec<f32> = (0..3).flat_map(row_units).collect();
             assert_eq!(actual, vec![f64::from(pair_sum(&all))]);
+        }
+    }
+}
+
+/// `dropout(key_from_seed(42i64), x, rate)` over `x = [1; count]` through
+/// lowering and the DAG evaluator.
+fn lowered_dropout(rate: f64, count: usize) -> Result<Vec<f64>, String> {
+    let source = format!(
+        "(app {{}} (var {{}} dropout) \
+         (app {{}} (var {{}} key_from_seed) (lit {{type: (t-prim {{}} i64)}} 42)) \
+         (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate:?}))"
+    );
+    let expression = chelis_deep::parser::parse_str(&source)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let inputs = UnordMap::from_iter([(
+        "x".to_string(),
+        TensorType {
+            dims: vec![DimInfo::Lit(count)],
+            precision: Prim::F32,
+        },
+    )]);
+    let dag = chelis_ir::lower::try_lower_subexpr_program(
+        &expression,
+        inputs,
+        UnordMap::new(),
+        UnordMap::new(),
+    )
+    .unwrap();
+    let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| {
+        (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
+    })?;
+    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+}
+
+/// [05-OP-37]: a zero rate keeps every element, at empty and nonempty
+/// shapes.
+#[test]
+fn zero_rate_dropout_is_an_identity_at_empty_and_nonempty_shapes() {
+    for count in [0, 1, 32] {
+        assert_eq!(lowered_dropout(0.0, count).unwrap(), vec![1.0; count]);
+    }
+}
+
+/// [05-OP-37]: a rate outside `[0, 1)` traps even when the tensor is empty.
+#[test]
+fn invalid_dropout_rates_trap_even_when_the_tensor_is_empty() {
+    for rate in [-0.5, 1.0, 2.0] {
+        for count in [0, 1, 32] {
+            let error = lowered_dropout(rate, count).unwrap_err();
+            assert_eq!(
+                error, "numeric trap: domain in dropout at f32",
+                "rate={rate:?}, count={count}"
+            );
         }
     }
 }

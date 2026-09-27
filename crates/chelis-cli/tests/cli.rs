@@ -947,11 +947,11 @@ fn eval_json_def_only_emits_empty_roots_json() {
         .expect("run chelis eval --json --file");
     assert!(output.status.success(), "def-only eval --json exits 0");
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    // Execution wire v3 (chelis#729): EvalResult stamps its payload
-    // version.
+    // EvalResult stamps its execution payload version (v4 since the key
+    // execution values, chelis#2413).
     assert_eq!(
         stdout.trim(),
-        r#"{"schema_version":3,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
+        r#"{"schema_version":4,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
     );
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
@@ -2202,7 +2202,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         format!("{formal_ingress} = {formal_value};"),
         format!("{tensor_input} = {formal_ingress};"),
         helper_input.to_string(),
-        "tensor_grad_local_wrapper__global__tensor_0__with_rng(__inputs_".to_string(),
+        "tensor_grad_local_wrapper__global__tensor_0__private(__inputs_".to_string(),
     ];
     let mut cursor = 0;
     for marker in ordered_markers {
@@ -5965,8 +5965,11 @@ fn build_hip_unbound_observation_root_fails_before_writing_an_artifact() {
     );
 }
 
+/// chelis#2413: the key analogue of the retired unhandled-`Random` check. A
+/// keyless `dropout` is an arity error at `chelis check`, and the same draw
+/// given a key checks clean.
 #[test]
-fn check_reports_unhandled_random_effect() {
+fn check_reports_a_keyless_dropout_as_an_arity_error() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("dropout.ch");
     write_file(
@@ -5976,13 +5979,24 @@ fn check_reports_unhandled_random_effect() {
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|error| {
-        error["kind"].as_str() == Some("UnhandledEffect")
-            && error["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("Random"))
-    }));
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("ArityMismatch")
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("`dropout(x, rate)` is the retired counter-stream spelling")
+                })
+        }),
+        "{json}"
+    );
     assert!(json["score"].as_f64().unwrap() < 1.0);
+
+    write_file(
+        &path,
+        "x: tensor[32, f32] = x\ny: tensor[32, f32] = dropout(key_from_seed(1i64), x, 0.5)\n",
+    );
+    let json = run_json_check(&path);
+    assert_eq!(json["errors"], serde_json::json!([]), "{json}");
+    assert_eq!(json["score"].as_f64(), Some(1.0), "{json}");
 }
 
 #[test]
@@ -9412,107 +9426,55 @@ fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
         );
 }
 
-// ----- Bucket-5 closure: `with seed(...)` plumbing through C backend ------
+// ----- Keyed draws through the C backend ---------------------------------
 //
 // Pre-Bucket-5, `chelis build --target c|hip` rejected any program that
-// contained `with seed(...)` anywhere in the deeply-walked AST with a hard
-// error (`does not yet plumb `with seed(...)` into the generated runtime`).
-// That gate was project-wide: a `with seed` block in *any* compiled file
-// would block `chelis build` of every sibling file too.
+// contained a seeded draw anywhere in the deeply-walked AST, and the gate was
+// project-wide: one such file blocked `chelis build` of every sibling. With
+// explicit keys (chelis#2413) a draw's key is an ordinary value; the tests
+// below pin, in key form:
 //
-// The closure removes the rejection gate and preserves the handled seed
-// either as a direct DAG seed or as generated C host RNG state when the
-// random op lives in a host helper. These are seed-plumbing controls, not
-// an oracle for [05-RNG-1]'s exact stream (tracked under chelis#1295).
-// The tests below pin:
+//   1. A keyed `uniform_like` builds, runs, and prints the draw the
+//      [05-RNG-2] reference gives for its key, so a key silently defaulted
+//      or dropped in the generated C fails.
+//   2. Same key gives the same bytes across runs; a different key gives
+//      different bytes.
+//   3. A sibling program in a directory where another file draws builds
+//      to C (the gate cannot be re-introduced).
 //
-//   1. `with seed(...)` builds, runs, and produces deterministic output.
-//   2. Same seed → same bytes across runs (determinism).
-//   3. Different seeds → different bytes (seed-sensitivity, the
-//      no-silent-drop contract).
-//   4. A sibling program in a workspace where another file uses `with
-//      seed(...)` is no longer blocked. (The `with seed` form lives
-//      inside a single file under `chelis build`, so this collapses to
-//      "the rejection gate is gone": building a sibling file that does
-//      not use `with seed` succeeds even though the workspace has files
-//      that do.)
+// Expected draws come from `common::key_ref`, pinned against `key_ref.py`
+// by `dropout_fixed_stream_cli::worked_values_match_key_ref_py`.
 
-fn write_seeded_uniform(path: &Path, low_seed: u64) {
+fn write_keyed_uniform(path: &Path, seed: i64) {
     let contents = format!(
         r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-sampled = with seed({low_seed}i64) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
+sampled = uniform_like(key_from_seed({seed}i64), copy(template), cast(0.0, f32), cast(1.0, f32))
 "#
     );
     write_file(path, &contents);
 }
 
-#[test]
-fn build_c_with_seed_uniform_like_succeeds() {
-    let dir = tempdir().expect("tempdir");
-    let src = dir.path().join("seeded.ch");
-    let out_dir = dir.path().join("out");
-    write_seeded_uniform(&src, 7);
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "build",
-            src.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("does not yet plumb").not());
-
-    // spec/08 permits either a baked DAG seed or an active host handler.
-    // A helper's baked zero is not its effective seed when that handler is
-    // active. Require the actual seed-7 frame and its installation, not just
-    // the presence of unused RNG support. Native controls below discriminate
-    // same/different handler seeds without claiming exact stream conformance.
-    let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
-    let installs_seed_seven = c_src.lines().any(|line| {
-        let Some(declaration) = line.trim().strip_prefix("chelis_rng_state ") else {
-            return false;
-        };
-        let Some((frame, initializer)) = declaration.split_once(" = {(uint64_t)") else {
-            return false;
-        };
-        let Some(seed) = initializer.strip_suffix(", 0ULL, 1};") else {
-            return false;
-        };
-        c_src.contains(&format!("{seed} = 7;"))
-            && c_src.contains(&format!("*__chelis_rng = {frame};"))
-    });
-    // A draw key reads either a `with seed(7)` region lowered inside the
-    // kernel, whose literal seed it carries, or the installed seed-7 host
-    // handler's next ordinal.
-    let scoped_seed_seven =
-        c_src.contains("chelis_random_key(UINT64_C(0x0000000000000007), __chelis_scoped_counter_");
-    let active_host_seed = installs_seed_seven
-        && c_src.contains("chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++)");
-    assert!(
-        scoped_seed_seven || active_host_seed,
-        "expected a draw key of the literal seed-7 region or of an installed seed-7 host \
-         handler; got:\n{c_src}"
-    );
-    assert!(
-        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
-        "sampler must not receive a silently-defaulted literal seed=0 when the source seed is 7"
-    );
+/// The f32 draws of `uniform_like(key_from_seed(seed), template, 0, 1)` over
+/// four elements.
+fn reference_uniform_unit(seed: i64) -> Vec<f32> {
+    common::key_ref::uniform_f32(common::key_ref::key_from_seed(seed), 4, 0.0, 1.0)
 }
 
-#[test]
-fn build_c_with_seed_is_deterministic_across_runs() {
-    let dir = tempdir().expect("tempdir");
-    let src = dir.path().join("seeded.ch");
-    let out_dir = dir.path().join("out");
-    write_seeded_uniform(&src, 7);
+/// A printed f32 tensor root's elements; the printed decimals round-trip at
+/// binary32.
+fn printed_f32(stdout: &str, root: &str) -> Vec<f32> {
+    common::parse_tensor_data(stdout, root)
+        .into_iter()
+        .map(|value| value as f32)
+        .collect()
+}
 
+/// Build `src` to C under `out_dir`, link it as `binary`, run it once and
+/// return its stdout.
+fn build_link_run(src: &Path, out_dir: &Path, binary: &str) -> String {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             src.to_str().unwrap(),
@@ -9523,82 +9485,79 @@ fn build_c_with_seed_is_deterministic_across_runs() {
         ])
         .assert()
         .success();
+    let status = gcc_link_generated(out_dir, &format!("{binary}.c"), binary);
+    assert!(status.success(), "gcc compile/link of generated C failed");
+    let run = StdCommand::new(out_dir.join(binary))
+        .output()
+        .expect("compiled binary must run");
+    assert!(
+        run.status.success(),
+        "{binary} exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
 
-    let gcc_status = gcc_link_generated(&out_dir, "seeded.c", "seeded");
-    assert!(gcc_status.success(), "gcc compile of generated C failed");
+#[test]
+fn build_c_keyed_uniform_like_prints_the_reference_draw() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    write_keyed_uniform(&src, 7);
+    let stdout = build_link_run(&src, &dir.path().join("out"), "seeded");
+    assert_eq!(
+        printed_f32(&stdout, "sampled"),
+        reference_uniform_unit(7),
+        "the C draw must read key_from_seed(7), not a defaulted key:\n{stdout}"
+    );
+}
 
+#[test]
+fn build_c_keyed_uniform_like_is_deterministic_and_key_sensitive() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    let out_dir = dir.path().join("out");
+    write_keyed_uniform(&src, 7);
+    let first = build_link_run(&src, &out_dir, "seeded");
     let run = || {
         let output = StdCommand::new(out_dir.join("seeded"))
             .output()
             .expect("compiled binary must run");
         assert!(output.status.success(), "seeded binary exited non-zero");
-        let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-        stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("sampled = "))
-            .expect("sampled output line")
-            .to_string()
+        String::from_utf8(output.stdout).expect("utf-8 stdout")
     };
-    let first = run();
     let second = run();
     let third = run();
     assert_eq!(
         first, second,
-        "with seed(...) determinism violated: run 1 vs run 2 differ"
+        "keyed draw determinism: run 1 vs run 2 differ"
     );
     assert_eq!(
         second, third,
-        "with seed(...) determinism violated: run 2 vs run 3 differ"
+        "keyed draw determinism: run 2 vs run 3 differ"
     );
 
-    // Negative parity: a different seed produces different bytes. This
-    // is the no-silent-drop contract: if the seed plumbing regresses to
-    // hard-coded 0, this assertion fails.
+    // A different key produces different bytes, each the reference's.
     let other_src = dir.path().join("seeded_other.ch");
-    let other_out = dir.path().join("out_other");
-    write_seeded_uniform(&other_src, 42);
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "build",
-            other_src.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            other_out.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let other_gcc = gcc_link_generated(&other_out, "seeded_other.c", "seeded_other");
-    assert!(other_gcc.success(), "gcc compile of seed=42 binary failed");
-    let other_run = StdCommand::new(other_out.join("seeded_other"))
-        .output()
-        .expect("compiled binary must run");
-    assert!(other_run.status.success(), "seed=42 binary exited non-zero");
-    let other_stdout = String::from_utf8(other_run.stdout).expect("utf-8 stdout");
-    let other = other_stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("sampled = "))
-        .expect("seed=42 sampled output line");
+    write_keyed_uniform(&other_src, 42);
+    let other = build_link_run(&other_src, &dir.path().join("out_other"), "seeded_other");
     assert_ne!(
-        first, other,
-        "with seed(7) and with seed(42) must produce different bytes"
+        printed_f32(&first, "sampled"),
+        printed_f32(&other, "sampled"),
+        "key_from_seed(7) and key_from_seed(42) must produce different bytes"
     );
+    assert_eq!(printed_f32(&other, "sampled"), reference_uniform_unit(42));
 }
 
 #[test]
-fn build_c_with_seed_no_longer_blocks_sibling_build() {
-    // Pre-Bucket-5, `decls_contain_with_seed` walked the AST of the
-    // build target and aborted with the project-wide gate. Today, a
-    // sibling `.ch` file that does NOT use `with seed(...)` builds
-    // cleanly even when a sibling file in the same directory does. This
-    // is trivially true post-fix (the sibling is a separate
-    // compilation), but the test pins that the gate cannot be
-    // re-introduced without breaking it.
+fn build_c_keyed_draw_does_not_block_a_sibling_build() {
+    // Pre-Bucket-5, a project-wide gate aborted the build of every sibling
+    // of a file that drew. A sibling `.ch` file that does not draw builds
+    // cleanly even when a file in the same directory does; the test pins
+    // that such a gate cannot be re-introduced without breaking it.
     let dir = tempdir().expect("tempdir");
-    let with_seed_path = dir.path().join("uses_seed.ch");
+    let keyed_path = dir.path().join("uses_key.ch");
     let plain_path = dir.path().join("plain_sibling.ch");
-    write_seeded_uniform(&with_seed_path, 7);
+    write_keyed_uniform(&keyed_path, 7);
     write_file(
         &plain_path,
         "xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n",
@@ -9616,101 +9575,62 @@ fn build_c_with_seed_no_longer_blocks_sibling_build() {
             out_dir.to_str().unwrap(),
         ])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("does not yet plumb").not());
+        .success();
     assert!(
         out_dir.join("plain_sibling.c").exists(),
-        "plain sibling without `with seed` must build to C"
+        "plain sibling without a draw must build to C"
     );
 
-    // And the seed-using file builds standalone too, of course.
-    let seed_out = dir.path().join("seed-out");
+    // And the drawing file builds standalone too.
+    let keyed_out = dir.path().join("keyed-out");
     Command::cargo_bin("chelis")
         .expect("binary")
         .args([
             "build",
-            with_seed_path.to_str().unwrap(),
+            keyed_path.to_str().unwrap(),
             "--target",
             "c",
             "--output",
-            seed_out.to_str().unwrap(),
+            keyed_out.to_str().unwrap(),
         ])
         .assert()
         .success();
     assert!(
-        seed_out.join("uses_seed.c").exists(),
-        "with-seed file must build to C now that the gate is lifted"
+        keyed_out.join("uses_key.c").exists(),
+        "the drawing file must build to C"
     );
 }
 
+/// A draw inside a helper reads the key its caller passes: equal keys give
+/// equal draws and a different key a different draw, each the reference's.
 #[test]
-fn cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend() {
+fn cross_function_key_wrapper_draws_from_its_callers_key_in_c_backend() {
     let dir = tempdir().expect("tempdir");
-    let src = dir.path().join("cross_function_seed_local.ch");
-    let out_dir = dir.path().join("out");
+    let src = dir.path().join("cross_function_key.ch");
     write_file(
         &src,
         r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =
-  uniform_like(copy(t), 0.0, 1.0)
-seven = with seed(7i64) { sample(copy(template)) }
-seven_again = with seed(7i64) { sample(copy(template)) }
-forty_two = with seed(42i64) { sample(copy(template)) }
+def sample(k: key, t: tensor[4, f32]) -> tensor[4, f32] =
+  uniform_like(k, copy(t), 0.0, 1.0)
+seven = sample(key_from_seed(7i64), copy(template))
+seven_again = sample(key_from_seed(7i64), copy(template))
+forty_two = sample(key_from_seed(42i64), copy(template))
 "#,
     );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            src.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let c_src =
-        fs::read_to_string(out_dir.join("cross_function_seed_local.c")).expect("read generated C");
-    assert!(
-        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
-        "cross-function seeded random must not bake seed=0 into generated C:\n{c_src}"
-    );
-
-    let status = gcc_link_generated(
-        &out_dir,
-        "cross_function_seed_local.c",
-        "cross_function_seed_local",
-    );
-    assert!(status.success(), "gcc compile/link of generated C failed");
-    let run = StdCommand::new(out_dir.join("cross_function_seed_local"))
-        .output()
-        .expect("compiled binary must run");
-    assert!(run.status.success(), "compiled binary exited non-zero");
-    let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
-    let seven = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("seven = "))
-        .expect("seven output line");
-    let seven_again = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("seven_again = "))
-        .expect("seven_again output line");
-    let forty_two = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("forty_two = "))
-        .expect("forty_two output line");
+    let stdout = build_link_run(&src, &dir.path().join("out"), "cross_function_key");
+    let seven = printed_f32(&stdout, "seven");
+    assert_eq!(seven, reference_uniform_unit(7), "{stdout}");
     assert_eq!(
-        seven, seven_again,
-        "repeated with-seed handlers around a wrapper call must restart the same stream"
+        printed_f32(&stdout, "seven_again"),
+        seven,
+        "equal keys through a wrapper call must give the same draw"
     );
-    assert_ne!(
-        seven, forty_two,
-        "different with-seed handlers around a wrapper call must produce distinct samples"
+    assert_eq!(
+        printed_f32(&stdout, "forty_two"),
+        reference_uniform_unit(42),
+        "{stdout}"
     );
+    assert_ne!(reference_uniform_unit(7), reference_uniform_unit(42));
 }
 
 /// #1872, [05-OP-37]/[05-RNG-1]: a source-fixed entry retains its sealed
@@ -9723,7 +9643,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         ("with_host", "def status() -> i64 = 7i64\n", false, false),
         ("deep_entry", "", true, false),
         ("seeded_helper", "", false, false),
-        ("declared_random", "", false, false),
+        ("local_key", "", false, false),
         ("pure_entry", "", false, true),
     ] {
         let surf = dir.path().join(format!("{stem}.ch"));
@@ -9734,9 +9654,9 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
                 if pure {
                     "def sample(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n"
                 } else if stem == "seeded_helper" {
-                    "def keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { keep(x) }\n"
-                } else if stem == "declared_random" {
-                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = with seed(42i64) { dropout(x, 0.5f32) }\n"
+                    "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = keep(key_from_seed(1i64), x)\n"
+                } else if stem == "local_key" {
+                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] = {\n  k = key_from_seed(1i64)\n  dropout(k, x, 0.5f32)\n}\n"
                 } else {
                     include_str!("../../../examples/dropout_entry.ch")
                 }
@@ -9791,7 +9711,8 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         let expected = if pure {
             "0x40000000u, 0x40800000u, 0x40c00000u, 0x41000000u"
         } else {
-            "0u, 0x40800000u, 0u, 0u"
+            // key_from_seed(1) at rate 0.5 drops elements 0 and 3 (key_ref.py).
+            "0u, 0x40800000u, 0x40c00000u, 0u"
         };
         let driver = format!(
             r#"
@@ -9853,7 +9774,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
             .assert()
             .success();
     }
-    let expected = "result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n";
+    let expected = "result.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n";
     Command::cargo_bin("chelis")
         .unwrap()
         .args(["eval", "--file"])
@@ -9880,22 +9801,17 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
 
     // [05-OP-37]: a runtime rate is an ordinary operand (chelis#2411). This
-    // program has no export list, so every top-level def is public (§2 Surf),
-    // and a public tensor entry owns no Random handler: its inherited draw is
-    // refused at build time instead of drawing seed zero.
+    // program has no export list, so every top-level def is public (§2 Surf).
+    // A keyless public entry is an arity error, refused at build time instead
+    // of drawing from a defaulted key; the entry that takes its key builds.
     write_file(
         &source,
         "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n",
     );
-    Command::cargo_bin("chelis")
-        .unwrap()
-        .args(["fmt", "--inplace"])
-        .arg(&source)
-        .assert()
-        .success();
     let runtime_rate = dir.path().join("runtime_rate");
     let refused = Command::cargo_bin("chelis")
         .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("build")
         .arg(&source)
         .arg("--output")
@@ -9904,13 +9820,33 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .failure();
     let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("public tensor entry cannot receive inherited Random"),
+        stderr.contains("`dropout(x, rate)` is the retired counter-stream spelling"),
         "{stderr}"
     );
+    write_file(
+        &source,
+        "def keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n",
+    );
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["fmt", "--inplace"])
+        .arg(&source)
+        .assert()
+        .success();
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&runtime_rate)
+        .assert()
+        .success();
 }
 
-/// [05-OP-37]/[05-RNG-1]: a concrete call of a dtype-generic static-rate
-/// helper retains its source draw identity through the CLI host build.
+/// [05-OP-37]/[05-RNG-2]: a concrete call of a dtype-generic static-rate
+/// helper draws from the key it is given through the CLI host build. The
+/// key is a concrete `key` parameter beside the `[p: Float]` binder
+/// ([04-LIN-10]).
 #[test]
 fn build_c_runs_generic_static_rate_dropout_host_helper() {
     let dir = tempdir().expect("tempdir");
@@ -9919,10 +9855,8 @@ fn build_c_runs_generic_static_rate_dropout_host_helper() {
     write_file(
         &src,
         r#"
-def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
-result = with seed(42i64) {
-  keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
-}
+def keep[p: Float](k: key, x: tensor[4, p]) -> tensor[4, p] = dropout(k, x, cast(0.5, p))
+result = keep(key_from_seed(7i64), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
 "#,
     );
     Command::cargo_bin("chelis")
@@ -9944,9 +9878,12 @@ result = with seed(42i64) {
         .output()
         .expect("compiled binary must run");
     assert!(run.status.success(), "compiled binary exited non-zero");
+    // `dropout(key_from_seed(7), ones, 0.5)` from `common::key_ref`.
+    let expected = common::key_ref::dropout_f32(common::key_ref::key_from_seed(7), &[1.0; 4], 0.5);
+    assert_eq!(expected, [0.0, 2.0, 2.0, 2.0]);
     assert_eq!(
         String::from_utf8(run.stdout).unwrap(),
-        "result = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n"
+        "result = tensor(shape=[4], data=[0.0, 2.0, 2.0, 2.0])\n"
     );
 }
 

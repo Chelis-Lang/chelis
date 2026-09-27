@@ -88,11 +88,13 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
 /// elsewhere (the pure scatter pattern).
 fn build_stride_sum_1d(n: usize, step: usize) -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = vec_n_f32(n);
     let out_n = n.div_ceil(step);
     let strided_ty = vec_n_f32(out_n);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(step)],
         },
@@ -101,6 +103,7 @@ fn build_stride_sum_1d(n: usize, step: usize) -> (Dag, NodeId, NodeId) {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![strided],
         scalar_f32(),
@@ -161,10 +164,12 @@ fn issue_291_grad_through_stride_is_exact_scatter() {
 #[test]
 fn issue_291_grad_stride_routes_nonuniform_cotangent() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = vec_n_f32(4);
     let strided_ty = vec_n_f32(2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -172,8 +177,9 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
         strided_ty.clone(),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![s, s], strided_ty, None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![s, s], strided_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![sq],
         scalar_f32(),
@@ -251,10 +257,12 @@ fn issue_291_grad_stride_step_three() {
 #[test]
 fn issue_291_grad_stride_two_axes() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat_f32(4, 4);
     let strided_ty = mat_f32(2, 2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -264,12 +272,14 @@ fn issue_291_grad_stride_two_axes() {
     );
     // Sum [2,2] -> [2] (axis 1) -> scalar (axis 0).
     let row_sums = dag.add_node(
+        decl,
         RiscOp::sum_default(1, Prim::F32).expect("sum_default axis 1"),
         vec![strided],
         vec_n_f32(2),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default axis 0"),
         vec![row_sums],
         scalar_f32(),
@@ -302,10 +312,12 @@ fn issue_291_grad_stride_two_axes() {
 #[test]
 fn issue_291_grad_stride_mixed_identity_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat_f32(3, 4);
     let strided_ty = mat_f32(3, 2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -314,12 +326,14 @@ fn issue_291_grad_stride_mixed_identity_axis() {
         None,
     );
     let row_sums = dag.add_node(
+        decl,
         RiscOp::sum_default(1, Prim::F32).expect("sum axis 1"),
         vec![strided],
         vec_n_f32(3),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum axis 0"),
         vec![row_sums],
         scalar_f32(),
@@ -350,10 +364,12 @@ fn issue_291_grad_stride_mixed_identity_axis() {
 #[test]
 fn issue_291_grad_stride_matches_finite_difference() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = vec_n_f32(4);
     let strided_ty = vec_n_f32(2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -361,8 +377,9 @@ fn issue_291_grad_stride_matches_finite_difference() {
         strided_ty.clone(),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![s, s], strided_ty, None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![s, s], strided_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![sq],
         scalar_f32(),
@@ -459,10 +476,12 @@ fn issue_291_grad_stride_step_equals_axis() {
 #[test]
 fn issue_291_grad_stride_supports_higher_order_ad() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = vec_n_f32(4);
     let strided_ty = vec_n_f32(2);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -470,8 +489,9 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
         strided_ty.clone(),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![s, s], strided_ty, None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![s, s], strided_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![sq],
         scalar_f32(),
@@ -483,7 +503,9 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     // Reduce the first gradient to a scalar so the second grad is well
     // defined, then differentiate the backward DAG with respect to `x`.
     let mut g2dag = first.dag.clone();
+    let g2dag_decl = g2dag.nodes()[0].owner.decl;
     let sum_grad = g2dag.add_node(
+        g2dag_decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![grad_x],
         scalar_f32(),
@@ -517,6 +539,7 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
 #[test]
 fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
@@ -525,8 +548,9 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
         dims: vec![DimInfo::Named("m".into(), None)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -535,6 +559,7 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![s],
         scalar_f32(),
@@ -565,13 +590,16 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
 #[test]
 fn issue_291_grad_through_shrink_is_exact_pad() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_n_f32(4),
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2))],
         },
@@ -580,6 +608,7 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![shrunk],
         scalar_f32(),
@@ -609,13 +638,16 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
 #[test]
 fn issue_291_grad_shrink_interior_nonuniform() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_n_f32(4),
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3))],
         },
@@ -623,8 +655,9 @@ fn issue_291_grad_shrink_interior_nonuniform() {
         vec_n_f32(2),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![shrunk, shrunk], vec_n_f32(2), None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![shrunk, shrunk], vec_n_f32(2), None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![sq],
         scalar_f32(),

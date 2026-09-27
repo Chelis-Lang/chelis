@@ -96,18 +96,15 @@ fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
         .iter()
         .find(|node| node.shape_deps.contains(&token))
         .expect("runtime-branch initializer owns its local claim");
-    let activations = owner
-        .shape_deps
-        .iter()
-        .filter(|dependency| {
-            dag.get(**dependency).is_some_and(|node| {
-                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
-            })
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        activations.len(),
-        1,
+    // The claim's activation is its carrier's owner activation, the arm's
+    // scalar Bool path (spec/10 section 3.2), and nothing else carries it.
+    let activation = owner
+        .owner
+        .activation
+        .expect("a path-local claim's carrier runs under the arm's activation");
+    let activation = dag.get(activation).unwrap();
+    assert!(
+        activation.output_type.dims.is_empty() && activation.output_type.precision == Prim::Bool,
         "a path-local claim has one exact scalar Bool activation"
     );
     assert!(
@@ -167,6 +164,41 @@ fn selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard() 
     .expect_err("the selected helper branch's disagreeing local claim must trap");
     assert_eq!(
         error,
+        "extent `2`: claimed = 2, pad axis 0 = 3\n\
+         numeric trap: domain in pad at i64"
+    );
+}
+
+/// The claimed arm in the `else` position: the join's condition takes its
+/// extent from that arm, whose zeros have the claimed extent 2, so only the
+/// `where` rule that an unselected branch is not shape-checked (decisions
+/// section 25) lets the taken `then` value through at its own extent.
+///
+/// Evidentiary status: DISPOSITION LOCK at 096daea8c (the untaken `pad` was
+/// computed from `x` there); REGRESSION TEST against 987b79e2e, where the
+/// zeros met `x` at the join and failed the shape check.
+#[test]
+fn an_untaken_else_arms_claimed_result_is_not_read_at_the_join() {
+    let dag = lower(
+        "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+         if flag then x else {\n  \
+           y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+           y\n\
+         }\n",
+    );
+    let run = |flag| {
+        eval_tensor_with(&dag, |name| match name {
+            "flag" => Some(runtime_bool(flag)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        })
+    };
+    let values = run(true).expect("the untaken else arm's claim is not observed");
+    let root = *dag.roots().last().expect("entry root");
+    assert_eq!(values[&root].shape, vec![3]);
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        run(false).expect_err("the selected else arm's claim traps"),
         "extent `2`: claimed = 2, pad axis 0 = 3\n\
          numeric trap: domain in pad at i64"
     );
@@ -254,12 +286,14 @@ fn rebuild_cse_dce_and_specialization_preserve_the_exact_site() {
 fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
     fn fusion_dag(claimed: bool) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("*".into(), None)],
             precision: Prim::F32,
         };
         let claim = claimed.then(|| {
             dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: ExtentWitnessSite::LocalAscriptionClaim {
                         ascription_id: 0,
@@ -283,16 +317,17 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
             )
         });
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             ty.clone(),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![input, input], ty.clone(), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![input, input], ty.clone(), None);
         if let Some(claim) = claim {
             dag.add_shape_dep(add, claim);
         }
-        let neg = dag.add_node(RiscOp::Neg, vec![add], ty, None);
+        let neg = dag.add_node(decl, RiscOp::Neg, vec![add], ty, None);
         dag.add_root(neg);
         dag
     }
@@ -532,8 +567,9 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     ));
     let token = chelis_ir::dag::NodeId(local_claims(&direct)[0].0);
     assert!(chelis_ir::verify::verify(&direct).is_empty());
-    for mutation in 0..8 {
+    for mutation in 0..7 {
         let mut dag = direct.clone();
+        let decl = dag.nodes()[0].owner.decl;
         match mutation {
             0 => {
                 let RiscOp::ExtentWitness {
@@ -599,34 +635,8 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
                     .unwrap()
                     .id;
                 let ty = dag.get(owner).unwrap().output_type.clone();
-                let duplicate = dag.add_node(RiscOp::Copy, vec![owner], ty, None);
+                let duplicate = dag.add_node(decl, RiscOp::Copy, vec![owner], ty, None);
                 dag.add_shape_dep(duplicate, token);
-            }
-            7 => {
-                let owner = dag
-                    .nodes()
-                    .iter()
-                    .find(|node| node.shape_deps.contains(&token))
-                    .unwrap()
-                    .id;
-                let bool_ty = TensorType {
-                    dims: Vec::new(),
-                    precision: Prim::Bool,
-                };
-                let first = dag.add_node(
-                    RiscOp::synth_const(Prim::Bool, 1.0),
-                    Vec::new(),
-                    bool_ty.clone(),
-                    None,
-                );
-                let second = dag.add_node(
-                    RiscOp::synth_const(Prim::Bool, 0.0),
-                    Vec::new(),
-                    bool_ty,
-                    None,
-                );
-                dag.add_shape_dep(owner, first);
-                dag.add_shape_dep(owner, second);
             }
             _ => unreachable!(),
         }
@@ -635,14 +645,6 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
             !errors.is_empty(),
             "malformed local role {mutation} was accepted"
         );
-        if mutation == 7 {
-            assert!(
-                errors.iter().any(|error| {
-                    error == "local ascription owner 2 has multiple runtime branch activations"
-                }),
-                "{errors:?}"
-            );
-        }
     }
 
     let named = lower(
@@ -665,4 +667,72 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
         !chelis_ir::verify::verify(&missing_declaration_identity).is_empty(),
         "a named local claim must retain its declaring parameter identity"
     );
+}
+
+/// The node carrying `source`'s one local claim, and the claim's guard site.
+fn claim_carrier_and_site(
+    source: &str,
+) -> (
+    chelis_ir::Dag,
+    chelis_ir::dag::NodeId,
+    chelis_ir::axis_sources::LocalGuardClaim,
+) {
+    let dag = lower(source);
+    let claims = local_claims(&dag);
+    assert_eq!(claims.len(), 1, "{dag:#?}");
+    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let carrier = dag
+        .nodes()
+        .iter()
+        .find(|node| node.shape_deps.contains(&token))
+        .expect("a claim token has its carrier")
+        .id;
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
+    let [(_, site)] = sites.as_slice() else {
+        panic!("{sites:#?}");
+    };
+    (dag, carrier, site.clone())
+}
+
+/// spec/10 section 3.2 (#2413): an arm's local claim is checked under the
+/// owner activation of the node carrying it, the one carrier of that fact.
+/// The carrier holds no Bool dependency that could name a second
+/// activation, and inside a `grad` body spliced into the arm the activation
+/// is still the arm's, not the body's own (empty) branch path.
+///
+/// Evidentiary status: REGRESSION TEST for the `grad` row (at 224414e1f its
+/// site had no activation); DISPOSITION LOCK for the direct arm, whose
+/// activation was already the arm's, through a Bool shape dependency.
+#[test]
+fn an_arms_local_claim_is_checked_under_its_carriers_owner_activation() {
+    let direct = "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+                  if flag then {\n  \
+                  y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+                  y\n\
+                  } else x\n";
+    let spliced = "def h(x: tensor[*, f32]) -> tensor[f32] = {\n  \
+                   y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+                   sum(y, 0i32)\n\
+                   }\n\
+                   def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+                   if flag then grad(h)(x) else x\n";
+    for (row, source) in [("direct", direct), ("grad", spliced)] {
+        let (dag, carrier, site) = claim_carrier_and_site(source);
+        let carrier = dag.get(carrier).unwrap();
+        assert!(site.activation.node().is_some(), "{row}: {dag:#?}");
+        assert_eq!(
+            site.activation.node(),
+            carrier.owner.activation,
+            "{row}: {dag:#?}"
+        );
+        assert_eq!(site.activation.claimed(), carrier.id, "{row}: {dag:#?}");
+        assert!(
+            carrier.shape_deps.iter().all(|dependency| {
+                let dependency = dag.get(*dependency).unwrap();
+                !(dependency.output_type.dims.is_empty()
+                    && dependency.output_type.precision == Prim::Bool)
+            }),
+            "{row}: {dag:#?}"
+        );
+    }
 }

@@ -217,7 +217,6 @@ module.exports = grammar({
     effect_expression: ($) =>
       choice(
         "Diff",
-        "Random",
         "Accum",
         "IO",
         "Test",
@@ -298,7 +297,7 @@ module.exports = grammar({
     with_handler_expression: ($) =>
       seq(
         "with",
-        field("handler", choice("seed", "device")),
+        field("handler", "device"),
         "(",
         field("argument", $.expression),
         optional(","),

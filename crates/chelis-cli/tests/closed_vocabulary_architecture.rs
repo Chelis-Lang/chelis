@@ -165,7 +165,6 @@ const EFFECT_KIND_CRATES: &[CrateEvidence] = &[
             "M::Effect",
             ".effect()",
             "decode_effect_kind(",
-            "EffectKind::Random",
             "EffectKind::Resource",
         ],
     },

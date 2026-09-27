@@ -206,10 +206,9 @@ use crate::host_abi::{
 };
 use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
-    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedDagView, VerifiedEdgeView,
-    VerifiedHostAction, VerifiedHostOperation, VerifiedHostTensorHelperView,
-    VerifiedHostTerminator, VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse,
-    VerifiedTerminalView,
+    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
+    VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
+    VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse, VerifiedTerminalView,
 };
 use chelis_types::manifest::{RootManifest, RootPathStep};
 use chelis_types::types::{Lane, Prim};
@@ -233,24 +232,18 @@ pub(crate) fn emit_host_abi_program(
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
-    #[cfg(feature = "native-random-observer")]
-    let source_sites = crate::random_observer::source_sites(projected.source_emission());
     append_scalar_conversion_helpers(&mut body);
     body.push(String::new());
     append_tensor_abi_helpers(&mut body);
     body.push(String::new());
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
-    append_tensor_print_helper(&mut body);
-    body.push(String::new());
+    // The key helpers precede the tensor printer, which reads a key tensor's
+    // elements through `chelis_key_at`.
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
-    #[cfg(feature = "native-random-observer")]
-    {
-        crate::random_observer::append_support(&mut body);
-        crate::random_observer::append_source_sites(&mut body, &source_sites);
-        body.push(String::new());
-    }
+    append_tensor_print_helper(&mut body);
+    body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
     // Authored functions are published in the generated header with external
@@ -335,7 +328,7 @@ pub(crate) fn emit_host_abi_program(
     }
 
     let global_entry_coverage = entry::global_helper_coverage(program);
-    for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
+    for index in 0..program.global_tensor_helpers.len() {
         let helper_name = global_tensor_helper_name(program_name, index);
         if external_helpers.contains(&helper_name) {
             append_external_helper_declaration(&mut body, &helper_name);
@@ -343,7 +336,6 @@ pub(crate) fn emit_host_abi_program(
             for (variant, coverage) in global_entry_coverage.variants[index].iter().enumerate() {
                 helper_requirements.merge(append_helper(
                     &mut body,
-                    helper,
                     projected
                         .global_tensor_helper(index)
                         .expect("projected global helper retains verified child"),
@@ -418,12 +410,6 @@ pub(crate) fn emit_host_abi_program(
             external_helpers,
             &captured_globals,
             &entry_work[function_index],
-            #[cfg(feature = "native-random-observer")]
-            &source_sites
-                .iter()
-                .filter(|s| s.verified.unit_word() == function_index + 1)
-                .cloned()
-                .collect::<Vec<_>>(),
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -458,7 +444,7 @@ pub(crate) fn emit_host_abi_program(
             })
             .collect::<Vec<_>>();
         let entry_coverage = entry::helper_coverage_with_verified(function, &verified_helpers);
-        for (index, helper) in function.tensor_helpers.iter().enumerate() {
+        for index in 0..function.tensor_helpers.len() {
             let function_name = emitted_names
                 .get(&function.name)
                 .expect("host function emitted name");
@@ -469,7 +455,6 @@ pub(crate) fn emit_host_abi_program(
                 for (variant, coverage) in entry_coverage.variants[index].iter().enumerate() {
                     helper_requirements.merge(append_helper(
                         &mut body,
-                        helper,
                         projected
                             .function_tensor_helper(function_index, index)
                             .expect("projected function helper retains verified child"),
@@ -788,7 +773,7 @@ fn function_specializations(program: &HostProgram) -> UnordMap<String, HostFunct
 /// The `[05-RNG-1]` stream and `[05-OP-8]` samplers, byte-identical to the
 /// block `CEmitter` prepends to a standalone kernel (chelis#2408), then
 /// `[05-RNG-2]`'s key derivation, which a kernel carries only when it derives
-/// keys, then the host frame that supplies a draw key at run time.
+/// keys.
 fn append_uniform_sample_helper(out: &mut Vec<String>) {
     for line in [
         "static inline uint64_t chelis_random_mix(uint64_t value) {",
@@ -796,10 +781,6 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;",
         "    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;",
         "    return value ^ (value >> 31);",
-        "}",
-        "static inline uint64_t chelis_random_key(uint64_t seed, uint64_t ordinal) {",
-        "    uint64_t call = chelis_random_mix(ordinal);",
-        "    return seed ^ ((call << 17) | (call >> 47));",
         "}",
         "static inline double chelis_random_unit(uint64_t key, uint64_t index) {",
         "    uint64_t element = chelis_random_mix(index);",
@@ -819,10 +800,68 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     ] {
         out.push(line.to_string());
     }
-    out.push(
-        "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
-            .to_string(),
-    );
+    // A host scalar key ([05-OP-69]..[05-OP-72]), `chelis_runtime.h`'s
+    // `chelis_key`, and its rank-0 key tensor, the form a kernel's key
+    // `Load` reads and a boxed key takes.
+    for line in [
+        "static inline chelis_key chelis_key_from_seed_bits(long long seed) {",
+        "    chelis_key key = { (unsigned long long)seed };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_derive_value(chelis_key key, unsigned long long index) {",
+        "    chelis_key derived = { chelis_key_derive(key.bits, index) };",
+        "    return derived;",
+        "}",
+        "static inline chelis_key chelis_key_fold_in(chelis_key key, long long n) {",
+        "    return chelis_key_derive_value(chelis_key_derive_value(key, 2ULL), (unsigned long long)n);",
+        "}",
+        "static inline chelis_tensor *chelis_key_tensor(chelis_key key) {",
+        "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_DTYPE_KEY);",
+        "    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);",
+        "    chelis_write_view view = chelis_tensor_write_view(guard);",
+        "    ((unsigned long long *)view.data)[0] = key.bits;",
+        "    chelis_tensor_end_write(guard);",
+        "    return tensor;",
+        "}",
+        "static inline chelis_key chelis_key_of_tensor(const chelis_tensor *tensor) {",
+        "    chelis_read_view view = chelis_tensor_read_view(tensor);",
+        "    if (view.dtype != CHELIS_DTYPE_KEY || view.count != 1) {",
+        "        fprintf(stderr, \"internal: a scalar key is not a rank-0 key tensor\\n\");",
+        "        abort();",
+        "    }",
+        "    chelis_key key = { ((const unsigned long long *)view.data)[0] };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_at(const chelis_tensor *tensor, int64_t index) {",
+        "    chelis_read_view view = chelis_tensor_read_view(tensor);",
+        "    if (view.dtype != CHELIS_DTYPE_KEY || index < 0 || index >= view.count) {",
+        "        fprintf(stderr, \"internal: no key at this index of a key tensor\\n\");",
+        "        abort();",
+        "    }",
+        "    chelis_key key = { ((const unsigned long long *)view.data)[index] };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_take_value(chelis_value value) {",
+        "    chelis_tensor *tensor = chelis_tensor_take_value(value);",
+        "    chelis_key key = chelis_key_of_tensor(tensor);",
+        "    chelis_tensor_release(tensor);",
+        "    return key;",
+        "}",
+        "static inline chelis_tensor *chelis_split_keys_tensor(chelis_key key, long long count) {",
+        "    if (count < 0) chelis_numeric_trap(\"numeric trap: domain in split_keys at i64\");",
+        "    int64_t extent = (int64_t)count;",
+        "    chelis_tensor *tensor = chelis_alloc(1, &extent, CHELIS_DTYPE_KEY);",
+        "    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);",
+        "    chelis_write_view view = chelis_tensor_write_view(guard);",
+        "    for (long long j = 0; j < count; j++) {",
+        "        ((unsigned long long *)view.data)[j] = chelis_key_fold_in(key, j).bits;",
+        "    }",
+        "    chelis_tensor_end_write(guard);",
+        "    return tensor;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
 }
 
 /// Translation-unit-local support for Std.Io.Json's canonical object
@@ -1586,6 +1625,16 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
     );
+    // [05-OBS-2]: a key has no scalar carrier; its element renders through
+    // the runtime's key text.
+    out.push("    if (chelis_tensor_read_view(t).dtype == CHELIS_DTYPE_KEY) {".to_string());
+    out.push(
+        "        chelis_string key_text = chelis_string_from_key(chelis_key_at(t, i));".to_string(),
+    );
+    out.push("        chelis_print_string(key_text);".to_string());
+    out.push("        chelis_string_release(key_text);".to_string());
+    out.push("        return;".to_string());
+    out.push("    }".to_string());
     out.push(
         "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
@@ -1715,13 +1764,12 @@ impl HelperRequirements {
 /// so each one is emitted exactly once at file scope.
 fn append_helper(
     out: &mut Vec<String>,
-    helper: &HostTensorHelper,
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
     entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<HelperRequirements, Unsupported> {
-    let helper_name = random_helper_name(helper_name);
-    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
+    let helper_name = private_helper_name(helper_name);
+    if verified.identity_input().is_some() {
         out.push(format!(
             "static void {}({}) {{",
             helper_name,
@@ -1731,9 +1779,6 @@ fn append_helper(
         ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
-        out.push("    (void)__chelis_rng;".to_string());
-        #[cfg(feature = "native-random-observer")]
-        out.push("    (void)__chelis_observer;".to_string());
         out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at i64\");".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
@@ -1755,20 +1800,8 @@ fn append_helper(
         static_entry: true,
         ..crate::CodegenOptions::default()
     };
-    #[cfg(feature = "native-random-observer")]
-    let source_location = dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.op, RiscOp::DrawKey { .. }))
-        .then(|| verified.source_location());
-    let helper_src = CEmitter::emit_verified_dag_with_options(
-        dag,
-        &helper_name,
-        options,
-        entry_coverage,
-        #[cfg(feature = "native-random-observer")]
-        source_location,
-    )?;
+    let helper_src =
+        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?;
     // The CEmitter prepends dtype-specific uniform sampling helpers to
     // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
@@ -1837,66 +1870,36 @@ fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) 
     out.extend(c_linkage_declarations([format!(
         "void {helper_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     )]));
-    // Peer translation units keep their established ABI and baked-seed
-    // behavior. The private adapter does not export Random state to a device.
+    // Peer translation units keep their established ABI. The private adapter
+    // gives the helper the private name every host call site uses.
     out.push(format!(
-        "static void {}({}) {{",
-        random_helper_name(helper_name),
-        private_random_params(
-            "chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out"
-        )
+        "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
+        private_helper_name(helper_name),
     ));
-    out.push("    (void)__chelis_rng;".to_string());
-    #[cfg(feature = "native-random-observer")]
-    out.push("    (void)__chelis_observer;".to_string());
     out.push(format!("    {helper_name}(inputs, n_in, outputs, n_out);"));
     out.push("}".to_string());
     out.push(String::new());
 }
 
-fn random_helper_name(name: &str) -> String {
-    format!("{name}__with_rng")
+/// The private name of a tensor helper: the host-owned definition whose
+/// signature carries the invocation context, or the adapter over a peer
+/// translation unit's exported helper.
+fn private_helper_name(name: &str) -> String {
+    format!("{name}__private")
 }
 
-#[cfg(not(feature = "native-random-observer"))]
-fn private_random_params(params: &str) -> String {
+/// `params` followed by `rest`, with no leading separator when `params` is
+/// empty.
+fn join_params(params: &str, rest: &str) -> String {
     if params.is_empty() {
-        "chelis_rng_state *__chelis_rng".to_string()
+        rest.to_string()
     } else {
-        format!("{params}, chelis_rng_state *__chelis_rng")
+        format!("{params}, {rest}")
     }
-}
-
-#[cfg(feature = "native-random-observer")]
-fn private_random_params(params: &str) -> String {
-    if params.is_empty() {
-        crate::random_observer::PRIVATE_PARAM.to_string()
-    } else {
-        format!("{params}, {}", crate::random_observer::PRIVATE_PARAM)
-    }
-}
-
-fn append_private_context_args(args: &mut Vec<String>) {
-    #[cfg(not(feature = "native-random-observer"))]
-    args.push("__chelis_rng".to_string());
-    #[cfg(feature = "native-random-observer")]
-    args.extend(
-        crate::random_observer::PRIVATE_ARGS
-            .iter()
-            .map(|arg| (*arg).to_string()),
-    );
 }
 
 fn append_private_host_context_args(args: &mut Vec<String>) {
-    append_private_context_args(args);
     args.push("__chelis_origin_arena".to_string());
-}
-
-fn append_invocation_random_context(out: &mut Vec<String>) {
-    out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
-    out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
-    #[cfg(feature = "native-random-observer")]
-    crate::random_observer::append_inactive_context(out, "    ");
 }
 
 fn append_invocation_origin_context(out: &mut Vec<String>) {
@@ -1908,25 +1911,6 @@ fn append_invocation_origin_context(out: &mut Vec<String>) {
         "    __chelis_host_result_origin_arena *__chelis_origin_arena = &__chelis_origin_arena_storage;"
             .to_string(),
     );
-}
-
-fn verified_identity_helper_input(
-    helper: &HostTensorHelper,
-    dag: VerifiedDagView<'_>,
-) -> Option<(String, chelis_ir::dag::TensorType)> {
-    if dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return None;
-    }
-    let root = dag.roots()[0];
-    let node = dag.get(root)?;
-    match &node.op {
-        RiscOp::Load { name } if node.output_type == helper.output => helper
-            .inputs
-            .iter()
-            .find(|input| input.name == *name)
-            .map(|input| (input.name.clone(), input.ty.clone())),
-        _ => None,
-    }
 }
 
 /// chelis#730 Phase 1: the branded self-naming abort stub emitted for an
@@ -2180,9 +2164,9 @@ fn c_string_literal(text: &str) -> String {
 /// This context is translation-unit private. Public wrappers retain their
 /// authored signatures, while one owned callee accepts any caller's literals.
 fn private_host_params(params: &str) -> String {
-    format!(
-        "{}, const __chelis_host_result_claim *__chelis_caller_result_claims",
-        private_random_params(params)
+    join_params(
+        params,
+        "const __chelis_host_result_claim *__chelis_caller_result_claims",
     )
 }
 
@@ -2193,9 +2177,11 @@ fn private_host_params(params: &str) -> String {
 const PRIVATE_RESULT_ORIGIN_RETURN_SLOT: &str = "__chelis_private_result_origin_return";
 
 fn private_host_function_params(params: &str) -> String {
-    format!(
-        "{}, __chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}",
-        private_random_params(params),
+    join_params(
+        params,
+        &format!(
+            "__chelis_host_result_origin_arena *__chelis_origin_arena, const __chelis_host_result_claim *__chelis_caller_result_claims, const __chelis_host_result_origin **{PRIVATE_RESULT_ORIGIN_RETURN_SLOT}"
+        ),
     )
 }
 
@@ -2562,8 +2548,6 @@ fn emit_function(
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
     entry_work: &entry_walk::EntryWork,
-    #[cfg(feature = "native-random-observer")]
-    source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -2586,7 +2570,6 @@ fn emit_function(
         body_name,
         private_host_function_params(&params)
     ));
-    out.push("    (void)__chelis_rng;".to_string());
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
         emitted_name,
@@ -2609,22 +2592,6 @@ fn emit_function(
     for param in &function.params {
         emitter.interface_reload_names.remove(&param.name);
         emitter.declare_result_origin(&param.name, &param.ty, Some("load"));
-    }
-    #[cfg(feature = "native-random-observer")]
-    {
-        if !crate::random_observer::source_bijection(source_sites, &emitter.expression_sites) {
-            return Err(invalid_abi_shape(
-                "source identity sidecar is not the verified expression-site bijection".into(),
-                "native Random source identity",
-            ));
-        }
-        emitter.source_sites = source_sites.to_vec();
-        let source = source_sites
-            .first()
-            .expect("function has a body expression");
-        let unit = source.verified.unit_word();
-        let admitted = usize::from(source.supported());
-        out.push(format!("    __chelis_random_function_frame __chelis_source_function = __chelis_random_push_function(__chelis_observer, {unit}ULL, {admitted});"));
     }
     if owner_bindings.len() < function.params.len()
         || function
@@ -2710,10 +2677,6 @@ fn emit_function(
     ));
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
-    #[cfg(feature = "native-random-observer")]
-    out.push(
-        "    __chelis_random_pop_function(__chelis_observer, __chelis_source_function);".into(),
-    );
     out.push("    return __result;".to_string());
     out.push("}".to_string());
 
@@ -2759,7 +2722,6 @@ fn emit_function(
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
         out.extend(exported_entry.iter().cloned());
-        append_invocation_random_context(out);
         append_invocation_origin_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
@@ -2797,61 +2759,6 @@ fn emit_function(
         out.push(crate::generated_header::render_authored_export_end(
             &function.name,
         ));
-
-        #[cfg(feature = "native-random-observer")]
-        {
-            let observed_params = if wrapper_params.is_empty() {
-                "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation".to_string()
-            } else {
-                format!(
-                    "{wrapper_params}, __chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation"
-                )
-            };
-            out.push(format!(
-                "static {} __chelis_observed_{}({observed_params}) {{",
-                c_type(&function.ret_ty)?,
-                emitted_name
-            ));
-            out.extend(exported_entry);
-            out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
-            out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
-            crate::random_observer::append_observed_context(out, "    ");
-            append_invocation_origin_context(out);
-            let mut args = Vec::with_capacity(function.params.len() + 2);
-            for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
-                if *use_ == VerifiedOwnershipUse::Move
-                    && retain_call(&param.name, &param.ty).is_some()
-                {
-                    let owned = format!("__chelis_owned_arg_{index}");
-                    out.push(format!(
-                        "    {} = {};",
-                        c_decl(&param.ty, &owned)?,
-                        c_ident(&param.name)
-                    ));
-                    out.push(format!(
-                        "    {}",
-                        retain_call(&owned, &param.ty).expect("heap retain")
-                    ));
-                    args.push(owned);
-                } else {
-                    args.push(c_ident(&param.name).into_owned());
-                }
-            }
-            append_private_host_context_args(&mut args);
-            args.push("NULL".to_string());
-            args.push("NULL".to_string());
-            out.push(format!(
-                "    {} __result = {}({});",
-                c_type(&function.ret_ty)?,
-                body_name,
-                args.join(", ")
-            ));
-            out.push(
-                "    __chelis_host_result_origin_arena_destroy(__chelis_origin_arena);".to_string(),
-            );
-            out.push("    return __result;".to_string());
-            out.push("}".to_string());
-        }
     }
     Ok(())
 }
@@ -2909,7 +2816,6 @@ fn emit_main(
     external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
-    append_invocation_random_context(out);
     append_invocation_origin_context(out);
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def
@@ -3224,10 +3130,6 @@ fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             collect_var_names(init, out);
             collect_var_names(list, out);
         }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            collect_var_names(seed, out);
-            collect_var_names(body, out);
-        }
     }
 }
 
@@ -3337,10 +3239,6 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                 walk(init, out);
                 walk(list, out);
             }
-            HostExprKind::WithSeed { seed, body, .. } => {
-                walk(seed, out);
-                walk(body, out);
-            }
             HostExprKind::Int(_)
             | HostExprKind::Float(_)
             | HostExprKind::Bool(_)
@@ -3438,8 +3336,6 @@ struct HostEmitter<'a> {
     /// Rebuild their aggregate load tree at each reference instead of reading
     /// an origin pointer retained by the cached/global value.
     interface_reload_names: UnordSet<String>,
-    #[cfg(feature = "native-random-observer")]
-    source_sites: Vec<crate::random_observer::SourceSite<'a>>,
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
@@ -3583,8 +3479,6 @@ impl<'a> HostEmitter<'a> {
             entry_projection: entry::Projection::default(),
             external_helpers: UnordSet::new(),
             interface_reload_names: UnordSet::new(),
-            #[cfg(feature = "native-random-observer")]
-            source_sites: Vec::new(),
             pre_emitted_clone_sites: UnordSet::new(),
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
@@ -3597,17 +3491,13 @@ impl<'a> HostEmitter<'a> {
     /// chelis#2120: fill a freshly allocated tensor with a `[05-OP-8]`
     /// uniform draw in the C HOST lane.
     ///
-    /// The tensor-DAG lane takes its key from a `DrawKey` node
-    /// (`emit::emit_draw_key`). The host lane's seed lives in `__chelis_rng`,
-    /// installed by `HostExprKind::WithSeed`, and the draw ordinal is
-    /// consumed at run time from it, so the two rules below are what keep it
-    /// in step with `chelis eval` (`chelis-compiler-api` `runtime/eval.rs`
-    /// `"uniform_like"`):
+    /// The host lane draws with the key its first argument computed, so the
+    /// two rules below are what keep it in step with `chelis eval`
+    /// (`chelis-compiler-api` `runtime/eval.rs` `"uniform_like"`):
     ///
-    /// 1. **Exactly one ordinal per application, read after the arguments.**
-    ///    `arg_vars` are already emitted when this runs, matching the
-    ///    evaluator's left-to-right argument evaluation followed by its
-    ///    `random_counter` read. The key is taken once, into a temporary, and
+    /// 1. **The key is read after the arguments.** `arg_vars` are already
+    ///    emitted when this runs, matching the evaluator's left-to-right
+    ///    argument evaluation. The key is read once, into a temporary, and
     ///    never inside the element loop.
     /// 2. **A foldable bound is re-folded from the structural `args`, not
     ///    read from `arg_vars`.** This stamps the same exact bit pattern the
@@ -3646,6 +3536,26 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_vars: &[(String, HostType)],
     ) -> Result<(), Unsupported> {
+        // [05-OP-8]: `uniform_like(k, template, low, high)`; the key is the
+        // first operand, and the rest keep their positions relative to it.
+        let key_var = match arg_vars.first() {
+            Some((var, HostType::Key)) => var.clone(),
+            _ => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Builtin("uniform_like".to_string()),
+                    "`chelis build` host emission",
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-TOT-2]",
+                        "uniform_like's first operand must be a key; the checker types it \
+                         as one, so a non-key here is an internal desync"
+                    ),
+                ));
+            }
+        };
+        // The key check above proves both slices non-empty.
+        let args = &args[1..];
+        let arg_vars = &arg_vars[1..];
         let template = match arg_vars.first() {
             Some((var, HostType::Tensor(_))) => var.clone(),
             _ => {
@@ -3669,25 +3579,10 @@ impl<'a> HostEmitter<'a> {
         let low_f64_expr = format!("((double)({low_f32_expr}))");
         let high_f64_expr = format!("((double)({high_f32_expr}))");
 
-        // A draw outside an active scope is reachable, not an internal
-        // desync: a top-level binding with an unhandled `Random` is a hard
-        // check error, but an exported `def` carrying one is not, and its
-        // generated wrapper initializes `__chelis_rng` inactive. Abort there
-        // rather than draw from a stream no handler owns.
-        let key = self.next_temp("uniform_key");
-        self.lines.push(format!(
-            "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    fprintf(stderr, \"uniform_like requires an active host RNG scope\\n\");",
-            self.indent
-        ));
-        self.lines.push(format!("{}    abort();", self.indent));
-        self.lines.push(format!("{}}}", self.indent));
+        let key = format!("{key_var}.bits");
         // [05-OP-8] validates finite bounds, `low <= high` and a finite
-        // difference at the draw's arithmetic width before it consumes an
-        // ordinal: f64 subtracts the widened bounds, every other float dtype
+        // difference at the draw's arithmetic width before any element is
+        // drawn: f64 subtracts the widened bounds, every other float dtype
         // subtracts in f32.
         let low = self.next_temp("uniform_low");
         let high = self.next_temp("uniform_high");
@@ -3725,11 +3620,6 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines.push(format!("{ind}    }}"));
         self.lines.push(format!("{ind}}}"));
-        self.lines.push(format!(
-            "{}uint64_t {key} = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);",
-            self.indent
-        ));
-
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));",
             self.indent
@@ -4841,42 +4731,7 @@ impl<'a> HostEmitter<'a> {
         // sibling binding cannot inherit the flag.
         let on_result_spine = std::mem::take(&mut self.claim_on_spine);
         let site = self.next_expression_site()?;
-        #[cfg(feature = "native-random-observer")]
-        let call_frame = {
-            let source = self
-                .source_sites
-                .iter()
-                .find(|s| s.verified.site().id() == site.id);
-            if source.is_some_and(|s| !s.matches(&site, expr)) {
-                return Err(invalid_abi_shape(
-                    "source identity disagrees with projected site/kind/target".into(),
-                    "native Random source identity",
-                ));
-            }
-            let pointer = source.map_or_else(|| "NULL".into(), |s| s.pointer());
-            if matches!(
-                expr.kind,
-                HostExprKind::Call { .. } | HostExprKind::TensorCall { .. }
-            ) {
-                let name = self.next_temp("source_call");
-                self.lines.extend(crate::random_observer::push_source_call(
-                    &self.indent,
-                    &name,
-                    &pointer,
-                ));
-                Some(name)
-            } else {
-                None
-            }
-        };
         self.assign_expr_at_site(target, expr, ty, &site, on_result_spine)?;
-        #[cfg(feature = "native-random-observer")]
-        if let Some(frame) = call_frame {
-            self.lines.push(crate::random_observer::pop_source_call(
-                &self.indent,
-                &frame,
-            ));
-        }
         Ok(())
     }
 
@@ -5408,81 +5263,6 @@ impl<'a> HostEmitter<'a> {
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
-            HostExprKind::WithSeed { seed, body, ty } => {
-                let seed_var = self.next_temp("seed");
-                self.emit_expr_to_var(seed, &seed_var, &HostType::Int64)?;
-                #[cfg(feature = "native-random-observer")]
-                let source_frame = {
-                    let pointer = self
-                        .source_sites
-                        .iter()
-                        .find(|s| s.verified.site().id() == site.id)
-                        .map_or_else(|| "NULL".into(), |s| s.pointer());
-                    let frame = self.next_temp("source_host");
-                    self.lines.push(format!("{}__chelis_random_host_frame {frame} = __chelis_random_push_host(__chelis_observer, {pointer}, (uint64_t){seed_var});", self.indent));
-                    self.lines.push(format!(
-                        "{}if (__chelis_observer != NULL) __chelis_observer->host = &{frame};",
-                        self.indent
-                    ));
-                    frame
-                };
-                let saved_var = self.next_temp("rng_saved");
-                let seeded_var = self.next_temp("rng_seeded");
-                self.lines.push(format!(
-                    "{}chelis_rng_state {saved_var} = *__chelis_rng;",
-                    self.indent
-                ));
-                #[cfg(feature = "native-random-observer")]
-                let observer_frame = self.next_temp("rng_observer_frame");
-                #[cfg(feature = "native-random-observer")]
-                self.lines.extend(crate::random_observer::push_frame(
-                    &self.indent,
-                    &observer_frame,
-                    &saved_var,
-                ));
-                // Install the complete handler frame, just as exit restores
-                // the complete saved frame, before evaluating its body.
-                self.lines.push(format!(
-                    "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};",
-                    self.indent
-                ));
-                self.lines
-                    .push(format!("{}*__chelis_rng = {seeded_var};", self.indent));
-                #[cfg(feature = "native-random-observer")]
-                self.lines.push(crate::random_observer::record(
-                    &self.indent,
-                    "__CHELIS_RANDOM_OBSERVER_HOST_INSTALL",
-                    "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
-                    "NULL",
-                    None,
-                    None,
-                    None,
-                    "*__chelis_rng",
-                    None,
-                ));
-                self.assign_expr(target, body, ty)?;
-                self.lines
-                    .push(format!("{}*__chelis_rng = {saved_var};", self.indent));
-                #[cfg(feature = "native-random-observer")]
-                {
-                    self.lines.push(crate::random_observer::pop_frame(
-                        &self.indent,
-                        &observer_frame,
-                    ));
-                    self.lines.push(crate::random_observer::record(
-                        &self.indent,
-                        "__CHELIS_RANDOM_OBSERVER_HOST_RESTORE",
-                        "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
-                        "NULL",
-                        None,
-                        None,
-                        None,
-                        "*__chelis_rng",
-                        None,
-                    ));
-                    self.lines.push(format!("{}if (__chelis_observer != NULL) __chelis_observer->host = {source_frame}.previous;", self.indent));
-                }
-            }
             HostExprKind::TensorCall { helper, args, ty } => {
                 let expression = self
                     .expression_sites
@@ -5662,6 +5442,58 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        // [05-OP-69]..[05-OP-72]: the key operations over host scalar keys,
+        // with the same derivation the kernels use (`chelis_key_derive`).
+        match name {
+            "key_from_seed" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_key_from_seed_bits((long long){});",
+                    self.indent, arg_vars[0].0
+                ));
+                return Ok(());
+            }
+            "fold_in" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_key_fold_in({}, (long long){});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            "split_key" => {
+                let halves = self.next_temp("split_key_values");
+                let ind = self.indent.clone();
+                let key = &arg_vars[0].0;
+                self.lines.push(format!("{ind}chelis_value {halves}[2];"));
+                for index in 0..2 {
+                    self.lines.push(format!(
+                        "{ind}{halves}[{index}] = {};",
+                        self.box_value_expr(
+                            &format!("chelis_key_derive_value({key}, {index}ULL)"),
+                            &HostType::Key
+                        )?
+                    ));
+                }
+                // The tuple retains its items, so the boxes are released
+                // here, as every other tuple construction releases them.
+                self.lines.push(format!(
+                    "{ind}{target} = chelis_tuple_from_values({halves}, 2);"
+                ));
+                for index in 0..2 {
+                    self.lines
+                        .push(format!("{ind}chelis_value_release({halves}[{index}]);"));
+                }
+                return Ok(());
+            }
+            "split_keys" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_split_keys_tensor({}, (long long){});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            _ => {}
         }
 
         if name == "__json_canonical_object_entries" {
@@ -7707,7 +7539,7 @@ impl<'a> HostEmitter<'a> {
         } else {
             entry_variant
         };
-        let helper_name = random_helper_name(&entry::variant_name(&base, entry_variant));
+        let helper_name = private_helper_name(&entry::variant_name(&base, entry_variant));
         let mut tensor_args: Vec<(String, Option<String>)> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let inferred_ty = host_type(arg);
@@ -7724,11 +7556,18 @@ impl<'a> HostEmitter<'a> {
                 // Preserve the declared dtype and stored bits through the
                 // existing tagged scalar carrier; no scalar class falls back
                 // to f32 or interprets f16/bf16 storage as an integer value.
-                let scalar = scalar_carrier_expr(&value_name, &inferred_ty)?;
-                self.lines.push(format!(
-                    "{}{tensor_name} = chelis_scalar_tensor({scalar});",
-                    self.indent
-                ));
+                // A key has no scalar carrier: it enters the kernel as the
+                // rank-0 key tensor its key `Load` reads.
+                let tensor = if inferred_ty == HostType::Key {
+                    format!("chelis_key_tensor({value_name})")
+                } else {
+                    format!(
+                        "chelis_scalar_tensor({})",
+                        scalar_carrier_expr(&value_name, &inferred_ty)?
+                    )
+                };
+                self.lines
+                    .push(format!("{}{tensor_name} = {tensor};", self.indent));
                 (tensor_name.clone(), Some(tensor_name))
             };
             tensor_args.push(entry);
@@ -7783,7 +7622,6 @@ impl<'a> HostEmitter<'a> {
             outputs_name.clone(),
             root_count.to_string(),
         ];
-        append_private_context_args(&mut helper_args);
         if !self.external_helpers.contains(&base) {
             helper_args.push(result_claims.unwrap_or("NULL").to_string());
         }
@@ -9429,6 +9267,9 @@ impl<'a> HostEmitter<'a> {
                 "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0)))"
             ),
             HostType::String => format!("chelis_value_take_string({value})"),
+            // A key has no scalar carrier ([05-OP-31] governs numeric and
+            // bool scalars); a boxed key is its rank-0 key tensor.
+            HostType::Key => format!("chelis_value_take_tensor(chelis_key_tensor({value}))"),
             HostType::Adt(_, _) => format!("chelis_value_take_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_take_tensor({value})"),
             HostType::List(_) => format!("chelis_value_take_list({value})"),
@@ -9493,6 +9334,7 @@ impl<'a> HostEmitter<'a> {
                 format!("chelis_host_scalar_as_bool(chelis_value_unbox_scalar({value_expr}))")
             }
             HostType::String => format!("chelis_string_take_value({value_expr})"),
+            HostType::Key => format!("chelis_key_take_value({value_expr})"),
             HostType::Adt(_, _) => format!("chelis_adt_take_value({value_expr})"),
             HostType::Tensor(_) => format!("chelis_tensor_take_value({value_expr})"),
             HostType::List(_) => format!("chelis_list_take_value({value_expr})"),
@@ -9662,6 +9504,12 @@ impl<'a> HostEmitter<'a> {
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\", {} ? \"true\" : \"false\");",
                 self.indent, value
+            )),
+            // [05-OBS-2]: a key root renders as the runtime's key text.
+            HostType::Key => self.lines.push(format!(
+                "{}{{ chelis_string text = chelis_string_from_key({value}); \
+                 chelis_print_string(text); chelis_string_release(text); }}",
+                self.indent
             )),
             HostType::Tensor(_) => self.lines.push(format!(
                 "{}chelis_print_tensor_stdout({});",
@@ -10245,7 +10093,6 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::Scan { ty, .. }
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
-        | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
         | HostExprKind::ResultClaimScope { ty, .. }
         | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
@@ -10275,6 +10122,7 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
         | HostType::Float64
         | HostType::Bool
         | HostType::String
+        | HostType::Key
         | HostType::Callback(_, _)
         | HostType::Dict(_, _)
         | HostType::MappedFile
@@ -10409,6 +10257,7 @@ fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Un
         HostType::Bool => Ok((Prim::Bool, CheckedCastSurface::Scalar)),
         HostType::Tensor(tensor) => Ok((tensor.precision, CheckedCastSurface::Tensor)),
         HostType::String
+        | HostType::Key
         | HostType::Callback(_, _)
         | HostType::Adt(_, _)
         | HostType::List(_)
@@ -10926,11 +10775,13 @@ mod expression_dispatch_tests {
     #[test]
     fn host_random_stream_helpers_are_the_standalone_kernel_prelude() {
         let mut dag = chelis_ir::dag::Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![chelis_ir::dag::DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::Load {
                 name: "template".into(),
             },
@@ -10944,6 +10795,7 @@ mod expression_dispatch_tests {
         };
         let bound = |dag: &mut chelis_ir::dag::Dag, value| {
             dag.add_node(
+                decl,
                 chelis_ir::dag::RiscOp::synth_const(Prim::F32, value),
                 vec![],
                 rank0(Prim::F32),
@@ -10953,22 +10805,21 @@ mod expression_dispatch_tests {
         let low = bound(&mut dag, 0.0);
         let high = bound(&mut dag, 1.0);
         let seed = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
-            chelis_ir::dag::RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high],
+            decl,
+            chelis_ir::dag::RiscOp::KeyFromSeed,
+            vec![seed],
             rank0(Prim::Key),
             None,
         );
         let draw = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,
@@ -10987,7 +10838,7 @@ mod expression_dispatch_tests {
         append_uniform_sample_helper(&mut host);
         let host = host.join("\n");
         assert!(
-            prelude.contains("chelis_random_key") && host.starts_with(prelude.trim_end()),
+            prelude.contains("chelis_random_unit") && host.starts_with(prelude.trim_end()),
             "kernel prelude:\n{prelude}\nhost helpers:\n{host}"
         );
     }

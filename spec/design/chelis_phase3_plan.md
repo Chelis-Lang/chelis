@@ -1403,7 +1403,7 @@ extracts all `Random`-effect-annotated operations into a structured JSON report.
 `chelis manifest --check` is a CI gate: fail the build if any random operation in a
 Shoals program is unseeded. Status: **demo-blocking, scoped, ready to build.** Full
 design: `chelis_manifest_spec.md` (concrete CLI surface and JSON schema); historical
-context in `chelis_reproducibility_manifests.md`.
+context in `archive/chelis_reproducibility_manifests.md`.
 
 **Canonical finance properties.** Shoals ships with a `properties/` directory of
 reference `@property` functions:

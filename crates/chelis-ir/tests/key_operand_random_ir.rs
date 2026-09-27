@@ -2,16 +2,13 @@
 //!
 //! Every expected value here is recomputed from the spec text of [05-RNG-1],
 //! [05-OP-37] and [05-OP-8] (the `spec_*` helpers below), never from an
-//! evaluator or kernel helper. The graphs exercise the bridge `DrawKey`
-//! (inherited and scoped handlers, activation, validation before consumption,
-//! unused results), runtime controls, the verifier's key rules, `grad`
-//! through the key edge, and the `RandomSelectionParameter` rejection of
-//! chelis#2421.
+//! evaluator or kernel helper. Each draw's key is `key_from_seed` of a literal
+//! seed. The graphs exercise runtime controls, the verifier's key rules,
+//! `grad` through the key edge, and the `RandomSelectionParameter` rejection
+//! of chelis#2421.
 
-use chelis_ir::dag::{
-    Dag, DimInfo, NodeId, RandomDraw, RandomHandler, RiscOp, TensorType, UniformBound,
-};
-use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::verify::verify;
 use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
@@ -28,9 +25,10 @@ fn splitmix64(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn spec_unit(seed: u64, ordinal: u64, index: u64) -> f64 {
-    let word =
-        splitmix64(seed ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41));
+/// [05-RNG-1]'s unit value of `word(key, index)` for the key whose bits are
+/// `key` (`key_from_seed` keeps a seed's two's-complement bits).
+fn spec_unit(key: u64, index: u64) -> f64 {
+    let word = splitmix64(key ^ splitmix64(index).rotate_left(41));
     (word >> 11) as f64 / (1_u64 << 53) as f64
 }
 
@@ -41,13 +39,13 @@ fn stored(prim: Prim, value: f64) -> f64 {
 /// [05-OP-37] at `p`: drop when the arithmetic-width unit is below the rate;
 /// otherwise `div(x, sub(1p, rate))`, each primitive finalized at `p` and
 /// f16/bf16 computed in f32.
-fn spec_dropout(prim: Prim, input: &[f64], rate: f64, seed: u64, ordinal: u64) -> Vec<f64> {
+fn spec_dropout(prim: Prim, input: &[f64], rate: f64, key: u64) -> Vec<f64> {
     let rate = stored(prim, rate);
     input
         .iter()
         .enumerate()
         .map(|(i, x)| {
-            let unit = spec_unit(seed, ordinal, i as u64);
+            let unit = spec_unit(key, i as u64);
             let unit = if prim == Prim::F64 {
                 unit
             } else {
@@ -60,20 +58,6 @@ fn spec_dropout(prim: Prim, input: &[f64], rate: f64, seed: u64, ordinal: u64) -
             } else {
                 let denominator = stored(prim, f64::from(1.0f32 - rate as f32));
                 stored(prim, f64::from(*x as f32 / denominator as f32))
-            }
-        })
-        .collect()
-}
-
-/// [05-OP-8] at `p` over f32 bounds.
-fn spec_uniform(prim: Prim, len: usize, low: f32, high: f32, seed: u64, ordinal: u64) -> Vec<f64> {
-    (0..len)
-        .map(|i| {
-            let unit = spec_unit(seed, ordinal, i as u64);
-            if prim == Prim::F64 {
-                (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
-            } else {
-                stored(prim, f64::from((high - low).mul_add(unit as f32, low)))
             }
         })
         .collect()
@@ -95,35 +79,35 @@ fn scalar(prim: Prim) -> TensorType {
     }
 }
 
-fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+    dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
-fn constant(dag: &mut Dag, prim: Prim, value: f64) -> NodeId {
-    dag.add_node(RiscOp::synth_const(prim, value), vec![], scalar(prim), None)
-}
-
-fn draw_key(
-    dag: &mut Dag,
-    handler: RandomHandler,
-    seed: Option<NodeId>,
-    draw: RandomDraw,
-    dtype: Prim,
-    controls: &[NodeId],
-    active: Option<NodeId>,
-) -> NodeId {
-    let inputs = seed
-        .into_iter()
-        .chain(controls.iter().copied())
-        .chain(active)
-        .collect();
+fn constant(dag: &mut Dag, decl: chelis_ir::dag::DeclId, prim: Prim, value: f64) -> NodeId {
     dag.add_node(
-        RiscOp::DrawKey {
-            handler,
-            draw,
-            dtype,
+        decl,
+        RiscOp::synth_const(prim, value),
+        vec![],
+        scalar(prim),
+        None,
+    )
+}
+
+/// `key_from_seed(seed)`: a rank-0 key whose bits are the seed's.
+fn seeded_key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: i64) -> NodeId {
+    let seed = dag.add_node(
+        decl,
+        RiscOp::Const {
+            value: chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
         },
-        inputs,
+        vec![],
+        scalar(Prim::Int64),
+        None,
+    );
+    dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
         scalar(Prim::Key),
         None,
     )
@@ -131,45 +115,30 @@ fn draw_key(
 
 fn dropout(
     dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
     x: NodeId,
     rate: NodeId,
-    handler: RandomHandler,
-    seed: Option<NodeId>,
+    seed: i64,
     active: Option<NodeId>,
 ) -> NodeId {
     let ty = dag.get(x).unwrap().output_type.clone();
-    let key = draw_key(
-        dag,
-        handler,
-        seed,
-        RandomDraw::Dropout,
-        ty.precision,
-        &[rate],
-        active,
-    );
+    let key = seeded_key(dag, decl, seed);
     let inputs = [x, rate, key].into_iter().chain(active).collect();
-    dag.add_node(RiscOp::Dropout, inputs, ty, None)
+    dag.add_node(decl, RiscOp::Dropout, inputs, ty, None)
 }
 
 fn uniform(
     dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
     template: NodeId,
     low: NodeId,
     high: NodeId,
-    handler: RandomHandler,
-    seed: Option<NodeId>,
+    seed: i64,
 ) -> NodeId {
     let ty = dag.get(template).unwrap().output_type.clone();
-    let key = draw_key(
-        dag,
-        handler,
-        seed,
-        RandomDraw::UniformLike,
-        ty.precision,
-        &[low, high],
-        None,
-    );
+    let key = seeded_key(dag, decl, seed);
     dag.add_node(
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, key],
         ty,
@@ -184,15 +153,6 @@ fn value(prim: Prim, shape: Vec<usize>, data: Vec<f64>) -> TensorValue {
     )
 }
 
-fn run(
-    dag: &Dag,
-    frame: &mut RandomFrame,
-    inputs: &UnordMap<&str, TensorValue>,
-) -> Result<UnordMap<NodeId, TensorValue>, String> {
-    assert!(verify(dag).is_empty(), "{:?}", verify(dag));
-    eval_tensor_roots_with_frame(dag, dag.roots(), frame, |name| inputs.get(name).cloned())
-}
-
 fn bits(value: &TensorValue) -> Vec<u64> {
     value
         .to_f64_lossy_vec()
@@ -205,201 +165,18 @@ fn f64_bits(values: &[f64]) -> Vec<u64> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
-const ACTIVE_FLOATS: [Prim; 4] = [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64];
-
 // ---- evaluation ----
-
-#[test]
-fn inherited_dropout_takes_a_runtime_rate_and_the_handlers_next_ordinal() {
-    for prim in ACTIVE_FLOATS {
-        let data = (0..12)
-            .map(|i| 0.5 + f64::from(i) / 4.0)
-            .collect::<Vec<_>>();
-        let mut dag = Dag::new();
-        let x = load(&mut dag, "x", tensor(prim, 12));
-        let rate = load(&mut dag, "rate", scalar(prim));
-        let out = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-        dag.add_root(out);
-        let inputs = UnordMap::from([
-            ("x", value(prim, vec![12], data.clone())),
-            ("rate", value(prim, vec![], vec![0.375])),
-        ]);
-        let mut frame = RandomFrame::inherited(42, 5);
-        let values = run(&dag, &mut frame, &inputs).unwrap();
-        let stored_input = value(prim, vec![12], data).to_f64_lossy_vec();
-        assert_eq!(
-            bits(&values[&out]),
-            f64_bits(&spec_dropout(prim, &stored_input, 0.375, 42, 5)),
-            "{prim:?}"
-        );
-        assert_eq!(frame.inherited_counter(), Some(6));
-    }
-}
-
-#[test]
-fn scoped_draws_count_from_zero_and_leave_the_inherited_stream_alone() {
-    for prim in ACTIVE_FLOATS {
-        let mut dag = Dag::new();
-        let template = load(&mut dag, "t", tensor(prim, 9));
-        let low = load(&mut dag, "low", scalar(Prim::F32));
-        let high = load(&mut dag, "high", scalar(Prim::F32));
-        let seed = constant(&mut dag, Prim::Int64, 7.0);
-        let scoped = RandomHandler::Scoped { instance: 3 };
-        let first = uniform(&mut dag, template, low, high, scoped, Some(seed));
-        let inherited = uniform(
-            &mut dag,
-            template,
-            low,
-            high,
-            RandomHandler::Inherited,
-            None,
-        );
-        let second = uniform(&mut dag, template, low, high, scoped, Some(seed));
-        for root in [first, inherited, second] {
-            dag.add_root(root);
-        }
-        let inputs = UnordMap::from([
-            ("t", value(prim, vec![9], vec![0.0; 9])),
-            ("low", value(Prim::F32, vec![], vec![-1.5])),
-            ("high", value(Prim::F32, vec![], vec![2.25])),
-        ]);
-        let mut frame = RandomFrame::inherited(42, 11);
-        let values = run(&dag, &mut frame, &inputs).unwrap();
-        for (node, seed, ordinal) in [(first, 7, 0), (inherited, 42, 11), (second, 7, 1)] {
-            assert_eq!(
-                bits(&values[&node]),
-                f64_bits(&spec_uniform(prim, 9, -1.5, 2.25, seed, ordinal)),
-                "{prim:?} seed {seed} ordinal {ordinal}"
-            );
-        }
-        assert_eq!(frame.inherited_counter(), Some(12));
-    }
-}
-
-#[test]
-fn an_unused_draw_still_consumes_its_ordinal() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let _unused = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-    let used = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-    dag.add_root(used);
-    let data = vec![1.0, 2.0, 3.0, 4.0];
-    let inputs = UnordMap::from([("x", value(Prim::F32, vec![4], data.clone()))]);
-    let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
-    let mut frame = RandomFrame::inherited(-1_i64 as u64, 0);
-    let values = run(&pruned, &mut frame, &inputs).unwrap();
-    assert_eq!(
-        bits(&values[&pruned.roots()[0]]),
-        f64_bits(&spec_dropout(Prim::F32, &data, 0.5, -1_i64 as u64, 1)),
-        "the used draw takes ordinal 1 behind the dead-result draw"
-    );
-    assert_eq!(frame.inherited_counter(), Some(2));
-}
-
-#[test]
-fn validation_precedes_consumption_and_an_inactive_draw_does_neither() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 3));
-    let rate = load(&mut dag, "rate", scalar(Prim::F32));
-    let active = load(&mut dag, "active", scalar(Prim::Bool));
-    let out = dropout(
-        &mut dag,
-        x,
-        rate,
-        RandomHandler::Inherited,
-        None,
-        Some(active),
-    );
-    dag.add_root(out);
-    let inputs = |rate: f64, active: bool| {
-        UnordMap::from([
-            ("x", value(Prim::F32, vec![3], vec![1.0, 2.0, 3.0])),
-            ("rate", value(Prim::F32, vec![], vec![rate])),
-            (
-                "active",
-                TensorValue::from_storage(
-                    vec![],
-                    finalize_tensor("test", Prim::Bool, RawTensor::Int(vec![i64::from(active)]))
-                        .unwrap(),
-                ),
-            ),
-        ])
-    };
-    let mut frame = RandomFrame::inherited(42, 9);
-    let error = run(&dag, &mut frame, &inputs(1.5, true)).unwrap_err();
-    assert!(error.contains("domain in dropout"), "{error}");
-    assert_eq!(
-        frame.inherited_counter(),
-        Some(9),
-        "a failed rate consumes nothing"
-    );
-
-    let values = run(&dag, &mut frame, &inputs(1.5, false)).unwrap();
-    assert_eq!(values[&out].to_f64_lossy_vec(), vec![0.0; 3]);
-    assert_eq!(
-        frame.inherited_counter(),
-        Some(9),
-        "an inactive draw consumes nothing"
-    );
-
-    let values = run(&dag, &mut frame, &inputs(0.25, true)).unwrap();
-    assert_eq!(
-        bits(&values[&out]),
-        f64_bits(&spec_dropout(Prim::F32, &[1.0, 2.0, 3.0], 0.25, 42, 9))
-    );
-    assert_eq!(frame.inherited_counter(), Some(10));
-}
-
-#[test]
-fn uniform_bounds_validate_before_consumption() {
-    let mut dag = Dag::new();
-    let template = load(&mut dag, "t", tensor(Prim::F64, 2));
-    let low = load(&mut dag, "low", scalar(Prim::F32));
-    let high = load(&mut dag, "high", scalar(Prim::F32));
-    let out = uniform(
-        &mut dag,
-        template,
-        low,
-        high,
-        RandomHandler::Inherited,
-        None,
-    );
-    dag.add_root(out);
-    for (lo, hi) in [(1.0, 0.0), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
-        let inputs = UnordMap::from([
-            ("t", value(Prim::F64, vec![2], vec![0.0; 2])),
-            ("low", value(Prim::F32, vec![], vec![lo])),
-            ("high", value(Prim::F32, vec![], vec![hi])),
-        ]);
-        let mut frame = RandomFrame::inherited(1, 4);
-        let error = run(&dag, &mut frame, &inputs).unwrap_err();
-        assert!(error.contains("domain in uniform_like"), "{error}");
-        assert_eq!(frame.inherited_counter(), Some(4));
-    }
-}
-
-#[test]
-fn an_inherited_draw_without_a_handler_is_refused() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 2));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let out = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-    dag.add_root(out);
-    let inputs = UnordMap::from([("x", value(Prim::F32, vec![2], vec![1.0, 2.0]))]);
-    let error = run(&dag, &mut RandomFrame::unhandled(), &inputs).unwrap_err();
-    assert!(error.contains("no active handler"), "{error}");
-}
 
 // ---- grad ----
 
-fn loss_of(dag: &mut Dag, value: NodeId, prim: Prim) -> NodeId {
+fn loss_of(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId, prim: Prim) -> NodeId {
     let accumulator = if prim == Prim::F64 {
         Prim::F64
     } else {
         Prim::F32
     };
     dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator,
@@ -414,10 +191,11 @@ fn loss_of(dag: &mut Dag, value: NodeId, prim: Prim) -> NodeId {
 fn dropout_input_adjoint_replays_the_forward_mask_through_the_key() {
     for prim in [Prim::F32, Prim::F64] {
         let mut dag = Dag::new();
-        let x = load(&mut dag, "x", tensor(prim, 16));
-        let rate = load(&mut dag, "rate", scalar(prim));
-        let out = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-        let loss = loss_of(&mut dag, out, prim);
+        let decl = dag.declare("test");
+        let x = load(&mut dag, decl, "x", tensor(prim, 16));
+        let rate = load(&mut dag, decl, "rate", scalar(prim));
+        let out = dropout(&mut dag, decl, x, rate, 42, None);
+        let loss = loss_of(&mut dag, decl, out, prim);
         dag.add_root(loss);
         let grad = grad_dag_checked(&dag, loss, &[x]).expect("the rate is not a parameter");
         let dx = grad.grad_nodes[&x];
@@ -426,18 +204,10 @@ fn dropout_input_adjoint_replays_the_forward_mask_through_the_key() {
             ("x", value(prim, vec![16], data)),
             ("rate", value(prim, vec![], vec![0.25])),
         ]);
-        let mut frame = RandomFrame::inherited(42, 3);
-        let values = eval_tensor_roots_with_frame(&grad.dag, &[dx], &mut frame, |name| {
-            inputs.get(name).cloned()
-        })
-        .unwrap();
-        let expected = spec_dropout(prim, &[1.0; 16], 0.25, 42, 3);
+        let values =
+            eval_tensor_roots_exact(&grad.dag, &[dx], |name| inputs.get(name).cloned()).unwrap();
+        let expected = spec_dropout(prim, &[1.0; 16], 0.25, 42);
         assert_eq!(bits(&values[&dx]), f64_bits(&expected), "{prim:?}");
-        assert_eq!(
-            frame.inherited_counter(),
-            Some(4),
-            "replay reads the key without a second draw"
-        );
     }
 }
 
@@ -446,20 +216,20 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
     for prim in [Prim::F32, Prim::F64] {
         let len = 11;
         let mut dag = Dag::new();
-        let template = load(&mut dag, "t", tensor(prim, len));
-        let weights = load(&mut dag, "w", tensor(prim, len));
-        let low = load(&mut dag, "low", scalar(Prim::F32));
-        let high = load(&mut dag, "high", scalar(Prim::F32));
-        let sample = uniform(
-            &mut dag,
-            template,
-            low,
-            high,
-            RandomHandler::Inherited,
+        let decl = dag.declare("test");
+        let template = load(&mut dag, decl, "t", tensor(prim, len));
+        let weights = load(&mut dag, decl, "w", tensor(prim, len));
+        let low = load(&mut dag, decl, "low", scalar(Prim::F32));
+        let high = load(&mut dag, decl, "high", scalar(Prim::F32));
+        let sample = uniform(&mut dag, decl, template, low, high, 9);
+        let weighted = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![sample, weights],
+            tensor(prim, len),
             None,
         );
-        let weighted = dag.add_node(RiscOp::Mul, vec![sample, weights], tensor(prim, len), None);
-        let loss = loss_of(&mut dag, weighted, prim);
+        let loss = loss_of(&mut dag, decl, weighted, prim);
         dag.add_root(loss);
         let grad = grad_dag_checked(&dag, loss, &[low, high]).expect("bounds differentiate");
         let weights_data = (0..len)
@@ -472,11 +242,8 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
             ("high", value(Prim::F32, vec![], vec![1.75])),
         ]);
         let roots = [grad.grad_nodes[&low], grad.grad_nodes[&high]];
-        let mut frame = RandomFrame::inherited(9, 2);
-        let values = eval_tensor_roots_with_frame(&grad.dag, &roots, &mut frame, |name| {
-            inputs.get(name).cloned()
-        })
-        .unwrap();
+        let values =
+            eval_tensor_roots_exact(&grad.dag, &roots, |name| inputs.get(name).cloned()).unwrap();
         // [05-OP-8]: g_i * (1-u_i) to low and g_i * u_i to high, at the
         // arithmetic width, combined by the adjacent-pair tree; the f32
         // bound then takes the checked cast of the template-dtype sum.
@@ -502,7 +269,7 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
         for (root, high_bound) in [(roots[0], false), (roots[1], true)] {
             let leaves = (0..len)
                 .map(|i| {
-                    let unit = spec_unit(9, 2, i as u64);
+                    let unit = spec_unit(9, i as u64);
                     let g = weights_data[i];
                     if prim == Prim::F64 {
                         g * if high_bound { unit } else { 1.0 - unit }
@@ -519,7 +286,6 @@ fn uniform_bound_adjoints_match_the_05_op_8_transcription() {
                 "{prim:?} high={high_bound}"
             );
         }
-        assert_eq!(frame.inherited_counter(), Some(3));
     }
 }
 
@@ -534,12 +300,13 @@ fn rejection(result: Result<chelis_ir::grad::GradResult, AdError>) -> Option<AdR
 fn a_parameter_reaching_the_rate_through_adjoint_slots_is_rejected() {
     // rate = p * c, and p is differentiated.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let p = load(&mut dag, "p", scalar(Prim::F32));
-    let c = constant(&mut dag, Prim::F32, 0.5);
-    let rate = dag.add_node(RiscOp::Mul, vec![p, c], scalar(Prim::F32), None);
-    let out = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-    let loss = loss_of(&mut dag, out, Prim::F32);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+    let p = load(&mut dag, decl, "p", scalar(Prim::F32));
+    let c = constant(&mut dag, decl, Prim::F32, 0.5);
+    let rate = dag.add_node(decl, RiscOp::Mul, vec![p, c], scalar(Prim::F32), None);
+    let out = dropout(&mut dag, decl, x, rate, 7, None);
+    let loss = loss_of(&mut dag, decl, out, Prim::F32);
     dag.add_root(loss);
     assert_eq!(
         rejection(grad_dag_checked(&dag, loss, &[p])),
@@ -558,12 +325,14 @@ fn a_rate_reached_only_through_a_zero_cotangent_slot_differentiates() {
     // rate = sum(uniform_like(p, 0.1, 0.2)) / 4: p reaches the rate only
     // through the uniform template, whose cotangent is zero.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let p = load(&mut dag, "p", tensor(Prim::F32, 4));
-    let low = constant(&mut dag, Prim::F32, 0.0);
-    let high = constant(&mut dag, Prim::F32, 0.25);
-    let noise = uniform(&mut dag, p, low, high, RandomHandler::Inherited, None);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+    let p = load(&mut dag, decl, "p", tensor(Prim::F32, 4));
+    let low = constant(&mut dag, decl, Prim::F32, 0.0);
+    let high = constant(&mut dag, decl, Prim::F32, 0.25);
+    let noise = uniform(&mut dag, decl, p, low, high, 7);
     let total = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -572,21 +341,29 @@ fn a_rate_reached_only_through_a_zero_cotangent_slot_differentiates() {
         scalar(Prim::F32),
         None,
     );
-    let four = constant(&mut dag, Prim::F32, 4.0);
-    let rate = dag.add_node(RiscOp::Div, vec![total, four], scalar(Prim::F32), None);
-    let out = dropout(&mut dag, x, rate, RandomHandler::Inherited, None, None);
-    let scaled = dag.add_node(RiscOp::Mul, vec![out, p], tensor(Prim::F32, 4), None);
-    let loss = loss_of(&mut dag, scaled, Prim::F32);
+    let four = constant(&mut dag, decl, Prim::F32, 4.0);
+    let rate = dag.add_node(
+        decl,
+        RiscOp::Div,
+        vec![total, four],
+        scalar(Prim::F32),
+        None,
+    );
+    let out = dropout(&mut dag, decl, x, rate, 7, None);
+    let scaled = dag.add_node(decl, RiscOp::Mul, vec![out, p], tensor(Prim::F32, 4), None);
+    let loss = loss_of(&mut dag, decl, scaled, Prim::F32);
     dag.add_root(loss);
     assert_eq!(rejection(grad_dag_checked(&dag, loss, &[p])), None);
     // Through a bound, which carries an adjoint, the same shape rejects.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let t = load(&mut dag, "t", tensor(Prim::F32, 4));
-    let bound = load(&mut dag, "b", scalar(Prim::F32));
-    let low = constant(&mut dag, Prim::F32, 0.0);
-    let noise = uniform(&mut dag, t, low, bound, RandomHandler::Inherited, None);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+    let t = load(&mut dag, decl, "t", tensor(Prim::F32, 4));
+    let bound = load(&mut dag, decl, "b", scalar(Prim::F32));
+    let low = constant(&mut dag, decl, Prim::F32, 0.0);
+    let noise = uniform(&mut dag, decl, t, low, bound, 7);
     let total = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -595,8 +372,8 @@ fn a_rate_reached_only_through_a_zero_cotangent_slot_differentiates() {
         scalar(Prim::F32),
         None,
     );
-    let out = dropout(&mut dag, x, total, RandomHandler::Inherited, None, None);
-    let loss = loss_of(&mut dag, out, Prim::F32);
+    let out = dropout(&mut dag, decl, x, total, 7, None);
+    let loss = loss_of(&mut dag, decl, out, Prim::F32);
     dag.add_root(loss);
     assert_eq!(
         rejection(grad_dag_checked(&dag, loss, &[bound])),
@@ -608,18 +385,12 @@ fn a_rate_reached_only_through_a_zero_cotangent_slot_differentiates() {
 
 fn dropout_graph() -> (Dag, NodeId, NodeId, NodeId, NodeId) {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let key = draw_key(
-        &mut dag,
-        RandomHandler::Inherited,
-        None,
-        RandomDraw::Dropout,
-        Prim::F32,
-        &[rate],
-        None,
-    );
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+    let rate = constant(&mut dag, decl, Prim::F32, 0.5);
+    let key = seeded_key(&mut dag, decl, 7);
     let out = dag.add_node(
+        decl,
         RiscOp::Dropout,
         vec![x, rate, key],
         tensor(Prim::F32, 4),
@@ -639,14 +410,17 @@ fn assert_rejected(dag: &Dag, needle: &str) {
 #[test]
 fn the_verifier_accepts_a_consumed_key_and_its_replays() {
     let (mut dag, _, rate, key, out) = dropout_graph();
-    let g = load(&mut dag, "g", tensor(Prim::F32, 4));
+    let decl = dag.nodes()[0].owner.decl;
+    let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
     let replay = dag.add_node(
+        decl,
         RiscOp::DropoutReplay,
         vec![g, rate, key],
         tensor(Prim::F32, 4),
         None,
     );
     let again = dag.add_node(
+        decl,
         RiscOp::DropoutReplay,
         vec![g, rate, key],
         tensor(Prim::F32, 4),
@@ -661,7 +435,9 @@ fn the_verifier_accepts_a_consumed_key_and_its_replays() {
 #[test]
 fn the_verifier_rejects_a_double_consume() {
     let (mut dag, x, rate, key, out) = dropout_graph();
+    let decl = dag.nodes()[0].owner.decl;
     let twice = dag.add_node(
+        decl,
         RiscOp::Dropout,
         vec![x, rate, key],
         tensor(Prim::F32, 4),
@@ -675,28 +451,30 @@ fn the_verifier_rejects_a_double_consume() {
 #[test]
 fn the_verifier_rejects_a_key_fed_to_another_operation() {
     let (mut dag, _, _, key, out) = dropout_graph();
-    let added = dag.add_node(RiscOp::Add, vec![key, key], scalar(Prim::Key), None);
+    let decl = dag.nodes()[0].owner.decl;
+    let added = dag.add_node(decl, RiscOp::Add, vec![key, key], scalar(Prim::Key), None);
     dag.add_root(out);
     dag.add_root(added);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
-    // chelis#2413 step 1, rule V2: a root is a use of its key, and a draw
-    // key's key is its draw's alone, so a consumed draw key is no root.
+    // chelis#2413 step 1, rule V2: a root is a use of its key, so a
+    // consumed key is no root.
     let (mut dag, _, _, key, out) = dropout_graph();
     dag.add_root(out);
     dag.add_root(key);
     assert_rejected(&dag, "is a graph root and is also consumed");
-    assert_rejected(&dag, "a draw key's key feeds only its draw");
 }
 
 #[test]
 fn the_verifier_rejects_a_replay_that_changes_the_mask_contract() {
     let (mut dag, _, _, key, out) = dropout_graph();
-    let g = load(&mut dag, "g", tensor(Prim::F32, 4));
-    let other_rate = constant(&mut dag, Prim::F32, 0.25);
+    let decl = dag.nodes()[0].owner.decl;
+    let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
+    let other_rate = constant(&mut dag, decl, Prim::F32, 0.25);
     let replay = dag.add_node(
+        decl,
         RiscOp::DropoutReplay,
         vec![g, other_rate, key],
         tensor(Prim::F32, 4),
@@ -704,117 +482,72 @@ fn the_verifier_rejects_a_replay_that_changes_the_mask_contract() {
     );
     dag.add_root(out);
     dag.add_root(replay);
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
 }
 
 #[test]
 fn the_verifier_rejects_a_replay_of_an_unconsumed_key() {
     let mut dag = Dag::new();
-    let g = load(&mut dag, "g", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let key = draw_key(
-        &mut dag,
-        RandomHandler::Inherited,
-        None,
-        RandomDraw::Dropout,
-        Prim::F32,
-        &[rate],
-        None,
-    );
+    let decl = dag.declare("test");
+    let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
+    let rate = constant(&mut dag, decl, Prim::F32, 0.5);
+    let key = seeded_key(&mut dag, decl, 7);
     let replay = dag.add_node(
+        decl,
         RiscOp::DropoutReplay,
         vec![g, rate, key],
         tensor(Prim::F32, 4),
         None,
     );
     dag.add_root(replay);
-    assert_rejected(&dag, "that no forward random primitive consumes");
+    assert_rejected(&dag, "which no forward random primitive consumes");
 }
 
 #[test]
-fn the_verifier_rejects_a_constant_key_and_mismatched_controls() {
-    // Rule V1: a key comes from a key operation, a draw key, or a Load; a
-    // key constant would be literal bits, which no carrier admits.
+fn the_verifier_rejects_a_constant_key() {
+    // Rule V1: a key comes from a key operation or a Load; a key constant
+    // would be literal bits, which no carrier admits.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", tensor(Prim::F32, 4));
+    let rate = constant(&mut dag, decl, Prim::F32, 0.5);
     let forged = dag.add_node(
+        decl,
         RiscOp::Const {
-            value: chelis_types::ScalarValue::from_key(chelis_types::RandomKey::from_counter(7, 0)),
+            value: chelis_types::ScalarValue::from_key(
+                chelis_types::RandomKey::from_seed(
+                    chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                )
+                .unwrap(),
+            ),
         },
         vec![],
         scalar(Prim::Key),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Dropout,
         vec![x, rate, forged],
         tensor(Prim::F32, 4),
         None,
     );
     dag.add_root(out);
-    assert_rejected(
-        &dag,
-        "only a key operation, a draw key or a Load produces one",
-    );
-
-    // The key validates a different rate than its consumer uses.
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let other = constant(&mut dag, Prim::F32, 0.75);
-    let key = draw_key(
-        &mut dag,
-        RandomHandler::Inherited,
-        None,
-        RandomDraw::Dropout,
-        Prim::F32,
-        &[other],
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::Dropout,
-        vec![x, rate, key],
-        tensor(Prim::F32, 4),
-        None,
-    );
-    dag.add_root(out);
-    assert_rejected(&dag, "does not validate the controls");
-
-    // A scoped key's seed must be a literal i64.
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 4));
-    let rate = constant(&mut dag, Prim::F32, 0.5);
-    let runtime_seed = load(&mut dag, "seed", scalar(Prim::Int64));
-    let out = dropout(
-        &mut dag,
-        x,
-        rate,
-        RandomHandler::Scoped { instance: 0 },
-        Some(runtime_seed),
-        None,
-    );
-    dag.add_root(out);
-    assert_rejected(&dag, "literal seed");
+    assert_rejected(&dag, "only a key operation, a join or a Load produces one");
 }
 
 #[test]
 fn bound_adjoint_nodes_verify_against_their_forward_template() {
     let mut dag = Dag::new();
-    let template = load(&mut dag, "t", tensor(Prim::F32, 4));
-    let low = constant(&mut dag, Prim::F32, 0.0);
-    let high = constant(&mut dag, Prim::F32, 1.0);
-    let out = uniform(
-        &mut dag,
-        template,
-        low,
-        high,
-        RandomHandler::Inherited,
-        None,
-    );
+    let decl = dag.declare("test");
+    let template = load(&mut dag, decl, "t", tensor(Prim::F32, 4));
+    let low = constant(&mut dag, decl, Prim::F32, 0.0);
+    let high = constant(&mut dag, decl, Prim::F32, 1.0);
+    let out = uniform(&mut dag, decl, template, low, high, 7);
     let key = dag.get(out).unwrap().inputs[3];
-    let g = load(&mut dag, "g", tensor(Prim::F32, 4));
+    let g = load(&mut dag, decl, "g", tensor(Prim::F32, 4));
     let adjoint = dag.add_node(
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::High,
         },
@@ -825,9 +558,10 @@ fn bound_adjoint_nodes_verify_against_their_forward_template() {
     dag.add_root(out);
     dag.add_root(adjoint);
     assert_eq!(verify(&dag), Vec::<String>::new());
-    let wide = load(&mut dag, "wide", tensor(Prim::F32, 5));
-    let g5 = load(&mut dag, "g5", tensor(Prim::F32, 5));
+    let wide = load(&mut dag, decl, "wide", tensor(Prim::F32, 5));
+    let g5 = load(&mut dag, decl, "g5", tensor(Prim::F32, 5));
     let mismatched = dag.add_node(
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::Low,
         },
@@ -836,5 +570,5 @@ fn bound_adjoint_nodes_verify_against_their_forward_template() {
         None,
     );
     dag.add_root(mismatched);
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
 }

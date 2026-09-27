@@ -331,7 +331,9 @@ mod tests {
     #[test]
     fn snapshots_retain_shape_dependencies_and_spans_without_aliasing() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "shape_source".into(),
             },
@@ -343,6 +345,7 @@ mod tests {
             Some("input-span".into()),
         );
         let output = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, -0.0),
             vec![],
             TensorType {

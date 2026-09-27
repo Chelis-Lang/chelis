@@ -1842,48 +1842,42 @@ fn staged_reshape_sources_preserve_signature_witnesses() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Staged extent claims around keyed draws: `g` splits its key three ways
+/// (`first`, a middle draw the `mixed` row makes inside the staged size, and
+/// `second`), and the claimed reshape of `second` must read exactly
+/// `second`'s key in every lane however the size is staged. Ported from the
+/// counter-stream version (chelis#2413), which pinned the handler's ordinal
+/// progress across staging; the expected draw is `common::key_ref`'s, not the
+/// compiler's sampler.
 #[test]
-fn staged_sources_preserve_handled_random_progress() {
+fn staged_sources_preserve_keyed_draws() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
     let mut cases = Vec::new();
-    for seed in [42u64, 43] {
+    for seed in [42i64, 43] {
         for n in [2, 3] {
-            for (kind, bindings, target, draw) in [
-                ("native", "", "bitand(numel(source), 3i64)", 1u64),
+            for (kind, bindings, target) in [
+                ("native", "", "bitand(numel(source), 3i64)"),
                 (
                     "mixed",
                     "",
-                    "if eq(numel(source), 2i64) then floor_div(numel(uniform_like(x, 2.0f32, 5.0f32)), 2i64) else 3i64",
-                    2u64,
+                    "if eq(numel(source), 2i64) then floor_div(numel(uniform_like(k_mid, x, 2.0f32, 5.0f32)), 2i64) else 3i64",
                 ),
                 (
                     "tuple_capture",
                     "  sizes = (numel(source), first)\n",
                     "bitand(sizes.0, 3i64)",
-                    1u64,
                 ),
             ] {
                 let expected = if n == 2 {
-                    // Reference the numeric sampler directly, independently of
-                    // either compiler lane's staging, seed and draw scheduling.
-                    let key = chelis_types::RandomKey::from_counter(seed, draw);
-                    let bound = |value| {
-                        chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, value)
-                            .unwrap()
-                    };
-                    let sampled = chelis_types::PreparedUniformLike::new(
-                        chelis_types::types::Prim::F32,
-                        4,
-                        bound(2.0),
-                        bound(5.0),
-                    )
-                    .unwrap()
-                    .apply(key)
-                    .unwrap();
+                    // `second`'s key is `split_key(split_key(k).1).1` for
+                    // `k = key_from_seed(seed)`.
+                    let (_, rest) = common::key_ref::split(common::key_ref::key_from_seed(seed));
+                    let (_, second) = common::key_ref::split(rest);
                     Expected::TensorF32Bits(
                         vec![2, 2],
-                        (0..4)
-                            .map(|index| (sampled.scalar_at(index).as_f64_lossy() as f32).to_bits())
+                        common::key_ref::uniform_f32(second, 4, 2.0, 5.0)
+                            .into_iter()
+                            .map(f32::to_bits)
                             .collect(),
                     )
                 } else {
@@ -1891,10 +1885,10 @@ fn staged_sources_preserve_handled_random_progress() {
                 };
                 call_matrix(
                     &mut cases,
-                    &format!("staged_source.random.{kind}.seed{seed}.x{n}"),
+                    &format!("staged_source.keyed.{kind}.seed{seed}.x{n}"),
                     1686,
                     &format!(
-                        "def g[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
+                        "def g[m, n](k: key, source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {{\n  (k_first, k_rest) = split_key(k)\n  (k_mid, k_second) = split_key(k_rest)\n  first = uniform_like(k_first, x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(k_second, x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = g(key_from_seed({seed}i64), source, x)"
                     ),
                     "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
                     vec![vector(n), vector(n * 2)],
@@ -1903,6 +1897,61 @@ fn staged_sources_preserve_handled_random_progress() {
             }
         }
     }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// [05-OP-8]: a draw has its data operand's type. A key projected from a
+/// `split_key` result is a rank-zero key tensor, so a staged host source that
+/// captures the draw, directly or through a tuple, must still see the draw's
+/// `f32` tensor rather than its key.
+#[test]
+fn staged_sources_type_draws_keyed_by_split_projections() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        for (kind, bindings) in [
+            (
+                "direct_capture",
+                "  size = if eq(numel(first), 4i64) then 2i64 else 3i64\n",
+            ),
+            (
+                "tuple_capture",
+                "  sizes = (first, numel(source))\n  size = if eq(numel(sizes.0), 4i64) then 2i64 else 3i64\n",
+            ),
+        ] {
+            let expected = if n == 2 {
+                // `second`'s key is `split_key(k).1` for `k = key_from_seed(7)`.
+                let (_, second) = common::key_ref::split(common::key_ref::key_from_seed(7));
+                Expected::TensorF32Bits(
+                    vec![2, 2],
+                    common::key_ref::uniform_f32(second, 4, 2.0, 5.0)
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect(),
+                )
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            };
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.split_projection.{kind}.x{n}"),
+                1686,
+                &format!(
+                    "def g[m, n](k: key, source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {{\n  (k_first, k_second) = split_key(k)\n  first = uniform_like(k_first, x, 2.0f32, 5.0f32)\n{bindings}  second = uniform_like(k_second, x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = g(key_from_seed(7i64), source, x)"
+                ),
+                "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n), vector(n * 2)],
+                expected,
+            );
+        }
+    }
+    assert_eq!(cases.len(), 12);
     let mut failures = Vec::new();
     for case in cases {
         let observed = observe(&case);

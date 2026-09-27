@@ -76,7 +76,7 @@ pub struct EffectError {
 /// This runs the same iterative-fixed-point inference that
 /// [`check_program`] uses internally, but exposes the per-def effect
 /// rows directly instead of folding them into validation. It performs
-/// NO validation — callers that need handler-arity / unhandled-random /
+/// NO validation — callers that need handler-arity /
 /// declared-vs-inferred checks must still call [`check_program`].
 ///
 /// The intended consumer is `chelis check --show-inferred --json`,
@@ -105,7 +105,6 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
 
     let mut errors = Vec::new();
     validate_handlers(&annotated_exprs, &mut errors);
-    validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
@@ -127,8 +126,7 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
 /// effect map and the new-code's own iterative fixed-point pass. When new
 /// code calls a library function, the library's effect row is inherited.
 ///
-/// Validation passes (handler arity, unhandled-random roots, declared-vs-
-/// inferred) run ONLY on the new code's annotated expressions. Library
+/// Validation passes (handler arity, declared-vs-inferred) run ONLY on the new code's annotated expressions. Library
 /// validation already happened during the original [`check_program`] call.
 ///
 /// The library's effect map is computed inside this function from
@@ -179,7 +177,6 @@ pub fn check_effects_with_context(
 
     let mut errors = Vec::new();
     validate_handlers(&annotated_exprs, &mut errors);
-    validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
@@ -316,8 +313,7 @@ fn infer_program_effects_with_context(
 /// Yield each top-level declaration, descending through any `(module {} name
 /// ...)` wrapper. Deep sources produced by Surf `module X` desugaring nest
 /// every def/defsig inside this wrapper; the whole-program effect validators
-/// below compare declared-vs-inferred and hunt unhandled-Random roots over a
-/// flat decl list, so without descent a module-wrapped `.dp` would hide every
+/// below compare declared-vs-inferred over a flat decl list, so without descent a module-wrapped `.dp` would hide every
 /// nested def from them. This mirrors `top_level_decl_items` in chelis-types,
 /// so the effect pass sees the same flattened decl set the type pass does and
 /// the module-wrapped `chelis check` path agrees with the flattened
@@ -478,10 +474,9 @@ fn infer_app_effects(
         ));
     }
 
+    // [05-RNG-1]: a random draw is a pure function of the key it is given,
+    // so `dropout` and `uniform_like` introduce no effect.
     let builtin_name = kids.first().and_then(var_name);
-    if matches!(builtin_name, Some("dropout" | "uniform_like")) {
-        effects.insert(Effect::Random);
-    }
     if matches!(
         builtin_name,
         Some(
@@ -578,10 +573,9 @@ fn infer_handle_effects(
         return infer_children_effects(kids, top_level_effects, top_level_callables, locals);
     }
     let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
-    let mut body_effects =
-        infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
+    let body_effects = infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
     match handled_effect {
-        Some(EffectKind::Random) => body_effects.remove(&Effect::Random),
+        // A `resource` region places its body; it handles no inferred effect.
         Some(EffectKind::Resource) => {}
         // Validation reports the structural decode error. Inference leaves the
         // body's effects unhandled instead of substituting a known kind.
@@ -821,21 +815,6 @@ fn validate_handler_kind(
     }
 
     match effect_kind {
-        Ok(EffectKind::Random)
-            if kids
-                .first()
-                .and_then(|seed| chelis_types::static_seed::literal_seed(seed, true))
-                .is_none() =>
-        {
-            errors.push(EffectError {
-                kind: EffectErrorKind::InvalidHandler,
-                message: "with seed(...) requires a signed i64 literal seed".to_string(),
-                suggestions: vec![
-                    "Use `with seed(42i64) { ... }` with an explicit i64-suffixed integer seed"
-                        .to_string(),
-                ],
-            });
-        }
         Ok(EffectKind::Resource) if kids.first().and_then(string_literal).is_none() => {
             errors.push(EffectError {
                 kind: EffectErrorKind::InvalidHandler,
@@ -846,61 +825,16 @@ fn validate_handler_kind(
                 ],
             });
         }
-        Ok(EffectKind::Random) | Ok(EffectKind::Resource) => {}
+        Ok(EffectKind::Resource) => {}
         Err(error) => errors.push(EffectError {
             kind: EffectErrorKind::InvalidHandler,
             message: format!("{error} in `handle-effect`"),
             suggestions: vec![
-                "Use one of the closed effect kinds `random` or `resource`".to_string(),
+                "Use the closed effect kind `resource`; randomness has no handler, \
+                 a random primitive takes an explicit key"
+                    .to_string(),
             ],
         }),
-    }
-}
-
-fn validate_unhandled_random_roots(
-    exprs: &[Expr],
-    effects_by_def: &BTreeMap<String, EffectSet>,
-    errors: &mut Vec<EffectError>,
-) {
-    for expr in flattened_top_level(exprs) {
-        let kids = match expr.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => continue,
-        };
-        if kids.len() < 2 {
-            continue;
-        }
-        let Some(name) = symbol_name(&kids[0]) else {
-            continue;
-        };
-        match kids[1].carrier() {
-            ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => continue,
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => {}
-        }
-        if effects_by_def
-            .get(name)
-            .is_some_and(|effects| effects.contains(&Effect::Random))
-        {
-            errors.push(EffectError {
-                kind: EffectErrorKind::UnhandledEffect,
-                message: format!(
-                    "Function `{name}` has unhandled effect `Random`; `dropout` requires `with seed(...)`"
-                ),
-                suggestions: vec![
-                    "Wrap the stochastic region with `with seed(42i64) { ... }`".to_string(),
-                ],
-            });
-        }
     }
 }
 
@@ -933,7 +867,6 @@ fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
     for member in effects.values() {
         match member {
             EffectMember::Name(name) => match name.value().as_str() {
-                "random" => declared.insert(Effect::Random),
                 "accum" => declared.insert(Effect::Accum),
                 "io" => declared.insert(Effect::Io),
                 "test" => declared.insert(Effect::Test),
@@ -1064,7 +997,6 @@ fn validate_build_target_handler(
     errors: &mut Vec<EffectError>,
 ) {
     match effect_kind {
-        Ok(EffectKind::Random) => {}
         Ok(EffectKind::Resource) => {
             if let Some(device) = kids.first().and_then(string_literal) {
                 let ok = match target {
@@ -1123,7 +1055,6 @@ fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
     let values = effects
         .iter()
         .map(|effect| match effect {
-            Effect::Random => EffectMember::Name(Spanned::new("random".into(), zero_span())),
             Effect::Accum => EffectMember::Name(Spanned::new("accum".into(), zero_span())),
             Effect::Io => EffectMember::Name(Spanned::new("io".into(), zero_span())),
             Effect::Test => EffectMember::Name(Spanned::new("test".into(), zero_span())),
@@ -1328,26 +1259,26 @@ mod tests {
     }
 
     #[test]
-    fn stamped_declared_pure_function_rejects_inferred_random() {
+    fn stamped_declared_pure_function_rejects_inferred_io() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
                  (t-fn {eff: (effects {})}
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+                   (t-prim {} string)
+                   (t-prim {} string)))
                (def {} entry
                  (fn {}
-                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                   (app {} (var {} dropout) (var {} x) (lit {} 0.5))))"#,
+                   (params {} (x {type: (t-prim {} string)}))
+                   (app {} (var {} debug) (var {} x))))"#,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
 
-        let errors = check_program(&typed).expect_err("declared-pure Random body must reject");
+        let errors = check_program(&typed).expect_err("declared-pure IO body must reject");
 
         assert!(
-            errors.iter().any(|error| {
-                error.message.contains("entry") && error.message.contains("Random")
-            }),
+            errors
+                .iter()
+                .any(|error| { error.message.contains("entry") && error.message.contains("IO") }),
             "effect diagnostic must name the function and missing effect: {errors:?}"
         );
     }
@@ -1474,13 +1405,13 @@ mod tests {
         }
 
         let span = Span::new(0, 0);
-        let invalid_random = stamped_def_body(
+        let invalid_resource = stamped_def_body(
             "(def {} x
-               (handle-effect {effect: random}
-                 (var {} seed)
+               (handle-effect {effect: resource}
+                 (var {} device)
                  (lit {} 1)))",
         );
-        let invalid_metadata = expression_metadata(invalid_random);
+        let invalid_metadata = expression_metadata(invalid_resource);
         let mut unknown_errors = Vec::new();
         validate_handler_expr(&unknown_form(invalid_metadata, span), &mut unknown_errors);
         assert!(
@@ -1623,7 +1554,7 @@ mod tests {
     fn declared_effect_reader_reads_a_decoded_defsig() {
         let mut parsed = chelis_deep::parse_and_stamp(
             "(defsig {} entry \
-               (t-fn {eff: (effects {} random io)} \
+               (t-fn {eff: (effects {} accum io)} \
                  (t-prim {} i32) \
                  (t-prim {} i32)))",
         )
@@ -1632,7 +1563,7 @@ mod tests {
 
         let successor_effects =
             declared_effects_from_defsig(&successor).expect("successor declaration");
-        assert!(successor_effects.contains(&Effect::Random));
+        assert!(successor_effects.contains(&Effect::Accum));
         assert!(successor_effects.contains(&Effect::Io));
     }
 
@@ -1663,138 +1594,85 @@ mod tests {
     }
 
     #[test]
-    fn stamped_declared_pure_function_rejects_random_local_closure() {
+    fn stamped_declared_pure_function_rejects_io_local_closure() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
                  (t-fn {eff: (effects {})}
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+                   (t-prim {} string)
+                   (t-prim {} string)))
                (def {} entry
                  (fn {}
-                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+                   (params {} (x {type: (t-prim {} string)}))
                    (let {}
                      (bind {} step
                        (fn {}
-                         (params {} (y {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                         (app {} (var {} dropout) (var {} y) (lit {} 0.5))))
+                         (params {} (y {type: (t-prim {} string)}))
+                         (app {} (var {} debug) (var {} y))))
                      (app {} (var {} step) (var {} x)))))"#,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
 
-        let errors =
-            check_program(&typed).expect_err("declared-pure local Random closure must reject");
+        let errors = check_program(&typed).expect_err("declared-pure local IO closure must reject");
 
         assert!(
-            errors.iter().any(|error| {
-                error.message.contains("entry") && error.message.contains("Random")
-            }),
+            errors
+                .iter()
+                .any(|error| { error.message.contains("entry") && error.message.contains("IO") }),
             "effect diagnostic must name the function and local closure effect: {errors:?}"
         );
     }
 
     #[test]
-    fn literal_random_and_resource_handlers_cross_the_type_effect_boundary() {
-        for source in [
-            r#"(def {} value
-                   (handle-effect {effect: random}
-                     (lit {type: (t-prim {} i64)} 7)
-                     (lit {type: (t-prim {} i32)} 1)))"#,
+    fn literal_resource_handler_crosses_the_type_effect_boundary() {
+        let deep = parse_str(
             r#"(def {} value
                    (handle-effect {effect: resource}
                      (lit {type: (t-prim {} string)} "cpu")
                      (lit {type: (t-prim {} i32)} 1)))"#,
-        ] {
-            let deep = parse_str(source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
-            check_program(&typed).expect("effects boundary accepts literal handler");
-        }
+        )
+        .expect("Deep handler fixture parses");
+        let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
+        check_program(&typed).expect("effects boundary accepts literal handler");
     }
 
     #[test]
-    fn signed_seed_constants_cross_type_and_effect_boundaries() {
-        for seed in [
-            "(lit {type: (t-prim {} i64)} -1)",
-            "(lit {type: (t-prim {} i64)} -9223372036854775808)",
-            "(lit {type: (t-prim {} i64)} 9223372036854775807)",
-            "(app {} (var {} neg) (lit {type: (t-prim {} i64)} 1))",
-        ] {
-            let source = format!(
-                "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
-            );
-            let deep = parse_str(&source).unwrap();
-            let typed = chelis_types::check_ir_program(&deep).expect("signed i64 constant");
-            check_program(&typed).unwrap_or_else(|errors| panic!("{seed}: {errors:?}"));
-        }
-    }
-
-    #[test]
-    fn malformed_seed_constants_never_cross_the_effect_boundary() {
-        let malformed = "(def {} value (handle-effect {effect: random} \
-            (lit {type: (t-prim {} i64)} 1 2) (lit {type: (t-prim {} f32)} 1.0)))";
+    fn nonliteral_resource_handler_is_rejected_once_by_the_effect_owner() {
+        let deep = parse_str(
+            "(def {} value (handle-effect {effect: resource} \
+             (var {} computed_handler) (lit {type: (t-prim {} i32)} 1)))",
+        )
+        .expect("Deep handler fixture parses");
+        let typed = chelis_types::check_ir_program(&deep)
+            .expect("handler payload is owned by the effects gate");
+        let errors = check_program(&typed).expect_err("nonliteral handler must reject");
+        assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
+        assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
         assert!(
-            parse_str(malformed)
-                .unwrap_err()
-                .to_string()
-                .contains("wrong child count for `lit`")
+            errors[0]
+                .message
+                .contains("requires a string literal device"),
+            "{errors:?}"
         );
-        for seed in [
-            "(lit {type: (t-prim {} i64)} 1.0)",
-            "(lit {type: (t-prim {} bool)} true)",
-            "(lit {type: (t-prim {} f64)} 1)",
-            "(app {} (var {} neg) (lit {type: (t-prim {} bool)} 1))",
-            "(app {} (var {} neg) (lit {type: (t-prim {} i64)} -1))",
-            "(app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} i64)} 1)))",
-            "(app {type: (t-prim {} i64)} (var {} neg) (lit {type: (t-prim {} i32)} 1))",
-            "(cast {type: (t-prim {} i32)} (lit {type: (t-prim {} i64)} 1) (t-prim {} i64))",
-            "(cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64) trunc)",
-            "(cast {} (var {} runtime) (t-prim {} i64))",
-            "(cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i64))",
-        ] {
-            let source = format!(
-                "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
-            );
-            let deep = parse_str(&source).unwrap();
-            if let Ok(typed) = chelis_types::check_ir_program(&deep) {
-                let errors = check_program(&typed).expect_err(seed);
-                assert_eq!(errors.len(), 1, "{seed}: {errors:?}");
-                assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler, "{seed}");
-            }
-        }
     }
 
     #[test]
-    fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
-        for (effect, expected) in [
-            ("random", "requires a signed i64 literal seed"),
-            ("resource", "requires a string literal device"),
-        ] {
-            let source = format!(
-                "(def {{}} value (handle-effect {{effect: {effect}}} \
-                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} i32)}} 1)))"
-            );
-            let deep = parse_str(&source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep)
-                .expect("handler payload is owned by the effects gate");
-            let errors = check_program(&typed).expect_err("nonliteral handler must reject");
-            assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
-            assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
-            assert!(errors[0].message.contains(expected), "{errors:?}");
-        }
-    }
-
-    #[test]
-    fn infers_random_for_dropout_fn() {
+    fn keyed_dropout_introduces_no_effect() {
+        // [05-RNG-1]: a draw is a pure function of its key, so a keyed
+        // `dropout` carries an empty effect row (the `Random` effect was
+        // retired with the counter stream, #2413).
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+             (def {} y (app {} (var {} dropout)
+               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
         let (inferred, _) = infer_program_effects(&exprs);
         assert!(
-            inferred
-                .get("y")
-                .is_some_and(|effects| effects.contains(&Effect::Random))
+            inferred.get("y").is_some_and(|effects| effects.is_empty()),
+            "keyed dropout must infer an empty effect row, got {:?}",
+            inferred.get("y")
         );
     }
 
@@ -1824,19 +1702,18 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
     }
 
     #[test]
-    fn rejects_unhandled_dropout_root() {
+    fn keyed_dropout_root_checks_clean() {
+        // The retired unhandled-`Random` root check has no successor: a keyed
+        // draw at a value root needs no handler.
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+             (def {} y (app {} (var {} dropout)
+               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
         let checked = chelis_types::check_ir_program(&exprs).unwrap();
-        let errors = check_program(&checked).unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect)
-        );
+        check_program(&checked).expect("a keyed draw root needs no handler");
     }
 
     #[test]
@@ -1948,8 +1825,8 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
     fn checked_program_does_not_emit_internal_type_override_metadata() {
         let program = checked(
             "(def {} f
-               (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))",
+               (fn {} (params {} (x {type: (t-prim {} string)}))
+                 (app {} (var {} debug) (var {} x))))",
         );
         let text = chelis_deep::printer::print_canonical(program.annotated_exprs());
         assert!(
@@ -2018,28 +1895,21 @@ totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
     }
 
     #[test]
-    fn partition_propagates_random_effect_to_root() {
-        let decls = parse_surf(
+    fn partition_propagates_io_effect_from_callback() {
+        let program = surf_checked(
             r#"
-def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
-xs: List[tensor[f32]] = [
-  trace(pad_sequences_to([[1.0]], cast(1, i64), cast(0.0, f32)), 0, 1),
-  trace(pad_sequences_to([[2.0]], cast(1, i64), cast(0.0, f32)), 0, 1)
-]
+def keep(x: i64) -> bool = gt(debug(x), cast(1, i64))
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
 buckets = partition(keep, xs)
 "#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
-        let errors = check_program(&checked).expect_err("partition should propagate Random effect");
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
+            inferred
+                .get("buckets")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on partition result, got {:?}",
+            inferred.get("buckets")
         );
     }
 
@@ -2058,32 +1928,6 @@ ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
                 .is_some_and(|effects| effects.contains(&Effect::Io)),
             "expected IO effect on flat_map result, got {:?}",
             inferred.get("ys")
-        );
-    }
-
-    #[test]
-    fn map_propagates_random_effect_to_root() {
-        let decls = parse_surf(
-            r#"
-def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-xs: List[tensor[8, f32]] = [
-  (to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) : tensor[8, f32]),
-  (to_tensor([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]) : tensor[8, f32])
-]
-ys = map(step, xs)
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
-        let errors = check_program(&checked).expect_err("map should propagate Random effect");
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
         );
     }
 
@@ -2218,12 +2062,13 @@ def outer() -> unit = inner()
     }
 
     #[test]
-    fn with_seed_does_not_handle_test_effect() {
-        // `with seed(...)` must remove Random, but must NOT remove Test.
+    fn with_device_does_not_handle_test_effect() {
+        // A `resource` handler handles no inferred effect: `with device(...)`
+        // must NOT remove Test.
         let program = surf_checked(
             r#"
 def sealed() -> unit =
-  with seed(7i64) { test_assert(true, "inside-handler") }
+  with device("cpu") { test_assert(true, "inside-handler") }
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -2231,7 +2076,7 @@ def sealed() -> unit =
             inferred
                 .get("sealed")
                 .is_some_and(|effects| effects.contains(&Effect::Test)),
-            "with seed(...) must not swallow the Test effect, got {:?}",
+            "with device(...) must not swallow the Test effect, got {:?}",
             inferred.get("sealed")
         );
     }
@@ -2325,7 +2170,7 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     // A `.dp` MODULE wraps its decls in `(module ...)`. The whole-program
     // effect validators must descend into that wrapper so a module-wrapped
     // `chelis check` agrees with the flattened build/eval path. Without the
-    // descent, a declared-pure function whose body performs Random/IO would be
+    // descent, a declared-pure function whose body performs IO would be
     // accepted module-wrapped but rejected flattened.
 
     /// Type-check a module-WRAPPED Deep program (the shape `chelis check` runs
@@ -2337,33 +2182,9 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     }
 
     #[test]
-    fn module_wrapped_declared_pure_body_does_random_is_rejected() {
-        // `entry` is declared pure (`! { }`) but its body calls `noisy`, which
-        // performs Random. Wrapped in `(module ...)`, the declared-vs-inferred
-        // validator must still fire after descending into the wrapper.
-        let checked = typed_module(
-            r#"module Frag.Effect
-export (entry)
-def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
-"#,
-        );
-        let errors = check_program(&checked)
-            .expect_err("module-wrapped declared-pure body performing Random must be rejected");
-        assert!(
-            errors.iter().any(|error| {
-                error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("entry")
-                    && error.message.contains("Random")
-            }),
-            "expected UnhandledEffect on entry mentioning Random, got {errors:?}"
-        );
-    }
-
-    #[test]
     fn module_wrapped_declared_pure_body_does_io_is_rejected() {
-        // The IO counterpart: a declared-pure function whose body calls a
-        // file-IO builtin must be rejected module-wrapped, the same as Random.
+        // A declared-pure function whose body calls a file-IO builtin must be
+        // rejected module-wrapped, the same as flattened.
         let checked = typed_module(
             r#"module Frag.Io
 export (entry)
@@ -2383,26 +2204,6 @@ def entry(path: string) -> string ! { } = read_file(path)
     }
 
     #[test]
-    fn module_wrapped_unhandled_random_value_root_is_rejected() {
-        // A value-binding (non-fn) root that performs Random inside a module
-        // wrapper must still be caught by the unhandled-random-roots validator.
-        let checked = typed_module(
-            r#"module Frag.Root
-export (sampled)
-sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0.5)
-"#,
-        );
-        let errors = check_program(&checked)
-            .expect_err("module-wrapped unhandled Random value root must be rejected");
-        assert!(
-            errors.iter().any(|error| {
-                error.kind == EffectErrorKind::UnhandledEffect && error.message.contains("Random")
-            }),
-            "expected unhandled Random effect, got {errors:?}"
-        );
-    }
-
-    #[test]
     fn module_wrapped_pure_program_checks_clean() {
         // The negative-parity case: a pure module must still check clean after
         // the descent change (no effects -> no rejection).
@@ -2417,18 +2218,17 @@ def entry(x: f32) -> f32 = helper(mul(x, x))
     }
 
     #[test]
-    fn module_wrapped_honest_random_signature_checks_clean() {
-        // A module-wrapped function that honestly declares `! { Random }` and
-        // handles the effect with `with seed(...)` must check clean: the
-        // descent fix tightens the unsound-accept path only, not honest code.
+    fn module_wrapped_honest_io_signature_checks_clean() {
+        // A module-wrapped function that honestly declares `! { IO }` must
+        // check clean: the descent fix tightens the unsound-accept path only,
+        // not honest code.
         let checked = typed_module(
             r#"module Frag.Honest
 export (entry)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] =
-  with seed(7i64) { dropout(x, 0.5) }
+def entry(path: string) -> string ! { IO } = read_file(path)
 "#,
         );
-        check_program(&checked).expect("handled-Random module-wrapped program must check clean");
+        check_program(&checked).expect("honest IO module-wrapped program must check clean");
     }
 }
 
@@ -2439,7 +2239,7 @@ mod decode_once_producer_tests {
     #[test]
     fn synthesized_effects_preserve_typed_members_and_decoded_wire_tags() {
         let mut effects = EffectSet::new();
-        effects.insert(Effect::Random);
+        effects.insert(Effect::Accum);
         effects.insert(Effect::Io);
         effects.insert(Effect::Resource("gpu0".into()));
         let metadata = Metadata::from(MetadataValue::Effects(effect_set_metadata(&effects)));
@@ -2465,9 +2265,9 @@ mod decode_once_producer_tests {
     #[test]
     fn effect_names_are_payload_not_vocabulary_tags() {
         let mut effects = EffectSet::new();
-        effects.insert(Effect::Random);
+        effects.insert(Effect::Accum);
         let payload = effect_set_metadata(&effects);
-        assert!(matches!(payload.values(), [EffectMember::Name(name)] if name.value() == "random"));
+        assert!(matches!(payload.values(), [EffectMember::Name(name)] if name.value() == "accum"));
     }
 
     #[test]

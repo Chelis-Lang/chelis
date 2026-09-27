@@ -519,9 +519,9 @@ fn uniform_like_literal_bounds_are_accepted_on_both_ingresses() {
     ] {
         assert_agree_and_accept(
             &format!(
-                "(defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} f32)) \
+                "(defsig {{}} f (t-fn {{}} (t-prim {{}} key) (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} f32)) \
                    (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} f32))))\n\
-                 (def {{}} f (fn {{}} (params {{}} x) (app {{}} (var {{}} uniform_like) (var {{}} x) \
+                 (def {{}} f (fn {{}} (params {{}} k x) (app {{}} (var {{}} uniform_like) (var {{}} k) (var {{}} x) \
                    {low} (lit {{type: (t-prim {{}} f32)}} 1.0))))"
             ),
             &format!("uniform_like with a {label} low bound"),
@@ -755,44 +755,39 @@ fn inline_param_polymorphic_float_mean_is_accepted_on_both_ingresses() {
     );
 }
 
-/// The `with seed(...)` handler program, at a chosen seed-literal width. The
-/// §P10a rule is that an integer-literal seed must carry the `i64` suffix,
-/// which Deep spells as `type: (t-prim {} i64)` on the seed `lit`.
-fn seeded_handler_program(seed_prim: &str) -> String {
+/// `key_from_seed` applied to a seed literal of a chosen width. [05-OP-69]
+/// takes an `i64` seed, and an integer literal's width is its `type:` `t-prim`
+/// in Deep, which both ingresses must read the same way.
+fn seeded_key_program(seed_prim: &str) -> String {
     format!(
-        "(def {{}} f (handle-effect {{effect: random}} \
-           (lit {{type: (t-prim {{}} {seed_prim})}} 42) \
-           (lit {{type: (t-prim {{}} f32)}} 1.0)))"
+        "(def {{}} f (app {{}} (var {{}} key_from_seed) \
+           (lit {{type: (t-prim {{}} {seed_prim})}} 42)))"
     )
 }
 
-/// PP7's EIGHTH in-checker divergence, found while delivering E5a and folded
-/// into it: REGRESSION TEST (red before the `seed_literal_form` repair, green
-/// after). `seed_literal_form` sits ten lines from `infer_lit`'s `type:`
-/// reader in the same file and had the same defect twice over -- an
-/// `Expr::List`-only match on the seed `lit` itself, and an `Expr::List`-only
-/// read of the `t-prim` under its `type:` metadata. On the stamped ingress
-/// the handler is an `Expr::Node`, so the outer match fell to `_ => None`, the
-/// seed classified as `NotIntLiteral`, and the §P10a i64-suffix rejection
-/// never fired: `chelis check` exited 2 and `chelis prove` exited 0 for the
-/// same file. Fail-open.
+/// PP7's EIGHTH in-checker divergence was the retired `with seed` handler's
+/// `seed_literal_form`, which read its seed `lit` only as an `Expr::List` and
+/// so never fired the i64-suffix rule on the stamped ingress. The handler is
+/// gone; its key-form analogue is the seed literal of `key_from_seed`, whose
+/// width both ingresses must read from the same `type:` metadata.
+/// DISPOSITION LOCK (the defective reader was deleted with the handler).
 #[test]
 fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
-        &seeded_handler_program("i32"),
-        "requires an i64-suffixed integer literal seed",
-        "with seed at an unsuffixed i32 literal",
+        &seeded_key_program("i32"),
+        "precision mismatch: expected i64, got i32",
+        "key_from_seed at an i32 literal",
     );
 }
 
 /// The over-rejection control for the row above, DISPOSITION LOCK (green
-/// before and after): a correctly suffixed non-negative seed must still check
-/// clean on both ingresses. Without it, "classify every seed carrier I cannot
-/// decode as unsuffixed" would satisfy the regression row.
+/// before and after): an i64 seed literal must still check clean on both
+/// ingresses. Without it, "reject every seed carrier I cannot decode" would
+/// satisfy the row above.
 #[test]
 fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
     assert_agree_and_accept(
-        &seeded_handler_program("i64"),
-        "with seed at an i64-suffixed literal",
+        &seeded_key_program("i64"),
+        "key_from_seed at an i64 literal",
     );
 }

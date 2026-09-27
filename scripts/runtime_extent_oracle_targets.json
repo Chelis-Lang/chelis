@@ -631,6 +631,8 @@
       },
       "expected": [
         "aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        "an_arms_local_claim_is_checked_under_its_carriers_owner_activation",
+        "an_untaken_else_arms_claimed_result_is_not_read_at_the_join",
         "each_inlined_activation_gets_a_distinct_one_owner_local_claim",
         "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
         "grad_pruning_preserves_a_dead_except_for_trap_local_site",
@@ -648,7 +650,7 @@
         "untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
         "vmap_shifts_the_local_claim_and_initializer_axis_together"
       ],
-      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inserted output axes remain distinct from their observed source axes, selected runtime branches enforce their site, untaken runtime branches do not, inferred metadata creates no site, and malformed roles fail closed."
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inserted output axes remain distinct from their observed source axes, selected runtime branches enforce their site, untaken runtime branches do not, in either arm of the join, inferred metadata creates no site, and malformed roles fail closed."
     },
     {
       "phase": "b",
@@ -745,10 +747,10 @@
         "mode": "exact"
       },
       "expected": [
-        "local_ascription_owner_rejects_multiple_runtime_branch_activations",
+        "a_local_ascriptions_activation_travels_as_its_carriers_owner_activation",
         "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
       ],
-      "note": "WireDag v15 requires the exact local-ascription identity and preserves one exact scalar Bool runtime-branch activation; missing, hybrid, empty, unknown or multiply activated representations reject."
+      "note": "WireDag requires the exact local-ascription identity and carries the claim's runtime-branch activation as its carrier node's owner activation, an earlier bool node; missing, hybrid, empty or unknown representations, and a non-bool activation, reject."
     },
     {
       "phase": "b",

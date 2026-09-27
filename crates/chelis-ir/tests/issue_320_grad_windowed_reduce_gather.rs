@@ -84,7 +84,9 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
 #[test]
 fn issue_320_lower_mean_over_symbolic_extent_does_not_panic() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         sym_vec("n"),
@@ -92,7 +94,7 @@ fn issue_320_lower_mean_over_symbolic_extent_does_not_panic() {
     );
     // This call previously PANICKED with "mean requires a concrete extent
     // for axis 0 in IR lowering".
-    let mean = tier2::lower_mean(&mut dag, x, 0, &sym_vec("n"), None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &sym_vec("n"), None);
     // The lowered mean must reduce to a scalar (axis 0 of a rank-1 operand).
     assert!(
         dag.get(mean)
@@ -123,13 +125,15 @@ fn issue_320_lower_mean_over_symbolic_extent_does_not_panic() {
 #[test]
 fn issue_320_grad_through_symbolic_mean_is_exact() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         sym_vec("n"),
         None,
     );
-    let mean = tier2::lower_mean(&mut dag, x, 0, &sym_vec("n"), None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &sym_vec("n"), None);
 
     // Forward value: mean([10,20,30,40]) = 25.
     let mut inputs = UnordMap::new();
@@ -162,8 +166,15 @@ fn issue_320_grad_through_symbolic_mean_is_exact() {
 #[test]
 fn issue_320_lower_mean_over_literal_extent_still_exact() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], lit_vec(4), None);
-    let mean = tier2::lower_mean(&mut dag, x, 0, &lit_vec(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        lit_vec(4),
+        None,
+    );
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &lit_vec(4), None);
     // Literal extent keeps the single-Sum (value) form with a Const divisor.
     let sum_count = dag
         .nodes()
@@ -205,8 +216,21 @@ fn issue_320_lower_mean_over_literal_extent_still_exact() {
 #[test]
 fn issue_320_grad_max_reduce_over_literal_shape_still_exact() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], lit_vec(4), None);
-    let out = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f32(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        lit_vec(4),
+        None,
+    );
+    let out = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 0 },
+        vec![x],
+        scalar_f32(),
+        None,
+    );
     let result = grad_dag_checked(&dag, out, &[x]).expect("literal max_reduce grad must construct");
     let grad_x = result.grad_nodes[&x];
     let mut inputs = UnordMap::new();
@@ -227,8 +251,16 @@ fn issue_320_grad_max_reduce_over_literal_shape_still_exact() {
 #[test]
 fn issue_320_grad_gather_over_literal_shape_still_exact() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], lit_vec(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        lit_vec(4),
+        None,
+    );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         TensorType {
@@ -238,12 +270,14 @@ fn issue_320_grad_gather_over_literal_shape_still_exact() {
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![x, indices],
         lit_vec(2),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![gathered],
         scalar_f32(),

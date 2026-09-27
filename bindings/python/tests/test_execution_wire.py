@@ -21,7 +21,7 @@ def scalar(dtype, bits):
 
 
 def envelope(value):
-    return {"schema_version": 3, "roots": [{"node_id": 0, "name": "x", "value": value}], "transcript": []}
+    return {"schema_version": 4, "roots": [{"node_id": 0, "name": "x", "value": value}], "transcript": []}
 
 
 class ExecutionWireTests(unittest.TestCase):
@@ -112,7 +112,7 @@ class ExecutionWireTests(unittest.TestCase):
                 chelis._tensor_value(dict(good, data=data))
 
     def test_facade_eval_checks_exact_stamp_before_visiting_values(self):
-        for version in (None, 1, 2, 4, True, 3.0, "3"):
+        for version in (None, 1, 2, 3, 5, True, 4.0, "4"):
             payload = envelope({"invalid": "must not decode"})
             if version is None:
                 del payload["schema_version"]
@@ -157,8 +157,8 @@ class ExecutionWireTests(unittest.TestCase):
                 chelis._execution_value(bad)
 
     def test_duplicate_json_fields_and_non_json_constants_are_rejected(self):
-        for raw in ('{"schema_version":3,"schema_version":2,"roots":[],"transcript":[]}',
-                    '{"schema_version":3,"roots":[],"transcript":[NaN]}'):
+        for raw in ('{"schema_version":4,"schema_version":3,"roots":[],"transcript":[]}',
+                    '{"schema_version":4,"roots":[],"transcript":[NaN]}'):
             with mock.patch.object(chelis._native, "eval_json", return_value=raw, create=True):
                 with self.assertRaises(ValueError):
                     chelis.eval("x = 1")
@@ -166,3 +166,57 @@ class ExecutionWireTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyExecutionValueTests(unittest.TestCase):
+    """chelis#2413: keys cross the facade only as spec/10 §3.2 execution values."""
+
+    ROWS = ["25ea33e61c10576f", "707124fbecd5f054", "823936153a565205"]
+
+    def test_scalar_key_and_key_tensor_round_trip(self):
+        key = chelis._execution_value({"type": "key", "bits": "0000000000000007"})
+        self.assertEqual(key, chelis.Key("0000000000000007"))
+        wire = {"shape": [3], "data": {"dtype": "key", "bits": self.ROWS}}
+        tensor = chelis._execution_value({"type": "tensor", "value": wire})
+        self.assertEqual(tensor.dtype, "key")
+        self.assertEqual(tensor.data, tuple(chelis.Key(bits) for bits in self.ROWS))
+        # Printed, then fed back: the binding payload is the printed storage.
+        self.assertEqual(chelis._tensor_value_payload(tensor), wire)
+
+    def test_key_decoders_are_strict(self):
+        for bits in ("000000000000007", "00000000000000007", "00000000000000AB", 7):
+            with self.assertRaises(ValueError):
+                chelis._execution_value({"type": "key", "bits": bits})
+            with self.assertRaises(ValueError):
+                chelis._tensor_value({"shape": [1], "data": {"dtype": "key", "bits": [bits]}})
+        for payload in (
+            {"type": "key", "bits": "0000000000000007", "extra": 1},
+            {"type": "key", "value": "0000000000000007"},
+            {"type": "scalar", "value": {"dtype": "key", "bits": "0000000000000007"}},
+        ):
+            with self.assertRaises(ValueError):
+                chelis._execution_value(payload)
+        for storage in (
+            {"dtype": "key", "values": [7]},
+            {"dtype": "key", "bits": ["0000000000000007"], "values": [7]},
+        ):
+            with self.assertRaises(ValueError):
+                chelis._tensor_value({"shape": [1], "data": storage})
+
+    def test_a_scalar_key_binding_says_what_to_pass_instead(self):
+        with self.assertRaises(chelis.ChelisError) as caught:
+            chelis._tensor_value_payload(chelis.Key("0000000000000007"))
+        message = str(caught.exception)
+        self.assertIn("scalar `chelis.Key` is not a binding", message)
+        self.assertIn("key_from_seed", message)
+        self.assertIn("tensor[n, key]", message)
+        self.assertNotIn("astype", message)
+
+    def test_a_key_is_never_a_numpy_value(self):
+        with self.assertRaises(ValueError):
+            chelis.Key(7)
+        with self.assertRaises(ChelisErrorOrValueError):
+            chelis._tensor_value_payload(np.array([7], dtype=np.uint64))
+
+
+ChelisErrorOrValueError = (ValueError, chelis.ChelisError)

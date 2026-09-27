@@ -14,11 +14,13 @@ fn vector(precision: Prim) -> TensorType {
 
 fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inputs = input_prims
         .iter()
         .enumerate()
         .map(|(index, precision)| {
             dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: format!("input_{index}").into(),
                 },
@@ -28,7 +30,7 @@ fn direct_dag(op: RiscOp, input_prims: &[Prim], output: Prim) -> Dag {
             )
         })
         .collect();
-    let out = dag.add_node(op, inputs, vector(output), None);
+    let out = dag.add_node(decl, op, inputs, vector(output), None);
     dag.add_root(out);
     dag
 }

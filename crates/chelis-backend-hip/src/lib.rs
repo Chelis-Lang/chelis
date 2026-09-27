@@ -171,6 +171,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
     use chelis_ir::dag::{Dag, NodeId, RiscOp};
     let selected = chelis_ir::specialize::specialize_for_blas(&dag);
     let mut out = Dag::new();
+    out.inherit_declarations(&selected);
     let mut remap: UnordMap<NodeId, NodeId> = UnordMap::new();
     let mut materialized: UnordMap<NodeId, NodeId> = UnordMap::new();
     for node in selected.nodes() {
@@ -183,6 +184,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
                 *input = *materialized.entry(*input).or_insert_with(|| {
                     let source = out.get(*input).unwrap().clone();
                     let realized = out.add_node(
+                        source.owner,
                         RiscOp::Realize,
                         vec![*input],
                         source.output_type,
@@ -201,6 +203,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
                 .unwrap_or(remap[&old])
         });
         let id = out.add_node(
+            node.owner.remap(&remap),
             node.op.clone(),
             inputs,
             node.output_type.clone(),
@@ -321,13 +324,27 @@ mod preparation_tests {
 
     fn matrix_program(precision: Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
             precision,
         };
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let output = dag.add_node(
+            decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![],
                 m: DimExpr::Concrete(2),

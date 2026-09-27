@@ -7,8 +7,6 @@ mod generated_header;
 mod host_abi;
 mod host_emit;
 pub mod memory;
-#[cfg(feature = "native-random-observer")]
-mod random_observer;
 #[cfg(test)]
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod test_runtime_archive;
@@ -661,7 +659,9 @@ mod tests {
     #[test]
     fn codegen_returns_source_and_header() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -688,7 +688,9 @@ mod tests {
     #[test]
     fn codegen_header_is_declaration() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -706,14 +708,22 @@ mod tests {
     #[test]
     fn codegen_rejects_mis_sized_leading_axis_pad() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym.clone(), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym.clone(),
+            None,
+        );
         // Padded leading axis by (2,0): output SHOULD be [4, batch] but is
         // MIS-SIZED to the operand extent [2, batch] (the #593 wrapper clobber).
         dag.add_node(
+            decl,
             RiscOp::zero_pad(
                 Prim::F32,
                 vec![
@@ -738,6 +748,7 @@ mod tests {
     #[test]
     fn codegen_accepts_well_sized_leading_axis_pad() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let in_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
@@ -746,8 +757,9 @@ mod tests {
             dims: vec![DimInfo::Lit(4), DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         dag.add_node(
+            decl,
             RiscOp::zero_pad(
                 Prim::F32,
                 vec![
@@ -776,7 +788,9 @@ mod tests {
         // compilation) must emit an extern-linkage entry function.  Making it
         // `static` would prevent external callers from linking against the symbol.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -800,7 +814,9 @@ mod tests {
         // When the caller explicitly requests static_entry (used internally for
         // HostTensorHelper DAG kernels), the function definition must be `static void`.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -835,7 +851,9 @@ mod tests {
 
         // Build a simple 1-element scalar DAG for the helper.
         let mut helper_dag = Dag::new();
+        let helper_dag_decl = helper_dag.declare("test");
         helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -883,7 +901,7 @@ mod tests {
         // The context-carrying helper is private to this translation unit.
         let my_fn = authored_c_symbol("my_fn");
         assert!(
-            src.contains(&format!("static void {my_fn}__tensor_0__with_rng(")),
+            src.contains(&format!("static void {my_fn}__tensor_0__private(")),
             "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
             src
         );
@@ -917,19 +935,23 @@ mod tests {
         let b_ty = mat_f32(3, 4);
         let out_ty = mat_f32(2, 4);
         let mut helper_dag = Dag::new();
+        let helper_dag_decl = helper_dag.declare("test");
         let a = helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
         let out = helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![],
                 m: chelis_ir::dag::DimExpr::Concrete(2),
@@ -994,13 +1016,16 @@ mod tests {
     #[test]
     fn codegen_surfaces_store_output_labels() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
@@ -1013,26 +1038,30 @@ mod tests {
     #[test]
     fn codegen_surfaces_distinct_input_labels() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x0 = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let x1 = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        let sum = dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32(), None);
-        dag.add_node(RiscOp::Add, vec![sum, y], scalar_f32(), None);
+        let sum = dag.add_node(decl, RiscOp::Add, vec![x0, x1], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![sum, y], scalar_f32(), None);
         let result = codegen(&dag, "test_fn").unwrap();
         assert_eq!(result.input_labels, vec!["x", "y"]);
         assert_eq!(result.output_labels, vec!["root0"]);
@@ -1041,19 +1070,23 @@ mod tests {
     #[test]
     fn codegen_does_not_surface_openblas_by_default() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -1066,6 +1099,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -1078,6 +1112,7 @@ mod tests {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -1087,6 +1122,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1103,19 +1139,23 @@ mod tests {
     #[test]
     fn blas_option_keeps_primitive_matmul_off_vendor_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -1128,6 +1168,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -1140,6 +1181,7 @@ mod tests {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -1149,6 +1191,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1296,19 +1339,22 @@ int main(void) {
     #[test]
     fn simple_add_compiles() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let result = codegen(&dag, "test_add").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1691,9 +1737,22 @@ int main(void) {{
     #[test]
     fn numerical_tensor_add_is_elementwise_with_runtime_inputs() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-        dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
 
         let outputs = compile_and_run_input_cases(
             &dag,
@@ -1711,9 +1770,22 @@ int main(void) {{
     #[test]
     fn numerical_tensor_mul_is_elementwise_with_runtime_inputs() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-        dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Mul, vec![x, y], vec_f32(4), None);
 
         let outputs = compile_and_run_input_cases(
             &dag,
@@ -1731,19 +1803,22 @@ int main(void) {{
     #[test]
     fn numerical_add_const() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_add");
         assert_float_eq(&out, 3.0);
     }
@@ -1751,13 +1826,15 @@ int main(void) {{
     #[test]
     fn numerical_neg() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_neg");
         assert_float_eq(&out, -5.0);
     }
@@ -1765,19 +1842,22 @@ int main(void) {{
     #[test]
     fn numerical_mul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_mul");
         assert_float_eq(&out, 12.0);
     }
@@ -1785,13 +1865,15 @@ int main(void) {{
     #[test]
     fn numerical_exp_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Exp, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_exp");
         assert_float_eq(&out, 1.0);
     }
@@ -1799,13 +1881,15 @@ int main(void) {{
     #[test]
     fn numerical_sqrt() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 9.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Sqrt, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sqrt");
         assert_float_eq(&out, 3.0);
     }
@@ -1814,13 +1898,15 @@ int main(void) {{
     fn numerical_log_e() {
         // log(e) = 1.0
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, std::f64::consts::E),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Log, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Log, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_log");
         assert_float_eq(&out, 1.0);
     }
@@ -1828,13 +1914,15 @@ int main(void) {{
     #[test]
     fn numerical_sin_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Sin, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Sin, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sin");
         assert_float_eq(&out, 0.0);
     }
@@ -1842,19 +1930,23 @@ int main(void) {{
     #[test]
     fn numerical_cmplt_true() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
@@ -1870,19 +1962,23 @@ int main(void) {{
     #[test]
     fn numerical_cmplt_false() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
@@ -1899,13 +1995,16 @@ int main(void) {{
     fn numerical_sum_vector() {
         // sum([2, 2, 2]) = 6
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 2.0),
             vec![],
             vec_f32(3),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1922,26 +2021,30 @@ int main(void) {{
     fn numerical_add_then_mul() {
         // (1 + 2) * 4 = 12
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let d = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![c, d], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_chain");
         assert_float_eq(&out, 12.0);
     }
@@ -1950,19 +2053,22 @@ int main(void) {{
     fn numerical_max_elem() {
         // max(3, 7) = 7
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 7.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::MaxElem, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::MaxElem, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_maxe");
         assert_float_eq(&out, 7.0);
     }
@@ -1970,13 +2076,15 @@ int main(void) {{
     #[test]
     fn numerical_relu() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let relu = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
+        let relu = tier2::lower_relu(decl.into(), &mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_relu");
         assert_float_eq(&out, 0.0);
         assert!(matches!(dag.get(relu).unwrap().op, RiscOp::Relu));
@@ -1985,13 +2093,15 @@ int main(void) {{
     #[test]
     fn numerical_sigmoid_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let _ = tier2::lower_sigmoid(&mut dag, x, &scalar_f32(), None);
+        let _ = tier2::lower_sigmoid(decl.into(), &mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sigmoid");
         assert_float_eq(&out, 0.5);
     }
@@ -2000,13 +2110,21 @@ int main(void) {{
     fn numerical_max_reduce() {
         // max_reduce([5, 5, 5]) over axis 0 = 5
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 5.0),
             vec![],
             vec_f32(3),
             None,
         );
-        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::MaxReduce { axis: 0 },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         let out = compile_and_run(&dag, "test_maxr");
         assert_float_eq(&out, 5.0);
     }
@@ -2014,13 +2132,16 @@ int main(void) {{
     #[test]
     fn numerical_cast_identity() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 42.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -2036,27 +2157,32 @@ int main(void) {{
     fn numerical_add_then_mul_then_sum() {
         // vec of 3 ones + vec of 3 twos = [3,3,3], * vec of 3 threes = [9,9,9], sum = 27
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 1.0),
             vec![],
             vec_f32(3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 2.0),
             vec![],
             vec_f32(3),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(3), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(3), None);
         let d = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 3.0),
             vec![],
             vec_f32(3),
             None,
         );
-        let e = dag.add_node(RiscOp::Mul, vec![c, d], vec_f32(3), None);
+        let e = dag.add_node(decl, RiscOp::Mul, vec![c, d], vec_f32(3), None);
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -2097,7 +2223,9 @@ int main(void) {{
     #[test]
     fn checked_c_metadata_dag_reshape_executes_under_ubsan() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -2109,6 +2237,7 @@ int main(void) {{
         let mut inputs = vec![input];
         for name in ["a", "b", "c"] {
             inputs.push(dag.add_node(
+                decl,
                 RiscOp::Load { name: name.into() },
                 vec![],
                 TensorType {
@@ -2119,6 +2248,7 @@ int main(void) {{
             ));
         }
         let output = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1), RtDim::Node(2), RtDim::Node(3)],
             },
@@ -2256,13 +2386,16 @@ int main(int argc, char **argv) {{
         // Create a 1D tensor [1,1,1,1,1,1] (const fills all), reshape to 2x3
         // We use const value 1.0 for a vec of 6, reshape to 2x3 -> still 6 ones
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(6).precision, 1.0),
             vec![],
             vec_f32(6),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
@@ -2277,13 +2410,16 @@ int main(int argc, char **argv) {{
     #[test]
     fn numerical_reshape_then_add() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(6).precision, 1.0),
             vec![],
             vec_f32(6),
             None,
         );
         let reshaped = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
@@ -2292,12 +2428,13 @@ int main(int argc, char **argv) {{
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![reshaped, b], mat_f32(2, 3), None);
+        dag.add_node(decl, RiscOp::Add, vec![reshaped, b], mat_f32(2, 3), None);
         let out = compile_and_run(&dag, "test_reshape_add");
         assert_floats_eq(&out, &[3.0, 3.0, 3.0, 3.0, 3.0, 3.0]);
     }
@@ -2307,13 +2444,16 @@ int main(int argc, char **argv) {{
         // Create 1D tensor [3.0] (size 1), expand to size 3 (stride 0 broadcast),
         // add with a 1D tensor [1.0, 1.0, 1.0] -> [4.0, 4.0, 4.0]
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(1).precision, 3.0),
             vec![],
             vec_f32(1),
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(3),
@@ -2323,12 +2463,13 @@ int main(int argc, char **argv) {{
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 1.0),
             vec![],
             vec_f32(3),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![expanded, b], vec_f32(3), None);
+        dag.add_node(decl, RiscOp::Add, vec![expanded, b], vec_f32(3), None);
         let out = compile_and_run(&dag, "test_expand_add");
         assert_floats_eq(&out, &[4.0, 4.0, 4.0]);
     }
@@ -2338,13 +2479,16 @@ int main(int argc, char **argv) {{
         // Create a 2x3 matrix (all 2.0), permute to 3x2 -> still all 2.0 but shape changes
         // Since const fills all elements with same value, we verify shape via size
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let permuted = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![a],
             mat_f32(3, 2),
@@ -2352,6 +2496,7 @@ int main(int argc, char **argv) {{
         );
         // Sum along axis 0 (3 rows) to get vec of 2: each column sums 3 x 2.0 = 6.0
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -2367,7 +2512,9 @@ int main(int argc, char **argv) {{
     #[test]
     fn checked_cast_identity_materializes_a_noncontiguous_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "input".into(),
             },
@@ -2376,12 +2523,14 @@ int main(int argc, char **argv) {{
             None,
         );
         let permuted = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![input],
             mat_f32(3, 2),
             None,
         );
         let cast = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -2410,7 +2559,9 @@ int main(int argc, char **argv) {{
     #[test]
     fn numerical_sparse_gather_and_scatter_add_with_duplicate_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -2419,6 +2570,7 @@ int main(int argc, char **argv) {{
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -2427,12 +2579,14 @@ int main(int argc, char **argv) {{
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F32),
             None,
         );
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -2441,6 +2595,7 @@ int main(int argc, char **argv) {{
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -2449,6 +2604,7 @@ int main(int argc, char **argv) {{
             None,
         );
         let scattered = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F32),
@@ -2582,8 +2738,16 @@ int main(void) {{
     #[test]
     fn numerical_pad_with_runtime_input() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(3),
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::pad(
                 vec![(RtDim::Lit(1), RtDim::Lit(2))],
                 chelis_types::scalar_from_f64("pad", Prim::F32, -1.0).unwrap(),
@@ -2607,8 +2771,16 @@ int main(void) {{
     #[test]
     fn numerical_shrink_with_runtime_input() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(5),
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
@@ -2628,8 +2800,16 @@ int main(void) {{
     #[test]
     fn numerical_stride_with_runtime_input() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(5),
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2)],
             },
@@ -2649,20 +2829,24 @@ int main(void) {{
     #[test]
     fn numerical_large_vector_add_then_sum() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(1024).precision, 1.0),
             vec![],
             vec_f32(1024),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(1024).precision, 2.0),
             vec![],
             vec_f32(1024),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(1024), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(1024), None);
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -2678,19 +2862,22 @@ int main(void) {{
     #[test]
     fn parameterized_input_helper_supports_multiple_cases() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![x, one], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![x, one], scalar_f32(), None);
         let lines = compile_and_run_input_cases(
             &dag,
             "test_cases",
@@ -2706,23 +2893,26 @@ int main(void) {{
     #[test]
     fn symbolic_batch_codegen_reuses_one_artifact_for_multiple_input_shapes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let batch_vec = TensorType {
             dims: vec![DimInfo::Named("batch".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             batch_vec.clone(),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             batch_vec.clone(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![x, y], batch_vec, None);
+        dag.add_node(decl, RiscOp::Add, vec![x, y], batch_vec, None);
 
         let result = codegen(&dag, "test_symbolic_batch").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
@@ -2761,6 +2951,7 @@ int main(void) {{
     #[test]
     fn symbolic_matmul_codegen_reuses_one_artifact_for_multiple_batch_sizes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = TensorType {
             dims: vec![DimInfo::Named("batch".to_string(), None), DimInfo::Lit(3)],
             precision: Prim::F32,
@@ -2770,18 +2961,20 @@ int main(void) {{
             precision: Prim::F32,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen(&dag, "test_symbolic_matmul").unwrap();
@@ -2819,6 +3012,7 @@ int main(void) {{
     #[test]
     fn symbolic_batched_matmul_preserves_primitive_arithmetic() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = TensorType {
             dims: vec![
                 DimInfo::Named("batch".to_string(), None),
@@ -2838,18 +3032,20 @@ int main(void) {{
             precision: Prim::F32,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen_with_options(
@@ -2901,7 +3097,9 @@ int main(void) {{
     #[test]
     fn noncontiguous_matrix_slice_stays_on_generic_matmul_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let base_a = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "base_a".into(),
             },
@@ -2911,6 +3109,7 @@ int main(void) {{
         );
         let a_ty = mat_f32(2, 3);
         let a = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![base_a],
             a_ty.clone(),
@@ -2918,12 +3117,13 @@ int main(void) {{
         );
         let b_ty = mat_f32(3, 4);
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen_with_options(
@@ -2949,30 +3149,34 @@ int main(void) {{
     #[test]
     fn symbolic_preamble_checks_every_non_canonical_occurrence() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let symbolic = TensorType {
             dims: vec![DimInfo::Named("batch".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             symbolic.clone(),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             symbolic.clone(),
             None,
         );
         let z = dag.add_node(
+            decl,
             RiscOp::Load { name: "z".into() },
             vec![],
             symbolic.clone(),
             None,
         );
-        let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone(), None);
-        let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic, None);
+        let xy = dag.add_node(decl, RiscOp::Add, vec![x, y], symbolic.clone(), None);
+        let xyz = dag.add_node(decl, RiscOp::Add, vec![xy, z], symbolic, None);
         dag.add_root(xyz);
 
         let result = codegen(&dag, "test_symbolic_occurrences").unwrap();
@@ -3003,13 +3207,16 @@ int main(void) {{
     #[test]
     fn multiple_roots_return_multiple_outputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -3059,7 +3266,14 @@ int main(void) {
     #[test]
     fn output_from_load_is_materialized_not_borrowed() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
+        let decl = dag.declare("test");
+        dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(2),
+            None,
+        );
         let result = codegen(&dag, "test_load_copy").unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3116,19 +3330,22 @@ int main(void) {
     #[test]
     fn generated_code_compiles_with_platform_parallelism() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let out = compile_and_run_with_flags(&dag, "test_platform_parallelism", &[]);
         assert_float_eq(&out, 3.0);
     }
@@ -3136,19 +3353,23 @@ int main(void) {
     #[test]
     fn canonical_matmul_codegen_compiles_and_runs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -3161,6 +3382,7 @@ int main(void) {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -3173,6 +3395,7 @@ int main(void) {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -3182,6 +3405,7 @@ int main(void) {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3242,19 +3466,23 @@ int main(void) {
     #[test]
     fn numerical_matmul_fallback() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 0.5),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -3267,6 +3495,7 @@ int main(void) {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -3279,6 +3508,7 @@ int main(void) {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -3288,6 +3518,7 @@ int main(void) {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3308,19 +3539,23 @@ int main(void) {
     #[test]
     fn canonical_matmul_numerics_ignore_blas_hint() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 0.5),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -3333,6 +3568,7 @@ int main(void) {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -3345,6 +3581,7 @@ int main(void) {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -3354,6 +3591,7 @@ int main(void) {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3380,10 +3618,23 @@ int main(void) {
     fn build_fused_exp_add_dag(n: usize) -> Dag {
         use chelis_ir::fuse::fuse;
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(n), None);
-        let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(n), None);
-        dag.add_node(RiscOp::Exp, vec![add], vec_f32(n), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
+        let add = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(n), None);
+        dag.add_node(decl, RiscOp::Exp, vec![add], vec_f32(n), None);
         fuse(&dag)
     }
 
@@ -3487,9 +3738,22 @@ int main(void) {
         // MathLib::Sleef is forced, because has_math_ops() returns false.
         use chelis_ir::fuse::fuse;
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
         let dag = fuse(&dag);
         let result = codegen_with_options(
             &dag,
@@ -3729,9 +3993,16 @@ int main(void) {{
         // A single Exp op (not fused) should emit the Sleef AVX2 path when MathLib::Sleef.
         // Previously this fell through to the omp-simd scalar path.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let n: usize = 9; // 8 + 1 to exercise both SIMD and scalar tail
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(n), None);
-        dag.add_node(RiscOp::Exp, vec![x], vec_f32(n), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Exp, vec![x], vec_f32(n), None);
 
         let result = codegen_with_options(
             &dag,
@@ -3765,8 +4036,15 @@ int main(void) {{
     fn simd_single_math_op_sleef_compiles_and_runs() {
         let n: usize = 9; // exercises both 8-wide SIMD block and 1-element scalar tail
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(n), None);
-        dag.add_node(RiscOp::Exp, vec![x], vec_f32(n), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Exp, vec![x], vec_f32(n), None);
 
         let result = codegen_with_options(
             &dag,
@@ -3875,7 +4153,9 @@ int main(void) {{
         };
 
         let mut helper_dag = Dag::new();
+        let helper_dag_decl = helper_dag.declare("test");
         helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -3927,7 +4207,7 @@ int main(void) {{
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
         assert!(
-            src.contains(&format!("static void {my_func}__tensor_0__with_rng(")),
+            src.contains(&format!("static void {my_func}__tensor_0__private(")),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
         // The published header declares this authored function external, so
@@ -3955,7 +4235,9 @@ int main(void) {{
         };
 
         let mut helper_dag = Dag::new();
+        let helper_dag_decl = helper_dag.declare("test");
         helper_dag.add_node(
+            helper_dag_decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -4026,13 +4308,15 @@ int main(void) {{
     #[test]
     fn adv_tan_emits_tanf_not_tanhf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Tan, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Tan, vec![x], scalar_f32(), None);
         let result = codegen(&dag, "test_tan").unwrap();
         let src = &result.c_source;
         assert!(src.contains("tanf("), "tan must emit `tanf(`; got:\n{src}");
@@ -4046,13 +4330,15 @@ int main(void) {{
     #[test]
     fn adv_abs_emits_fabsf_not_absf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Abs, vec![x], scalar_f32(), None);
         let result = codegen(&dag, "test_abs").unwrap();
         let src = &result.c_source;
         // `fabsf` must appear; plain `absf` (which doesn't exist in C) must not.
@@ -4075,13 +4361,15 @@ int main(void) {{
     #[test]
     fn adv_numerical_cos_at_pi_over_4() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, std::f64::consts::FRAC_PI_4),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Cos, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Cos, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_cos_pi4");
         let val: f32 = out.trim().parse().expect("float output");
         assert!(
@@ -4095,13 +4383,15 @@ int main(void) {{
     #[test]
     fn adv_numerical_atan_at_1() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Atan, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Atan, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_atan_1");
         let val: f32 = out.trim().parse().expect("float output");
         let expected = std::f32::consts::FRAC_PI_4;
@@ -4115,13 +4405,15 @@ int main(void) {{
     #[test]
     fn adv_numerical_floor_negative() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -1.3),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Floor, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Floor, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_floor_neg");
         let val: f32 = out.trim().parse().expect("float output");
         assert!(
@@ -4134,13 +4426,15 @@ int main(void) {{
     #[test]
     fn adv_numerical_ceil_negative() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -1.7),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Ceil, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Ceil, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_ceil_neg");
         let val: f32 = out.trim().parse().expect("float output");
         assert!(
@@ -4153,13 +4447,15 @@ int main(void) {{
     #[test]
     fn adv_numerical_abs_negative_pi() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -std::f64::consts::PI),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Abs, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_abs_neg_pi");
         let val: f32 = out.trim().parse().expect("float output");
         assert!(
@@ -4272,6 +4568,7 @@ int main(void) {{
     #[test]
     fn f64_tensor_const_and_add_produces_correct_output() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Emit four individual consts because RiscOp::Const fills the whole
         // tensor with one scalar; we build the vectors element-by-element via
         // scalar const tensors that we then broadcast-add pairwise. Simpler:
@@ -4283,18 +4580,20 @@ int main(void) {{
         // instead: construct via (1.1 + 0.5) scalar, tile to [4], add to
         // [0.0, 0.0, 0.0, 0.0]. Simpler: just test one scalar per lane.
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f64(4).precision, 1.1),
             vec![],
             vec_f64(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f64(4).precision, 0.5),
             vec![],
             vec_f64(4),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f64(4), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f64(4), None);
 
         let out = compile_and_run_f64(&dag, "test_f64_add", 4);
         // Both inputs are uniform-fill, so every lane == 1.6 exactly in double.
@@ -4312,13 +4611,15 @@ int main(void) {{
     #[test]
     fn f64_tensor_sin_at_pi_over_4() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f64().precision, std::f64::consts::FRAC_PI_4),
             vec![],
             scalar_f64(),
             None,
         );
-        dag.add_node(RiscOp::Sin, vec![x], scalar_f64(), None);
+        dag.add_node(decl, RiscOp::Sin, vec![x], scalar_f64(), None);
 
         let out = compile_and_run_f64(&dag, "test_f64_sin_pi4", 1);
         let expected = (std::f64::consts::FRAC_PI_4).sin();

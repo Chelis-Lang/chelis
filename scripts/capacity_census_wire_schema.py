@@ -174,12 +174,20 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
             )
     for dtype in vocabulary:
         name = dtype["name"]
-        if dtype["kind"] == "key":
-            # spec/10 section 3.2: a key tensor has no execution-value carrier
-            # either, so every attempted tensor spelling of one is rejected.
-            for label, storage in (
-                ("no-literal-bits", {"dtype": name, "bits": ["0" * 16]}),
-                ("no-literal-values", {"dtype": name, "values": [7]}),
+        key = dtype["kind"] == "key"
+        if key:
+            # spec/10 section 3.2: a key tensor's storage object is
+            # `{"dtype":"key","bits":[h,...]}` with `h` exactly 16 lowercase
+            # hex digits. Every other spelling of it is rejected.
+            if name != "key" or dtype["width"] != 8:
+                raise ValueError("unsupported random key runtime dtype")
+            for label, storage, error in (
+                ("values-member", {"dtype": name, "values": [7]}, "unknown field"),
+                ("fifteen-digits", {"dtype": name, "bits": ["0" * 15]}, "16 lowercase"),
+                ("seventeen-digits", {"dtype": name, "bits": ["0" * 17]}, "16 lowercase"),
+                ("uppercase", {"dtype": name, "bits": ["8FD06B2E7BAD8630"]}, "16 lowercase"),
+                ("prefixed", {"dtype": name, "bits": ["0x8fd06b2e7bad86"]}, "16 lowercase"),
+                ("json-number", {"dtype": name, "bits": [7]}, None),
             ):
                 wire = {"shape": [1], "data": storage}
                 for codec in ("json", "construct"):
@@ -191,11 +199,15 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
                             codec,
                             canonical(wire),
                             None,
+                            error,
                         )
                     )
-            continue
+        # The right half of split(key(7)) from the independent key reference
+        # (its high bit is set), so the digits are a key and not a signed word.
         value = (
-            "8" + "0" * (dtype["width"] * 2 - 1)
+            "8fd06b2e7bad8630"
+            if key
+            else "8" + "0" * (dtype["width"] * 2 - 1)
             if dtype["kind"] == "float"
             else 2**53 + 1
             if name == "int64"
@@ -203,6 +215,9 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
             if dtype["kind"] == "integer"
             else True
         )
+        # The key storage variant follows every carried dtype (the codec graph
+        # enforces that), so its bincode ordinal is the carried count.
+        ordinal = len(order) if key else order.index(name)
         for label, shape, elements, admitted in (
             ("scalar", [], [value], True),
             ("one", [1], [value], True),
@@ -215,13 +230,13 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
         ):
             storage = {
                 "dtype": name,
-                "bits" if dtype["kind"] == "float" else "values": elements,
+                "bits" if dtype["kind"] in {"float", "key"} else "values": elements,
             }
             wire = {"shape": shape, "data": storage}
             binary = (
                 len(shape).to_bytes(8, "little")
                 + b"".join(d.to_bytes(8, "little", signed=True) for d in shape)
-                + _binary(order.index(name), dtype, elements, True)
+                + _binary(ordinal, dtype, elements, True)
             )
             expected = (
                 {
@@ -478,6 +493,10 @@ _FIXED = {
 _NUMERIC = _SCHEMA + "execution::NumericScalar"
 _TENSOR = _SCHEMA + "TensorValue"
 _TENSOR_WIRE = _SCHEMA + "execution::TensorWire"
+# spec/10 section 3.2's execution storage grammar: the storage mirrors plus the
+# key storage object. Only the tensor execution wire's `data` field uses it.
+_EXECUTION_STORAGE = "chelis_types::dtype_semantics::execution_storage"
+_EXECUTION_STORAGE_MODULE = ("chelis_types", "dtype_semantics", "wire_codec", "execution_storage")
 _ORDERED = _SCHEMA + "OrderedInferredParameters"
 _REPORTS = {
     _SCHEMA + "CheckResult": "Diagnostic",
@@ -1060,8 +1079,19 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                 ("encode", self._schema_reference(stem + "Ref")),
                 ("header", self._schema_reference(_ENVELOPE + "VersionHeader")),
             ]
-            expected = [
-                ("schema_version", ("primitive", "u32")),
+            expected = [("schema_version", ("primitive", "u32"))]
+            if dag:
+                expected.append(
+                    (
+                        "declarations",
+                        (
+                            "container",
+                            "alloc::vec::Vec",
+                            (("atomic", "alloc::string::String"),),
+                        ),
+                    )
+                )
+            expected += [
                 (
                     "nodes" if dag else "roots",
                     (
@@ -1234,8 +1264,25 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                 "skip_serializing_if",
                 "default",
                 "deserialize_with",
+                "with",
             },
         )
+        if "with" in dict(options):
+            location = self.locations.get(_TENSOR_WIRE)
+            fields = ()
+            if location is not None:
+                owner = self._item(*location)
+                fields = (
+                    owner.get("inner", {}).get("struct", {}).get("kind", {})
+                    .get("plain", {}).get("fields", ())
+                )
+            _require(
+                options == (("with", _EXECUTION_STORAGE),)
+                and item.get("name") == "data"
+                and location is not None
+                and any(self._item(location[0], field) is item for field in fields),
+                "the execution storage codec belongs only to the exact tensor wire data field",
+            )
         if "deserialize_with" in dict(options):
             location = self.locations.get(_SCHEMA + "WireDagNode")
             fields = ()
@@ -1245,9 +1292,16 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                     owner.get("inner", {}).get("struct", {}).get("kind", {})
                     .get("plain", {}).get("fields", ())
                 )
+            # Two exact WireDagNode fields are optional values that must be
+            # present, explicitly null when absent: the span and the
+            # activation (spec/10 section 3.2).
             _require(
-                options == (("deserialize_with", "require_explicit_span"),)
-                and item.get("name") == "span_id"
+                (
+                    (options == (("deserialize_with", "require_explicit_span"),)
+                     and item.get("name") == "span_id")
+                    or (options == (("deserialize_with", "require_explicit_activation"),)
+                        and item.get("name") == "activation")
+                )
                 and location is not None
                 and any(self._item(location[0], field) is item for field in fields),
                 "required span decoder belongs only to the exact WireDagNode field",
@@ -1256,7 +1310,12 @@ class _SchemaShapeGraph(_CodecShapeGraph):
 
     def _validate_field_serde(self, options, ty):
         options = dict(options)
-        if "deserialize_with" in options:
+        if options.get("deserialize_with") == "require_explicit_activation":
+            _require(
+                ty == ("container", "core::option::Option", (("primitive", "u64"),)),
+                "required activation decoder requires an optional node reference",
+            )
+        elif "deserialize_with" in options:
             _require(
                 ty == (
                     "container", "core::option::Option",
@@ -1304,6 +1363,44 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             )
         )
         _require(supported, "unsupported or type-mismatched serde omission predicate")
+
+    def _execution_storage_mirrors(self):
+        """Bind the `with` module to its two actual codec functions in the
+        stored-value codec source; its grammar is the storage mirrors."""
+        documents = [
+            (name, d)
+            for name, d in self.documents.items()
+            if d.get("index", {}).get(str(d.get("root")), {}).get("name")
+            == "chelis_types"
+        ]
+        _require(len(documents) == 1, "missing the stored-value codec artifact")
+        crate, document = documents[0]
+        modules = [
+            item_id
+            for item_id, path in document["paths"].items()
+            if tuple(path.get("path", ())) == _EXECUTION_STORAGE_MODULE
+            and path.get("kind") == "module"
+        ]
+        _require(len(modules) == 1, "missing the execution storage codec module")
+        module = self._item(crate, modules[0])
+        functions = {}
+        for member in module.get("inner", {}).get("module", {}).get("items", []):
+            child = self._item(crate, member)
+            _require("function" in child.get("inner", {}), "execution storage codec gained a non-function member")
+            span = child.get("span") or {}
+            _require(
+                span.get("filename") == "crates/chelis-types/src/dtype_semantics/wire_codec.rs",
+                "execution storage codec source identity changed",
+            )
+            functions[child.get("name")] = child
+        _require(
+            set(functions) == {"serialize", "deserialize", "json_schema"},
+            "execution storage codec functions changed",
+        )
+        return tuple(
+            (label, self._schema_reference("chelis_types::dtype_semantics::wire_codec::" + name))
+            for label, name in (("json", "StorageWire"), ("binary", "BinaryStorageWire"))
+        )
 
     def _plain_fields(self, crate, item):
         body = item["inner"].get("struct")
@@ -1423,12 +1520,17 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             self._private(item, "::schema::execution")
             super()._definition(crate, item_id, identity)
             definition = self.definitions[identity]
-            expected = (
-                ("shape", ("container", "alloc::vec::Vec", (("primitive", "i64"),))),
-                ("data", ("reference", _TYPES + "TensorStorage", ())),
-            )
+            shape = ("container", "alloc::vec::Vec", (("primitive", "i64"),))
+            storage = ("reference", _TYPES + "TensorStorage", ())
+            codec = (("with", _EXECUTION_STORAGE),)
             _require(
-                self._plain_fields(crate, item) == expected,
+                tuple((e.path, e.type, e.serde) for e in definition.edges)
+                == (
+                    (identity + ".shape", shape, ()),
+                    (identity + ".data", storage, codec),
+                )
+                and definition.layout
+                == (("", (), ("plain", (("shape", ()), ("data", codec)))),),
                 "tensor wire shape or storage carrier changed",
             )
             _require(
@@ -1436,6 +1538,18 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                 "tensor wire strict shape contract changed",
             )
             self._serde_implementations(crate, body, set(), _EXECUTION_SOURCE)
+            # The `with` codec bypasses TensorStorage's own graph codec and
+            # encodes the storage mirrors directly, key storage object included.
+            mirrors = self._execution_storage_mirrors()
+            self.definitions[identity] = replace(
+                definition,
+                edges=(definition.edges[0],)
+                + tuple(
+                    Edge(identity + ".data$" + label, mirror, ())
+                    for label, mirror in mirrors
+                ),
+                codec=definition.codec + "+execution-storage",
+            )
             return
         _require(not _serde(item), "tensor codec attributes changed")
         native = self._plain_fields(crate, item)

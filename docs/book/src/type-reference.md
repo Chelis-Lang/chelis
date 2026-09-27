@@ -25,6 +25,10 @@ The numeric primitives are:
 There are no unsigned integer types. `string` exists as a type for parsing and host work,
 and `()` is the unit type.
 
+`key` is the non-numeric type of a random key: `key_from_seed(42i64)` makes one, and
+`tensor[n, key]` holds `n` of them. A key has no arithmetic and no cast, and each key is used
+at most once on every path; see [Effects and Handlers](effects.md#randomness-is-not-an-effect).
+
 ## Tensor types
 
 A tensor type is written `tensor[dims..., elemtype]`. The element type is the last entry;
@@ -207,18 +211,18 @@ A function type can carry an effect set in `eff` metadata. In Surf the effect se
 `! { ... }` suffix on a signature or `def`.
 
 ```chelis-surf-fragment
-sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
+sig report[n]: tensor[n, f32] -> unit ! { IO }
 ```
 
 ```chelis-deep-fragment
-(t-fn {eff: (effects {} random)}
+(t-fn {eff: (effects {} io)}
   (t-tensor {} (d-var {} n) (t-prim {} f32))
-  (t-tensor {} (d-var {} n) (t-prim {} f32)))
+  (t-unit {}))
 ```
 
 Effect inference runs after type inference. A function's effect set is the union of the
-effects of the operations in its body. `Random` comes from `dropout` and `uniform_like` and
-the initializers that call them; it is discharged by `with seed(...)`. `IO` is inferred
+effects of the operations in its body. Randomness is not an effect: `dropout`,
+`uniform_like` and the initializers take a `key` and contribute none. `IO` is inferred
 from host operations such as `print` and file reads. `Resource("device")` marks a region
 validated against the build target through `with device(...)`. See
 [Effects and Handlers](effects.md).

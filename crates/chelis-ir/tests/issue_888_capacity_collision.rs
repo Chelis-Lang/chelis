@@ -19,15 +19,17 @@ fn shape(first: usize, second: usize) -> TensorType {
 
 fn slots_for(final_type: TensorType) -> usize {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let small = shape(1 << 40, 1 << 40);
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         small.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Neg, vec![a], small, None);
-    let c = dag.add_node(RiscOp::Neg, vec![b], final_type, None);
+    let b = dag.add_node(decl, RiscOp::Neg, vec![a], small, None);
+    let c = dag.add_node(decl, RiscOp::Neg, vec![b], final_type, None);
     dag.add_root(c);
     let program = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
     plan_c_storage(program).unwrap().slots().len()
@@ -67,14 +69,22 @@ fn expired_owned_slots_require_exact_representation_in_both_lanes() {
                 precision,
             };
             let mut dag = Dag::new();
-            let a = dag.add_node(RiscOp::synth_const(source, 1.0), vec![], ty(source), None);
+            let decl = dag.declare("test");
+            let a = dag.add_node(
+                decl,
+                RiscOp::synth_const(source, 1.0),
+                vec![],
+                ty(source),
+                None,
+            );
             let middle = if source == Prim::Bool {
                 RiscOp::Copy
             } else {
                 RiscOp::Neg
             };
-            let b = dag.add_node(middle, vec![a], ty(source), None);
+            let b = dag.add_node(decl, middle, vec![a], ty(source), None);
             let c = dag.add_node(
+                decl,
                 RiscOp::Cast {
                     new_precision: target,
                 },

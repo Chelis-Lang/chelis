@@ -652,45 +652,49 @@ fn block_result_aliasing_an_outer_binding_claims_no_second_allocation() {
     assert_line_matches_eval(source, "alias_block_result", &stdout, "b");
 }
 
+/// A handler scope returning an outer binding. The scope was `with seed`
+/// until chelis#2413 retired it; `with device("cpu")` is the handler scope
+/// host C builds. One allocation plus two retained owners balance three
+/// releases.
 #[test]
-fn seeded_block_returning_an_outer_binding_claims_no_second_allocation() {
+fn handler_block_returning_an_outer_binding_claims_no_second_allocation() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with seed(1i64) { a }\n";
-    let (stdout, emitted) = build_run_and_emit(source, "alias_with_seed");
+    let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with device(\"cpu\") { a }\n";
+    let (stdout, emitted) = build_run_and_emit(source, "alias_with_device");
     assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_retain_release_counts(
         &emitted,
         "chelis_tensor_retain(",
         "chelis_tensor_release(",
-        (3, 4),
-        "one allocation, two artifact roots, and the seed block's temporary owner balance",
+        (2, 3),
+        "one allocation and two artifact roots balance",
     );
-    assert_line_matches_eval(source, "alias_with_seed", &stdout, "a");
-    assert_line_matches_eval(source, "alias_with_seed", &stdout, "b");
+    assert_line_matches_eval(source, "alias_with_device", &stdout, "a");
+    assert_line_matches_eval(source, "alias_with_device", &stdout, "b");
 }
 
-/// Negative parity: a seed scope that constructs a tensor must not be
+/// Negative parity: a handler scope that constructs a tensor must not be
 /// mistaken for the alias above and lose its independent allocation.
 #[test]
-fn seeded_block_constructing_a_tensor_keeps_its_independent_allocation() {
+fn handler_block_constructing_a_tensor_keeps_its_independent_allocation() {
     if skip_without_cc() {
         return;
     }
     let source = "a = to_tensor([1.0f32, 2.0f32])\n\
-                  b = with seed(1i64) { to_tensor([3.0f32, 4.0f32]) }\n";
-    let (stdout, emitted) = build_run_and_emit(source, "fresh_with_seed");
+                  b = with device(\"cpu\") { to_tensor([3.0f32, 4.0f32]) }\n";
+    let (stdout, emitted) = build_run_and_emit(source, "fresh_with_device");
     assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
     assert_retain_release_counts(
         &emitted,
         "chelis_tensor_retain(",
         "chelis_tensor_release(",
         (2, 4),
-        "the fresh result transfers directly out of the seed scope; two allocations and two roots balance",
+        "the fresh result transfers directly out of the handler scope; two allocations and two roots balance",
     );
     for root in ["a", "b"] {
-        assert_line_matches_eval(source, "fresh_with_seed", &stdout, root);
+        assert_line_matches_eval(source, "fresh_with_device", &stdout, root);
     }
 }
 
@@ -1048,13 +1052,15 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
     // is about and the one that must not move for any lowering reason. Counted
     // over the emitted file rather than over `main`, because where a
     // descriptor is released is a lowering decision and whether it is released
-    // is not.
+    // is not. One of the releases is not this program's: the emitted prelude's
+    // key helper `chelis_key_take_value` (chelis#2413) takes ownership of a
+    // rank-0 key tensor and releases it within that helper.
     assert_eq!(
         (
             emitted.matches("chelis_tensor_retain(").count(),
             emitted.matches("chelis_tensor_release(").count(),
         ),
-        (7, 16),
+        (7, 17),
         "the file-fed pipeline must balance every artifact owner and \
          descriptor across the emitted unit",
     );

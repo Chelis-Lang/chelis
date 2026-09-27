@@ -167,19 +167,23 @@ fn assert_prepared_strided_dispatch(source: &str, dag: &Dag, call_name: &str) ->
 #[test]
 fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_count() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F32, vec![2, 3, 4, 5]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F32, vec![2, 3, 5, 6]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(2), DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -209,19 +213,23 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
 #[test]
 fn rank3_f64_uniform_batched_dispatches_typed_strided_batched() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F64, vec![3, 4, 5]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F64, vec![3, 5, 6]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -254,19 +262,23 @@ fn rank3_f64_uniform_batched_dispatches_typed_strided_batched() {
 #[test]
 fn rank3_f64_with_narrow_accumulator_is_rejected_before_dispatch() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F64, vec![3, 4, 5]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F64, vec![3, 5, 6]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -293,6 +305,7 @@ fn rank3_f64_with_narrow_accumulator_is_rejected_before_dispatch() {
 #[test]
 fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_count() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let dims_a = vec![
         DimInfo::Named("batch".into(), None),
         DimInfo::Lit(4),
@@ -309,18 +322,21 @@ fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_co
         DimInfo::Lit(6),
     ];
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t_named(Prim::F32, dims_a),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t_named(Prim::F32, dims_b),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Sym("batch".into())],
             m: DimExpr::Concrete(4),
@@ -350,6 +366,7 @@ fn symbolic_batch_concrete_mnk_dispatches_strided_batched_with_symbolic_batch_co
 #[test]
 fn symbolic_mnk_falls_back_to_helper_loop_not_strided_batched() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let dims_a = vec![
         DimInfo::Lit(3),
         DimInfo::Named("m".into(), None),
@@ -366,18 +383,21 @@ fn symbolic_mnk_falls_back_to_helper_loop_not_strided_batched() {
         DimInfo::Named("n".into(), None),
     ];
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t_named(Prim::F32, dims_a),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t_named(Prim::F32, dims_b),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Sym("m".into()),
@@ -411,19 +431,23 @@ fn symbolic_mnk_falls_back_to_helper_loop_not_strided_batched() {
 #[test]
 fn rank2_matmul_takes_plain_sgemm_not_batched_nor_strided() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F32, vec![8, 16]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F32, vec![16, 4]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -457,13 +481,16 @@ fn rank2_matmul_takes_plain_sgemm_not_batched_nor_strided() {
 #[test]
 fn broadcasted_rhs_leading_axis_realizes_then_dispatches_strided() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F32, vec![3, 4, 5]),
         None,
     );
     let base_b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base_b".into(),
         },
@@ -472,6 +499,7 @@ fn broadcasted_rhs_leading_axis_realizes_then_dispatches_strided() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -481,6 +509,7 @@ fn broadcasted_rhs_leading_axis_realizes_then_dispatches_strided() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -509,7 +538,9 @@ fn broadcasted_rhs_leading_axis_realizes_then_dispatches_strided() {
 #[test]
 fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let base_a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base_a".into(),
         },
@@ -518,6 +549,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -527,6 +559,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         None,
     );
     let base_b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base_b".into(),
         },
@@ -535,6 +568,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -544,6 +578,7 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -591,19 +626,23 @@ fn both_sides_broadcasted_leading_axes_realize_then_dispatch_strided() {
 #[test]
 fn perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F32, vec![3, 4, 5]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F32, vec![3, 5, 6]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),
@@ -650,7 +689,9 @@ fn perf_f1_uniform_rank3_batched_matmul_dispatches_strided_batched() {
 #[test]
 fn perf_f1_broadcasted_leading_axis_realizes_then_dispatches_strided() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let base_a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base_a".into(),
         },
@@ -659,6 +700,7 @@ fn perf_f1_broadcasted_leading_axis_realizes_then_dispatches_strided() {
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -668,12 +710,14 @@ fn perf_f1_broadcasted_leading_axis_realizes_then_dispatches_strided() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F32, vec![3, 5, 6]),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Concrete(3)],
             m: DimExpr::Concrete(4),

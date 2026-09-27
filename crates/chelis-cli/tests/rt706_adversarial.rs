@@ -1,7 +1,9 @@
 //! chelis#706 red-team keepers — adversarial coverage found by a fresh
 //! red-team pass on PR #769 that the shipped tests do not lock:
-//!   * bare statements inside a *nested* block and inside a `with seed`
-//!     block are rejected too (both silently collapsed before #706);
+//!   * bare statements inside a *nested* block and inside a `with` handler
+//!     block are rejected too (both silently collapsed before #706; the
+//!     handler row used `with seed` until chelis#2413 retired it and now
+//!     uses `with device`);
 //!   * the diagnostic offset lands on the stray statement even when a
 //!     `--` line comment sits between the tail and the bare statement;
 //!   * `validate --surf` and `validate --desugar` AGREE on the #706
@@ -63,19 +65,22 @@ fn nested_block_bare_statement_rejected() {
     );
 }
 
-/// The bounded tail also applies inside a `with seed(..)` handler block.
+/// The bounded tail also applies inside a `with device(..)` handler block.
 #[test]
-fn with_seed_block_bare_statement_rejected() {
-    let src = "def f(x: tensor[batch, f32]) -> tensor[batch, f32] = with seed(42i64) {\n  a(x)\n  b(x)\n}\n";
+fn with_handler_block_bare_statement_rejected() {
+    let src = "def f(x: tensor[batch, f32]) -> tensor[batch, f32] = with device(\"gpu:0\") {\n  a(x)\n  b(x)\n}\n";
     let out = run(&[
         "check",
-        write_tempfile("rt706-seed-", src).path().to_str().unwrap(),
+        write_tempfile("rt706-handler-", src)
+            .path()
+            .to_str()
+            .unwrap(),
     ]);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(out.status.code(), Some(CHECK_ERRORS_EXIT_CODE));
     assert!(
         stdout.contains("expression statement must be bound"),
-        "with-seed bare statement should surface #706 diagnostic; stdout={stdout}"
+        "handler-block bare statement should surface #706 diagnostic; stdout={stdout}"
     );
 }
 

@@ -448,10 +448,6 @@ impl<'a> Walker<'a> {
                 self.walk(list, env, facts);
                 self.callback(callback, env, facts);
             }
-            HostExprKind::WithSeed { seed, body, .. } => {
-                self.walk(seed, env, facts);
-                self.walk(body, env, facts);
-            }
             HostExprKind::Int(_)
             | HostExprKind::Float(_)
             | HostExprKind::Bool(_)
@@ -518,9 +514,22 @@ mod tests {
     fn function() -> HostFunction {
         let ty = tensor("seq");
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        let sum = dag.add_node(RiscOp::Add, vec![a, b], ty.clone(), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], ty.clone(), None);
         dag.add_root(sum);
         HostFunction {
             helper_result_claim_axes: Vec::new(),
@@ -636,8 +645,6 @@ mod tests {
             "dominated",
             options,
             &projection.variants[0][0],
-            #[cfg(feature = "native-random-observer")]
-            None,
         )
         .unwrap();
         let seq_diagnostic = "extent `seq`: a axis 0 = %lld, b axis 0 = %lld";
@@ -645,15 +652,9 @@ mod tests {
             "if (chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)) {";
         assert!(!discharged.contains(seq_diagnostic), "{discharged}");
         assert!(!discharged.contains(seq_comparison), "{discharged}");
-        let full = CEmitter::emit_verified_dag_with_options(
-            dag.emission(),
-            "unguarded",
-            options,
-            &[],
-            #[cfg(feature = "native-random-observer")]
-            None,
-        )
-        .unwrap();
+        let full =
+            CEmitter::emit_verified_dag_with_options(dag.emission(), "unguarded", options, &[])
+                .unwrap();
         assert_eq!(full.matches(seq_diagnostic).count(), 1, "{full}");
         assert_eq!(full.matches(seq_comparison).count(), 1, "{full}");
         let standalone = crate::codegen_with_options(dag, "standalone", options).unwrap();

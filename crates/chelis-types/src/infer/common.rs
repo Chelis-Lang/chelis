@@ -306,6 +306,7 @@ pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> Che
         TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
             CheckErrorKind::PrecisionMismatch
         }
+        TypeErrorKind::KeyInstantiation { .. } => CheckErrorKind::KeyReuse,
         TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
         TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
         TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
@@ -1157,6 +1158,11 @@ pub(super) fn collect_all_declarations(
             diagnostic_owner,
         );
     }
+    // [04-LIN-10] / spec/04 section 8.4.1: every `type` of this check, and of
+    // the library context it extends, is registered now and no body has been
+    // inferred yet, so the key-carrying set is complete before any generic is
+    // instantiated.
+    subst.set_key_carrying_adts(adt_reg.key_carrying_adts());
 }
 
 /// Collect nominal names and arities before resolving any declaration body.
@@ -1828,6 +1834,11 @@ pub(super) fn collect_declarations(
                 match (resolved, installed) {
                     (Ok(resolved), Ok(())) => {
                         let scheme = env.generalize(&resolved.ty, subst);
+                        subst.name_generic_parameters(
+                            &scheme,
+                            name,
+                            &resolved.binder_identities.type_names(),
+                        );
                         env.bind(name.to_string(), scheme);
                         env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
@@ -1965,13 +1976,18 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_normal"
             | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
+            | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform_given"
             | "pkg__chelis__std__Std__Init__Kaiming__tensor_shape"
             | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_given"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__Random__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal"
+            | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal_given"
             | "pkg__chelis__std__Std__Init__XavierExt__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_normal"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
+            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform_given"
             | "pkg__chelis__std__Std__Sort__sort"
             | "pkg__chelis__std__Std__Tensor__Construct__arange"
             | "pkg__chelis__std__Std__Tensor__Construct__arange_values"
@@ -2010,7 +2026,7 @@ fn install_exact_op35_dependency_contracts(
     if matches!(
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
-            | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
     ) {
         let template = vg.fresh_tvar();
@@ -2026,6 +2042,7 @@ fn install_exact_op35_dependency_contracts(
                 rvars: vec![],
                 body: Type::Fn(
                     vec![
+                        Type::Prim(Prim::Key),
                         Type::Ref(Box::new(Type::Var(template))),
                         Type::Var(low),
                         Type::Var(high),
@@ -2221,6 +2238,29 @@ pub(super) fn check_rank_body_discipline(
 
 // ── Top-level inference (second pass) ────────────────────────────
 
+/// A recursive group member's inferred type, held until the whole group is
+/// inferred and generalized together.
+pub(super) struct DeferredRecursiveBinding {
+    pub(super) name: String,
+    pub(super) ty: Type,
+    pub(super) owned_contracts: Vec<crate::unify::CollectionContractId>,
+    /// The authored binders of the member's declaration, so [04-LIN-10]'s
+    /// diagnostic can name the parameter a key reached.
+    pub(super) binder_names: UnordMap<TypeVar, String>,
+}
+
+/// Generalize a recursive group member and name its generic parameters.
+pub(super) fn generalize_deferred_recursive_binding(
+    binding: DeferredRecursiveBinding,
+    env: &Env,
+    subst: &Subst,
+) -> (String, Scheme) {
+    let scheme =
+        env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
+    subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
+    (binding.name, scheme)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_top_level(
     expr: &deep::Expr,
@@ -2236,7 +2276,7 @@ pub(super) fn infer_top_level(
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Option<(String, Type, Vec<crate::unify::CollectionContractId>)> {
+) -> Option<DeferredRecursiveBinding> {
     let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
@@ -2647,9 +2687,12 @@ pub(super) fn infer_top_level(
             body_ty
         };
 
-        let binder_contract =
-            AuthoredBinderContract::new(name.clone(), declared_type_names, declared_dtype_bounds)
-                .in_holed_group(env.is_holed_group_member(&name));
+        let binder_contract = AuthoredBinderContract::new(
+            name.clone(),
+            declared_type_names.clone(),
+            declared_dtype_bounds,
+        )
+        .in_holed_group(env.is_holed_group_member(&name));
         product.record_authored_binder_contract(match binder_rigidity {
             Some((decl_ty, dim_names, rank_names)) => {
                 binder_contract.with_rigidity(decl_ty, dim_names, rank_names)
@@ -2695,15 +2738,17 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
-            Some((
+            Some(DeferredRecursiveBinding {
                 name,
-                scheme_body,
-                subst.collection_contract_ids_since(collection_contract_mark),
-            ))
+                ty: scheme_body,
+                owned_contracts: subst.collection_contract_ids_since(collection_contract_mark),
+                binder_names: declared_type_names,
+            })
         } else {
             let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
             let scheme =
                 env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            subst.name_generic_parameters(&scheme, &name, &declared_type_names);
             env.bind(name, scheme);
             None
         }

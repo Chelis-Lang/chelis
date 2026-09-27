@@ -46,6 +46,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
     captured_loads: &UnordSet<String>,
 ) -> Result<(Dag, Vec<NodeId>), String> {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let concrete_batch = match &batch_dim {
         DimInfo::Lit(size) => Some(*size),
         DimInfo::Named(_, Some(size)) => Some(*size),
@@ -64,6 +65,14 @@ pub fn vectorize_axis0_with_node_map_and_captures(
     // An element-derived scalar would make the result ragged, which the dense
     // tensor IR cannot represent.
     let shared_bound_nodes = shared_bound_nodes(dag)?;
+    // A captured key that nothing reads is not broadcast to any row; the
+    // lexical scope seeds a Load for every enclosing binding, used or not.
+    let read_nodes = dag
+        .nodes()
+        .iter()
+        .flat_map(|node| node.inputs.iter().chain(node.shape_deps.iter()).copied())
+        .chain(dag.roots().iter().copied())
+        .collect::<UnordSet<NodeId>>();
     let mut mapped_ids = Vec::with_capacity(dag.nodes().len());
     let mut expanded_shared = UnordMap::<NodeId, NodeId>::new();
 
@@ -75,19 +84,16 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         );
         // spec/design/randomness_explicit_keys.md §3: each row of a vmapped
         // draw consumes its own row of a mapped `tensor[n, key]`. Broadcasting
-        // one captured key to every row would consume it once per row, and a
-        // counter-stream draw key has no per-row key at all (chelis#2409).
-        if captured_load && node.output_type.precision == chelis_types::types::Prim::Key {
+        // one captured key to every row would consume it once per row
+        // (chelis#2409).
+        if captured_load
+            && node.output_type.precision == chelis_types::types::Prim::Key
+            && read_nodes.contains(&node.id)
+        {
             return Err(format!(
                 "vmap cannot broadcast captured key {:?} to every row; a vmapped key must be a mapped tensor of keys",
                 node.op
             ));
-        }
-        if matches!(node.op, RiscOp::DrawKey { .. }) {
-            return Err(
-                "vmap of a counter-stream draw key is refused: a draw key has no per-row key (chelis#2409)"
-                    .to_string(),
-            );
         }
         let output_type = if shared {
             node.output_type.clone()
@@ -202,6 +208,12 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             other => other.clone(),
         };
 
+        // The activation maps like a value input: an `if` over a row makes
+        // it the row's Bool, so a batched node checks row by row.
+        let owner = node
+            .owner
+            .try_remap_with(|activation| mapped_ids.get(activation.0).copied())
+            .map_err(|message| format!("vmap node {}: {message}", node.id.0))?;
         let bound_slots = bound_input_slots(&node.op);
         let batch_witness = node
             .inputs
@@ -243,6 +255,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     }
                 };
                 let expanded = out.add_node(
+                    owner,
                     RiscOp::Expand { axis: 0, size },
                     expand_inputs,
                     prepend_batch_type(&dag.get(input).unwrap().output_type, &batch_dim),
@@ -262,6 +275,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shape operations.
         if !shared && captured_load {
             let raw = out.add_node(
+                owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -294,6 +308,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
+                owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -322,6 +337,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // longer matches its declared type (chelis#1932).
         if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
             let raw = out.add_node(
+                owner,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -349,6 +365,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
+                owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -373,7 +390,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
-        let new_id = out.add_node(op, inputs, output_type, node.span_id.clone());
+        let new_id = out.add_node(owner, op, inputs, output_type, node.span_id.clone());
         mapped_ids.push(new_id);
         let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
         let remapped_result_claims =
@@ -429,7 +446,13 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     )
                 }
             };
+            let root_owner = dag
+                .get(*root)
+                .unwrap()
+                .owner
+                .try_remap_with(|activation| mapped_ids.get(activation.0).copied())?;
             let expanded = out.add_node(
+                root_owner,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 prepend_batch_type(&dag.get(*root).unwrap().output_type, &batch_dim),
@@ -699,8 +722,15 @@ mod tests {
     #[test]
     fn elementwise_vmap_prepends_batch_axis() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-        let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(3),
+            None,
+        );
+        let y = dag.add_node(decl, RiscOp::Neg, vec![x], vec_f32(3), None);
         dag.add_root(y);
 
         let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -723,13 +753,16 @@ mod tests {
     #[test]
     fn reduction_vmap_shifts_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -762,7 +795,14 @@ mod tests {
     #[test]
     fn nested_vmap_adds_two_batch_axes() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         dag.add_root(x);
 
         let inner = vectorize_axis0(&dag, DimInfo::Lit(3)).expect("inner vmap should succeed");
@@ -781,19 +821,23 @@ mod tests {
     #[test]
     fn batched_matmul_shape_matches_expand_mul_sum_pattern() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_f32(3, 4),
             None,
         );
         let a_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -806,6 +850,7 @@ mod tests {
             None,
         );
         let b_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -818,6 +863,7 @@ mod tests {
             None,
         );
         let prod = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![a_exp, b_exp],
             TensorType {
@@ -827,6 +873,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,

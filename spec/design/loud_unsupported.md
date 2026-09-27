@@ -917,10 +917,10 @@ The effect consumer set is exhaustive for the current tree:
 | `chelis-effects::infer_handle_effects` | exhaustively remove the handled kind; decode failures enter `EffectError` |
 | `chelis-effects::validate_handler_expr` | exhaustive per-kind validation; decode failures are errors |
 | `chelis-effects::validate_build_target_expr` | exhaustive typed target policy |
-| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `Random`/`Resource`; preserve distinct diagnostic payloads |
+| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `EffectKind`; preserve distinct diagnostic payloads |
 | `chelis-ir::host::lower_host_expr` | consume `Result`; no empty sentinel or raw comparison |
 | `chelis-compiler-api::runtime::eval::HostEvaluator::eval_expr` | exhaustive typed evaluation; every decode error is `Err` |
-| `chelis-surf::desugar` `WithSeed`/`WithDevice` | emit `EffectKind::symbol()` |
+| `chelis-surf::desugar` `WithDevice` | emit `EffectKind::symbol()` |
 | both `chelis-surf::decompile_handle_effect` implementations | decode once; exhaust known kinds; preserve malformed/unknown Deep only through an explicit observation path |
 
 The added-kind mutation oracle inserts a temporary variant in the single
@@ -2201,7 +2201,7 @@ definition instead derives its per-backend result transitively from every
 statically resolved numeric, sibling, and host-constructor disposition plus
 every exact effect row keyed by
 `(CanonicalEffectRequirement, BackendId)`. The effect requirement is exactly
-`Random | Accum | IO | Test | Resource(ResourceId)`; the four fixed variants
+`Accum | IO | Test | Resource(ResourceId)`; the three fixed variants
 and every resource literal discovered in the completed checked-body closure
 expand across all backends. Recursive host values additionally compose through
 the host-constructor table. The program reaches build/link/run when

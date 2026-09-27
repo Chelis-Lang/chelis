@@ -26,7 +26,7 @@ fn versionless_result_is_rejected_naming_the_field() {
 /// rejected with a message naming the field and both versions.
 #[test]
 fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
-    for version in [1u32, 2, 999] {
+    for version in [1u32, 2, 3, 999] {
         let payload = format!(r#"{{"schema_version":{version},"roots":[]}}"#);
         let err = serde_json::from_str::<EvalResult>(&payload)
             .expect_err("a non-current schema_version must not parse");
@@ -34,7 +34,7 @@ fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
         assert!(
             msg.contains("schema_version")
                 && msg.contains(&version.to_string())
-                && msg.contains('3'),
+                && msg.contains('4'),
             "the rejection must name the field, the stale version, and the \
              supported version; got: {msg}"
         );
@@ -53,7 +53,7 @@ fn produced_result_stamps_v3() {
     };
     let json = serde_json::to_string(&result).expect("serialize");
     assert!(
-        json.contains(r#""schema_version":3"#),
+        json.contains(r#""schema_version":4"#),
         "the version stamp must be on the wire; got: {json}"
     );
 }

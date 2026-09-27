@@ -3,10 +3,10 @@ use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag};
 use serde_json::{Value, json};
 
 fn load() -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
 }
 fn graph(op: Value) -> Value {
-    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
+    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
     if value["nodes"][1]["op"]["kind"] == "shape" {
         value["nodes"][1]["output_type"] = json!({"dims":[],"precision":"int64"});
     }
@@ -42,15 +42,13 @@ fn live_lowering_emits_exact_control_carriers_as_operands() {
     let lower = |body: &str| {
         chelis_compiler_api::compiler::lower(LowerRequest {
             source_kind: SourceKind::Surf,
-            source: format!(
-                "def sample(x: tensor[2, f32]) -> tensor[2, f32] = with seed(7i64) {{ {body} }}\n"
-            ),
+            source: format!("def sample(k: key, x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"),
             entry: Some("sample".into()),
         })
     };
-    // Wire v17: the bounds are exact f32 carriers on ordinary constant
-    // operands of the draw, never fields of the random node.
-    let lowered = lower("uniform_like(x, 0.1f32, 1.0f32)").unwrap();
+    // The bounds are exact f32 carriers on ordinary constant operands of the
+    // draw, never fields of the random node.
+    let lowered = lower("uniform_like(k, x, 0.1f32, 1.0f32)").unwrap();
     let wire = serde_json::to_value(lowered).unwrap();
     let nodes = wire["dag"]["nodes"].as_array().unwrap();
     let uniform = nodes
@@ -65,8 +63,8 @@ fn live_lowering_emits_exact_control_carriers_as_operands() {
     assert_eq!(operand(1), float("3dcccccd"));
     assert_eq!(operand(2), float("3f800000"));
     // [05-OP-37]: a rate outside [0, 1) is refused by the draw at execution,
-    // before it takes an ordinal; lowering carries it as an operand.
-    lower("dropout(x, 1.0f32)").unwrap();
+    // before it draws; lowering carries it as an operand.
+    lower("dropout(k, x, 1.0f32)").unwrap();
 }
 
 #[test]
@@ -108,7 +106,7 @@ fn typed_load(id: u64, name: &str, sizes: &[i64], dtype: &str) -> Value {
         .iter()
         .map(|size| json!({"kind":"lit","size":size}))
         .collect::<Vec<_>>();
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,
         "id":id,"op":{"kind":"load","name":name},"inputs":[],
         "output_type":{"dims":dims,"precision":dtype}})
 }
@@ -167,7 +165,7 @@ fn axis_graph(kind: &str) -> Value {
     output["op"] = op;
     output["inputs"] = json!((0..id).collect::<Vec<_>>());
     nodes.push(output);
-    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":nodes,"roots":[id]})
+    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]})
 }
 
 #[test]
@@ -254,8 +252,7 @@ fn forward_and_adjoint_window_fields_reject_bad_domains_at_both_edges() {
             output["inputs"] = json!((0..id).collect::<Vec<_>>());
             output["op"] = json!({"kind":kind,"reducer":reducer,"window_shape":[2],"strides":[1]});
             nodes.push(output);
-            let value =
-                json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":nodes,"roots":[id]});
+            let value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]});
             let decoded = WireDag::from_validated_json(&value.to_string()).unwrap();
             assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
             let last = decoded.nodes.len() - 1;

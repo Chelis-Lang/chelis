@@ -23,6 +23,7 @@ const DAG_METHODS: [&str; 20] = [
     "emit_realize",
     "emit_cast",
 ];
+const WHERE_CHECKED_PROJECTION: &str = "{read} ? chelis_tensor_elementwise_index_step_for_shape(t{node}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0";
 const HOST_ARMS: [&str; 4] = [
     "emit_binary_elementwise_arm",
     "emit_binary_func_elementwise_arm",
@@ -127,6 +128,18 @@ fn method<'a>(source: &'a str, name: &str) -> &'a str {
 }
 
 fn check_dag(source: &str) -> Result<(), String> {
+    // The element-loop helper bounds every element, row by row under a
+    // per-row activation, by the size it is given.
+    let helper = method(source, "open_element_loop");
+    for bound in [
+        "for (int64_t {var} = 0; {var} < {size}; {var}++) {{",
+        "const int64_t __row_len_{id} = ({size}) / __act_rows_{id};",
+        "{var} < (__row_{id} + 1) * __row_len_{id}",
+    ] {
+        if !helper.contains(bound) {
+            return Err("open_element_loop: missing checked loop bound".to_string());
+        }
+    }
     for name in DAG_METHODS {
         let body = method(source, name);
         for retired in [
@@ -138,9 +151,15 @@ fn check_dag(source: &str) -> Result<(), String> {
                 return Err(format!("{name}: retired coordinate arithmetic"));
             }
         }
-        let projection = body
-            .find("self.emit_elementwise_index_steps(id, inputs, ty)")
-            .ok_or_else(|| format!("{name}: missing checked projection"))?;
+        // `where` reads only the branches its condition selects ([05-OP-53]),
+        // so it takes the same checked step for each operand under that
+        // operand's read instead of for every input.
+        let projection = if name == "emit_where" {
+            body.find(WHERE_CHECKED_PROJECTION)
+        } else {
+            body.find("self.emit_elementwise_index_steps(id, inputs, ty)")
+        }
+        .ok_or_else(|| format!("{name}: missing checked projection"))?;
         let allocation = [
             "self.emit_slot_wrapper(",
             "self.emit_fused_in_place_wrapper(",
@@ -160,7 +179,12 @@ fn check_dag(source: &str) -> Result<(), String> {
                 return Err(format!("{name}: scalar admitted to fast path"));
             }
         }
-        if !body.contains("i < t{id}_size") {
+        // The loop is bounded by the checked output count, written out or
+        // passed to the element-loop helper that bounds by it.
+        let compact = body.split_whitespace().collect::<String>();
+        if !compact.contains("i<t{id}_size")
+            && !compact.contains("open_element_loop(id,\"i\",&format!(\"t{id}_size\")")
+        {
             return Err(format!("{name}: missing checked loop bound"));
         }
         if !body.contains("_step") {
@@ -221,8 +245,23 @@ fn cohort_control_rejects_raw_helpers_late_validation_and_unchecked_loop_bounds(
             "missing checked projection",
         ),
         (
+            WHERE_CHECKED_PROJECTION,
+            "{read} ? 1 /* {node} {rank} {shape} */ : 0",
+            "missing checked projection",
+        ),
+        (
             "i < t{id}_size",
             "i < t{a}_size",
+            "missing checked loop bound",
+        ),
+        (
+            "&format!(\"t{id}_size\")",
+            "&format!(\"t{a}_size\")",
+            "missing checked loop bound",
+        ),
+        (
+            "{var} < {size}; {var}++",
+            "{var} < {size} + 1; {var}++",
             "missing checked loop bound",
         ),
         (

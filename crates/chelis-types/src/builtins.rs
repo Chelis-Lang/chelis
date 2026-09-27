@@ -29,6 +29,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
+    "key_from_seed",
+    "split_key",
+    "split_keys",
+    "fold_in",
     "cmplt",
     "sub",
     "div",
@@ -405,6 +410,227 @@ const TO_STRING_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
     sibling_cases: TO_STRING_CASES,
 };
 
+/// [04-LIN-9], [04-LIN-10] and spec/04 section 1.1: what one builtin case's
+/// atom does with a key-carrying value, read by the allow-list
+/// ([`crate::key_admission::case_key_operand`]). A builtin in the Numeric
+/// domain alone has no sibling case and admits a key only as a key
+/// primitive's key operand ([`crate::key_admission::KeyPrimitive`]). Every
+/// Container and Boundary case declares its rule in [`case_keys`], which has
+/// no wildcard arm, so a new case must decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseKeys {
+    /// The atom fixes every operand type (strings, paths, i64 counts,
+    /// booleans, CSV tables, mapped files), so no operand carries a key.
+    NoKeyOperand,
+    /// The atom's domain names no `key` (a tensor element dtype domain, the
+    /// equality domain, the rendering domain). The listed zero-based
+    /// operands are the ones a key-carrying type can reach; like every
+    /// other operand of the case, each refuses it.
+    Refused(&'static [usize]),
+    /// The atom takes values of any checked type. Every type parameter is
+    /// declared at each operand that instantiates it, with how its values
+    /// are routed; an operand with no declared parameter admits no key.
+    Values(&'static [KeyParameter]),
+}
+
+/// One type parameter of a [`CaseKeys::Values`] case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyParameter {
+    /// The parameter's name in the atom's signature.
+    pub name: &'static str,
+    /// Where a call instantiates it.
+    pub site: KeyParameterSite,
+    /// How the case routes a value of this parameter.
+    pub routing: KeyRouting,
+}
+
+/// Where a call to a builtin instantiates one of its type parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyParameterSite {
+    /// The zero-based argument's own type.
+    Argument(usize),
+    /// The element type of the zero-based `List` argument.
+    ListElement(usize),
+    /// The result type of the zero-based callback argument.
+    CallbackResult(usize),
+}
+
+impl KeyParameterSite {
+    /// The zero-based argument the site reads.
+    pub const fn operand(self) -> usize {
+        match self {
+            Self::Argument(index) | Self::ListElement(index) | Self::CallbackResult(index) => index,
+        }
+    }
+}
+
+/// How a builtin case routes each value of one type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRouting {
+    /// Each value reaches at most one consumer: the callback, the drop, or
+    /// one place in the result. A key-carrying instantiation is affine-safe.
+    OneConsumer,
+    /// The case reads the value without consuming it. [04-LIN-9] refuses a
+    /// key-carrying instantiation because no read leaves a key live; the
+    /// linearity checker's borrowed operands are that refusal.
+    Borrowed,
+    /// A value reaches the callback and the result both, so a key-carrying
+    /// instantiation would use one key twice ([04-LIN-9]).
+    CallbackAndResult,
+}
+
+/// A `'static` slice of [`KeyParameter`]s, one per `(name, site, routing)`.
+macro_rules! key_parameters {
+    ($(($name:expr, $site:expr, $routing:expr)),+ $(,)?) => {{
+        const PARAMETERS: &[KeyParameter] = &[$(KeyParameter {
+            name: $name,
+            site: $site,
+            routing: $routing,
+        }),+];
+        PARAMETERS
+    }};
+}
+
+/// The key rule of every Container and Boundary builtin case. Exhaustive,
+/// with no wildcard arm: a new case is a compile error here until it decides.
+pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
+    use BuiltinSiblingCaseId as Case;
+    use KeyParameterSite::{Argument, CallbackResult, ListElement};
+    use KeyRouting::{Borrowed, CallbackAndResult, OneConsumer};
+    match case {
+        Case::FailString
+        | Case::TestAssertBool
+        | Case::ReadFile
+        | Case::WriteFile
+        | Case::ReadLines
+        | Case::ReadBytes
+        | Case::FileExists
+        | Case::ListDir
+        | Case::MmapFile
+        | Case::MmapRead
+        | Case::MmapLen
+        | Case::ProcessRun
+        | Case::ParseCsv
+        | Case::ToCsv
+        | Case::CsvF64s
+        | Case::CsvInts
+        | Case::CsvStrs
+        | Case::CsvNrows
+        | Case::CsvCols
+        | Case::CsvF64
+        | Case::CsvInt
+        | Case::CsvStr
+        | Case::CharCode
+        | Case::CharFromCode
+        | Case::StringLen
+        | Case::StringConcat
+        | Case::StringSlice
+        | Case::StringContains
+        | Case::StringStartsWith
+        | Case::StringEndsWith
+        | Case::StringTrim
+        | Case::ToInt
+        | Case::ToFloat
+        | Case::RangeList => CaseKeys::NoKeyOperand,
+        // [05-OP-60]: observation borrows the value it renders.
+        Case::PrintRecursive | Case::DebugRecursive => {
+            CaseKeys::Values(key_parameters![("value", Argument(0), Borrowed)])
+        }
+        // [05-OP-38] and [05-OP-36]: the equality domain names no `key`.
+        Case::TestAssertEq
+        | Case::TestAssertEqTensor
+        | Case::TestAssertCloseTensor
+        | Case::EqRecursive
+        | Case::NeqRecursive => CaseKeys::Refused(&[0, 1]),
+        // [05-OP-25]: the rendering domain is the nine data element dtypes.
+        Case::ToStringUnit
+        | Case::ToStringScalar
+        | Case::ToStringTensor
+        | Case::ToStringList
+        | Case::ToStringTuple
+        | Case::ToStringDict
+        | Case::ToStringOption
+        | Case::ToStringAdt
+        | Case::ToStringFunction => CaseKeys::Refused(&[0]),
+        // [05-OP-54]: `len` and `index` borrow the collection.
+        Case::LenList | Case::LenDict => {
+            CaseKeys::Values(key_parameters![("collection", Argument(0), Borrowed)])
+        }
+        Case::IndexList => CaseKeys::Values(key_parameters![("T", ListElement(0), Borrowed)]),
+        // [05-OP-54]: each element moves to one place in the result.
+        Case::AppendList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", Argument(1), OneConsumer)
+        ]),
+        Case::ConcatList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", ListElement(1), OneConsumer)
+        ]),
+        Case::TakeList
+        | Case::SkipList
+        | Case::ChunkList
+        | Case::FlattenList
+        | Case::EnumerateList => {
+            CaseKeys::Values(key_parameters![("T", ListElement(0), OneConsumer)])
+        }
+        // [05-OP-62], [05-OP-53], [05-OP-57], [05-OP-9] and [05-OP-10]: a
+        // domain of every active tensor element dtype admits exactly the nine
+        // data element dtypes, never `key`.
+        Case::ConcatTensors | Case::SplitTensor | Case::ToTensorList | Case::ToListTensor => {
+            CaseKeys::Refused(&[0])
+        }
+        Case::PadSequences => CaseKeys::Refused(&[0, 1]),
+        Case::PadSequencesTo => CaseKeys::Refused(&[0, 2]),
+        // [05-OP-67]: `drop` is the value's one consumer.
+        Case::DropValue => CaseKeys::Values(key_parameters![("T", Argument(0), OneConsumer)]),
+        // [05-OP-55]: each element reaches the callback once, and `map` and
+        // `flat_map` keep only the callback's results.
+        Case::MapList | Case::FlatMapList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(1), OneConsumer),
+            ("U", CallbackResult(0), OneConsumer)
+        ]),
+        // [05-OP-55]: the callback reads each element and the result keeps it.
+        Case::FilterList | Case::PartitionList => {
+            CaseKeys::Values(key_parameters![("T", ListElement(1), CallbackAndResult)])
+        }
+        // [05-OP-55]: each accumulator feeds the next call once.
+        Case::FoldList => CaseKeys::Values(key_parameters![
+            ("A", Argument(1), OneConsumer),
+            ("T", ListElement(2), OneConsumer)
+        ]),
+        // [05-OP-55]: each accumulator feeds the next call and the result.
+        Case::ScanList => CaseKeys::Values(key_parameters![
+            ("A", Argument(1), CallbackAndResult),
+            ("T", ListElement(2), OneConsumer)
+        ]),
+        // [05-OP-38]: each state feeds the next call and the stacked result.
+        Case::TensorScan => {
+            CaseKeys::Values(key_parameters![("T", Argument(0), CallbackAndResult)])
+        }
+        Case::ZipList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("U", ListElement(1), OneConsumer)
+        ]),
+        // [05-OP-56]: a dictionary keeps at most one value per key, and a
+        // value the result does not keep is dropped.
+        Case::DictOf => CaseKeys::Values(key_parameters![("(K, V)", ListElement(0), OneConsumer)]),
+        Case::DictGet
+        | Case::DictContains
+        | Case::DictRemove
+        | Case::DictKeys
+        | Case::DictValues
+        | Case::DictEntries => CaseKeys::Values(key_parameters![("V", Argument(0), OneConsumer)]),
+        Case::DictInsert => CaseKeys::Values(key_parameters![
+            ("V", Argument(0), OneConsumer),
+            ("V", Argument(2), OneConsumer)
+        ]),
+        Case::DictMerge => CaseKeys::Values(key_parameters![
+            ("V", Argument(0), OneConsumer),
+            ("V", Argument(1), OneConsumer)
+        ]),
+    }
+}
+
 /// Lane realizability declaration for a builtin. Part of `BuiltinDecl`.
 /// Determines whether the tensor-DAG path or host path realizes this op.
 ///
@@ -477,6 +703,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    "split_keys",
     "cmplt",
     "sub",
     "div",
@@ -911,6 +1138,47 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-69]..[05-OP-72]: the random key operations. Each scheme is
+    // monomorphic in its key and count operands, and the affine key rule
+    // ([04-LIN-9]) is the linearity checker's, not the signature's.
+    BuiltinDecl {
+        name: "key_from_seed",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (i64) -> key fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_key",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (key) -> (key, key) fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_keys",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "fold_in",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (key, i64) -> key fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2357,8 +2625,14 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
             rvars: vec![rank],
+            // [05-OP-37]: the key comes first and is consumed; the tensor is
+            // borrowed.
             body: Type::Fn(
-                vec![borrowed(input.clone()), Type::Var(precision)],
+                vec![
+                    Type::Prim(Prim::Key),
+                    borrowed(input.clone()),
+                    Type::Var(precision),
+                ],
                 Box::new(input),
             ),
         };
@@ -2373,8 +2647,11 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
+            // [05-OP-8]: the key comes first and is consumed; the template
+            // is borrowed.
             body: Type::Fn(
                 vec![
+                    Type::Prim(Prim::Key),
                     borrowed(Type::Var(input)),
                     Type::Prim(Prim::F32),
                     Type::Prim(Prim::F32),
@@ -2713,6 +2990,53 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("ceil", &mut env, &mut vg);
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
+
+    // [05-OP-69]..[05-OP-72] (spec/05 section 2.7): the random key
+    // operations. The key operand of `split_key`, `split_keys` and `fold_in`
+    // is owned, never borrowed: [04-LIN-9] makes every key affine, and these
+    // are its consuming uses. `split_keys`'s extent is its count `n`
+    // ([05-OP-71]); its application's result extent is decided from the
+    // count by `check_split_keys_signature`, spec/04 section 4.7.2's
+    // `expand` rule, and the scheme's dimension only types the builtin named
+    // as a value.
+    let key = Type::Prim(Prim::Key);
+    let count = Type::Prim(Prim::Int64);
+    env.bind(
+        "key_from_seed".to_string(),
+        Scheme::mono(Type::Fn(vec![count.clone()], Box::new(key.clone()))),
+    );
+    env.bind(
+        "split_key".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![key.clone()],
+            Box::new(Type::Tuple(vec![key.clone(), key.clone()])),
+        )),
+    );
+    env.bind(
+        "fold_in".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![key.clone(), count.clone()],
+            Box::new(key.clone()),
+        )),
+    );
+    let key_rows = vg.fresh_dvar();
+    env.bind(
+        "split_keys".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![key_rows],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![key, count],
+                Box::new(Type::Tensor(
+                    vec![Dim::Var(key_rows)],
+                    TensorPrec::Concrete(Prim::Key),
+                )),
+            ),
+        },
+    );
 
     cmplt_sig("cmplt", &mut env, &mut vg);
 

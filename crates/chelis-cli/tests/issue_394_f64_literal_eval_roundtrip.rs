@@ -47,7 +47,7 @@ fn eval_json(expr: &str) -> Value {
 }
 
 fn scalar_result(json: &Value) -> f64 {
-    assert_eq!(json["schema_version"], 3);
+    assert_eq!(json["schema_version"], 4);
     let value = json
         .get("roots")
         .and_then(Value::as_array)

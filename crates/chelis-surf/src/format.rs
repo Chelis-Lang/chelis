@@ -275,9 +275,7 @@ fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
         | Expr::Quote(value, _)
         | Expr::Unquote(value, _)
         | Expr::Splice(value, _) => migrate_expr(value, shadow),
-        Expr::Binary(_, left, right, _)
-        | Expr::WithSeed(left, right, _)
-        | Expr::WithDevice(left, right, _) => {
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
             migrate_expr(left, shadow);
             migrate_expr(right, shadow);
         }
@@ -937,7 +935,6 @@ fn format_effects(effects: Option<&[EffectExpr]>) -> String {
 fn format_effect(effect: &EffectExpr) -> String {
     match effect {
         EffectExpr::Diff(_) => "Diff".to_string(),
-        EffectExpr::Random(_) => "Random".to_string(),
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
         EffectExpr::Test(_) => "Test".to_string(),
@@ -1123,11 +1120,6 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Realize(expr, _) => format!("realize({})", format_expr(expr)),
         Expr::Copy(expr, _) => format!("copy({})", format_expr(expr)),
         Expr::Borrow(expr, _) => format!("&{}", wrap_simple(expr)),
-        Expr::WithSeed(seed, body, _) => format!(
-            "with seed({}) {}",
-            format_expr(seed),
-            format_handler_body(body)
-        ),
         Expr::WithDevice(device, body, _) => {
             format!(
                 "with device({}) {}",
@@ -1386,7 +1378,6 @@ fn format_call_callee(function: &Expr) -> String {
         | Expr::Match(..)
         | Expr::Lambda(..)
         | Expr::RecordUpdate(..)
-        | Expr::WithSeed(..)
         | Expr::WithDevice(..)
         | Expr::Par(..)
         | Expr::Do(..)
@@ -1555,7 +1546,6 @@ fn expression_span(expr: &Expr) -> chelis_deep::Span {
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
         | Expr::Borrow(_, span)
-        | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Do(_, span)

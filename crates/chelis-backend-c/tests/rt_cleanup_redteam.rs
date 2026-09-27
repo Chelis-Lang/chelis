@@ -304,13 +304,15 @@ fn run_bf16_abs_with_bits(bits: u16) -> u16 {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Abs, vec![load], vec_ty(n, Prim::Bf16), None);
     let result = codegen(&dag, "bf16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -345,13 +347,15 @@ fn run_f16_abs_with_bits(bits: u16) -> u16 {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::F16), None);
+    dag.add_node(decl, RiscOp::Abs, vec![load], vec_ty(n, Prim::F16), None);
     let result = codegen(&dag, "f16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -555,7 +559,9 @@ fn bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1() {
     }
     let n = 4096;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
@@ -563,6 +569,7 @@ fn bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1() {
     );
     let sum_op = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
     dag.add_node(
+        decl,
         sum_op,
         vec![load],
         TensorType {
@@ -634,13 +641,16 @@ int main(void) {{
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -658,7 +668,7 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_bf16_to_f32"),
@@ -684,13 +694,16 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
 fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::F16),
@@ -703,7 +716,7 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "f16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_f16_to_f32"),
@@ -804,13 +817,16 @@ fn assert_matmul_scratch_lifetime(src: &str, names: &[&str]) {
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -823,7 +839,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
     let result = codegen(&dag, "bf16_mm_alloc_free").unwrap();
     let src = &result.c_source;
     assert_matmul_scratch_lifetime(src, &["af", "bf", "cf"]);
@@ -833,13 +849,16 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -852,7 +871,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_alloc_free_f32_out").unwrap();
     let src = &result.c_source;
     // f32 results are written directly to the result tensor.
@@ -884,7 +903,9 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Bf16, value),
             vec![],
             vec_ty(n, Prim::Bf16),
@@ -934,7 +955,9 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F16, value),
             vec![],
             vec_ty(n, Prim::F16),
@@ -990,13 +1013,16 @@ fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Bf16,
         },
@@ -1039,13 +1065,16 @@ fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -1087,13 +1116,16 @@ fn cast_f32_to_f16_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F16,
         },
@@ -1138,26 +1170,30 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
     }
     let n = 8;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![a, b], vec_ty(n, Prim::Bf16), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_ty(n, Prim::Bf16), None);
     let c = dag.add_node(
+        decl,
         RiscOp::Load { name: "c".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
 
     // Evaluator
     let mut inputs = chelis_unord::UnordMap::new();
@@ -1418,13 +1454,16 @@ fn sibling_sweep_no_em_dash_in_string_literals_in_touched_crates() {
 fn scratch_cleanup_controls_reject_conditional_or_in_loop_release() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -1437,7 +1476,7 @@ fn scratch_cleanup_controls_reject_conditional_or_in_loop_release() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let src = codegen(&dag, "round2_probe").unwrap().c_source;
     assert_matmul_scratch_lifetime(&src, &["af", "bf"]);
 

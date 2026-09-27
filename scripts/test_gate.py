@@ -869,9 +869,8 @@ class StageUnionTests(unittest.TestCase):
 
     def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
-                   "compilation-trace,native-random-observer", "--lib", "--test", "emission_observer",
-                   "--test", "execution_artifact_metadata", "--test", "compilation_trace",
-                   "--test", "native_random_observer", "--test", "fixed_control_c"]
+                   "compilation-trace", "--lib", "--test", "emission_observer",
+                   "--test", "execution_artifact_metadata", "--test", "compilation_trace"]
         self.assertEqual(gate.EMISSION_OBSERVER_TESTS, command)
         self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
         commands = gate.selected_stage_commands(

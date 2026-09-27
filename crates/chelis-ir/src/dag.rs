@@ -15,6 +15,120 @@ use crate::load_store_name::LoadStoreName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
+/// Index into a DAG's [`Dag::declarations`]: the declaration a node belongs to.
+///
+/// Every node carries one ([`DagNode::decl`]), supplied at its construction
+/// ([`Dag::add_node`]): there is no default declaration, so a node built
+/// without one does not compile, and a wrong one is visible at its site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DeclId(pub u32);
+
+/// A node's owner (spec/10 section 3.2): the declaration it belongs to and the
+/// activation it runs under.
+///
+/// The activation is the scalar or per-row Bool node that holds exactly when
+/// the source position of this node is entered: the conjunction of the
+/// enclosing runtime `if` arms' predicates (and of a `grad` or `vmap` body's
+/// call-site activation), or `None` where every execution of the graph
+/// enters the node. A node whose activation is false is still computed, since
+/// a `Where` may read its value, but checks nothing: no trap fires, no draw
+/// validates, no count is read.
+///
+/// Every node carries one, supplied at construction ([`Dag::add_node`]). The
+/// activation is a dependency like [`DagNode::shape_deps`]: a pass that
+/// rebuilds a graph carries it through its node map ([`Owner::remap`]), which
+/// panics on an activation the map does not cover rather than dropping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Owner {
+    /// The declaration this node belongs to, an index into
+    /// [`Dag::declarations`].
+    pub decl: DeclId,
+    /// The Bool node under which this node runs, or `None` when it runs on
+    /// every execution of its declaration.
+    pub activation: Option<NodeId>,
+}
+
+impl Owner {
+    /// An owner in `decl` under `activation`.
+    pub const fn new(decl: DeclId, activation: Option<NodeId>) -> Self {
+        Self { decl, activation }
+    }
+
+    /// An owner in `decl` that every execution of `decl` enters.
+    pub const fn unconditional(decl: DeclId) -> Self {
+        Self {
+            decl,
+            activation: None,
+        }
+    }
+
+    /// This owner in a rebuilt graph, its activation carried through `map`
+    /// (old node to new node). An activation `map` does not cover is a defect
+    /// of the rebuilding pass, never a reason to drop the activation: it
+    /// panics.
+    pub fn remap_with(self, map: impl FnOnce(NodeId) -> Option<NodeId>) -> Self {
+        self.try_remap_with(map)
+            .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    /// [`Self::remap_with`] through a node map.
+    pub fn remap(self, map: &UnordMap<NodeId, NodeId>) -> Self {
+        self.remap_with(|old| map.get(&old).copied())
+    }
+
+    /// [`Self::remap_with`], reporting an unmapped activation instead of
+    /// panicking, for a pass with a recoverable error channel.
+    pub fn try_remap_with(
+        self,
+        map: impl FnOnce(NodeId) -> Option<NodeId>,
+    ) -> Result<Self, String> {
+        let activation = match self.activation {
+            Some(old) => Some(map(old).ok_or_else(|| {
+                format!("node activation {old:?} has no node in the rebuilt graph")
+            })?),
+            None => None,
+        };
+        Ok(Self {
+            decl: self.decl,
+            activation,
+        })
+    }
+}
+
+/// A bare declaration owns its nodes unconditionally: a graph built outside
+/// program lowering (a backend helper kernel, a runtime transform, a test)
+/// has no runtime branch to activate them under.
+impl From<DeclId> for Owner {
+    fn from(decl: DeclId) -> Self {
+        Self::unconditional(decl)
+    }
+}
+
+/// One declaration of a graph (chelis#2476, #2413).
+///
+/// A lowered program holds every top-level declaration's activation in one
+/// graph, whether or not anything calls it, and a function's parameters are
+/// `Load`s built exactly like an entry's inputs. Selecting roots is a scoping
+/// decision, so the graph records which declaration owns each node: a seed (an
+/// abort, or a draw that can trap) runs only when a selected root belongs to
+/// its declaration ([`Dag::entered_declarations`]), and a parameter is its
+/// declaration and its name, never its name alone. A graph built outside
+/// program lowering (a backend helper kernel, a runtime transform, a test)
+/// registers its own named declaration.
+///
+/// Another declaration runs a declaration's work only inlined into its own
+/// nodes: a function's body where it calls it, and a value's initializer
+/// where it reads the value when that initializer may trap. It reads a
+/// value declaration's own nodes only when none of them can trap, which the
+/// verifier checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Declaration {
+    /// The declaration's name; empty for an unnamed top-level expression.
+    pub name: String,
+    /// Whether it declares a value rather than a function.
+    pub value: bool,
+}
+
 /// Tensor type carried on each DAG node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorType {
@@ -488,19 +602,6 @@ pub enum UniformBound {
     High,
 }
 
-/// The handler whose stream a [`RiscOp::DrawKey`] reads.
-///
-/// `Inherited` is the stream the graph's caller holds when it runs the graph.
-/// `Scoped` is a `with seed` handler lowered inside the graph: its literal
-/// seed is the node's first input and its ordinal counts from zero. `instance`
-/// is an opaque identity for one lowered handler region, so two regions with
-/// equal seeds keep separate counters even after their seed constants merge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RandomHandler {
-    Inherited,
-    Scoped { instance: u32 },
-}
-
 /// Which half of `[05-OP-70]`'s pair a [`RiscOp::Split`] produces: `Left` is
 /// `derive(k, 0)` and `Right` is `derive(k, 1)` of `[05-RNG-2]`. `split_key`
 /// is two nodes because an IR node has one output (LaCaDiLE's
@@ -521,32 +622,14 @@ impl KeyBranch {
     }
 }
 
-/// The random primitive whose controls a [`RiscOp::DrawKey`] validates before
-/// it advances its handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RandomDraw {
-    /// `[05-OP-37]`: one rate control.
-    Dropout,
-    /// `[05-OP-8]`: low and high bound controls.
-    UniformLike,
-}
-
-impl RandomDraw {
-    /// The number of control inputs the primitive and its key both carry.
-    pub const fn control_count(self) -> usize {
-        match self {
-            Self::Dropout => 1,
-            Self::UniformLike => 2,
-        }
-    }
-}
-
 /// How a key-operand random primitive's inputs relate to its key batch
 /// (spec/10 §3.2, rule V5). Every lane checks their runtime extents in this
 /// order before it reads one: the data's leading axes against the key's
-/// shape, then each present per-row input's axes against the key's leading
-/// ones. The DAG evaluator and the C lane both read this one table, so they
-/// check the same inputs in the same order and report the same line.
+/// shape, then each per-row input's axes against the key's leading ones,
+/// then the node's own activation's ([`Owner::activation`]), which is shaped
+/// like a leading part of the key's shape too. The DAG evaluator and the C
+/// lane both read this one table, so they check the same inputs in the same
+/// order and report the same line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawBatchLayout {
     /// The operation its traps name.
@@ -556,8 +639,8 @@ pub struct DrawBatchLayout {
     /// The input whose leading axes are the key's shape: the data, the
     /// template, or a bound adjoint's cotangent.
     pub data_input: usize,
-    /// The controls' and the activation's slots, each shaped like a leading
-    /// part of the key's shape; an absent activation is skipped.
+    /// The controls' slots, each shaped like a leading part of the key's
+    /// shape. The activation is the node's owner's, not an input.
     pub per_row: &'static [usize],
 }
 
@@ -750,70 +833,80 @@ pub enum RiscOp {
     /// that would NaN on non-positive inputs. Backends emit
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
-    /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
-    /// key]`, optionally followed by one Bool activation. The template
-    /// supplies only the shape and dtype `p`; `low` and `high` are floats of
-    /// dtype `p`, or f32 while the checker's bound signature is f32
-    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. Under
-    /// spec/10 §3.2's rule V5 the key's shape is the template's leading axes
-    /// and the bounds and activation are shaped like leading parts of the
-    /// key's shape. An inactive draw validates nothing and produces positive
+    /// `[05-OP-8]` with operand controls. Inputs are exactly `[template, low,
+    /// high, key]`. The template supplies only the shape and dtype `p`; `low`
+    /// and `high` are floats of dtype `p`, or f32 while the checker's bound
+    /// signature is f32 (chelis#1295); `key` is this draw's `Prim::Key`,
+    /// consumed here. Under spec/10 §3.2's rule V5 the key's shape is the
+    /// template's leading axes and the bounds and the node's activation
+    /// ([`Owner::activation`]) are shaped like leading parts of the key's
+    /// shape. An inactive draw validates nothing and produces positive
     /// zeros.
     UniformLike,
-    /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
-    /// optionally followed by one Bool activation, shaped as for
-    /// `UniformLike`; `rate` is a value of `x`'s dtype and `key` is consumed
-    /// here. An inactive draw validates nothing and produces positive zeros.
+    /// `[05-OP-37]` with an operand rate. Inputs are exactly `[x, rate,
+    /// key]`, shaped as for `UniformLike`; `rate` is a value of `x`'s dtype
+    /// and `key` is consumed here. An inactive draw validates nothing and
+    /// produces positive zeros.
     Dropout,
-    /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
-    /// key]`, optionally followed by the forward draw's activation. It reads
-    /// its forward `Dropout`'s key and rate without consuming the key, and
-    /// applies the same saved mask and finalized sub/div to the cotangent.
+    /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are exactly `[g,
+    /// rate, key]`, and its owner is its forward draw's, activation included.
+    /// It reads its forward `Dropout`'s key and rate without consuming the
+    /// key, and applies the same saved mask and finalized sub/div to the
+    /// cotangent.
     DropoutReplay,
-    /// AD-only `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
-    /// optionally followed by the forward draw's activation; the result is a
-    /// value of the template's dtype shaped like a leading part of the key's
-    /// shape (rule V5). It reads its forward `UniformLike`'s key without
-    /// consuming it.
+    /// AD-only `[05-OP-8]` bound adjoint. Inputs are exactly `[template, g,
+    /// key]`, and its owner is its forward draw's, activation included; the
+    /// result is a value of the template's dtype shaped like a leading part
+    /// of the key's shape (rule V5). It reads its forward `UniformLike`'s key
+    /// without consuming it.
     UniformBoundAdjoint {
         bound: UniformBound,
-    },
-    /// The counter-stream bridge (`spec/design/randomness_counter_stream.md`
-    /// §2): the key of `handler`'s next `[05-RNG-1]` ordinal,
-    /// `RandomKey::from_counter(seed, ordinal)`. Inputs are the literal seed
-    /// (a rank-0 i64 `Const`) when the handler is scoped, then `draw`'s
-    /// controls, then optionally one rank-0 Bool activation. When active it
-    /// validates the controls for a draw of dtype `dtype` and only then
-    /// advances its handler; when inactive it neither validates nor advances.
-    /// It is effectful: a dead-code root that is never merged, folded or
-    /// recomputed, executed in node order.
-    DrawKey {
-        handler: RandomHandler,
-        draw: RandomDraw,
-        dtype: Prim,
     },
     /// `[05-OP-69]` `key_from_seed`: input `[seed: tensor[D, i64]]`, output
     /// the `tensor[D, key]` of each seed's two's-complement bits. Pure and
     /// never constant-folded, so an exported key stays symbolic.
     KeyFromSeed,
-    /// One half of `[05-OP-70]` `split_key`: input `[k: tensor[D, key]]`,
-    /// output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
-    /// `derive(k, 1)` (`Right`). A parent feeds at most one `Split` of each
-    /// branch, and nothing else.
+    /// One half of `[05-OP-70]` `split_key`: input exactly `[k: tensor[D,
+    /// key]]`, output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
+    /// `derive(k, 1)` (`Right`). The node's activation ([`Owner::activation`])
+    /// is shaped like a leading part of `D`. A parent feeds at most one
+    /// `Split` of each branch, and nothing else, unless rule V3 admits the
+    /// sharing through exclusive activations (spec/10 §3.2). The activation
+    /// changes no key.
     Split {
         branch: KeyBranch,
     },
-    /// `[05-OP-72]` `fold_in`: inputs `[k: tensor[D, key], n: tensor[D, i64]]`
-    /// of exactly equal shape, output `derive(derive(k, 2), n)` element-wise.
+    /// `[05-OP-72]` `fold_in`: inputs exactly `[k: tensor[D, key], n:
+    /// tensor[D, i64]]` of equal shape; output `derive(derive(k, 2), n)`
+    /// element-wise. The node's activation is shaped like a leading part of
+    /// `D` and changes no key.
     FoldIn,
     /// `[05-OP-71]` `split_keys`: input `[k: tensor[D, key]]`, then the
-    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`. The
-    /// output is `tensor[D ++ [count], key]`, the new axis last; row `j` is
-    /// `derive(derive(k, 2), j)`. A negative runtime count traps before
-    /// allocation, as a negative movement bound does.
+    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`, and
+    /// nothing else; the node's activation is shaped like a leading part of
+    /// `D`. The output is `tensor[D ++ [count], key]`, the new axis last; row
+    /// `j` is `derive(derive(k, 2), j)`. A negative runtime count traps before
+    /// allocation, as a negative movement bound does. Where the activation
+    /// holds in no row the count is not read: the count axis takes the extent
+    /// the output type declares where another node or a literal fixes it, and
+    /// zero where the split itself declares it, so an unselected arm's split
+    /// neither traps nor allocates on its count.
     SplitN {
         count: RtDim,
     },
+    /// Rule S's join (spec/10 §3.2): the key of a runtime `if` whose value is
+    /// a key. Inputs are `[then_key, else_key, then_active, else_active]`:
+    /// two keys of the result's exact type, then the two arms' Bool
+    /// activations, each shaped like a leading part of the key's shape.
+    /// Input 0 is consumed under `then_active` and input 1 under
+    /// `else_active`. The two are the join's own activation
+    /// ([`Owner::activation`], the enclosing one) conjoined with the branch's
+    /// condition and with its negation, so where the join's activation holds
+    /// exactly one of them does. Element `i` is `then_key[i]` where
+    /// `then_active` holds for its row, and `else_key[i]` elsewhere. The
+    /// result is a fresh key under the join's activation; the join derives
+    /// nothing and changes no key.
+    KeySelect,
 
     // --- Reduction ---
     /// `reduce_sum` over `axis`, with the accumulator precision pinned
@@ -1386,13 +1479,35 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
+    /// The exact number of inputs a key-operand random primitive, its replay
+    /// or bound adjoint, a key operation or a join reads; `None` for any
+    /// other operation. None of them reads an activation from an input: a
+    /// draw's and a key operation's activation is its own
+    /// ([`Owner::activation`]), and a join's two slot activations are its
+    /// last two inputs. So a stale trailing activation operand is an arity
+    /// error (spec/10 §3.2).
+    pub fn key_operand_arity(&self) -> Option<usize> {
+        match self {
+            Self::KeyFromSeed | Self::Split { .. } => Some(1),
+            Self::FoldIn => Some(2),
+            // A runtime count names the input it reads, by value or by axis.
+            Self::SplitN {
+                count: RtDim::Node(slot) | RtDim::InputAxis { tensor: slot, .. },
+            } => Some(slot + 1),
+            Self::SplitN { .. } => Some(1),
+            Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint { .. } => Some(3),
+            Self::UniformLike | Self::KeySelect => Some(4),
+            _ => None,
+        }
+    }
+
     /// The batch layout of a key-operand random primitive, or `None` for any
     /// other operation.
     pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
         let (op, key, data_input, per_row): (_, _, _, &'static [usize]) = match self {
-            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1, 3]),
-            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2, 4]),
-            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[3]),
+            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1]),
+            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2]),
+            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[]),
             _ => return None,
         };
         Some(DrawBatchLayout {
@@ -1466,14 +1581,14 @@ impl RiscOp {
             Self::Dropout => Semantic(Id::Dropout),
             Self::DropoutReplay => Semantic(Id::DropoutReplay),
             Self::UniformBoundAdjoint { .. } => Semantic(Id::UniformBoundAdjoint),
-            // The counter-stream bridge supplies a key; it is not a Table-A
-            // operation and the explicit-key switch deletes it.
-            Self::DrawKey { .. } => Structural,
             Self::KeyFromSeed => Semantic(Id::KeyFromSeed),
             // Both halves are one identity: [05-OP-70] returns the pair.
             Self::Split { .. } => Semantic(Id::SplitKey),
             Self::SplitN { .. } => Semantic(Id::SplitKeys),
             Self::FoldIn => Semantic(Id::FoldIn),
+            // The join is how a runtime `if` over keys is represented, not a
+            // callable Table-A operation: it selects one of two existing keys.
+            Self::KeySelect => Structural,
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1834,13 +1949,14 @@ impl RiscOp {
             RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
-            | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. } => false,
+            | RiscOp::UniformBoundAdjoint { .. } => false,
 
             // Key derivations produce opaque keys, not a numeric envelope.
-            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
-                false
-            }
+            RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => false,
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -2032,6 +2148,426 @@ pub struct DagNode {
     /// until this producer discharges the obligation.
     #[serde(default)]
     pub result_claim_deps: Vec<NodeId>,
+    /// The node's owner: its declaration and its activation ([`Owner`]).
+    /// Required: lowering supplies the declaration it is lowering and the
+    /// path activation of the position it lowers, a rebuilding pass the
+    /// source node's owner carried through its node map, and a node a pass
+    /// synthesizes the owner of the node it derives from.
+    pub owner: Owner,
+}
+
+impl DagNode {
+    /// Every node this node reads, in every dependency lane: its value
+    /// inputs, its shape-only and result-claim dependencies, and its
+    /// activation ([`Owner::activation`]). A liveness walk or a partition
+    /// that follows these keeps everything the node needs to run.
+    pub fn dependencies(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.inputs
+            .iter()
+            .chain(&self.shape_deps)
+            .chain(&self.result_claim_deps)
+            .copied()
+            .chain(self.owner.activation)
+    }
+
+    /// The value operand `slot` takes where this node's activation is false
+    /// ([`Owner::activation`]): one no check of the operation rejects, so the
+    /// node computes a value and reports nothing (spec/10 section 3.2).
+    /// `None` for an operation that checks nothing of its operands' values
+    /// ([`RuntimeCheck::OperandValues`], [`RuntimeCheck::MeanDivisor`] and
+    /// [`RuntimeCheck::Abort`] are the ones that do). The evaluator and the C
+    /// lane substitute exactly these values.
+    pub fn inactive_operand(&self, slot: usize) -> Option<i64> {
+        match self.runtime_check() {
+            RuntimeCheck::OperandValues | RuntimeCheck::MeanDivisor => Some(match &self.op {
+                // A zero divisor, an integer `MIN / -1`, and an empty
+                // `mean`'s count: zero divided by one rejects none of them.
+                RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
+                    i64::from(slot == 1)
+                }
+                // Zero converts to every dtype, no sum or product of zeros
+                // overflows, and zero is in every integer range.
+                _ => 0,
+            }),
+            // The condition takes the value that does not fire. The fallback
+            // is checked by nothing, so it is read unchanged.
+            RuntimeCheck::Abort => match &self.op {
+                RiscOp::GuardedFail { trap_on_true, .. } if slot == 0 => {
+                    Some(i64::from(!trap_on_true))
+                }
+                _ => None,
+            },
+            RuntimeCheck::Nothing
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims
+            | RuntimeCheck::Random
+            | RuntimeCheck::Ungated => None,
+        }
+    }
+
+    /// What this node checks at run time ([`RuntimeCheck`]): the one
+    /// exhaustive declaration, with no wildcard arm, from which the trap
+    /// seed ([`TrapSeeds::is_observable_root`]) and the false-activation behaviour
+    /// ([`Self::inactive_operand`], [`TrapSeeds::is_activation_gated`]) are both
+    /// read. A new operation does not compile until it states which class
+    /// it is in.
+    ///
+    /// Inventory (the evaluator's `eval.rs` and the C emitter), by class:
+    ///
+    /// | class | operations | what traps |
+    /// |---|---|---|
+    /// | `OperandValues` | integer `Add` `Sub` `Mul` `Neg` `Abs` | overflow |
+    /// | | `FloorDiv` `TruncDiv` `Mod`, integer `Div` | division by zero, `MIN / -1` |
+    /// | | `Cast` `CastTrunc` into an integer or bool width | domain, overflow |
+    /// | | integer `Sum` `ProdReduce`, integer `ReduceWindow` | overflow |
+    /// | | integer `FusedElem` | its steps' overflow and division |
+    /// | `MeanDivisor` | float `Div` | a lowered `mean`'s empty count |
+    /// | `EmptyAxis` | `MaxReduce` `MinReduce` `Argmax` `Argmin` | an empty reduced axis |
+    /// | `MovementBounds` | `Shrink` `Stride` `Pad` | a runtime bound out of domain |
+    /// | `ExtentClaims` | `ExtentWitness` (checking sites), `CheckedReshapeExtent` | a claimed extent |
+    /// | `Random` | `Dropout` `DropoutReplay` `UniformLike` `UniformBoundAdjoint` `SplitN` `FoldIn` `KeySelect` | controls, key extents, a negative count |
+    /// | `Abort` | `GuardedFail` | its authored condition |
+    /// | `Ungated` | `Reshape` `Expand` | a runtime target extent |
+    /// | | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
+    /// | `Nothing` | every other operation, and float arithmetic and reductions | |
+    ///
+    /// Three checks are not an operation kind's and are listed here for
+    /// completeness. A node whose declared extent rests on a claim checked
+    /// under its activation ([`TrapSeeds::is_claim_sized`]) is gated whatever
+    /// its class, and where its activation is false it produces zeros of its
+    /// declared type. Every same-shape producer's operand agreement (the
+    /// evaluator's "tensor shapes must match" and the C lane's
+    /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
+    /// the kernel, not a gated check: a false activation leaves it in place,
+    /// except at a claim-sized node, which then reads no operand. A result's
+    /// element count and byte size are admitted at every allocation
+    /// ([05-OP-33]) whatever the activation.
+    pub fn runtime_check(&self) -> RuntimeCheck {
+        let integer = self.output_type.precision.is_integer();
+        let value_check = |checks: bool| {
+            if checks {
+                RuntimeCheck::OperandValues
+            } else {
+                RuntimeCheck::Nothing
+            }
+        };
+        match &self.op {
+            RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
+                value_check(integer)
+            }
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => value_check(integer),
+            // Float-only since chelis#178; its one float check is a lowered
+            // `mean`'s count, which the node alone cannot tell apart.
+            RiscOp::Div if integer => RuntimeCheck::OperandValues,
+            RiscOp::Div => RuntimeCheck::MeanDivisor,
+            // Read the cast's OWN target, not the node's output type: if a
+            // lowering ever let them drift, deriving the class from the
+            // output type would silently switch the check off.
+            RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
+                value_check(new_precision.is_integer() || *new_precision == Prim::Bool)
+            }
+            RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => value_check(integer),
+            // An integer window sum overflows; a window is never empty, and
+            // max and min select without arithmetic.
+            RiscOp::ReduceWindow { reducer, .. } => value_check(
+                integer && matches!(reducer, ReduceWindowKind::Sum | ReduceWindowKind::Mean),
+            ),
+            RiscOp::FusedElem { .. } => value_check(integer),
+            RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. } => RuntimeCheck::EmptyAxis,
+            RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
+                RuntimeCheck::MovementBounds
+            }
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LiteralResultClaim,
+                ..
+            } => RuntimeCheck::Nothing,
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } if !requirements.is_empty() => RuntimeCheck::Nothing,
+            RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } => {
+                RuntimeCheck::ExtentClaims
+            }
+            RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformLike
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::SplitN { .. }
+            | RiscOp::FoldIn
+            | RiscOp::KeySelect => RuntimeCheck::Random,
+            RiscOp::GuardedFail { .. } => RuntimeCheck::Abort,
+            RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::ScatterAdd { .. }
+            | RiscOp::Scatter { .. }
+            | RiscOp::ScatterElements { .. }
+            | RiscOp::OneHot { .. } => RuntimeCheck::Ungated,
+            RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Round
+            | RiscOp::Recip
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::Count { .. }
+            | RiscOp::ReduceWindowGrad { .. }
+            | RiscOp::Permute { .. }
+            | RiscOp::Shape { .. }
+            | RiscOp::CheckedUnitAxis { .. }
+            | RiscOp::Const { .. }
+            | RiscOp::ConstTensor { .. }
+            | RiscOp::Load { .. }
+            | RiscOp::Store { .. }
+            | RiscOp::Copy
+            | RiscOp::Drop
+            | RiscOp::Realize
+            | RiscOp::BlasMatmul { .. } => RuntimeCheck::Nothing,
+        }
+    }
+}
+
+/// What an operation checks at run time (the classes of
+/// [`DagNode::runtime_check`]'s inventory), and so what a node of it does
+/// where its activation is false (spec/10 section 3.2: it is computed, since
+/// a `Where` may read its value, and checks nothing) and whether it is a
+/// trap seed ([`TrapSeeds::is_observable_root`], spec/06 section 5.2).
+///
+/// Under a per-row activation (a `vmap`ped `if`) a check of an operand's
+/// VALUES decides row by row, and a check of an EXTENT decides for every
+/// row at once, since the rows of one tensor share their extents: it runs
+/// when the activation holds in some row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCheck {
+    /// Checks nothing a well-typed operand can fail. Never a seed.
+    Nothing,
+    /// Checks its operands' element values: integer overflow, integer
+    /// division, a cast's range. Where the activation is false each operand
+    /// slot reads [`DagNode::inactive_operand`], a value no check rejects.
+    /// A seed.
+    OperandValues,
+    /// A float `Div`, which checks a lowered `mean`'s count for zero and is
+    /// gated like [`Self::OperandValues`]. Not a seed: the node alone does
+    /// not say it is a `mean`.
+    MeanDivisor,
+    /// Checks that its reduced axis is not empty. Where the activation is
+    /// false an empty axis reduces to zeros. A seed unless its operand's
+    /// reduced axis is a nonzero literal.
+    EmptyAxis,
+    /// Checks its runtime bounds (a `shrink` range, a `stride` step, a `pad`
+    /// width) against its operand's extents. Where the activation is false
+    /// it reads no bound and produces zeros of its declared type, each axis
+    /// it declares itself taking its operand's extent. A seed unless every
+    /// bound is statically in range ([`Dag::movement_bounds_may_fail`]).
+    MovementBounds,
+    /// Compares an extent a contract claims (a call's, a result's, a local
+    /// ascription's, a reshape target's). Where the activation is false it
+    /// compares nothing; its value is unchanged. A seed.
+    ExtentClaims,
+    /// A draw or key operation, gated by its owner's activation in its own
+    /// emitter (it draws or validates nothing where it is false) and
+    /// seeded by the per-guard rule ([`Dag::random_node_may_trap`]).
+    Random,
+    /// An authored abort ([05-OP-68]): gated like [`Self::OperandValues`],
+    /// its condition reading the value that does not fire. Always a seed.
+    Abort,
+    /// Can trap, and neither checks nothing under a false activation nor
+    /// is a seed (chelis#2440's remaining kinds).
+    Ungated,
+}
+
+/// The trap seed ([`Self::is_observable_root`]), the check-may-fail fact it
+/// and the activation gate share ([`Self::check_may_fail`]), and the gate
+/// itself ([`Self::is_activation_gated`]), over one graph
+/// ([`Dag::trap_seeds`]).
+///
+/// A literal result claim observed at a call's parameter witness makes that
+/// witness a check ([`Self::literal_result_witness_requirements`]), and
+/// which witness observes a claim is a whole-graph derivation. The queries
+/// therefore live on this value rather than on [`Dag`]: a pass takes one
+/// before it walks the nodes and the derivation runs at most once, where a
+/// per-node query on the graph repeated it for every witness, quadratic in
+/// the graph in dead-code elimination, the evaluator's seeds and the
+/// verifier.
+pub struct TrapSeeds<'dag> {
+    dag: &'dag Dag,
+    literal_result_witness_requirements:
+        std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
+    claim_sized_nodes: std::cell::OnceCell<Result<std::collections::BTreeSet<NodeId>, String>>,
+}
+
+impl TrapSeeds<'_> {
+    /// Whether `node` is an observable root (`spec/06-transformations.md`
+    /// §5.2): it must execute because of what it does, not because a value
+    /// reaches it. "Potentially effectful or trapping nodes are observable
+    /// roots; purity alone does not make a possible trap dead."
+    ///
+    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
+    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// trap by itself ([`Dag::random_node_may_trap`], chelis#2413). A
+    /// backward-synthesized adjoint is not a numeric member: its trap
+    /// obligation belongs to the forward node it was derived from, and it is
+    /// scaffolding for a gradient that may not be requested (seeding one
+    /// resurrects integer adjoint machinery that fails verification as
+    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
+    ///
+    /// This is the one seed predicate. The evaluator, dead-code elimination,
+    /// `grad`'s pruner, the verifier's dangling rule and the host transform
+    /// runner all read it; the evaluator and dead-code elimination then keep
+    /// only the seeds whose declaration the evaluation enters
+    /// ([`Dag::outside_selection`]), and a node whose activation is false
+    /// checks nothing when it runs.
+    pub fn is_observable_root(&self, node: &DagNode) -> bool {
+        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
+        match node.runtime_check() {
+            RuntimeCheck::Abort => true,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::EmptyAxis
+            | RuntimeCheck::MovementBounds
+            | RuntimeCheck::ExtentClaims => !synthesized_adjoint && self.check_may_fail(node),
+            RuntimeCheck::Random => self.check_may_fail(node),
+            RuntimeCheck::Nothing | RuntimeCheck::MeanDivisor | RuntimeCheck::Ungated => false,
+        }
+    }
+
+    /// Whether `node`'s run-time check ([`DagNode::runtime_check`]) can
+    /// fail for some input: its class checks something, and no static fact
+    /// rules the failure out. The facts are per class: a reduced axis of
+    /// nonzero literal extent is not empty
+    /// ([`Dag::reduced_axis_may_be_empty`]), movement bounds statically in
+    /// range are in range ([`Dag::movement_bounds_may_fail`]), and a random
+    /// node's literal in-range controls pass ([`Dag::random_node_may_trap`]).
+    /// The trap seed ([`Self::is_observable_root`]) and the activation gate
+    /// ([`Self::is_activation_gated`]) both read it.
+    pub fn check_may_fail(&self, node: &DagNode) -> bool {
+        match node.runtime_check() {
+            RuntimeCheck::Nothing => false,
+            RuntimeCheck::OperandValues
+            | RuntimeCheck::MeanDivisor
+            | RuntimeCheck::Abort
+            | RuntimeCheck::Ungated => true,
+            RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
+            RuntimeCheck::EmptyAxis => self.dag.reduced_axis_may_be_empty(node),
+            RuntimeCheck::MovementBounds => self.dag.movement_bounds_may_fail(node),
+            RuntimeCheck::Random => self.dag.random_node_may_trap(node),
+        }
+    }
+
+    /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
+    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
+    /// compares its axis against its literal requirements, its named claims
+    /// and the literal result claims observed at it
+    /// ([`Self::literal_result_witness_requirements`], the evaluator's and
+    /// the C lane's full list); a witness with none of the three only
+    /// reports the extent it reads, which no input can fail. Lowering places
+    /// such a witness at every call entry, so seeding it would keep a
+    /// parameter's `Load` that nothing else reads and make that parameter a
+    /// required input.
+    fn extent_claims_may_fail(&self, node: &DagNode) -> bool {
+        match &node.op {
+            RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            } => {
+                !requirements.is_empty()
+                    || !claims.is_empty()
+                    || !self.literal_result_witness_requirements(node.id).is_empty()
+            }
+            _ => true,
+        }
+    }
+
+    /// The literal result claims checked at `witness`
+    /// ([`crate::axis_sources::literal_result_witness_requirements`]), in
+    /// claim order. The whole graph's are derived on the first call and
+    /// shared by every later one.
+    pub fn literal_result_witness_requirements(
+        &self,
+        witness: NodeId,
+    ) -> &[chelis_types::ScalarValue] {
+        self.literal_result_witness_requirements
+            .get_or_init(|| crate::axis_sources::literal_result_witness_requirements(self.dag))
+            .get(&witness)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `node` checks nothing where its activation is false (spec/10
+    /// section 3.2): it has an activation, and either its declared extent
+    /// rests on a claim checked under it ([`Self::is_claim_sized`]), or its
+    /// check can fail
+    /// ([`Self::check_may_fail`]; a node whose check no input fails needs
+    /// no gate and computes as usual) and its class is one the lanes gate,
+    /// by one of the mechanisms [`RuntimeCheck`] names: every class but
+    /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
+    /// key-operation emitters read the owner's activation themselves, and
+    /// [`RuntimeCheck::Ungated`].
+    ///
+    /// The one gate declaration every lane reads: the evaluator and the C
+    /// emitter gate exactly these nodes, fusion keeps each in its own
+    /// kernel, and the HIP emitter refuses one whose kernel does not take
+    /// the gate.
+    pub fn is_activation_gated(&self, node: &DagNode) -> bool {
+        node.owner.activation.is_some()
+            && ((self.check_may_fail(node)
+                && match node.runtime_check() {
+                    RuntimeCheck::OperandValues
+                    | RuntimeCheck::MeanDivisor
+                    | RuntimeCheck::EmptyAxis
+                    | RuntimeCheck::MovementBounds
+                    | RuntimeCheck::ExtentClaims
+                    | RuntimeCheck::Abort => true,
+                    RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+                })
+                || self.is_claim_sized(node))
+    }
+
+    /// Whether `node`'s declared extent rests on a claim checked under its
+    /// activation ([`crate::axis_sources::claim_sized_nodes`]: a result
+    /// claim, a local ascription, an extent an operation computes or a
+    /// carrier sets, a restamp (chelis#2512), a unit claim, a
+    /// [`RiscOp::CheckedUnitAxis`]), whatever its operation's class. Where
+    /// its activation holds in no row the claim is not checked, so it checks
+    /// nothing and produces zeros of its declared type, each claimed axis
+    /// taking the claim's extent, as [`RuntimeCheck::MovementBounds`] does:
+    /// its operand's extent need not be the one it declares there, so it
+    /// reads no operand, and its operands' agreement, which only its reads
+    /// need, is not checked either. Where some row is active it computes as
+    /// usual.
+    ///
+    /// A whole-graph derivation, run on the first call and shared by every
+    /// later one; [`Self::is_activation_gated`] asks it only of a node with
+    /// an activation. A graph whose guard sites cannot be derived has every
+    /// such node gated: each lane refuses that graph when it derives the
+    /// sites itself, and until then gating keeps it out of fusion.
+    pub fn is_claim_sized(&self, node: &DagNode) -> bool {
+        match self
+            .claim_sized_nodes
+            .get_or_init(|| crate::axis_sources::claim_sized_nodes(self.dag))
+        {
+            Ok(nodes) => nodes.contains(&node.id),
+            Err(_) => true,
+        }
+    }
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -2039,6 +2575,8 @@ pub struct DagNode {
 pub struct Dag {
     nodes: Vec<DagNode>,
     roots: Vec<NodeId>,
+    /// The declarations this graph's nodes belong to ([`DagNode::decl`]).
+    declarations: Vec<Declaration>,
 }
 
 impl Dag {
@@ -2054,8 +2592,14 @@ impl Dag {
     /// Pass `None` for nodes synthesized by passes that don't have a
     /// natural source region in S2 — S3 will populate spans on those
     /// per pass-specific rules.
+    ///
+    /// `owner` is required for the same reason: every node belongs to a
+    /// declaration this graph registered ([`Self::declare`]) and runs under
+    /// an activation, an earlier node of this graph or none. A bare
+    /// [`DeclId`] is an unconditional owner.
     pub fn add_node(
         &mut self,
+        owner: impl Into<Owner>,
         op: RiscOp,
         inputs: Vec<NodeId>,
         output_type: TensorType,
@@ -2099,7 +2643,33 @@ impl Dag {
         } else {
             Vec::new()
         };
+        let owner = owner.into();
+        // One fact, one carrier (spec/10 section 3.2): a draw's or key
+        // operation's activation is its owner's and never an input, so a
+        // pass that still appends one is a defect caught here, at the site
+        // that built it.
+        if let Some(arity) = op.key_operand_arity() {
+            assert!(
+                inputs.len() == arity,
+                "a {op:?} node reads exactly {arity} inputs, not {}; its activation is its owner's",
+                inputs.len()
+            );
+        }
+        let decl = owner.decl;
+        assert!(
+            (decl.0 as usize) < self.declarations.len(),
+            "node declaration {decl:?} is not registered in this graph ({} declarations)",
+            self.declarations.len()
+        );
         let id = NodeId(self.nodes.len());
+        // The verifier also requires the activation to be a Bool; a graph
+        // lowered without type checking may hold another scalar there.
+        if let Some(activation) = owner.activation {
+            assert!(
+                activation.0 < id.0,
+                "node {id:?}'s activation {activation:?} is not an earlier node of this graph"
+            );
+        }
         self.nodes.push(DagNode {
             id,
             op,
@@ -2110,6 +2680,7 @@ impl Dag {
             merged_spans: Vec::new(),
             shape_deps: Vec::new(),
             result_claim_deps: Vec::new(),
+            owner,
         });
         for (target, source) in inferred_where_shape_deps {
             self.add_shape_dep(target, source);
@@ -2287,57 +2858,164 @@ impl Dag {
         &self.roots
     }
 
-    /// Draw keys of a `with seed` region lowered in this graph that are not
-    /// yet live although another draw key of the same region is
-    /// (`spec/design/randomness_counter_stream.md` §2). A region's draws take
-    /// consecutive ordinals of its own counter, so once the region executes
-    /// none of them may be skipped, unused results included. A liveness pass
-    /// over a graph holding several independently executed regions marks
-    /// these, propagates their inputs, and repeats until none remain.
-    pub fn unlive_scoped_draw_peers(&self, live: &[bool]) -> Vec<NodeId> {
-        let scoped = |node: &DagNode| match node.op {
-            RiscOp::DrawKey {
-                handler: RandomHandler::Scoped { instance },
-                ..
-            } => Some(instance),
-            _ => None,
-        };
-        let live_regions = self
-            .nodes
-            .iter()
-            .filter(|node| live[node.id.0])
-            .filter_map(scoped)
-            .collect::<std::collections::BTreeSet<_>>();
-        self.nodes
-            .iter()
-            .filter(|node| !live[node.id.0])
-            .filter(|node| scoped(node).is_some_and(|instance| live_regions.contains(&instance)))
-            .map(|node| node.id)
-            .collect()
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`TrapSeeds`]). A pass takes one and asks it about every node, so the
+    /// whole-graph facts they read are derived once per pass.
+    pub fn trap_seeds(&self) -> TrapSeeds<'_> {
+        TrapSeeds {
+            dag: self,
+            literal_result_witness_requirements: std::cell::OnceCell::new(),
+            claim_sized_nodes: std::cell::OnceCell::new(),
+        }
     }
 
-    /// chelis#2413: whether a random node can trap by itself, and so is an
-    /// observable root for dead-code elimination (`spec/06-transformations.md`
-    /// §5.2, "purity alone does not make a possible trap dead").
-    ///
-    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]) unless
-    /// its key is a `DrawKey`'s output: that `DrawKey` validates the same
-    /// controls first, and whether it runs is the counter stream's own
-    /// liveness rule, so the draw adds no trap of its own. A `SplitN` traps
-    /// on a negative runtime count ([05-OP-71]); a literal count cannot be
-    /// negative. The other key operations are total.
-    pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
-        let key_slot = match &node.op {
-            RiscOp::Dropout => 2,
-            RiscOp::UniformLike => 3,
-            RiscOp::SplitN { count } => return count.as_lit().is_none(),
-            _ => return false,
+    /// Whether the reduced axis of an [`RuntimeCheck::EmptyAxis`] node can
+    /// be empty at run time: anything but a nonzero literal extent.
+    fn reduced_axis_may_be_empty(&self, node: &DagNode) -> bool {
+        let axis = match &node.op {
+            RiscOp::MaxReduce { axis }
+            | RiscOp::MinReduce { axis }
+            | RiscOp::Argmax { axis }
+            | RiscOp::Argmin { axis } => *axis,
+            _ => return true,
         };
         !node
             .inputs
-            .get(key_slot)
-            .and_then(|key| self.get(*key))
-            .is_some_and(|key| matches!(key.op, RiscOp::DrawKey { .. }))
+            .first()
+            .and_then(|input| self.get(*input))
+            .and_then(|input| input.output_type.dims.get(axis))
+            .is_some_and(|dim| matches!(dim, DimInfo::Lit(extent) if *extent > 0))
+    }
+
+    /// Whether a [`RuntimeCheck::MovementBounds`] node's bounds can fail at
+    /// run time. A bound read at run time (a node, another tensor's axis, a
+    /// symbol) may; a literal bound is checked here against its operand's
+    /// axis, and exempt only where that axis is a literal extent too and the
+    /// bound is in range for every lane: a `shrink` range nonempty and
+    /// inside the axis (the evaluator rejects an empty one), a `stride` step
+    /// positive. A literal `pad` width cannot be negative.
+    pub fn movement_bounds_may_fail(&self, node: &DagNode) -> bool {
+        let Some(operand) = node.inputs.first().and_then(|input| self.get(*input)) else {
+            return true;
+        };
+        let extent = |axis: usize| match operand.output_type.dims.get(axis) {
+            Some(DimInfo::Lit(extent)) => Some(*extent),
+            _ => None,
+        };
+        match &node.op {
+            RiscOp::Shrink { bounds } => bounds.iter().enumerate().any(|(axis, (start, end))| {
+                let end = match end {
+                    RtDim::ToEnd => extent(axis),
+                    end => end.as_lit(),
+                };
+                !matches!(
+                    (start.as_lit(), end, extent(axis)),
+                    (Some(start), Some(end), Some(extent)) if start < end && end <= extent
+                )
+            }),
+            RiscOp::Stride { strides } => strides
+                .iter()
+                .any(|step| !step.as_lit().is_some_and(|step| step > 0)),
+            RiscOp::Pad { padding, .. } => padding
+                .iter()
+                .any(|(before, after)| before.as_lit().is_none() || after.as_lit().is_none()),
+            _ => true,
+        }
+    }
+
+    /// chelis#2413: whether a random node can trap by itself, the random
+    /// member of [`TrapSeeds::is_observable_root`].
+    ///
+    /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
+    /// and cannot trap only when every guard is statically satisfied:
+    /// [`Self::draw_controls_are_literal_and_in_range`] and
+    /// [`Self::draw_key_batch_is_literal`]. A `SplitN` traps on a negative
+    /// runtime count ([05-OP-71]); a literal count cannot be negative. The
+    /// other key operations are total.
+    pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
+        match &node.op {
+            RiscOp::Dropout | RiscOp::UniformLike => {
+                !(self.draw_controls_are_literal_and_in_range(node)
+                    && self.draw_key_batch_is_literal(node))
+            }
+            RiscOp::SplitN { count } => count.as_lit().is_none(),
+            _ => false,
+        }
+    }
+
+    /// Whether every control of the draw `node` (a dropout rate, a
+    /// `uniform_like` bound pair) is a `Const` its own atom accepts at the
+    /// draw's dtype: the same validation the draw performs before drawing,
+    /// applied to the literal. A runtime control, or a literal out of range,
+    /// may trap.
+    fn draw_controls_are_literal_and_in_range(&self, node: &DagNode) -> bool {
+        let literal = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .and_then(|input| match &input.op {
+                    RiscOp::Const { value } => Some(*value),
+                    _ => None,
+                })
+        };
+        let prim = node.output_type.precision;
+        match &node.op {
+            RiscOp::Dropout => literal(1).is_some_and(|rate| {
+                chelis_types::dtype_semantics::DropoutParameters::new(prim, rate).is_ok()
+            }),
+            RiscOp::UniformLike => literal(1).zip(literal(2)).is_some_and(|(low, high)| {
+                chelis_types::dtype_semantics::UniformLikeParameters::new(prim, low, high).is_ok()
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the draw `node`'s key batch statically indexes its operands:
+    /// a rank-0 key, or a key whose dims are all literal and equal to the
+    /// literal leading dims of its data, of every per-row operand (its
+    /// controls) and of its activation, the static form of the evaluator's
+    /// extent check. A symbolic extent on either side may disagree at run
+    /// time.
+    fn draw_key_batch_is_literal(&self, node: &DagNode) -> bool {
+        let Some(layout) = node.op.draw_batch_layout() else {
+            return false;
+        };
+        let dims_of = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .map(|input| input.output_type.dims.as_slice())
+        };
+        let Some(key) = dims_of(layout.key) else {
+            return false;
+        };
+        if key.is_empty() {
+            return true;
+        }
+        let literal_prefix = |dims: &[DimInfo], axes: usize| {
+            dims.len() >= axes
+                && dims[..axes].iter().zip(key).all(
+                    |(dim, key)| matches!((dim, key), (DimInfo::Lit(a), DimInfo::Lit(b)) if a == b),
+                )
+        };
+        let Some(data) = dims_of(layout.data_input) else {
+            return false;
+        };
+        let activation = node
+            .owner
+            .activation
+            .and_then(|activation| self.get(activation))
+            .map(|activation| activation.output_type.dims.as_slice());
+        literal_prefix(data, key.len())
+            && layout
+                .per_row
+                .iter()
+                .map(|slot| dims_of(*slot))
+                .chain(std::iter::once(activation))
+                .all(|dims| match dims {
+                    Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
+                    None => true,
+                })
     }
 
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
@@ -2346,6 +3024,116 @@ impl Dag {
 
     pub fn is_root(&self, id: NodeId) -> bool {
         self.roots.contains(&id)
+    }
+
+    /// The declarations this graph's nodes belong to.
+    pub fn declarations(&self) -> &[Declaration] {
+        &self.declarations
+    }
+
+    /// The declaration `decl` names.
+    pub fn declaration(&self, decl: DeclId) -> &Declaration {
+        &self.declarations[decl.0 as usize]
+    }
+
+    /// Register a function declaration named `name`: its standalone nodes run
+    /// only when a selected root belongs to it. A graph built outside program
+    /// lowering registers one of these for its nodes.
+    pub fn declare(&mut self, name: impl Into<String>) -> DeclId {
+        self.push_declaration(name.into(), false)
+    }
+
+    /// Register a value declaration named `name`: its own nodes run only
+    /// when a selected root belongs to it, and another declaration reads
+    /// them only when none of them can trap.
+    pub fn declare_value(&mut self, name: impl Into<String>) -> DeclId {
+        self.push_declaration(name.into(), true)
+    }
+
+    fn push_declaration(&mut self, name: String, value: bool) -> DeclId {
+        let id = u32::try_from(self.declarations.len())
+            .expect("a graph has fewer than 2^32 declarations");
+        self.declarations.push(Declaration { name, value });
+        DeclId(id)
+    }
+
+    /// Take `source`'s declarations, for a pass that rebuilds `source` node
+    /// by node and supplies each node's `decl`. Call it before the first
+    /// node is added.
+    pub fn inherit_declarations(&mut self, source: &Dag) {
+        debug_assert!(
+            self.nodes.is_empty(),
+            "a rebuild inherits its source's declarations before adding nodes"
+        );
+        self.declarations.clone_from(&source.declarations);
+    }
+
+    /// A diagnostic name for `id`: its declaration, and for a `Load` the
+    /// parameter it reads, as "parameter `x` of `f`"; otherwise "node N of
+    /// `f`". An unnamed declaration is "the top-level expression".
+    pub fn describe_node(&self, id: NodeId) -> String {
+        let Some(node) = self.get(id) else {
+            return format!("node {}", id.0);
+        };
+        let owner = self.describe_declaration(node.owner.decl);
+        match &node.op {
+            RiscOp::Load { name } => format!("parameter `{}` of {owner}", name.as_str()),
+            _ => format!("node {} of {owner}", id.0),
+        }
+    }
+
+    /// A diagnostic name for `decl`: "`f`", or "the top-level expression"
+    /// for an unnamed one.
+    pub fn describe_declaration(&self, decl: DeclId) -> String {
+        match self.declarations.get(decl.0 as usize) {
+            Some(declaration) if !declaration.name.is_empty() => {
+                format!("`{}`", declaration.name)
+            }
+            Some(_) => "the top-level expression".to_owned(),
+            None => format!("unregistered declaration {}", decl.0),
+        }
+    }
+
+    /// The declarations an activation of the `selected` roots enters, as a
+    /// mask over [`Self::declarations`]: each selected root's declaration.
+    /// Another declaration's work runs only inlined into an entered one's
+    /// own nodes ([`Declaration`]): a call runs the function's body in the
+    /// caller, and a reference to a value whose initializer may trap runs
+    /// that initializer where the reference is.
+    pub fn entered_declarations(&self, selected: &[NodeId]) -> Vec<bool> {
+        let mut entered = vec![false; self.declarations.len()];
+        for root in selected {
+            entered[self.nodes[root.0].owner.decl.0 as usize] = true;
+        }
+        entered
+    }
+
+    /// The nodes whose seeds (an abort, or a random node that can trap by
+    /// itself) an evaluation of the `selected` roots does not run
+    /// (chelis#2476, `spec/06-transformations.md` §5.2).
+    ///
+    /// Selecting roots is a scoping decision, not merely a request for
+    /// certain outputs: a lowered program holds every declaration's
+    /// activation, called or not, and a seed marks nodes the selected roots
+    /// do not reach, which is the whole point of a seed. So a seed runs only
+    /// when its node belongs to a declaration the selection enters
+    /// ([`Self::entered_declarations`]), whether it sits in a root's value
+    /// graph, in a discarded value's terminal, or in a library declaration's
+    /// own body. With nothing selected nothing is out of scope. Reachability
+    /// from the selection makes a node live whatever this says, so scoping
+    /// only ever drops work no selected root needs.
+    ///
+    /// The evaluator's seeds and dead-code elimination's seeds both read
+    /// this one predicate.
+    pub fn outside_selection(&self, selected: &[NodeId]) -> Vec<bool> {
+        if selected.is_empty() {
+            return vec![false; self.len()];
+        }
+        let entered = self.entered_declarations(selected);
+        self.nodes
+            .iter()
+            .map(|node| !entered[node.owner.decl.0 as usize])
+            .collect()
     }
 
     /// Return nodes in topological order (they already are, since we only append).
@@ -2511,21 +3299,17 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 
 /// chelis#616: add a shape-dep from every node that references an
 /// op-declared runtime dim (in its output dims or op-internal fields) to the
-/// dim's declaring node. DCE and grad's output pruning honor `shape_deps`,
-/// so this keeps the declarer — and, transitively, its bound-scalar chain —
+/// dim's declaring node, when the declarer is earlier: a dependency names an
+/// earlier node, and a node before the declarer that names the dim has it
+/// from elsewhere (a parameter's shape). The declarer may be a key split: the
+/// edge reads its extent, which is not key material ([04-LIN-9]). DCE and
+/// grad's output pruning honor `shape_deps`, so this keeps the declarer — and, transitively, its bound-scalar chain —
 /// alive for consumers that need the extent at run time even when the
 /// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
 /// extent whose forward result the gradient never reads).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
-        // chelis#2413: a runtime-count `SplitN` declares its count axis, but
-        // its value is a key, which no node may take as a dependency (spec/10
-        // §3.2). It needs no edge: a runtime count can trap, so every pruner
-        // keeps the split live by itself (`Dag::random_node_may_trap`).
-        if node.output_type.precision == Prim::Key {
-            continue;
-        }
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
         }
@@ -2547,7 +3331,7 @@ pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
         names.extend(op_internal_symbolic_dims(&node.op));
         for name in names {
             if let Some(declarer) = declarers.get(&name)
-                && *declarer != node.id
+                && *declarer < node.id
             {
                 deps.push((node.id, *declarer));
             }
@@ -2674,7 +3458,8 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::CastTrunc { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
-        | RiscOp::FoldIn => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         // [05-OP-71]: the key's axes pass through; the appended count axis
         // comes from the count, not from the key.
         RiscOp::SplitN { .. } => {
@@ -2918,10 +3703,13 @@ pub fn bind_symbolic_dims(
         }
     };
     let mut rebound = Dag::new();
+    rebound.inherit_declarations(dag);
     for node in dag.nodes() {
         let (output_type, op) =
             map_node_symbolic_bindings(node, &mut resolve, &mut |message| Err(message.to_owned()))?;
+        // Binding keeps every node id, so the owner's activation stands.
         let new_id = rebound.add_node(
+            node.owner,
             op.unwrap_or_else(|| node.op.clone()),
             node.inputs.clone(),
             output_type,
@@ -3102,6 +3890,185 @@ mod tests {
         TensorType::scalar_f32()
     }
 
+    /// chelis#2413: a draw cannot trap only when every guard is statically
+    /// satisfied ([`Dag::random_node_may_trap`]): its controls are literals
+    /// in range at its dtype, and its key is rank 0 or its literal dims equal
+    /// its data's literal leading dims. One negative per guard.
+    mod draw_trap_guards {
+        use super::*;
+        use chelis_types::types::Prim;
+
+        fn ty(dims: &[DimInfo], precision: Prim) -> TensorType {
+            TensorType {
+                dims: dims.to_vec(),
+                precision,
+            }
+        }
+
+        fn lit(dims: &[usize]) -> Vec<DimInfo> {
+            dims.iter().copied().map(DimInfo::Lit).collect()
+        }
+
+        /// A key of `key_dims` (`None` for `key_from_seed(7)`), data of
+        /// `data_dims`, and the draw `op` over them with `controls`, each a
+        /// literal or, for `None`, a runtime `Load`.
+        fn draw(
+            op: RiscOp,
+            controls: &[Option<f64>],
+            key_dims: Option<Vec<DimInfo>>,
+            data_dims: Vec<DimInfo>,
+        ) -> (Dag, NodeId) {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let data = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&data_dims, Prim::F32),
+                None,
+            );
+            let mut inputs = vec![data];
+            for (slot, control) in controls.iter().enumerate() {
+                let op = match control {
+                    Some(value) => RiscOp::synth_const(Prim::F32, *value),
+                    None => RiscOp::Load {
+                        name: format!("control{slot}").as_str().into(),
+                    },
+                };
+                inputs.push(dag.add_node(decl, op, vec![], scalar_f32(), None));
+            }
+            let key = match key_dims {
+                None => {
+                    let seed = dag.add_node(
+                        decl,
+                        RiscOp::Const {
+                            value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                        },
+                        vec![],
+                        ty(&[], Prim::Int64),
+                        None,
+                    );
+                    dag.add_node(
+                        decl,
+                        RiscOp::KeyFromSeed,
+                        vec![seed],
+                        ty(&[], Prim::Key),
+                        None,
+                    )
+                }
+                Some(dims) => dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "k".into() },
+                    vec![],
+                    ty(&dims, Prim::Key),
+                    None,
+                ),
+            };
+            inputs.push(key);
+            let drawn = dag.add_node(decl, op, inputs, ty(&data_dims, Prim::F32), None);
+            (dag, drawn)
+        }
+
+        fn may_trap((dag, drawn): &(Dag, NodeId)) -> bool {
+            dag.random_node_may_trap(dag.get(*drawn).unwrap())
+        }
+
+        /// Evidentiary status: REGRESSION TEST. At 727e74b41 every draw was
+        /// a seed, so a discarded draw with an in-range literal rate kept its
+        /// data live (`dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root`).
+        #[test]
+        fn a_draw_whose_guards_all_hold_statically_cannot_trap() {
+            for graph in [
+                draw(RiscOp::Dropout, &[Some(0.0)], None, lit(&[4])),
+                draw(RiscOp::Dropout, &[Some(0.5)], Some(lit(&[2])), lit(&[2, 4])),
+                draw(
+                    RiscOp::UniformLike,
+                    &[Some(-1.0), Some(1.0)],
+                    None,
+                    lit(&[4]),
+                ),
+            ] {
+                assert!(!may_trap(&graph));
+                // Dead, it is eliminated with its data.
+                let (mut dag, _) = graph;
+                let root = dag.add_node(
+                    DeclId(0),
+                    RiscOp::synth_const(Prim::F32, 1.0),
+                    vec![],
+                    scalar_f32(),
+                    None,
+                );
+                dag.add_root(root);
+                let pruned = crate::optimize::dead_code_eliminate(&dag);
+                assert_eq!(pruned.len(), 1, "{:?}", pruned.nodes());
+            }
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn an_out_of_range_literal_control_may_trap() {
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(1.0)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(-0.5)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(1.0), Some(-1.0)],
+                None,
+                lit(&[4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_symbolic_key_extent_against_a_literal_one_may_trap() {
+            let symbolic = vec![DimInfo::Named("n".into(), None)];
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(symbolic.clone()),
+                lit(&[2, 4])
+            )));
+            let mut data = symbolic;
+            data.push(DimInfo::Lit(4));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[2])),
+                data
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[3])),
+                lit(&[2, 4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_runtime_control_may_trap() {
+            assert!(may_trap(&draw(RiscOp::Dropout, &[None], None, lit(&[4]))));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(0.0), None],
+                None,
+                lit(&[4])
+            )));
+        }
+    }
+
     #[test]
     fn empty_dag() {
         let dag = Dag::new();
@@ -3113,7 +4080,9 @@ mod tests {
     #[test]
     fn add_const_node() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 42.0),
             vec![],
             scalar_f32(),
@@ -3129,19 +4098,22 @@ mod tests {
     #[test]
     fn add_binary_op() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
@@ -3150,17 +4122,21 @@ mod tests {
     #[test]
     fn strict_shape_dependency_remap_rejects_missing_correspondence() {
         let mut source = Dag::new();
+        let source_decl = source.declare("test");
         let dep = source.add_node(
+            source_decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let owner = source.add_node(RiscOp::Neg, vec![dep], scalar_f32(), None);
+        let owner = source.add_node(source_decl, RiscOp::Neg, vec![dep], scalar_f32(), None);
         source.add_shape_dep(owner, dep);
 
         let mut rebuilt = Dag::new();
+        let rebuilt_decl = rebuilt.declare("test");
         let rebuilt_owner = rebuilt.add_node(
+            rebuilt_decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             scalar_f32(),
@@ -3183,13 +4159,15 @@ mod tests {
     #[test]
     fn topological_order() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let b = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        let b = dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
         let order = dag.topological_order();
         assert_eq!(order, vec![a, b]);
     }
@@ -3203,7 +4181,9 @@ mod tests {
     #[test]
     fn roots_can_be_registered() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -3233,8 +4213,9 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty_x, None);
-        dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
+        let decl = dag.declare("test");
+        dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty_x, None);
+        dag.add_node(decl, RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
 
         assert_eq!(symbolic_params(&dag), vec!["batch"]);
 
@@ -3268,13 +4249,16 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(4)]),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(2)]),
@@ -3294,7 +4278,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_rewrites_output_types_and_preserves_input_axis_sizes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3304,6 +4290,7 @@ mod tests {
             None,
         );
         let h = dag.add_node(
+            decl,
             RiscOp::Load { name: "h".into() },
             vec![],
             TensorType {
@@ -3313,6 +4300,7 @@ mod tests {
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 1,
                 size: RtDim::InputAxis {
@@ -3369,7 +4357,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_resolves_shrink_to_end_sentinel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -3382,6 +4372,7 @@ mod tests {
         // left axis 1 (`m`, symbolic) unpadded: `(1, 2)` on axis 0 (concrete),
         // `(0, SHRINK_TO_END)` full-axis identity on axis 1.
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![
                     (RtDim::Lit(1), RtDim::Lit(2)),
@@ -3424,7 +4415,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_rejects_unbound_shrink_to_end() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -3434,6 +4427,7 @@ mod tests {
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
@@ -3470,13 +4464,16 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("seq".into(), None)]),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![
@@ -3486,12 +4483,14 @@ mod tests {
             None,
         );
         let from_x = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![x],
             ty(vec![DimInfo::Named("seq".into(), None)]),
             None,
         );
         let from_y = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![y],
             ty(vec![
@@ -3525,7 +4524,9 @@ mod tests {
     #[test]
     fn a_deliberately_unbound_name_is_tolerated_in_a_type() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3548,7 +4549,9 @@ mod tests {
         // The tolerance stops at a by-value read: a `Reshape` target that
         // SPELLS the name needs a number and there is none to give it.
         let mut reading = Dag::new();
+        let reading_decl = reading.declare("test");
         let y = reading.add_node(
+            reading_decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             TensorType {
@@ -3558,6 +4561,7 @@ mod tests {
             None,
         );
         let reshaped = reading.add_node(
+            reading_decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Sym("seq".into())],
             },
@@ -3592,7 +4596,9 @@ mod tests {
     #[test]
     fn verifier_rejects_expand_size_sym_without_consulting_the_symbol_walk() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3602,6 +4608,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 1,
                 size: RtDim::Sym("d7".into()),
@@ -3664,11 +4671,6 @@ mod tests {
             RiscOp::UniformBoundAdjoint {
                 bound: UniformBound::High,
             },
-            RiscOp::DrawKey {
-                handler: RandomHandler::Inherited,
-                draw: RandomDraw::Dropout,
-                dtype: Prim::F32,
-            },
             RiscOp::KeyFromSeed,
             RiscOp::Split {
                 branch: KeyBranch::Left,
@@ -3677,6 +4679,7 @@ mod tests {
             RiscOp::SplitN {
                 count: RtDim::Lit(3),
             },
+            RiscOp::KeySelect,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3747,6 +4750,199 @@ mod tests {
         ]
     }
 
+    /// chelis#2413: the verifier's key rule V4 reads the key allow-list
+    /// (`chelis_types::key_admission`). Every graph operation admits a key at
+    /// exactly the input slots of its role's admission, and the admissions
+    /// graph operations reach are exactly the list's graph admissions, the
+    /// same list the linearity checker reads.
+    ///
+    /// Each slot's admission is its read's ([`crate::verify::slot_read`]): an
+    /// extent slot is an extent observation whatever the operation.
+    ///
+    /// Evidentiary status: REGRESSION TEST for `Drop`: at `f4eeca363` a key
+    /// reaching a `Drop` broke V4, so `def f(k: key) = drop(k)` checked and
+    /// then failed the evaluator's key rules. A lock for every other op.
+    #[test]
+    fn every_risc_op_admits_a_key_exactly_where_the_allow_list_does() {
+        use crate::verify::{KeyGraph, verify_key_rules};
+        use chelis_types::key_admission::KeyAdmission;
+        use std::collections::BTreeSet;
+        let ty = |precision| TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision,
+        };
+        // An operation with no fixed key arity reads up to four inputs here.
+        const DATA_SLOTS: usize = 4;
+        let mut reached = BTreeSet::new();
+        let mut failures = Vec::new();
+        for op in one_of_every_risc_op() {
+            let arity = op.key_operand_arity().unwrap_or(DATA_SLOTS);
+            for slot in 0..arity {
+                let mut dag = Dag::new();
+                let decl = dag.declare("f");
+                let load = |dag: &mut Dag, name: &str, precision| {
+                    dag.add_node(
+                        decl,
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        ty(precision),
+                        None,
+                    )
+                };
+                let key = load(&mut dag, "k", Prim::Key);
+                let mut inputs: Vec<NodeId> = ["x0", "x1", "x2", "x3"][..arity]
+                    .iter()
+                    .map(|name| load(&mut dag, name, Prim::F32))
+                    .collect();
+                inputs[slot] = key;
+                let node = dag.add_node(decl, op.clone(), inputs, ty(Prim::F32), None);
+                dag.add_root(node);
+                let role = KeyGraph::role(&dag, node.0);
+                let mut errors = Vec::new();
+                verify_key_rules(&dag, &mut errors);
+                let refused = errors
+                    .iter()
+                    .any(|error| error.contains(&format!("reaches input {slot} of")));
+                let admission = KeyGraph::slot_read(&dag, node.0, slot).admission(role, slot);
+                if refused == admission.is_some() {
+                    failures.push(format!("{op:?} slot {slot}: {admission:?}, {errors:?}"));
+                }
+                reached.extend(admission);
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        let listed: BTreeSet<KeyAdmission> = KeyAdmission::ALL
+            .into_iter()
+            .filter(|admission| admission.in_graph())
+            .collect();
+        assert_eq!(reached, listed);
+    }
+
+    /// `op` with every runtime bound read from input 1's axis 0, the form in
+    /// which each bound is an extent slot; `None` for an operation without
+    /// bounds.
+    fn with_extent_bounds(op: &RiscOp) -> Option<RiscOp> {
+        let read = || RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        };
+        Some(match op {
+            RiscOp::Expand { axis, .. } => RiscOp::Expand {
+                axis: *axis,
+                size: read(),
+            },
+            RiscOp::Reshape { new_shape } => RiscOp::Reshape {
+                new_shape: new_shape.iter().map(|_| read()).collect(),
+            },
+            RiscOp::Pad { padding, fill } => RiscOp::Pad {
+                padding: padding.iter().map(|_| (read(), read())).collect(),
+                fill: *fill,
+            },
+            RiscOp::Shrink { bounds } => RiscOp::Shrink {
+                bounds: bounds.iter().map(|_| (read(), read())).collect(),
+            },
+            RiscOp::Stride { strides } => RiscOp::Stride {
+                strides: strides.iter().map(|_| read()).collect(),
+            },
+            RiscOp::SplitN { .. } => RiscOp::SplitN { count: read() },
+            _ => return None,
+        })
+    }
+
+    /// chelis#2413 (spec/10 §3.2, [04-LIN-9]): a key tensor's extent is not
+    /// key material. Every extent slot the table declares
+    /// ([`crate::verify::slot_read`]), found by sweeping every operation and
+    /// its bound-reading form rather than listed here, observes a key
+    /// without using it: the key's one `Drop` is still its one use, and a
+    /// second `Drop` is still refused. Every kind of extent slot is reached.
+    ///
+    /// Evidentiary status: REGRESSION TEST for the bound slots. At
+    /// `83f9781fe` a key at an `InputAxis` bound (`expand(s, 0i32, shape(ks,
+    /// 0i32))` folds to one) was refused ("reaches input 1").
+    #[test]
+    fn every_extent_slot_observes_a_key_without_using_it() {
+        use crate::verify::{ExtentSlot, SlotRead, slot_read, verify_key_rules};
+        use std::collections::BTreeSet;
+        let ty = |precision| TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision,
+        };
+        let witness = RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "ks".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        };
+        let ops = one_of_every_risc_op()
+            .iter()
+            .flat_map(|op| [Some(op.clone()), with_extent_bounds(op)])
+            .flatten()
+            .chain([witness])
+            .collect::<Vec<_>>();
+        let mut reached = BTreeSet::new();
+        let mut failures = Vec::new();
+        for op in &ops {
+            for slot in 0..4 {
+                let SlotRead::Extent(kind) = slot_read(op, slot) else {
+                    continue;
+                };
+                reached.insert(kind);
+                for drops in [1, 2] {
+                    let mut dag = Dag::new();
+                    let decl = dag.declare("f");
+                    let key = dag.add_node(
+                        decl,
+                        RiscOp::Load { name: "ks".into() },
+                        vec![],
+                        ty(Prim::Key),
+                        None,
+                    );
+                    let mut inputs = (0..=slot)
+                        .map(|input| {
+                            dag.add_node(
+                                decl,
+                                RiscOp::Load {
+                                    name: format!("x{input}").as_str().into(),
+                                },
+                                vec![],
+                                ty(Prim::F32),
+                                None,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    inputs[slot] = key;
+                    // A split produces keys whatever its count reads.
+                    let produces = match op {
+                        RiscOp::SplitN { .. } => Prim::Key,
+                        _ => Prim::F32,
+                    };
+                    let node = dag.add_node(decl, op.clone(), inputs, ty(produces), None);
+                    dag.add_root(node);
+                    for _ in 0..drops {
+                        dag.add_node(decl, RiscOp::Drop, vec![key], ty(Prim::Key), None);
+                    }
+                    let mut errors = Vec::new();
+                    verify_key_rules(&dag, &mut errors);
+                    let verdict = match drops {
+                        1 => errors.is_empty(),
+                        _ => {
+                            errors.len() == 1
+                                && errors[0].starts_with("key `ks` of `f` is consumed twice")
+                        }
+                    };
+                    if !verdict {
+                        failures.push(format!(
+                            "{op:?} slot {slot} ({kind:?}), {drops} drops: {errors:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        assert_eq!(reached, BTreeSet::from(ExtentSlot::ALL));
+    }
+
     /// Exhaustiveness guard for the WI-2 verifier/Beacon op subset: every
     /// `RiscOp` variant must be classified, and the in/out partition must
     /// match the documented `beacon_plan.md` §3.1 corpus. A future new op
@@ -3773,7 +4969,7 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (the two
-        // key-operand draws, their two AD replays and the draw key: 5),
+        // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
         // (1), sparse gather/scatter (4, including element-wise
@@ -3785,8 +4981,9 @@ mod tests {
         // output envelope, and relaxing it to its fallback's envelope would
         // drop the trap. The chelis#2413 key-operand IR replaces the two
         // baked draws with the two key-operand draws and adds their two
-        // AD replays and the draw key (+3 = 28). The four explicit key
-        // derivations produce opaque keys, not numeric envelopes (+4 = 32).
+        // AD replays (+2 = 27). The four explicit key derivations produce
+        // opaque keys, not numeric envelopes (+4 = 31), and so does a
+        // branch's key join (+1 = 32).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
@@ -3901,7 +5098,7 @@ mod tests {
                     | RiscOp::Drop
                     | RiscOp::Realize
                     | RiscOp::FusedElem { .. }
-                    | RiscOp::DrawKey { .. }
+                    | RiscOp::KeySelect
             );
             assert_eq!(
                 matches!(op.atom_disposition(), RiscAtomDisposition::Structural),

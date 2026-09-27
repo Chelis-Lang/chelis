@@ -59,19 +59,23 @@ fn t3(prim: Prim, a: usize, b: usize, c: usize) -> TensorType {
 /// host-lowering passes hand to the summarizers.
 fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(prim, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(prim, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -81,6 +85,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -89,8 +94,9 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         t3(prim, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -206,20 +212,23 @@ fn f32_matmul_helper_specializer_still_hits_blas_path() {
 #[test]
 fn non_matmul_shape_helper_silently_misses_blas_summary() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 4, 4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 4, 4),
         None,
     );
     // Root is Add — not matmul-shaped.
-    let add = dag.add_node(RiscOp::Add, vec![a, b], mat(Prim::F32, 4, 4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![a, b], mat(Prim::F32, 4, 4), None);
     dag.add_root(add);
 
     let inputs = vec![
@@ -265,7 +274,9 @@ fn non_matmul_shape_helper_silently_misses_blas_summary() {
 #[test]
 fn const_operand_helper_silently_misses_blas_summary() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
@@ -273,12 +284,14 @@ fn const_operand_helper_silently_misses_blas_summary() {
     );
     // Inline constant as the rhs (16x4).
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(Prim::F32, 16, 4).precision, 2.0),
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -288,6 +301,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -296,8 +310,15 @@ fn const_operand_helper_silently_misses_blas_summary() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,

@@ -35,13 +35,15 @@ fn scalar_at(precision: Prim) -> TensorType {
 /// with the rest of the operand-precision contract.
 fn build_bf16_program() -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_at(Prim::Bf16, 4),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![x, x], vec_at(Prim::Bf16, 4), None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], vec_at(Prim::Bf16, 4), None);
     let sum_op = RiscOp::sum_default(0, Prim::Bf16)
         .expect("bf16 reduce_sum constructs (default accumulator = f32)");
     // Reduction output dtype = accumulator dtype per spec §5.7.1; for
@@ -49,8 +51,9 @@ fn build_bf16_program() -> (Dag, NodeId, NodeId) {
     // output is f32. We then downcast back to bf16 for the loss
     // scalar so the AD entry-point sees a bf16 scalar (matching the
     // "scalar bf16 loss" wording in the WS-A3 brief).
-    let summed = dag.add_node(sum_op, vec![sq], scalar_at(Prim::F32), None);
+    let summed = dag.add_node(decl, sum_op, vec![sq], scalar_at(Prim::F32), None);
     let loss = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Bf16,
         },
@@ -97,17 +100,20 @@ fn bf16_grad_returns_bf16_adjoint_tensor() {
 #[test]
 fn f16_grad_returns_f16_adjoint_tensor() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_at(Prim::F16, 3),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![x, x], vec_at(Prim::F16, 3), None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], vec_at(Prim::F16, 3), None);
     let sum_op = RiscOp::sum_default(0, Prim::F16)
         .expect("f16 reduce_sum constructs (default accumulator = f32)");
-    let summed = dag.add_node(sum_op, vec![sq], scalar_at(Prim::F32), None);
+    let summed = dag.add_node(decl, sum_op, vec![sq], scalar_at(Prim::F32), None);
     let loss = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F16,
         },

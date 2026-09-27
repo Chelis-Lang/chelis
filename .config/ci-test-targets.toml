@@ -440,6 +440,28 @@ name = "issue_1922_helper_summary_diagnostic_cli"
 package = "chelis-ir"
 name = "issue_1906_concat_admission"
 
+# chelis#2491: the DAG evaluator admits every extent-sized result before
+# allocating it, trapping where the compiled lane traps instead of panicking.
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_2491_eval_extent_admission"
+
+# chelis#2413 / chelis#2440: a local tensor ascription checks only under its
+# carrier's owner activation (grad/vmap bodies in arms, per-row vmap arms).
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "local_ascription_activation"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2563_local_ascription_eval_file"
+
+# chelis#2413: at a runtime `if` join every lane returns the taken arm or its
+# claim's typed trap, over the generated claimed-join matrix.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2413_claimed_join_lanes"
+
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1906_annotated_softmax"
@@ -471,10 +493,6 @@ name = "issue_687_rejected_cells_corpus"
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "invocation_local_random"
-
-[[standing_target]]
-package = "chelis-compiler-api"
-name = "fixed_control_c"
 
 [[standing_target]]
 package = "chelis-compiler-api"
@@ -572,10 +590,6 @@ package = "chelis-compiler-api"
 name = "fragment_parity"
 
 [[standing_target]]
-package = "chelis-ir"
-name = "dropout_fixed_stream_ir"
-
-[[standing_target]]
 package = "chelis-compiler-api"
 name = "dropout_fixed_stream_api"
 
@@ -660,6 +674,10 @@ name = "hip_count_codegen"
 [[standing_target]]
 package = "chelis-backend-hip"
 name = "logical_comparison_where"
+
+[[standing_target]]
+package = "chelis-backend-hip"
+name = "hip_activation_gate"
 
 [[standing_target]]
 package = "chelis-backend-metal"
@@ -921,6 +939,20 @@ cadence = "manual-required on the exact reviewed candidate"
 reason = "the runtime-representation hardware manifest registers the exact real-HIP command"
 tracking_issue = "chelis#1284"
 
+# This target requires an Apple Silicon Metal device, and every test in it is
+# ignored. The same hardware manifest registers its exact manual command (lane
+# `metal`, docs/manual_gates.md Phase M row), so Ubuntu change-owned and
+# package expansion workers preserve that manual gate rather than attempting
+# the ignored hardware suite.
+[[target_exclusion]]
+package = "chelis-backend-metal"
+name = "gpu_correctness"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "manual-required on the exact reviewed candidate"
+reason = "the runtime-representation hardware manifest registers the exact Metal command"
+tracking_issue = "chelis#893"
+
 # The default nextest profile excludes these complete targets. The current
 # unfiltered four-shard Linux workspace job is their exact alternative owner.
 [[target_exclusion]]
@@ -1173,6 +1205,42 @@ prefix = "examples/dropout_staged_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# chelis#2413 explicit-key examples. Each is exercised by
+# chelis-cli::parity (its per-file lane test), by
+# chelis-e2e::spec_all_executable_examples_parse_and_check and
+# example_corpus_validate, by chelis-surf's fmt_idempotent_on_repo_ch_corpus
+# (which failed on their retired `with seed` form), and additionally:
+# dropout_entry.ch by cli.rs's fixed-control C-entry test,
+# dropout_fixed_stream.ch by dropout_fixed_stream_cli, and
+# dropout_static_rate.ch by cli.rs and
+# chelis-compiler-api::dropout_fixed_stream_api.
+[[path_rule]]
+prefix = "examples/dropout_entry.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_fixed_stream.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_static_rate.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/signed_seed.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# Illustrative source read by chelis-e2e::example_corpus_validate and
+# chelis-surf's fmt_idempotent_on_repo_ch_corpus.
+[[path_rule]]
+prefix = "examples/illustrative/effects_handlers.ch"
+disposition = "packages"
+packages = ["chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/illustrative/mlp.ch"
 disposition = "packages"
@@ -1397,6 +1465,24 @@ workflow = "conformance.yml"
 job = "conformance"
 cadence = "pull_request and push"
 reason = "the required Hull gate executes every frozen program against the candidate compiler"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull gate runs this runner against the candidate compiler, and its unit tests run in the same job"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/test_run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job's conformance unit-test step executes this module"
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
@@ -2865,6 +2951,15 @@ reason = "Clippy policy is executed directly by the standing Rust policy job"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core dependency guard against the workspace's resolved cargo graph"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
@@ -3154,6 +3249,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle source contracts and runner legs execute in the script unit suite"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1313"
 
 [[path_rule]]
 prefix = "scripts/dtype_exact_reductions_oracle.py"

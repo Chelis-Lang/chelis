@@ -890,11 +890,13 @@ mod tests {
     #[test]
     fn exact_source_identity_ignores_same_spelled_dimension_names() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -903,6 +905,7 @@ mod tests {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -925,7 +928,9 @@ mod tests {
     fn exact_source_identity_is_scoped_to_one_verified_program() {
         fn one_load(name: &str) -> (crate::ownership::VerifiedDagProgram, NodeId) {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let load = dag.add_node(
+                decl,
                 RiscOp::Load { name: name.into() },
                 vec![],
                 TensorType {
@@ -952,11 +957,13 @@ mod tests {
     #[test]
     fn pass_through_axis_retains_the_exact_source_identity() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let input = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "input".into(),
             },
@@ -964,7 +971,7 @@ mod tests {
             ty.clone(),
             None,
         );
-        let relu = dag.add_node(RiscOp::Relu, vec![input], ty, None);
+        let relu = dag.add_node(decl, RiscOp::Relu, vec![input], ty, None);
 
         let dag = verified(dag);
         let input = capacity_key_for_node(dag.emission(), input)
@@ -979,17 +986,19 @@ mod tests {
     #[test]
     fn class_supplied_extent_retains_its_origin_through_pass_through() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let supplied = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty.clone(),
             None,
         );
-        let relu = dag.add_node(RiscOp::Relu, vec![supplied], ty, None);
+        let relu = dag.add_node(decl, RiscOp::Relu, vec![supplied], ty, None);
 
         let dag = verified(dag);
         let supplied = capacity_key_for_node(dag.emission(), supplied)
@@ -1004,17 +1013,19 @@ mod tests {
     #[test]
     fn same_spelled_class_supplied_extents_do_not_bypass_source_identity() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let left = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty.clone(),
             None,
         );
-        let right = dag.add_node(RiscOp::synth_const(Prim::F32, 1.0), vec![], ty, None);
+        let right = dag.add_node(decl, RiscOp::synth_const(Prim::F32, 1.0), vec![], ty, None);
 
         let dag = verified(dag);
         let left = capacity_key_for_node(dag.emission(), left)

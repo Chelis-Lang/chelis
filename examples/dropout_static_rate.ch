@@ -1,14 +1,16 @@
-def draw(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = {
-  keep = fn (v: tensor[4, f32], rate: f32) -> dropout(v, rate)
+def draw(k: key, x: tensor[4, f32]) -> tensor[4, f32] = {
+  keep = fn (j: key, v: tensor[4, f32], rate: f32) -> dropout(j, v, rate)
   rate = 0.5f32
-  keep(x, rate)
+  keep(k, x, rate)
 }
-def loss(x: tensor[4, f32]) -> tensor[f32] ! { Random } = sum(draw(x), 0i32)
-def generic_keep[p: Float](x: tensor[4, p]) -> tensor[4, p] ! { Random } = dropout(x, cast(0.5, p))
-result = with seed(42i64) {
+def loss(k: key, x: tensor[4, f32]) -> tensor[f32] = sum(draw(k, x), 0i32)
+def generic_keep[p: Float](k: key, x: tensor[4, p]) -> tensor[4, p] = dropout(k, x, cast(0.5, p))
+result = {
+  (k1, rest) = split_key(key_from_seed(42i64))
+  (k2, k3) = split_key(rest)
   x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])
-  forward = draw(copy(x))
-  backward = grad(loss)(copy(x))
-  following = generic_keep(x)
+  forward = draw(k1, copy(x))
+  backward = grad(loss, wrt=x)(k2, copy(x))
+  following = generic_keep(k3, x)
   (forward, backward, following, x)
 }

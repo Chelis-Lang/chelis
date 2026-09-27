@@ -59,6 +59,7 @@ pub enum DiagnosticKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    KeyReuse,
     CycleDetected,
     UnsupportedTensorPrecision,
     DuplicateDefinition,
@@ -87,7 +88,7 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 57] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -127,6 +128,7 @@ impl DiagnosticKind {
         Self::UseAfterConsume,
         Self::UnconsumedLinear,
         Self::InvalidBorrow,
+        Self::KeyReuse,
         Self::CycleDetected,
         Self::UnsupportedTensorPrecision,
         Self::DuplicateDefinition,
@@ -187,6 +189,7 @@ impl DiagnosticKind {
             Self::UseAfterConsume => "UseAfterConsume",
             Self::UnconsumedLinear => "UnconsumedLinear",
             Self::InvalidBorrow => "InvalidBorrow",
+            Self::KeyReuse => "KeyReuse",
             Self::CycleDetected => "CycleDetected",
             Self::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             Self::DuplicateDefinition => "DuplicateDefinition",
@@ -240,16 +243,14 @@ pub enum EffectKindInput<'a> {
 /// A closed effect vocabulary for all semantic consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EffectKind {
-    Random,
     Resource,
 }
 
 impl EffectKind {
-    pub const ALL: [Self; 2] = [Self::Random, Self::Resource];
+    pub const ALL: [Self; 1] = [Self::Resource];
 
     pub const fn symbol(self) -> &'static str {
         match self {
-            Self::Random => "random",
             Self::Resource => "resource",
         }
     }
@@ -258,8 +259,8 @@ impl EffectKind {
         match input {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
-            EffectKindInput::Symbol("random") => Ok(Self::Random),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
+            EffectKindInput::Symbol("random") => Err(EffectKindDecodeError::RetiredRandom),
             EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
     }
@@ -273,7 +274,13 @@ impl EffectKind {
 pub enum EffectKindDecodeError<'a> {
     Missing,
     Malformed,
-    Unknown { symbol: &'a str },
+    Unknown {
+        symbol: &'a str,
+    },
+    /// The `random` handler kind, retired with the counter stream (#2413):
+    /// randomness has no handler or effect, and a random primitive takes an
+    /// explicit key.
+    RetiredRandom,
 }
 
 impl fmt::Display for EffectKindDecodeError<'_> {
@@ -282,6 +289,11 @@ impl fmt::Display for EffectKindDecodeError<'_> {
             Self::Missing => f.write_str("missing effect kind"),
             Self::Malformed => f.write_str("malformed effect kind"),
             Self::Unknown { symbol } => write!(f, "unknown effect kind `{symbol}`"),
+            Self::RetiredRandom => f.write_str(
+                "effect kind `random` is retired: randomness has no handler or effect, and a \
+                 random primitive takes an explicit key made by `key_from_seed` and derived by \
+                 `split_key`, `split_keys` or `fold_in` (spec/04-type-system.md section 1.1)",
+            ),
         }
     }
 }

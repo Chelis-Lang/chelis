@@ -115,7 +115,7 @@ active Devenv shell unless the command itself tests shell entry.
 
 | Manual gate | Documented command | Prerequisite | Owning phase |
 |---|---|---|---|
-| Phase 2a effect-surface manual check | `cargo run -q -p chelis-cli -- check $tmpdir/unhandled_random.ch` then `... handled_random.ch` (full script in `chelis_phase2_plan.md` §2a Acceptance Gate) | None beyond default toolchain; expected: first check reports `UnhandledEffect`/`Random`, second reports no effect errors | 2a |
+| Phase 2a effect-surface manual check | `cargo run -q -p chelis-cli -- check $tmpdir/keyless_draw.ch` then `... keyed_draw.ch`, where the first holds `y = dropout(to_tensor([1.0f32, 1.0f32]), 0.5f32)` and the second `y = dropout(key_from_seed(42i64), to_tensor([1.0f32, 1.0f32]), 0.5f32)` (the `with seed` script in `chelis_phase2_plan.md` §2a predates #2413's explicit keys) | None beyond default toolchain; expected: first check reports `ArityMismatch` for the keyless draw, second reports score 1 with no errors and no effect | 2a |
 | Phase 2b linearity manual check | Hand-written program allocating two large tensors, consuming one to produce another, verifying compiler accepts and runtime does not double-free | None beyond default toolchain | 2b |
 | Phase 2c macro manual check | Define a custom `attention(q, k, v)` macro in Surf; expand it; verify the Deep matches the documented expansion | None beyond default toolchain | 2c |
 | Phase 2e MCP manual check | Connect Claude (or another MCP-capable agent) to `chelis tide mcp`; have agent perform documented compiler tasks | MCP-capable agent client | 2e |

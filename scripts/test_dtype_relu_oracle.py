@@ -62,8 +62,8 @@ class SourceContractMutationTests(unittest.TestCase):
         source = path.read_text()
         path.write_text(
             source.replace(
-                "add_synth(dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)",
-                "lower_max_elem(dag, x, zero, ty, parent_span)",
+                "add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)",
+                "lower_max_elem(owner, dag, x, zero, ty, parent_span)",
                 1,
             )
         )
@@ -75,8 +75,8 @@ class SourceContractMutationTests(unittest.TestCase):
         source = path.read_text()
         path.write_text(
             source.replace(
-                "let dx = dag.add_node(RiscOp::ReluAdjoint, vec![x, g]",
-                "let dx = dag.add_node(RiscOp::MaxElem, vec![x, g]",
+                "let dx = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g]",
+                "let dx = dag.add_node(node.owner, RiscOp::MaxElem, vec![x, g]",
                 1,
             )
         )

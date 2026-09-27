@@ -1045,22 +1045,22 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-float template)",
-                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
+                late_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
                 diagnostic: "uniform_like expects a float tensor template",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+            resolved_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
         },
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-tensor template)",
-                resolved_invalid: "def f(x: i32) -> i32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: i32) -> i32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
-                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(k: key, x: i32) -> i32 = uniform_like(k, x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(k: key, x: i32) -> i32 = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
+                late_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  g(k, x)\n}\n",
                 diagnostic: "uniform_like expects tensor template input",
             },
-            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+            resolved_valid: "def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n",
         },
         // `integer_binop_result_type`: the binary operators decide the call's
         // RESULT type, not only its admissibility, and their operands are three
@@ -1122,27 +1122,32 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 /// type stays accepted.
 #[test]
 fn never_bound_dtype_operands_are_decided_at_the_boundary() {
-    for (route, program) in [
+    for (route, program, explicit) in [
         (
             "sqrt",
             "def f() -> i32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: f32) -> sqrt(t)\n  1i32\n}\n",
         ),
         (
             "mod",
             "def f() -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: i32) -> mod(t, 3i32)\n  1i32\n}\n",
         ),
         (
             "shl",
             "def f() -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: i32) -> shl(t, 1i32)\n  1i32\n}\n",
         ),
+        // [04-LIN-10]: a key parameter declares its type, so only the
+        // tensor operand is undetermined.
         (
             "uniform_like",
-            "def f() -> i32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t: tensor[3, f32]) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
         if matches!(route, "sqrt" | "mod" | "shl") {
             let family = if route == "sqrt" { "Float" } else { "Int" };
-            let parameter = if route == "sqrt" { "f32" } else { "i32" };
             let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
@@ -1154,8 +1159,7 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
                 "{}",
                 summary(&errors)
             );
-            check(&program.replace("fn (t)", &format!("fn (t: {parameter})")))
-                .expect("the explicit concrete contract admits the operation");
+            check(explicit).expect("the explicit concrete contract admits the operation");
             continue;
         }
         let errors =
@@ -1167,8 +1171,7 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
             "{route}: {}",
             summary(&errors)
         );
-        check(&program.replace("fn (t)", "fn (t: tensor[3, f32])"))
-            .expect("the explicit tensor contract admits the operation");
+        check(explicit).expect("the explicit tensor contract admits the operation");
     }
 }
 
@@ -1284,7 +1287,7 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
         ),
         (
             "dropout",
-            "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> dropout(t, 0.5f32)\n  g(x)\n}\n",
+            "def f(k: key, x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (j, t) -> dropout(j, t, 0.5f32)\n  g(k, x)\n}\n",
             "tensor precision mismatch: f32 vs i32",
         ),
         (
@@ -1502,12 +1505,12 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     const FAMILY: &str = "type variable bounded by dtype family `Float` (the active float dtypes) \
          cannot be instantiated at `i32`";
 
-    check("def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
+    check("def g[p: Float](k: key, x: tensor[3, p], r: p) -> tensor[3, p] = dropout(k, x, r)\n")
         .expect("the signature's own bound makes the declaration well typed");
 
     let errors = check(
-        "def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
-         def f() -> tensor[3, i32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
+        "def g[p: Float](k: key, x: tensor[3, p], r: p) -> tensor[3, p] = dropout(k, x, r)\n\
+         def f(k: key) -> tensor[3, i32] = g(k, to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
     )
     .expect_err("the integer instantiation must be rejected");
     assert!(

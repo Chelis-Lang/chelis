@@ -23,10 +23,11 @@
 //! 2. **Tagged-error coverage.** Each rejection case pins which pass rejects
 //!    (Type / Effect / Linearity) so the tool's error tag stays faithful to the
 //!    pass that actually failed. The cases span the full pass surface: type /
-//!    precision, declared-pure-body-performs-Random/IO, effect propagation to a
-//!    held caller, linearity use-after-consume, and the remaining cross-def
-//!    structural detector (top-level binding cycle). A separate acceptance row
-//!    pins [04-INF-2]/[04-INF-3] uniform recursion after PP9.
+//!    precision, declared-pure-body-performs-IO (and a keyed draw, which
+//!    performs no effect), effect propagation to a held caller, linearity
+//!    use-after-consume, and the remaining cross-def structural detector
+//!    (top-level binding cycle). A separate acceptance row pins
+//!    [04-INF-2]/[04-INF-3] uniform recursion after PP9.
 //!
 //! ## Verdict definition
 //!
@@ -410,41 +411,42 @@ def is_odd(n: i32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 "#;
 
 /// Constructed: an effect-propagation module. `entry` is declared pure
-/// (`! { }`) and currently calls only the pure `pure_sibling`. `noisy`
-/// performs `Random` via the `dropout` builtin; `logger` performs `Io` via
-/// `debug`. Splicing a `noisy`- or `logger`-calling body into `entry` performs
-/// an effect under a pure signature; full check rejects it under both shapes
-/// (the declared-vs-inferred validator descends into the module wrapper).
-/// Checks clean standalone.
+/// (`! { }`) and currently calls only the pure `pure_sibling`. `logger`
+/// performs `Io` via `debug`; `noisy` draws with the explicit key it is given,
+/// which is no effect. Splicing a `logger`-calling body into `entry` performs
+/// an effect under a pure signature, so full check rejects it (the
+/// declared-vs-inferred validator descends into the module wrapper); a
+/// `noisy`-calling body stays pure. Checks clean standalone.
 const EFFECT_MODULE: &str = r#"module Frag.Effect
 export (entry)
-def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+def noisy(k: key, x: tensor[8, f32]) -> tensor[8, f32] = dropout(k, x, 0.5)
 def logger(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)
 def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
 "#;
 
-/// Constructed: cross-def effect propagation to a held caller (the red-team
-/// finding). `t` is declared `! { Random }` but its body is pure (`add(x, x)`),
-/// so its INFERRED effect is empty: over-declaration, which is allowed.
-/// `caller` is declared pure (`! { }`) and calls `t`; since `t`'s inferred
-/// effect is empty, `caller`'s inferred effect is empty too, so the base module
-/// checks clean. Splicing `t`'s body to perform `Random` (via `dropout`) raises
-/// `t`'s INFERRED effect to `{ Random }` (still matching its declared `Random`,
-/// so a `t`-local view accepts), but `caller` now INHERITS `Random` and
-/// violates its declared purity. Only the whole-module check sees that
-/// propagation, so it REJECTS on the effect pass. This is the divergence a
-/// single-def-scoped check would have missed.
-const CROSS_DEF_RANDOM_MODULE: &str = r#"module Frag.CrossRandom
+/// Constructed: a keyed draw spliced into a callee of a held caller. `t` takes
+/// a key it does not use (dropping a key is allowed); `caller` is declared
+/// pure (`! { }`) and passes `t` a fresh key. Splicing `t`'s body to draw with
+/// that key leaves both inferred effects empty, so the whole-module check
+/// accepts: a draw propagates no effect to its callers. Checks clean
+/// standalone.
+const CROSS_DEF_KEY_MODULE: &str = r#"module Frag.CrossKey
 export (caller)
-def t(x: tensor[8, f32]) -> tensor[8, f32] ! { Random } = add(x, x)
-def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
+def t(k: key, x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
+def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(key_from_seed(7i64), x)
 "#;
 
-/// The IO analog of [`CROSS_DEF_RANDOM_MODULE`]. `t` is declared `! { IO }` with
-/// a pure body; `caller` is declared pure and calls `t`. Splicing `t`'s body to
-/// perform `Io` (via `debug`) makes `caller` inherit `Io` and violate its
-/// declared purity. Checks clean standalone.
+/// Constructed: cross-def effect propagation to a held caller (the red-team
+/// finding). `t` is declared `! { IO }` but its body is pure (`add(x, x)`), so
+/// its INFERRED effect is empty: over-declaration, which is allowed. `caller`
+/// is declared pure (`! { }`) and calls `t`; since `t`'s inferred effect is
+/// empty, `caller`'s is too, so the base module checks clean. Splicing `t`'s
+/// body to perform `Io` (via `debug`) raises `t`'s INFERRED effect to
+/// `{ Io }` (still matching its declaration, so a `t`-local view accepts), but
+/// `caller` now INHERITS `Io` and violates its declared purity. Only the
+/// whole-module check sees that propagation, so it REJECTS on the effect pass.
+/// This is the divergence a single-def-scoped check would have missed.
 const CROSS_DEF_IO_MODULE: &str = r#"module Frag.CrossIo
 export (caller)
 def t(x: tensor[8, f32]) -> tensor[8, f32] ! { IO } = add(x, x)
@@ -672,30 +674,30 @@ fn effect_pure_body_agrees_accept() {
 }
 
 #[test]
-fn effect_declared_pure_body_introduces_random() {
-    // `entry` is declared pure (`! { }`); the new body calls `noisy`, which
-    // performs `Random`. The declared-vs-inferred validator descends into the
-    // `(module ...)` wrapper and rejects on the effect pass.
+fn effect_declared_pure_body_with_a_keyed_draw_accepts() {
+    // `entry` is declared pure (`! { }`); the new body calls `noisy` with a
+    // fresh key. A draw is a pure function of its key, so the body infers no
+    // effect and the validator accepts it (under the retired counter stream
+    // this body performed `Random` and was rejected).
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
-        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(x)\n",
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(key_from_seed(7i64), x)\n",
         "f",
     );
     assert_parity_mw(
-        "effect/declared_pure_introduces_random",
+        "effect/declared_pure_keyed_draw",
         &module,
         "entry",
         &body,
-        Verdict::Reject(FailingPass::Effect),
+        Verdict::Accept,
         true,
     );
 }
 
 #[test]
 fn effect_declared_pure_body_introduces_io() {
-    // The IO counterpart: `entry` is declared pure (`! { }`); the new body
-    // calls `logger`, which performs `Io` via `debug`. Rejected on the effect
-    // pass, the same as the Random case.
+    // `entry` is declared pure (`! { }`); the new body calls `logger`, which
+    // performs `Io` via `debug`. Rejected on the effect pass.
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = logger(x)\n",
@@ -714,24 +716,21 @@ fn effect_declared_pure_body_introduces_io() {
 // ── Effect: cross-def propagation to a held caller (red-team finding) ───────
 
 #[test]
-fn effect_cross_def_random_propagates_to_held_caller_rejects() {
-    // `t` is declared `! { Random }` with a pure body; `caller` (declared pure)
-    // calls `t`. Splicing `t`'s body to perform `Random` keeps `t` itself
-    // self-consistent (its declared Random now matches its inferred Random) but
-    // makes `caller` INHERIT Random and violate its declared purity. Only the
-    // whole-module check sees that propagation, so it REJECTS on the effect
-    // pass. A single-def-scoped check of `t` alone would have ACCEPTED.
-    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+fn effect_cross_def_keyed_draw_keeps_caller_pure_accepts() {
+    // The key-form counterpart of the propagation below: splicing `t`'s body
+    // to draw with its key keeps `t`'s inferred effect empty, so the pure
+    // `caller` stays pure and the whole-module check ACCEPTS.
+    let module = render_deep(CROSS_DEF_KEY_MODULE);
     let body = render_body(
-        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n",
+        "module M\ndef f(k: key, x: tensor[8, f32]) -> tensor[8, f32] = dropout(k, x, 0.5)\n",
         "f",
     );
     assert_parity_mw(
-        "effect/cross_def_random_to_held_caller",
+        "effect/cross_def_keyed_draw_keeps_caller_pure",
         &module,
         "t",
         &body,
-        Verdict::Reject(FailingPass::Effect),
+        Verdict::Accept,
         true,
     );
 }
@@ -762,8 +761,8 @@ fn effect_cross_def_pure_body_keeps_caller_pure_accepts() {
     // Control: splicing `t`'s body to another pure expression keeps `t`'s
     // inferred effect empty, so `caller` stays pure and the whole-module check
     // ACCEPTS. This pins that the reject above is the propagated effect, not the
-    // mere presence of the `! { Random }` declaration on `t`.
-    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+    // mere presence of the `! { IO }` declaration on `t`.
+    let module = render_deep(CROSS_DEF_IO_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = mul(x, x)\n",
         "f",

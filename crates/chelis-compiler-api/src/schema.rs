@@ -1,5 +1,7 @@
 mod artifact;
 mod dag_domains;
+#[cfg(test)]
+pub(crate) use dag_domains::wire_slot_read;
 mod directory;
 mod envelopes;
 mod execution;
@@ -421,6 +423,7 @@ fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKi
         K::UseAfterConsume => DiagnosticKind::UseAfterConsume,
         K::UnconsumedLinear => DiagnosticKind::UnconsumedLinear,
         K::InvalidBorrow => DiagnosticKind::InvalidBorrow,
+        K::KeyReuse => DiagnosticKind::KeyReuse,
         K::CycleDetected => DiagnosticKind::CycleDetected,
         K::UnsupportedTensorPrecision => DiagnosticKind::UnsupportedTensorPrecision,
         K::DuplicateDefinition => DiagnosticKind::DuplicateDefinition,
@@ -509,6 +512,7 @@ pub(crate) enum GeneralKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    KeyReuse,
     CycleDetected,
     UnsupportedTensorPrecision,
     DuplicateDefinition,
@@ -580,6 +584,7 @@ impl GeneralKind {
             DiagnosticKind::UseAfterConsume => Some(Self::UseAfterConsume),
             DiagnosticKind::UnconsumedLinear => Some(Self::UnconsumedLinear),
             DiagnosticKind::InvalidBorrow => Some(Self::InvalidBorrow),
+            DiagnosticKind::KeyReuse => Some(Self::KeyReuse),
             DiagnosticKind::CycleDetected => Some(Self::CycleDetected),
             DiagnosticKind::UnsupportedTensorPrecision => Some(Self::UnsupportedTensorPrecision),
             DiagnosticKind::DuplicateDefinition => Some(Self::DuplicateDefinition),
@@ -633,6 +638,7 @@ impl GeneralKind {
             Self::UseAfterConsume => DiagnosticKind::UseAfterConsume,
             Self::UnconsumedLinear => DiagnosticKind::UnconsumedLinear,
             Self::InvalidBorrow => DiagnosticKind::InvalidBorrow,
+            Self::KeyReuse => DiagnosticKind::KeyReuse,
             Self::CycleDetected => DiagnosticKind::CycleDetected,
             Self::UnsupportedTensorPrecision => DiagnosticKind::UnsupportedTensorPrecision,
             Self::DuplicateDefinition => DiagnosticKind::DuplicateDefinition,
@@ -784,7 +790,17 @@ impl DiagnosticSpan {
 /// Execution-value schema version: exact stored-bit carriers, numeric scalar
 /// tags, and checked int64 tensor shapes. Readers validate this stamp before
 /// decoding values; older, missing and future versions have no fallback.
-pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 3;
+/// Bump it whenever a producer may emit a value an earlier reader cannot
+/// decode, so that reader rejects the payload at the stamp rather than
+/// partway through its values.
+///
+/// Version history:
+/// - `3`: exact stored-bit scalar and storage carriers (chelis#1664).
+/// - `4`: the key execution values of spec/10 section 3.2, a scalar key
+///   `{"type":"key","bits":h}` and a key tensor's storage object
+///   `{"dtype":"key","bits":[h,...]}` (chelis#2413). A version-3 reader has
+///   no spelling for either.
+pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 4;
 
 /// The canonical sealed storage carrier, with the exact spec/10 bit codec.
 pub type TensorElements = chelis_types::TensorStorage;
@@ -793,6 +809,7 @@ pub type TensorElements = chelis_types::TensorStorage;
 pub struct TensorValue {
     #[schemars(schema_with = "execution::shape_schema")]
     pub shape: Vec<i64>,
+    #[schemars(schema_with = "chelis_types::dtype_semantics::execution_storage::json_schema")]
     pub data: TensorElements,
 }
 
@@ -815,6 +832,11 @@ pub enum ExecutionValue {
     },
     Bool {
         value: bool,
+    },
+    /// spec/10 section 3.2's scalar key, `{"type":"key","bits":h}`: a key is
+    /// not a number, so it has its own variant and never a scalar carrier.
+    Key {
+        bits: chelis_types::KeyBits,
     },
     String {
         value: String,
@@ -1272,13 +1294,11 @@ pub enum WireInferredPrecision {
 /// Internally tagged on `kind`. The `kind` discriminant is the
 /// lowercase spelling; `Resource` additionally carries its `device`
 /// string. Consumers that want the human Display spelling
-/// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) can reconstruct it
+/// (`Accum`/`IO`/`Test`/`Resource("dev")`) can reconstruct it
 /// from `kind` + `device`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireInferredEffect {
-    /// `Effect::Random`.
-    Random,
     /// `Effect::Accum`.
     Accum,
     /// `Effect::Io`.
@@ -1801,11 +1821,6 @@ pub enum WireSurfExpr {
         expr: Box<WireSurfExpr>,
         span: Span,
     },
-    WithSeed {
-        seed: Box<WireSurfExpr>,
-        body: Box<WireSurfExpr>,
-        span: Span,
-    },
     WithDevice {
         device: Box<WireSurfExpr>,
         body: Box<WireSurfExpr>,
@@ -2104,10 +2119,10 @@ pub struct WireRecordPatternField {
 /// - `17`: random primitives take their controls and a key as operands
 ///   (chelis#2413). `UniformLike` and `Dropout` carry no fields; their inputs
 ///   are the data or template, the controls, the key and an optional Bool
-///   activation. `DrawKey` produces each key, `DropoutReplay` and
-///   `UniformBoundAdjoint` read a forward draw's key, and `key` is a
-///   structural precision with no literal carrier. A version-16 random node's
-///   baked controls and seed have no version-17 spelling.
+///   activation. A counter-stream bridge operation produced each key,
+///   `DropoutReplay` and `UniformBoundAdjoint` read a forward draw's key, and
+///   `key` is a structural precision with no literal carrier. A version-16
+///   random node's baked controls and seed have no version-17 spelling.
 /// - `18`: the explicit key operations `KeyFromSeed`, `Split`, `FoldIn` and
 ///   `SplitN` ([05-OP-69..72], chelis#2413). `key` is a precision at any
 ///   rank; a key may enter as a `Load` and be a root; a draw may take a
@@ -2115,7 +2130,16 @@ pub struct WireRecordPatternField {
 ///   controls and activation shaped like a leading part of the batch. A
 ///   version-17 graph holds no key operation and is rejected like every
 ///   other earlier version.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 18;
+/// - `19`: the counter-stream bridge operation is deleted with the seed
+///   handler (chelis#2413); a key comes only from a key operation or a
+///   key-typed `Load`, or from `KeySelect`, a branch's join, which a
+///   runtime `if` whose value is a key lowers to (spec/10 §3.2, Rule S).
+///   Every node carries its declaration and its activation; a draw's or a
+///   key operation's activation is its node's, and no input carries it. A
+///   version-18 graph may hold that bridge operation, which has no
+///   version-19 spelling, so it is rejected like every other earlier
+///   version.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2185,6 +2209,12 @@ impl std::error::Error for WireDagContractError {}
 pub struct WireDag {
     /// Exact schema version of this serialized DAG surface.
     pub schema_version: u32,
+    /// The declarations the nodes belong to, one row each, by name
+    /// (spec/10 section 3.4). Two rows may carry one name: new code that
+    /// replaces a library definition keeps the replaced declaration beside
+    /// its own. A node names its declaration by row, never by name, and
+    /// every row is some node's declaration.
+    pub declarations: Vec<String>,
     pub nodes: Vec<WireDagNode>,
     pub roots: Vec<u64>,
 }
@@ -2192,6 +2222,7 @@ pub struct WireDag {
 #[derive(Serialize, Deserialize)]
 struct WireDagFields {
     schema_version: u32,
+    declarations: Vec<String>,
     nodes: Vec<WireDagNode>,
     roots: Vec<u64>,
 }
@@ -2199,6 +2230,7 @@ struct WireDagFields {
 #[derive(Serialize)]
 struct WireDagFieldsRef<'a> {
     schema_version: u32,
+    declarations: &'a [String],
     nodes: &'a [WireDagNode],
     roots: &'a [u64],
 }
@@ -2214,6 +2246,7 @@ impl Serialize for WireDag {
             .map_err(<S::Error as serde::ser::Error>::custom)?;
         WireDagFieldsRef {
             schema_version: self.schema_version,
+            declarations: &self.declarations,
             nodes: &self.nodes,
             roots: &self.roots,
         }
@@ -2235,6 +2268,7 @@ impl<'de> Deserialize<'de> for WireDag {
             serde_json::from_str(raw.get()).map_err(<D::Error as serde::de::Error>::custom)?;
         let dag = Self {
             schema_version: fields.schema_version,
+            declarations: fields.declarations,
             nodes: fields.nodes,
             roots: fields.roots,
         };
@@ -2595,6 +2629,8 @@ impl WireDag {
                             unreachable!("owner validation rejects forbidden SplitN carriers")
                         }
                     };
+                    // Its activation is the node's own, never an input
+                    // (spec/10 §3.2).
                     if node.inputs.len() != expected_inputs {
                         return Err(WireDagContractError::new(format!(
                             "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}",
@@ -2865,6 +2901,7 @@ impl WireDag {
             serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
         let dag = Self {
             schema_version: fields.schema_version,
+            declarations: fields.declarations,
             nodes: fields.nodes,
             roots: fields.roots,
         };
@@ -3192,8 +3229,10 @@ fn wire_axis_origin(
             require_input_agreement,
         )
     };
-    let same_shape_input_origin = || {
-        let mut origins = node.inputs.iter().filter_map(|source_id| {
+    // The origin every one of the first `operands` inputs agrees on; a
+    // join's two trailing activations are not among its operands.
+    let same_shape_input_origin = |operands: usize| {
+        let mut origins = node.inputs.iter().take(operands).filter_map(|source_id| {
             let source = wire_node_by_id(nodes, *source_id)?;
             (!source.output_type.dims.is_empty()).then_some(source)
         });
@@ -3321,9 +3360,9 @@ fn wire_axis_origin(
         | WireRiscOp::CastTrunc { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
-        | WireRiscOp::KeyFromSeed {}
-        | WireRiscOp::Split { .. }
-        | WireRiscOp::FoldIn {} => same_shape_input_origin(),
+        | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
+        WireRiscOp::Split { .. } => same_shape_input_origin(1),
+        WireRiscOp::FoldIn {} | WireRiscOp::KeySelect {} => same_shape_input_origin(2),
         // A draw's data operand is its only same-shape operand: its controls,
         // key and activation are shaped like leading parts of the data.
         WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
@@ -3398,10 +3437,10 @@ fn wire_axis_origin(
                                 source.output_type.dims.len() == node.output_type.dims.len()
                             })
                     })
-                    .then(same_shape_input_origin)
+                    .then(|| same_shape_input_origin(node.inputs.len()))
                     .flatten()
             } else {
-                same_shape_input_origin()
+                same_shape_input_origin(node.inputs.len())
             }
         }
         WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => node
@@ -3426,7 +3465,6 @@ fn wire_axis_origin(
             }),
         WireRiscOp::Shape { .. }
         | WireRiscOp::UniformBoundAdjoint { .. }
-        | WireRiscOp::DrawKey { .. }
         | WireRiscOp::ExtentWitness { .. }
         | WireRiscOp::CheckedReshapeExtent { .. }
         | WireRiscOp::Sum { .. }
@@ -3605,6 +3643,18 @@ pub struct WireDagNode {
     #[serde(deserialize_with = "require_explicit_span")]
     pub span_id: Option<String>,
     pub merged_spans: Vec<String>,
+    /// The declaration this node belongs to, as its row in
+    /// [`WireDag::declarations`]: required on every node. A `Load` reads its
+    /// declaration's parameter, so a key parameter is its declaration's row
+    /// and its name (spec/10 section 3.2); two declarations that share a name
+    /// stay two.
+    pub declaration: u64,
+    /// The node's activation (spec/10 section 3.2): an earlier `bool` node
+    /// under which the node runs, explicitly null when every execution of its
+    /// declaration enters it. A node whose activation is false checks
+    /// nothing.
+    #[serde(deserialize_with = "require_explicit_activation")]
+    pub activation: Option<u64>,
     pub id: u64,
     pub op: WireRiscOp,
     pub inputs: Vec<u64>,
@@ -3615,6 +3665,12 @@ fn require_explicit_span<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
+}
+
+fn require_explicit_activation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3708,24 +3764,6 @@ pub enum WireUniformBound {
 pub enum WireKeyBranch {
     Left,
     Right,
-}
-
-/// The handler whose stream a `DrawKey` reads: the stream the graph's caller
-/// holds, or a `with seed` region lowered inside the graph. `instance` is an
-/// opaque region identity, not a count or a numeric value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WireRandomHandler {
-    Inherited,
-    Scoped { instance: u32 },
-}
-
-/// The random primitive whose controls a `DrawKey` validates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WireRandomDraw {
-    Dropout,
-    UniformLike,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -3857,30 +3895,21 @@ pub enum WireRiscOp {
     Floor,
     Ceil,
     Round,
-    /// `[05-OP-8]`. Inputs are `[template, low, high, key]`, optionally
-    /// followed by one Bool activation, shaped as spec/10 §3.2 fixes.
+    /// `[05-OP-8]`. Inputs are exactly `[template, low, high, key]`; its
+    /// activation is the node's own, shaped as spec/10 §3.2 fixes.
     UniformLike {},
-    /// `[05-OP-37]`. Inputs are `[x, rate, key]`, optionally followed by one
-    /// Bool activation, shaped as spec/10 §3.2 fixes.
+    /// `[05-OP-37]`. Inputs are exactly `[x, rate, key]`; its activation is
+    /// the node's own, shaped as spec/10 §3.2 fixes.
     Dropout {},
-    /// The `[05-OP-37]` pathwise adjoint. Inputs are `[g, rate, key]`,
-    /// optionally followed by the forward draw's activation; it reads its
-    /// forward `Dropout`'s key without consuming it.
+    /// The `[05-OP-37]` pathwise adjoint. Inputs are exactly `[g, rate,
+    /// key]`, under its forward draw's activation; it reads its forward
+    /// `Dropout`'s key without consuming it.
     DropoutReplay {},
-    /// A `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
-    /// optionally followed by the forward draw's activation; it reads its
-    /// forward `UniformLike`'s key without consuming it.
+    /// A `[05-OP-8]` bound adjoint. Inputs are exactly `[template, g, key]`,
+    /// under its forward draw's activation; it reads its forward
+    /// `UniformLike`'s key without consuming it.
     UniformBoundAdjoint {
         bound: WireUniformBound,
-    },
-    /// The counter-stream bridge: the key of `handler`'s next `[05-RNG-1]`
-    /// ordinal for a `draw` of dtype `dtype`. Inputs are the rank-zero `int64`
-    /// literal seed when the handler is scoped, then the draw's controls,
-    /// then optionally one rank-zero Bool activation.
-    DrawKey {
-        handler: WireRandomHandler,
-        draw: WireRandomDraw,
-        dtype: String,
     },
     /// `[05-OP-69]`. Input is one `int64` tensor; the output is the `key`
     /// tensor of the same shape.
@@ -3898,6 +3927,12 @@ pub enum WireRiscOp {
     SplitN {
         count: WireRtDim,
     },
+    /// A branch's join (spec/10 §3.2, Rule S). Inputs are the then and else
+    /// `key` tensors of the output's exact shape, then the then and else
+    /// Bool activations, each shaped like a leading part of that shape: the
+    /// node's own activation conjoined with a condition and with its
+    /// negation.
+    KeySelect {},
     Sum {
         axis: i32,
         /// Accumulator precision, populated per spec/04-type-system.md
@@ -4100,6 +4135,7 @@ mod tests {
     fn empty_wire_dag() -> WireDag {
         WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: Vec::new(),
             nodes: vec![],
             roots: vec![],
         }
@@ -4173,6 +4209,7 @@ mod tests {
         assert!(serde_json::from_str::<WireDag>(&json).is_err());
         let dag = WireDag {
             schema_version: future,
+            declarations: Vec::new(),
             nodes: vec![],
             roots: vec![],
         };
@@ -4233,7 +4270,7 @@ mod tests {
             "nodes": [{
                 "shape_deps": [],
                 "span_id": null,
-                "merged_spans": [],
+                "merged_spans": [], "declaration": 0, "activation": null,
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
                 "inputs": [],
@@ -4317,7 +4354,10 @@ mod tests {
         let exact = 9_007_199_254_740_993i64;
         let dag = WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: vec!["entry".to_owned()],
             nodes: vec![WireDagNode {
+                declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -4478,6 +4518,8 @@ mod tests {
             precision: precision.to_string(),
         };
         let load = |id, precision: &str, size| WireDagNode {
+            declaration: 0,
+            activation: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -4491,10 +4533,13 @@ mod tests {
         let validate = |op, inputs, output_type| {
             WireDag {
                 schema_version: WIRE_DAG_SCHEMA_VERSION,
+                declarations: vec!["entry".to_owned()],
                 nodes: vec![
                     load(0, "f32", 4),
                     load(1, "f32", 4),
                     WireDagNode {
+                        declaration: 0,
+                        activation: None,
                         shape_deps: vec![],
                         span_id: None,
                         merged_spans: vec![],
@@ -4752,6 +4797,7 @@ mod diagnostic_projection_contract {
             K::UseAfterConsume,
             K::UnconsumedLinear,
             K::InvalidBorrow,
+            K::KeyReuse,
             K::CycleDetected,
             K::UnsupportedTensorPrecision,
             K::DuplicateDefinition,
@@ -4795,6 +4841,7 @@ mod diagnostic_projection_contract {
             K::UseAfterConsume => "UseAfterConsume",
             K::UnconsumedLinear => "UnconsumedLinear",
             K::InvalidBorrow => "InvalidBorrow",
+            K::KeyReuse => "KeyReuse",
             K::CycleDetected => "CycleDetected",
             K::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             K::DuplicateDefinition => "DuplicateDefinition",

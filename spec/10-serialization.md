@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 18 is explicitly
+WireDag JSON is an exact-version contract. Schema version 19 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 17, and every future version are decode errors before any IR
+versions 1 through 18, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -103,8 +103,28 @@ entry with an empty binder, a missing or extra requirement input, and a
 requirement input that is not an earlier rank-zero `int64` `ExtentWitness` are
 each encoding and decoding errors. `WireDagNode.shape_deps` contains exact u64 node
 references to strictly earlier nodes. It does not carry shape numbers.
-`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
-mandatory fields, including when their lists are empty.
+`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and
+`declaration` are mandatory fields, including when their lists are empty, and
+so is `WireDag.declarations`. `WireDag.declarations` is the graph's declaration
+table: one row per declaration, holding its name. `WireDagNode.declaration` is
+the row of the declaration the node belongs to (§3.4). Two rows may hold one
+name, so a name never identifies a declaration. Every row is the declaration of
+at least one node; a row that no node names is an encoding and decoding error.
+`WireDagNode.activation` is mandatory too, explicitly null when absent. It is
+the node's activation: an earlier node of `bool` dtype that holds exactly where
+the node's source position is entered, the conjunction of the runtime branch
+predicates enclosing it, or null where every execution of its declaration
+enters it. An activation is rank zero, or under a batched branch shaped like
+the node's leading axes, one element per row. A node and its activation form
+its owner, with the declaration. A node whose activation is false is still
+computed, since a `Where` may read its value, but checks nothing: no numeric
+trap, draw validation, count or extent check fires for it, and it computes its
+value from operands its checks accept. A draw's, a draw replay's and a key
+operation's activation is its node's activation; no input carries it. A
+`KeySelect`'s two activation inputs are its keys' consumption activations,
+its own activation conjoined with its branch's condition and with that
+condition's negation (§3.2). An activation that is not an earlier `bool` node
+is an encoding and decoding error.
 
 `WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
 It has exactly two earlier input nodes, each with its output's integer dtype
@@ -163,11 +183,11 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 18 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 19 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
-`schema_version: 3`. Missing, older, and future execution versions are rejected
+`schema_version: 4`. Missing, older, and future execution versions are rejected
 before decoding values. An execution version never substitutes for WireDag
 version validation, or conversely. Tensor bindings in requests use the same
 execution-value carrier grammar. A cache or compiled-context worker handoff
@@ -225,14 +245,18 @@ mapping; neither vocabulary is accepted as an alias at the other's ingress.
 | `f64`, `f32`, `f16`, `bf16` | `{"dtype":p,"bits":h}` | `{"dtype":p,"bits":[h,...]}` |
 | `int64`, `int32`, `int16`, `int8` | `{"dtype":p,"value":n}` | `{"dtype":p,"values":[n,...]}` |
 | `bool` | `{"dtype":"bool","value":b}` | `{"dtype":"bool","values":[b,...]}` |
+| `key` | none | `{"dtype":"key","bits":[h,...]}` |
 
 Here `p` is a JSON string naming the exact dtype, `b` is a JSON boolean,
 and `n` is an exact signed JSON integer within that dtype's range, never a
 float or numeric string. `h` is a JSON string of lowercase hexadecimal digits
-containing the stored IEEE bits, most significant digit first, with no sign,
-prefix, separators, or whitespace. Its exact digit counts are
-f64: 16; f32: 8; f16: 4; bf16: 4. Leading zeroes are required to reach that
-width. The encoding is independent of machine endianness.
+containing the stored IEEE bits, or a key's 64 bits ([05-RNG-2]), most
+significant digit first, with no sign, prefix, separators, or whitespace. Its
+exact digit counts are f64: 16; f32: 8; f16: 4; bf16: 4; key: 16. Leading
+zeroes are required to reach that width. The encoding is independent of
+machine endianness. A key is not a number: it has no scalar object and is
+never an integer carrier, and its storage object appears only in a tensor
+execution value.
 
 All bit patterns are representable, including finite values, subnormals,
 positive and negative zero, infinities, and quiet or signaling NaNs with their
@@ -245,7 +269,8 @@ number and bit encodings. Numeric integers never pass through binary64.
 
 Numeric scalar execution values use `{"type":"scalar","value":s}`, where
 `s` is the scalar carrier above. Boolean execution values retain
-`{"type":"bool","value":b}`. Tensor execution values use
+`{"type":"bool","value":b}`. A scalar key execution value is
+`{"type":"key","bits":h}`, with `h` the key's 16 digits. Tensor execution values use
 `{"type":"tensor","value":{"shape":[d,...],"data":t}}`, where `t` is
 the storage carrier and each `d` is an exact nonnegative int64 JSON integer.
 Non-scalar aggregate execution variants retain their recursive element order
@@ -258,49 +283,83 @@ or access under [04-NUM-11].
 `Const.value`, `Pad.fill`, and `ConstTensor.data` use the same scalar/storage
 grammar, not private alternate encodings. The random operations carry no
 numeric fields: their controls and their key are operand nodes.
-`UniformLike.inputs` is its template, its `low` and `high` bounds, its key,
-and at most one Bool path activation. `Dropout.inputs` is its data input, its
-rate, its key, and at most one activation. The bounds and the rate are
-operands of the template's or input's exact active float dtype.
+`UniformLike.inputs` is exactly its template, its `low` and `high` bounds and
+its key. `Dropout.inputs` is exactly its data input, its rate and its key. The
+bounds and the rate are operands of the template's or input's exact active
+float dtype.
 (Not fully implemented; chelis#1295.) A draw's key has any rank `r`, and its
 shape equals the leading `r` axes of the draw's data: the first input of
 `UniformLike`, `Dropout` and `DropoutReplay`, and the cotangent, input 1, of
 `UniformBoundAdjoint`. Row `b` of the draw, the data elements whose leading
 `r` indices are the key's row-major index `b`, draws with `key[b]`, with its
 elements' row-major indices within the row as [05-RNG-2]'s element indices.
-Each control and the activation has the shape of the key's leading `c` axes
-for some `c <= r`, and row `b` reads the element that `b`'s leading `c`
-indices name, so under a rank-zero key every control and the activation are
-rank zero.
+Each control and the node's activation has the shape of the key's leading
+`c` axes for some `c <= r`, and row `b` reads the element that `b`'s leading
+`c` indices name, so under a rank-zero key every control and the activation
+are rank zero.
 Both operations preserve the first input's exact shape and dtype. Their
-value-domain checks remain [05-OP-8/37], before Random consumption. Each row
+value-domain checks remain [05-OP-8/37], before any element is drawn. Each row
 is one draw and checks the control elements it reads only when it is active,
 so a row whose activation is false, or a batch with no rows, checks nothing,
 as the stack of the rows' draws would. The codec neither inserts casts nor
-implements an adjoint. `DropoutReplay.inputs` is
-its cotangent, its rate, its forward draw's key and that draw's activation
-when it has one, and its result has its cotangent's exact shape and dtype.
-`UniformBoundAdjoint.inputs` is its template, its cotangent, its forward
-draw's key and that draw's activation when it has one. Its cotangent has its
-template's exact shape and dtype, and its result has the template's dtype and
-the shape of the key's leading `c` axes for some `c <= r`, and
-each element is one canonical tree over the contributions, in row-major
-order, of the rows whose leading `c` indices name it. Each reads the key
-without consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node
-reference under §3.4, not another template.
+implements an adjoint. `DropoutReplay.inputs` is exactly its cotangent, its
+rate and its forward draw's key, and its result has its cotangent's exact
+shape and dtype. `UniformBoundAdjoint.inputs` is exactly its template, its
+cotangent and its forward draw's key. Its cotangent has its template's exact
+shape and dtype, and its result has the template's dtype and the shape of the
+key's leading `c` axes for some `c <= r`, and each element is one canonical
+tree over the contributions, in row-major order, of the rows whose leading
+`c` indices name it. Each reads the key without consuming it, and its
+activation is its forward draw's.
 
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
-key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or a `DrawKey`,
-or enters as a key-precision `Load`, and every `Load` of one parameter is one
-key. A key has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or
-`SplitN`, one place among the roots, or at most one `Split` of each branch.
-It is otherwise read only by its draw's replays, and a `DrawKey`'s key is used
-only by a draw. Two draws may consume one key only when each carries an activation
-and, for every pair, one activation's `And` conjuncts include a node `X` and
-the other's include `Not(X)`, or either's include the `bool` constant `false`,
-whose draw never runs. A key reaching any other operation or a shape
-dependency is a decode error.
+key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or `KeySelect`,
+or enters as a key-precision `Load`; a key-precision `Store`, which names a
+root, is the key it stores, so rooting the `Store` is that key's place among
+the roots. A `Drop` ([05-OP-67]) consumes the key it closes, and its output,
+typed as its input, is not a key. Every node carries its declaration's row, and a
+parameter is its declaration's row and its name: every `Load` of one name in one
+row is one key, and `Load`s of one name in two rows read two parameters, even
+when the two rows hold one name. A node reads a node of another row only when
+no node of that row is potentially trapping (spec/06 §5.2): a reference to a
+value declaration whose initializer may trap is that initializer's own nodes in
+the referencing row, under the reference's activation. A
+key
+has at most one use: one `UniformLike`, `Dropout`, `FoldIn`, `SplitN` or
+`Drop`, one key input of one `KeySelect`, one place among the roots, or at most one
+`Split` of each branch. It is otherwise read only by its draw's replays. Two
+uses of one key, by draws, key operations and `KeySelect` inputs alike, other
+than one `Split` of each branch, may both consume it only when each consumes
+it under an activation and one activation's `And` conjuncts include a node `X`
+and the other's include `Not(X)`, or either's include the `bool` constant
+`false`, whose consumer never runs. A draw or key operation consumes its key
+under its node's activation. `KeySelect` is a branch's join. Its inputs are
+two `key` tensors of its output's exact shape, then two Bool activations,
+each shaped like the key's leading `c` axes for some `c`; it consumes input 0
+under input 2 and input 1 under input 3, and each element of its output is
+input 0's key where input 2 holds for that element's row, and input 1's
+elsewhere. Its two activations are the two arms of one branch under its own
+activation `S`: the `And` conjuncts of one are `S`'s and a node `X`, and those
+of the other are `S`'s and `Not(X)`, or `X` and `Not(X)` are the `bool`
+constants `true` and `false`, a constant `true` conjunct being set aside; with
+no activation, `S` has no conjuncts. So wherever `S` holds exactly one arm
+does, and where it does not, neither does. Two key
+operations sharing a key under exclusive activations may derive equal keys,
+as two `Split`s of one branch do, so a key that a key operation derives from a
+key it shares this way, and every key derived from that key in turn, is
+consumed only under that operation's activation or by the join of its branch:
+each of its uses consumes it under an activation whose `And` conjuncts include
+that activation or the constant `false`, and it is never a root. A join's
+output is a key under `S`: each of its uses consumes it under an activation
+whose `And` conjuncts include `S`'s, and each such requirement of its inputs
+that both arms include, or the constant `false`, and while it has any such
+requirement it is never a root. A key reaching any other operation or input
+is a decode error, except that any operation may read a key tensor at an
+input it reads only for its extent (an `ExtentWitness`'s or `Shape`'s tensor
+input, or an input a bound reads by `input_axis`) and any node may name a key
+among its shape dependencies: an extent is not key material, so neither is a
+use and the key stays live.
 
 `KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor
 of that shape holding [05-OP-69]'s key of each element. `Split` carries its
@@ -311,16 +370,13 @@ exactly equal shape, and its output is [05-OP-72]'s key of each pair.
 `SplitN.count` is a `WireRtDim` under the same carrier rules as
 `Expand.size`, except that only `lit` and a `node` at input slot 1 are
 admitted; its output appends that extent to its `key` input's shape, and row
-`j` of each key is [05-OP-71]'s. `DrawKey` carries
-its `handler`, its `draw` (`uniform_like` or `dropout`) and the draw's
-template or input `dtype`. An `inherited` handler takes the next ordinal of
-the stream the graph's caller holds. A `scoped` handler is a `with seed`
-region lowered inside the graph: its `instance` is an exact u32 region
-identity, not a count or a numeric value, and its first input is a rank-zero
-`int64` constant holding the region's signed seed, whose two's-complement
-image is [05-RNG-1]'s stream seed. Every seed bit is significant; zero is a
-seed, not absence, and there is no default seed. The remaining inputs are the
-draw's controls, in the draw's own order, and at most one activation.
+`j` of each key is [05-OP-71]'s. `Split`, `FoldIn` and `SplitN` take no
+input besides these operands. Their node's activation is shaped like the key's
+leading `c` axes for some `c`, and it changes no key that the operation
+derives. Where a `SplitN`'s activation is false in every element, the split
+reads no count and checks nothing: its count axis has the extent its output
+type declares when a literal or an earlier node fixes that extent, and zero
+when the split alone would bind it.
 
 ### 3.3 Source Syntax And Locations
 
@@ -365,6 +421,8 @@ specifies u32. A decoder never narrows a reference to fit a host index.
 | fields | scope and admission |
 |---|---|
 | `WireDagNode.id`, `WireDagNode.inputs`, `WireDagNode.shape_deps`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs and shape dependencies refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. Shape dependencies identify nodes, not extents. |
+| `WireDagNode.declaration` | Zero-based row of the owning DAG's `declarations` table. The row, not the name it holds, is the declaration's identity; every row is some node's declaration. |
+| `WireDagNode.activation` | Null, or the ID of an earlier node of the owning DAG whose dtype is `bool`. |
 | `LowerResult.named_roots`, `GradResult.output_node`, `GradResult.grad_nodes_by_name`, `GradResult.forward_nodes_by_name` | IDs select nodes in that result's DAG; a name never changes the owning DAG. |
 | `EvaluatedRoot.node_id` | Identity in the evaluated graph associated with that result; without that graph it remains an opaque result identity and cannot be dereferenced. |
 | `WireFusedInput.External.index` | Zero-based slot in the owning fused node's external inputs. |

@@ -2082,7 +2082,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const",
-      "sample": "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_..."
+      "sample": "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
@@ -2114,7 +2114,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_integer_abs",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "int64_t idx = i * t{id}_input{a}_step;"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_pad",
@@ -2150,7 +2150,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
+      "sample": "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
@@ -2221,10 +2221,6 @@
       "sample": "for (int64_t __i = 0;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
-      "sample": "static inline uint64_t chelis_random_mix"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=supported_concrete_types_map_to_exact_c_host_abis",
       "sample": "int8_t"
     },
@@ -2243,10 +2239,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_checked_tensor_cast",
       "sample": "{}for (int64_t {flat_index} = 0; {flat_index} < {view}.count; {flat_index}++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
-      "sample": "{}__chelis_random_host_frame {frame} = __chelis_random_push_host(__chelis_observer, {pointer}, (u..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_filter",
@@ -2634,7 +2626,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_node",
-      "sample": "if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"
+      "sample": "((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip_reduced_f",
@@ -2983,14 +2975,6 @@
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=_",
       "sample": "core :: mem :: size_of :: < RuntimeDType > ()"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_function",
-      "sample": "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invoc..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/random_observer.rs|owner=SUPPORT",
-      "sample": "/* CHELIS_NATIVE_RANDOM_OBSERVER_BEGIN */ typedef struct { uint64_t value; } __chelis_random_obse..."
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_host_result_claim_support",

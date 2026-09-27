@@ -976,7 +976,7 @@
         "chelis-backend-c::emit::tests::neg_emits_unary_minus",
         "chelis-backend-c::emit::tests::omp_pragma_in_elementwise",
         "chelis-backend-c::emit::tests::pad_emits_fill_and_copy",
-        "chelis-backend-c::emit::tests::path_sensitive_uniform_reads_uint8_bool_and_gates_counter",
+        "chelis-backend-c::emit::tests::path_sensitive_uniform_reads_uint8_bool",
         "chelis-backend-c::emit::tests::permute_materializes_the_axis_mapping",
         "chelis-backend-c::emit::tests::realize_emits_materialization_loop",
         "chelis-backend-c::emit::tests::reduce_window_max_min_select_first_nan_and_stored_representation",

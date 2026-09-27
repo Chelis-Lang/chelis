@@ -4,9 +4,10 @@ use super::{
     WireExtentWitnessSite, WireFusedInput, WireKeyBranch, WireLogicalKind, WireRiscOp, WireRtAxis,
     WireRtDim, host_index, wire_dim_info_equal,
 };
-use chelis_ir::dag::{DimInfo, KeyBranch, RandomDraw};
+use chelis_ir::dag::{DimInfo, KeyBranch};
 use chelis_ir::verify::{
-    KeyGraph, KeyRole, SplitCount, is_const_false, verify_key_rules, verify_random_operands,
+    BoundInput, ExtentSlot, KeyGraph, KeyRole, SlotRead, SplitCount, bound_slot_read,
+    is_const_false, is_const_true, operand_extent_read, verify_key_rules, verify_random_operands,
 };
 use chelis_types::types::Prim;
 use std::borrow::Cow;
@@ -94,26 +95,6 @@ impl KeyGraph for DecodedKeys<'_> {
 
     fn role(&self, node: usize) -> KeyRole {
         match self.0.nodes.get(node).map(|node| &node.op) {
-            Some(WireRiscOp::DrawKey {
-                handler,
-                draw,
-                dtype,
-            }) => {
-                // `random_node` has already rejected a draw key whose dtype
-                // is not an active float. Were one to reach the rules, it
-                // would read as no draw key, and its key output would fail.
-                let Some(dtype) = Prim::parse_interchange_name(dtype) else {
-                    return KeyRole::Other;
-                };
-                KeyRole::DrawKey {
-                    scoped: matches!(handler, super::WireRandomHandler::Scoped { .. }),
-                    draw: match draw {
-                        super::WireRandomDraw::Dropout => RandomDraw::Dropout,
-                        super::WireRandomDraw::UniformLike => RandomDraw::UniformLike,
-                    },
-                    dtype,
-                }
-            }
             Some(WireRiscOp::KeyFromSeed {}) => KeyRole::KeyFromSeed,
             Some(WireRiscOp::Split { branch }) => KeyRole::Split {
                 branch: match branch {
@@ -122,6 +103,7 @@ impl KeyGraph for DecodedKeys<'_> {
                 },
             },
             Some(WireRiscOp::FoldIn {}) => KeyRole::FoldIn,
+            Some(WireRiscOp::KeySelect {}) => KeyRole::KeySelect,
             Some(WireRiscOp::SplitN { count }) => KeyRole::SplitN {
                 count: match count {
                     WireRtDim::Lit { value } => {
@@ -134,10 +116,12 @@ impl KeyGraph for DecodedKeys<'_> {
                 },
             },
             Some(WireRiscOp::Load { .. }) => KeyRole::Load,
+            Some(WireRiscOp::Store { .. }) => KeyRole::Store,
             Some(WireRiscOp::Dropout {}) => KeyRole::Dropout,
             Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
             Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
             Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            Some(WireRiscOp::Drop) => KeyRole::Drop,
             Some(WireRiscOp::Logical {
                 logical: WireLogicalKind::And,
             }) => KeyRole::And,
@@ -145,8 +129,16 @@ impl KeyGraph for DecodedKeys<'_> {
                 logical: WireLogicalKind::Not,
             }) => KeyRole::Not,
             Some(WireRiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
+            Some(WireRiscOp::Const { value }) if is_const_true(value) => KeyRole::ConstTrue,
             _ => KeyRole::Other,
         }
+    }
+
+    fn slot_read(&self, node: usize, slot: usize) -> SlotRead {
+        self.0
+            .nodes
+            .get(node)
+            .map_or(SlotRead::Value, |node| wire_slot_read(&node.op, slot))
     }
 
     fn dtype(&self, node: usize) -> Option<Prim> {
@@ -173,13 +165,8 @@ impl KeyGraph for DecodedKeys<'_> {
         wire_position(*self.0.nodes.get(node)?.inputs.get(slot)?)
     }
 
-    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.0
-            .nodes
-            .get(node)
-            .into_iter()
-            .flat_map(|node| node.shape_deps.iter().copied())
-            .filter_map(wire_position)
+    fn activation(&self, node: usize) -> Option<usize> {
+        wire_position(self.0.nodes.get(node)?.activation?)
     }
 
     fn roots(&self) -> impl Iterator<Item = usize> + '_ {
@@ -190,6 +177,24 @@ impl KeyGraph for DecodedKeys<'_> {
         match &self.0.nodes.get(node)?.op {
             WireRiscOp::Load { name } => Some(name),
             _ => None,
+        }
+    }
+
+    fn declaration(&self, node: usize) -> &str {
+        self.0
+            .nodes
+            .get(node)
+            .and_then(|node| usize::try_from(node.declaration).ok())
+            .and_then(|row| self.0.declarations.get(row))
+            .map_or("", String::as_str)
+    }
+
+    /// Two nodes' declarations are one when they name one row: a name
+    /// alone is not an identity, since two rows may share it.
+    fn same_declaration(&self, left: usize, right: usize) -> bool {
+        match (self.0.nodes.get(left), self.0.nodes.get(right)) {
+            (Some(left), Some(right)) => left.declaration == right.declaration,
+            _ => false,
         }
     }
 
@@ -214,12 +219,108 @@ impl KeyGraph for DecodedKeys<'_> {
             .collect::<Option<Vec<_>>>()
             .map(Cow::Owned)
     }
+}
 
-    fn is_const(&self, node: usize) -> bool {
-        matches!(
-            self.0.nodes.get(node).map(|node| &node.op),
-            Some(WireRiscOp::Const { .. })
-        )
+/// `chelis_ir::verify::slot_read` of the operation `op` encodes: the same
+/// rows, exhaustive with no wildcard arm, each bound read by the shared
+/// `bound_slot_read`.
+pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
+    let of = |bound: &WireRtDim| match bound {
+        WireRtDim::Node { input } => {
+            usize::try_from(*input).map_or(BoundInput::None, BoundInput::Value)
+        }
+        WireRtDim::InputAxis { tensor, .. } => {
+            usize::try_from(*tensor).map_or(BoundInput::None, BoundInput::Extent)
+        }
+        WireRtDim::Lit { .. } | WireRtDim::ToEnd | WireRtDim::Sym { .. } => BoundInput::None,
+    };
+    let bounds = |kind, bounds: &mut dyn Iterator<Item = &WireRtDim>| {
+        bound_slot_read(kind, bounds.map(of), slot)
+    };
+    match op {
+        WireRiscOp::Shape { .. } => operand_extent_read(ExtentSlot::Shape, slot),
+        WireRiscOp::ExtentWitness { .. } => operand_extent_read(ExtentSlot::ExtentWitness, slot),
+        WireRiscOp::Expand { size, .. } => {
+            bounds(ExtentSlot::ExpandSize, &mut std::iter::once(size))
+        }
+        WireRiscOp::Reshape { new_shape } => {
+            bounds(ExtentSlot::ReshapeTarget, &mut new_shape.iter())
+        }
+        WireRiscOp::Pad { padding, .. } => bounds(
+            ExtentSlot::PadBound,
+            &mut padding.iter().flat_map(|(before, after)| [before, after]),
+        ),
+        WireRiscOp::Shrink { bounds: pairs } => bounds(
+            ExtentSlot::ShrinkBound,
+            &mut pairs.iter().flat_map(|(start, end)| [start, end]),
+        ),
+        WireRiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
+        WireRiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
+        WireRiscOp::Add
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::Compare { .. }
+        | WireRiscOp::Logical { .. }
+        | WireRiscOp::Where {}
+        | WireRiscOp::GuardedFail { .. }
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike {}
+        | WireRiscOp::Dropout {}
+        | WireRiscOp::DropoutReplay {}
+        | WireRiscOp::UniformBoundAdjoint { .. }
+        | WireRiscOp::KeyFromSeed {}
+        | WireRiscOp::Split { .. }
+        | WireRiscOp::FoldIn {}
+        | WireRiscOp::KeySelect {}
+        | WireRiscOp::Sum { .. }
+        | WireRiscOp::Count { .. }
+        | WireRiscOp::MaxReduce { .. }
+        | WireRiscOp::MinReduce { .. }
+        | WireRiscOp::ProdReduce { .. }
+        | WireRiscOp::ReduceWindow { .. }
+        | WireRiscOp::ReduceWindowGrad { .. }
+        | WireRiscOp::Argmax { .. }
+        | WireRiscOp::Argmin { .. }
+        | WireRiscOp::Permute { .. }
+        | WireRiscOp::OneHot { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedUnitAxis { .. }
+        | WireRiscOp::Const { .. }
+        | WireRiscOp::ConstTensor { .. }
+        | WireRiscOp::Load { .. }
+        | WireRiscOp::Store { .. }
+        | WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::FusedElem { .. }
+        | WireRiscOp::BlasMatmul { .. }
+        | WireRiscOp::Gather { .. }
+        | WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. } => SlotRead::Value,
     }
 }
 
@@ -462,6 +563,21 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
 }
 
 pub(super) fn validate(dag: &WireDag) -> Result<()> {
+    let mut declared = vec![false; dag.declarations.len()];
+    for node in &dag.nodes {
+        let row = usize::try_from(node.declaration)
+            .ok()
+            .filter(|row| *row < declared.len())
+            .ok_or_else(|| {
+                reject("a node's declaration must be a row of the owning DAG's declaration table")
+            })?;
+        declared[row] = true;
+    }
+    if declared.contains(&false) {
+        return Err(reject(
+            "every row of the declaration table must be the declaration of some node",
+        ));
+    }
     for (index, node) in dag.nodes.iter().enumerate() {
         if node.id != host_index(index) {
             return Err(reject(
@@ -477,6 +593,18 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             return Err(reject(
                 "shape dependencies must resolve to earlier nodes in the owning DAG",
             ));
+        }
+        if let Some(activation) = node.activation {
+            let bool_node = usize::try_from(activation)
+                .ok()
+                .filter(|_| activation < host_index(index))
+                .and_then(|activation| dag.nodes.get(activation))
+                .is_some_and(|activation| activation.output_type.precision == "bool");
+            if !bool_node {
+                return Err(reject(
+                    "a node's activation must be an earlier bool node of the owning DAG",
+                ));
+            }
         }
         for dependency in &node.shape_deps {
             let required = &dag.nodes[*dependency as usize];
@@ -538,40 +666,14 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                     Some(WireRtDim::Node { .. } | WireRtDim::InputAxis { .. })
                 ),
                 WireRiscOp::Shrink { .. } | WireRiscOp::Pad { .. } => true,
+                // [05-OP-71]: a split's count axis, as an expansion's size;
+                // the split checks it before any key exists.
+                WireRiscOp::SplitN { .. } => result_axis + 1 == node.output_type.dims.len(),
                 _ => same_shape_result_relation_is_supported(dag, node),
             };
             if !supported || result_axis >= node.output_type.dims.len() {
                 return Err(reject(
                     "result claim dependency requires a supported producing axis",
-                ));
-            }
-        }
-        let owns_local_ascription = node.shape_deps.iter().any(|dependency| {
-            dag.nodes
-                .get(*dependency as usize)
-                .is_some_and(|dependency| {
-                    matches!(
-                        dependency.op,
-                        WireRiscOp::ExtentWitness {
-                            site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
-                            ..
-                        }
-                    )
-                })
-        });
-        if owns_local_ascription {
-            let activation_count = node
-                .shape_deps
-                .iter()
-                .filter_map(|dependency| dag.nodes.get(*dependency as usize))
-                .filter(|dependency| {
-                    dependency.output_type.dims.is_empty()
-                        && dependency.output_type.precision == "bool"
-                })
-                .count();
-            if activation_count > 1 {
-                return Err(reject(
-                    "local ascription owner has multiple runtime branch activations",
                 ));
             }
         }
@@ -898,11 +1000,6 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             // The random and key operations' operand rules are the IR
             // verifier's, applied by `key_rules`; only the wire's own
             // encodings are checked here.
-            WireRiscOp::DrawKey { dtype, .. } => {
-                if Prim::parse_interchange_name(dtype).is_none() {
-                    return Err(reject("draw key requires an active float draw dtype"));
-                }
-            }
             WireRiscOp::SplitN { count } => bound(count)?,
             _ => {}
         }

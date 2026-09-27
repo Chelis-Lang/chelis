@@ -9,6 +9,7 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 fn model(rank: usize, matrix: bool) -> String {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mut dims = vec![DimInfo::Lit(1); rank];
     if let Some(last) = dims.last_mut() {
         *last = DimInfo::Named("n".into(), None);
@@ -20,9 +21,16 @@ fn model(rank: usize, matrix: bool) -> String {
         dims,
         precision: Prim::F32,
     };
-    let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
     if matrix {
         let permute = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![input],
             TensorType {
@@ -32,6 +40,7 @@ fn model(rank: usize, matrix: bool) -> String {
             None,
         );
         let reshape = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(6)],
             },
@@ -45,7 +54,7 @@ fn model(rank: usize, matrix: bool) -> String {
         dag.add_root(permute);
         dag.add_root(reshape);
     } else {
-        let negative = dag.add_node(RiscOp::Neg, vec![input], ty, None);
+        let negative = dag.add_node(decl, RiscOp::Neg, vec![input], ty, None);
         dag.add_root(input);
         dag.add_root(negative);
     }
@@ -54,11 +63,13 @@ fn model(rank: usize, matrix: bool) -> String {
 
 fn sparse_model(operation: usize, index_precision: Prim) -> String {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let tensor = |dims: &[usize], precision| TensorType {
         dims: dims.iter().copied().map(DimInfo::Lit).collect(),
         precision,
     };
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -67,6 +78,7 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -77,6 +89,7 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
     let mut inputs = vec![target, indices];
     if operation != 0 {
         inputs.push(dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -93,6 +106,7 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
         _ => unreachable!(),
     };
     let output = dag.add_node(
+        decl,
         op,
         inputs,
         tensor(if operation == 0 { &[4, 2] } else { &[3, 2] }, Prim::F32),
@@ -106,23 +120,27 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
 fn blas_model() -> String {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let tensor = |rows, columns| TensorType {
         dims: vec![DimInfo::Lit(rows), DimInfo::Lit(columns)],
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         tensor(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         tensor(3, 2),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -141,6 +159,7 @@ fn blas_model() -> String {
 
 fn empty_result_model() -> String {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vector = TensorType {
         dims: vec![DimInfo::Lit(3)],
         precision: Prim::F32,
@@ -150,13 +169,15 @@ fn empty_result_model() -> String {
         precision: Prim::F32,
     };
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vector.clone(),
         None,
     );
-    let work = dag.add_node(RiscOp::Neg, vec![input], vector, None);
+    let work = dag.add_node(decl, RiscOp::Neg, vec![input], vector, None);
     let output = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(0),
@@ -165,7 +186,7 @@ fn empty_result_model() -> String {
         empty.clone(),
         None,
     );
-    let realized = dag.add_node(RiscOp::Realize, vec![output], empty, None);
+    let realized = dag.add_node(decl, RiscOp::Realize, vec![output], empty, None);
     dag.add_root(output);
     dag.add_root(realized);
     support::codegen_hip(&dag, "entry_probe").unwrap().c_source

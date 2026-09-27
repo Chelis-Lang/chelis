@@ -156,6 +156,24 @@
     },
     {
       "authority": "TaggedTransport",
+      "contract": "earlier-activation",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDagNode.activation: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "declaration-row",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDagNode.declaration: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
       "contract": "dag-position",
       "flags": [
         "numeric-field"
@@ -251,15 +269,6 @@
         "numeric-field"
       ],
       "id": "chelis_compiler_api::schema::WireInferredType::Var.id: u32",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "authority": "TaggedTransport",
-      "contract": "random-handler-instance",
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRandomHandler::Scoped.instance: u32",
       "kind": "wire-schema-numeric-field"
     },
     {

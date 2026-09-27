@@ -80,7 +80,9 @@ mod tests {
     #[test]
     fn append_none_is_noop() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),
@@ -94,7 +96,9 @@ mod tests {
     #[test]
     fn append_canonical_is_noop() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),
@@ -107,7 +111,9 @@ mod tests {
     #[test]
     fn append_dedup_skips_existing() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),
@@ -121,7 +127,9 @@ mod tests {
     #[test]
     fn append_lex_sorts() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),
@@ -136,7 +144,9 @@ mod tests {
     #[test]
     fn merge_duplicate_transfers_canonical_and_merged() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let survivor = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),
@@ -155,7 +165,9 @@ mod tests {
     #[test]
     fn merge_duplicate_dedups_against_survivor() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let survivor = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar().precision, 0.0),
             vec![],
             scalar(),

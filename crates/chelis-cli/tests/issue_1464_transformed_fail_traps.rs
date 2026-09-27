@@ -741,6 +741,66 @@ fn a_discarded_untaken_guard_still_evaluates_its_fallback() {
     );
 }
 
+/// chelis#2440: a discarded trapping node still traps.
+///
+/// `spec/06-transformations.md` §5.2: "Mark every effectful node, every
+/// potentially trapping node ... as live", and "purity alone does not make a
+/// possible trap dead". The cast overflows f32 into i32 and nothing consumes
+/// it; before this it was swept and the trap simply did not occur.
+#[test]
+fn a_discarded_trapping_node_still_traps() {
+    let source = "module Repro.DiscardedTrap\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           dead = cast(mul(&x, to_tensor([cast(1.0e30, f32)])), i32)\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32)]))\n";
+    let evaluated = eval(source, "discarded_trap");
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "a discarded trapping cast must still trap: stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("numeric trap"),
+        "the trap must report on its own terms; got: {stderr}"
+    );
+}
+
+/// chelis#2440, the reordering half of [05-OP-68]: two observable effects
+/// report in source order regardless of which one is consumed.
+///
+/// This is why the atom carried a scoped parenthetical. A discarded trap
+/// placed BEFORE a guard used to be swept, so the guard fired and the
+/// earlier effect never reported — the guard was effectively reordered ahead
+/// of it. The difference was purely the other effect's liveness.
+#[test]
+fn an_earlier_discarded_trap_reports_before_a_later_guard() {
+    let source = "module Repro.TrapBeforeGuard\n\
+         def loss(x: tensor[1, f32]) -> tensor[f32] = {\n\
+           dead = cast(mul(&x, to_tensor([cast(1.0e30, f32)])), i32)\n\
+           guard = if gt(tensor_to_scalar(sum(&x, cast(0, i32))), cast(0.5, f32)) \
+           then fail(\"GUARD AFTER DEAD TRAP\") else sum(&x, cast(0, i32))\n\
+           sum(x, cast(0, i32))\n\
+         }\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32)]))\n";
+    let evaluated = eval(source, "trap_before_guard");
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).into_owned();
+    assert!(
+        !evaluated.status.success(),
+        "one of the two effects must fire"
+    );
+    assert!(
+        stderr.contains("numeric trap"),
+        "the EARLIER effect reports; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("GUARD AFTER DEAD TRAP"),
+        "the later guard must not pre-empt the earlier trap; got: {stderr}"
+    );
+}
+
 /// A `fail` with no enclosing `if` and NO transform is still the host lane's
 /// whole-value abort.
 ///

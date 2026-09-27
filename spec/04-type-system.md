@@ -58,8 +58,9 @@ no arithmetic, comparison, cast, literal, or default value. [05-OP-69] creates
 keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
 reads it under [05-RNG-2]. An operation admits `key` elements only where its
 own atom names `key`: a domain written as every active tensor element dtype
-admits exactly the nine active data element dtypes. (Source and Deep ingress
-do not yet accept the `key` spelling; chelis#2413.)
+admits exactly the nine active data element dtypes. Keys are affine
+([04-LIN-9]), and no function's type parameter stands for a key-carrying
+type ([04-LIN-10]).
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
@@ -184,7 +185,7 @@ the spec or in user-facing docs must resolve to a cell in this table.
 | i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
-| key    | admitted                                                                                                          | **operation-limited**: only the key ([05-RNG-2]) that a `with seed` region lowered into the same graph gives one of its [05-OP-8] draws with literal bounds and no activation; [05-OP-69] through [05-OP-72], key parameters, and key results are rejected | **operation-limited**: no operation          | admitted  |
+| key    | admitted                                                                                                          | **operation-limited**: no operation                                                                                                                                                                      | **operation-limited**: no operation          | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
@@ -2171,9 +2172,7 @@ context-inferred `[2, 2]` would hide exactly the distinction the dtype
 exists to carry. Chelis programs are written and, more often, audited by
 agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
-context-dependent literals is paid on every audit. This is the trade
-`with seed(...)` already records (§7.1): its seed demands `i64` and the
-literal states it (`with seed(42i64)`), with no adoption carve-out.
+context-dependent literals is paid on every audit.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
@@ -2797,7 +2796,6 @@ satisfy [04-FIT-26]; chelis#2130 owns that gap.)
 
 Built-in effect vocabulary in the type layer:
 
-- `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
 - `IO` -- host-side effects such as `print` and `debug`,
   the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
@@ -2806,15 +2804,19 @@ Built-in effect vocabulary in the type layer:
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
 `Diff` is a compiler capability marker, not a user-handled boundary effect.
-`Accum` is internal-only and users do not handle it directly. `Random` and
-`Resource(Device)` are the two user-handler boundaries. `IO` may remain
+`Accum` is internal-only and users do not handle it directly.
+`Resource(Device)` is the one user-handler boundary. `IO` may remain
 unhandled at the program boundary. `Test` is consumed by `chelis test`; other
 execution boundaries reject an unhandled `Test` effect.
 
-> **[04-EFF-1]** A `handle-effect` form SHALL name one of the two user
-> handler boundaries, `random` or `resource`. Any other handler kind is a
-> type error; lowering SHALL NOT erase its handler or execute the body as if
-> no handler were present.
+Randomness is not an effect. A random primitive ([05-OP-8], [05-OP-37]) is a
+pure function of the explicit key it is given ([05-RNG-1]), and a function
+that draws takes a `key` parameter and needs no effect annotation.
+
+> **[04-EFF-1]** A `handle-effect` form SHALL name the one user handler
+> boundary, `resource`. Any other handler kind is a type error; lowering
+> SHALL NOT erase its handler or execute the body as if no handler were
+> present.
 
 > **[04-EFF-2]** Before emitting a host-C artifact, the build boundary SHALL
 > reject every reachable `resource` handler whose device designator is not
@@ -2830,30 +2832,19 @@ Inference and checking obey these rules:
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are
-  `Random` sources; stdlib random helpers such as
-  `normal_like` and Kaiming/Xavier initializers inherit that effect through
-  calls
+- random primitives, the key operations [05-OP-69] through [05-OP-72], and
+  stdlib random helpers such as `normal_like` and the Kaiming/Xavier
+  initializers contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
   `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
   Compiled host execution preserves these effects and their order under
   spec/05-risc-primitives.md [05-HOST-1..2]
-- `with seed(seed) { ... }` handles `Random` across direct operations and calls made
-  inside the handled region; the C host backend preserves this with generated
-  handler-scoped RNG state for nested stdlib/user functions. The seed is
-  semantically i64, and a seed written as an integer literal SHALL carry the
-  `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
-  unsuffixed literal is a type error naming the required suffix. The body is
-  checked in the enclosing context and its type is returned, so the enclosing
-  signature is enforced. `spec/05-risc-primitives.md` [05-RNG-1] governs the
-  seeded stream in every lane
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target; [04-EFF-2] defines the host-C admission boundary
 - declared `Resource("...")` annotations on `t-fn` expressions constrain the
   inferred resource set, and checked `fn` metadata records every unhandled
   `Resource(Device)` effect
-- unhandled top-level `Random` is a check error with repair guidance
 - top-level `IO` is permitted
 - assertion operations introduce `Test`; only the test runner handles it
 
@@ -2899,8 +2890,8 @@ discovered probe files, not on [04-TEST-1]'s runnable-test count.
 Declared function types with effects use `eff` metadata on `t-fn`:
 
 ```scheme
-;; f : tensor[D, f32] -> tensor[D, f32] ! {Random, Resource("gpu:0")}
-(t-fn {eff: (effects {} random (resource {} "gpu:0"))}
+;; f : tensor[D, f32] -> tensor[D, f32] ! {IO, Resource("gpu:0")}
+(t-fn {eff: (effects {} io (resource {} "gpu:0"))}
   (t-tensor {} (d-var {} d) (t-prim {} f32))
   (t-tensor {} (d-var {} d) (t-prim {} f32)))
 ```
@@ -2908,7 +2899,7 @@ Declared function types with effects use `eff` metadata on `t-fn`:
 Checked function bodies may also carry inferred effect metadata:
 
 ```scheme
-(fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
+(fn {type: (t-fn {} ...), effects: (effects {} io)} (params {} x) body)
 ```
 
 The `effects` metadata records the complete inferred, unhandled effect set.
@@ -2939,6 +2930,10 @@ arguments. A consuming use makes the binding dead; a borrow leaves the owned bin
 live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
 post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
 exit is the fallback only when no earlier valid terminal point can be proved.
+
+Random keys are the exception to copying. A key-carrying value (§8.4.1) is
+affine: it is used at most once, never copied or borrowed, and may be dropped
+unused ([04-LIN-9]). A second key comes from deriving one, never from a copy.
 
 ### 8.2 Type Representation
 
@@ -3028,8 +3023,10 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   free reference to a top-level value that no initializer consumes does not consume it,
   and one to a value that an initializer consumes is rejected whatever the textual
   order. A consuming use of such a reference yields each call's owned result through a
-  copy, per [04-LIN-4].
-- Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
+  copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
+  whose copy [04-LIN-9] refuses.
+- Ordinary consuming fan-out is handled by inserted copies, except on a
+  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
@@ -3135,6 +3132,66 @@ lexical binding, change which callable is selected, or memoize function results.
 > An implementation may reclaim later only when an explicitly live owner or
 > view requires the storage; recursion depth alone is not such a reason.
 
+> **[04-LIN-9]** A key-carrying value (§8.4.1) is affine: it SHALL have
+> at most one consuming use on every control-flow path, and it needs none,
+> so an unused one is dropped. No explicit or compiler-inserted `copy`
+> applies to it, so the copies that [04-LIN-3], [04-LIN-5] and [04-LIN-6]
+> allow for another owned value are refused for it. It SHALL NOT be
+> borrowed, copied, captured by a closure, or read by any operation that
+> leaves it live, and no signature SHALL declare a borrowed key-carrying
+> parameter. Binding it to another name moves it. A key-carrying value
+> reaches only the operations this rule admits: a key derivation
+> ([05-OP-70] to [05-OP-72]) or a draw ([05-OP-8], [05-OP-37]) at its key
+> operand; `drop` ([05-OP-67]); a runtime branch's join; the construction
+> and destructuring of tuples, records and data values; a binding, or a
+> block's, a handler region's or a function's result; a builtin operation
+> whose atom routes each value of a type parameter to exactly one consumer;
+> and a call through a
+> parameter whose declared type carries a key, whether direct or through
+> `grad`, `vmap` or `jit`. Every other operation refuses it, `realize`,
+> `cast` and `copy` included, and a builtin passed as a function value
+> admits it only where a call to that builtin would. Every call consumes a
+> key-carrying argument, including the otherwise observational arguments of
+> a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
+> value is reached only by consuming that value: a destructuring `let` or
+> `match` pattern; a tuple projection, which takes each key-carrying
+> component at most once and leaves the tuple unusable as a whole; a field
+> access, which consumes the whole value; or `vmap` over a key axis, which
+> gives each row to one application. Reading a consumed key's bits again in
+> a backward pass or a checkpoint recomputation is not a use. A key tensor's
+> extent is not key material, so `shape`, `numel` and a call's extent check
+> admit a key tensor and read its extent without a use, leaving the key live,
+> and like any read such a read precedes the key's consuming use. A violation
+> is a type error whose suggested repair derives fresh keys with
+> `split_key` or `split_keys` ([05-OP-70], [05-OP-71]), never `copy`.
+
+> **[04-LIN-10]** A function's type parameter SHALL NOT be instantiated at a
+> key-carrying type (§8.4.1), because a generic body may use a value of its
+> parameter type more than once. Every type variable that a definition's or
+> a generalized `let` binding's type scheme quantifies is such a parameter,
+> authored or inferred: an authored type binder, including one that names a
+> tensor element dtype with or without a dtype-family bound, and a variable
+> that inference leaves free in the binding's type, whatever the bound value
+> is, since a tuple or a data value can hold a closure over it. A `let`
+> binding without an ascription is generalized: `e = Nil` followed by
+> `Cons(k, e)` instantiates `e`'s type parameter at `key` and is refused,
+> while the ascribed `e: List[key] = Nil` and the value written where it is
+> used, `Cons(k, Nil)`, quantify nothing. The rule holds
+> however the generic is reached: called directly, bound to another name,
+> stored in a tuple or a data value, returned from a function, or passed as
+> an argument to another function, a builtin operation included. A key
+> reaches a function only through a parameter whose declared type carries a
+> key without a type parameter, such as `key`, `tensor[n, key]`, or a data
+> type with a key field. A data type's own type parameters are not function
+> type parameters: `List[key]`, `Option[key]`, and a data type instantiated
+> at a key are key-carrying types that construction, matching, and the
+> builtin operations handle under [04-LIN-9]. A violation is a type error
+> that names the generic, and the type parameter when the program spells
+> one. Its suggested repair passes the key through such a parameter or, when
+> the generic is a value binding rather than a function, ascribes the
+> binding a type with no type parameter or writes its value where it is
+> used.
+
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
 faulting use — never a compiler-synthesized intermediate.
@@ -3171,6 +3228,25 @@ visible at check time. When the linearity checker runs against composed
 contexts (library + new code), both halves are resolved in one pass so a
 new-code `Outer` whose carrier classification depends on a library `Inner` is
 recognized correctly.
+
+#### 8.4.1 Key-carrying types
+
+A type **carries a key** iff it is in the least relation satisfying:
+
+- `key` carries a key, and so does `tensor[..., key]`.
+- `(t1, t2, ...)` carries a key iff some `ti` does.
+- `&U` carries a key iff `U` does.
+- `U[arg1, arg2, ...]` carries a key iff `U` is key-carrying, **or** some
+  `argi` carries a key.
+- Function types `t-fn` carry no key, even when their parameters or return
+  do. A closure never captures a key ([04-LIN-9]).
+
+An ADT is **key-carrying** iff one of its variant fields has a type that
+carries a key. The relation is resolved as the §8.4 carrier set is: a least
+fixed point over every `deftype` visible at check time, library and new code
+together. A value that carries both a tensor and a key follows §8.4 and
+[04-LIN-9] at once, and [04-LIN-9] refuses the borrows and copies that §8.3
+would otherwise allow it.
 
 ### 8.5 Type-Name Uniqueness
 

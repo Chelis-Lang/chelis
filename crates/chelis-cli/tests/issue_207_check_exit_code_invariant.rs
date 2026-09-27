@@ -130,17 +130,20 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
         ),
         (
             "effect",
-            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+            // The effect is IO: chelis#2413 retired the `Random` effect this
+            // fixture used, and `print` is the remaining effect a
+            // declared-pure body can perform.
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = { _ = print(x)\n x }\n",
             serde_json::json!({
                 "score": 0.8,
                 "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
-                "typed_nodes": 4,
+                "typed_nodes": 5,
                 "untyped_nodes": 0,
-                "total_nodes": 4,
+                "total_nodes": 5,
                 "unresolved_names": [],
                 "errors": [{
                     "kind": "UnhandledEffect",
-                    "message": "Function `noisy` is declared with effects `{}` but its body performs effects `{Random}` that were not declared",
+                    "message": "Function `noisy` is declared with effects `{}` but its body performs effects `{IO}` that were not declared",
                     "severity": 0.8,
                     // [04-FIT-15] again, and this fixture is the one that
                     // proved the rule was not yet met: the effect checker
@@ -148,7 +151,7 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
                     // them, so the field set DID vary by producing stage
                     // while the linearity fixture below claimed it did not.
                     "suggestions": [
-                        "Either add the missing effect(s) to the signature of `noisy` (e.g. `! { Random }`) or refactor the body so it does not perform them."
+                        "Either add the missing effect(s) to the signature of `noisy` (e.g. `! { IO }`) or refactor the body so it does not perform them."
                     ],
                 }],
             }),

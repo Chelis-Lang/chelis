@@ -12,7 +12,7 @@ fn every_annotation_key_is_unique_including_extensions() {
     ] {
         let (tag, value, children) = match key {
             "literal_source" => ("lit", "integer", "1"),
-            "effect" => ("handle-effect", "random", "(lit {} 1) (lit {} 2)"),
+            "effect" => ("handle-effect", "resource", "(lit {} 1) (lit {} 2)"),
             "destructure" => ("bind", "true", "x (lit {} 1)"),
             _ => ("var", "\"a\"", "x"),
         };
@@ -30,7 +30,8 @@ fn additional_core_payloads_reject_bad_shapes_and_owners() {
         "(lit {literal_source: float} 1)",
         "(var {literal_source: integer} x)",
         "(handle-effect {effect: imaginary} (lit {} 1) (lit {} 2))",
-        "(var {effect: random} x)",
+        "(var {effect: resource} x)",
+        "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
         "(bind {destructure: false} x (lit {} 1))",
         "(var {destructure: true} x)",
     ] {
@@ -213,7 +214,7 @@ const TYPED_CASES: &[(&str, &str)] = &[
     ("doc", "(var {doc: \"documentation\"} x)"),
     (
         "effect",
-        "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
+        "(handle-effect {effect: resource} (lit {} 1) (lit {} 2))",
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),
@@ -483,7 +484,20 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
     assert_eq!(old.len(), sources.len());
     let mut rejected = 0;
     let mut accepted = 0;
+    let mut retired = 0;
     for (source, json) in sources.iter().zip(old) {
+        // The `random` handler kind was retired with the counter stream
+        // (#2413): its source no longer parses and its old core JSON no
+        // longer decodes, each naming the retired kind.
+        if source.contains("{effect: random}") {
+            assert!(parse_str(source).is_err(), "retired kind parsed: {source}");
+            let error = serde_json::from_value::<Vec<chelis_deep::Expr>>(json)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("effect kind `random` is retired"), "{error}");
+            retired += 1;
+            continue;
+        }
         let expected = parse_str(source).unwrap();
         let current = serde_json::to_value(&expected).unwrap();
         let decoded = serde_json::from_value::<Vec<chelis_deep::Expr>>(json);
@@ -506,6 +520,7 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
         );
     }
     assert!(accepted > 0 && rejected > 0);
+    assert_eq!(retired, 1);
     assert!(
         bincode::deserialize::<Vec<Vec<chelis_deep::Expr>>>(include_bytes!(
             "fixtures/metadata_df5daab/ast.bin"
@@ -578,28 +593,31 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
 #[test]
 fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
     use chelis_deep::{Atom, Expr, Metadata, Span};
-    for kind in ["random", "resource"] {
-        parse_str(&format!(
-            "(handle-effect {{effect: {kind}}} (lit {{}} 1) (lit {{}} 2))"
-        ))
-        .unwrap();
+    parse_str("(handle-effect {effect: resource} (lit {} 1) (lit {} 2))").unwrap();
+    let value = Expr::Atom(Atom::Name("resource".into()), Span::new(0, 0));
+    let wire = serde_json::json!({"entries": [["effect", value]]});
+    assert!(serde_json::from_value::<Metadata>(wire).is_ok());
+    // `random` was a handler kind until the counter stream was retired
+    // (#2413); both ingresses refuse it as a typed retired spelling, and
+    // `teleport` as an unknown kind.
+    for (kind, expected) in [
+        ("teleport", "unknown effect kind `teleport`"),
+        ("random", "effect kind `random` is retired"),
+    ] {
+        let source = format!("(handle-effect {{effect: {kind}}} (lit {{}} 1) (lit {{}} 2))");
         let value = Expr::Atom(Atom::Name(kind.into()), Span::new(0, 0));
         let wire = serde_json::json!({"entries": [["effect", value]]});
-        assert!(serde_json::from_value::<Metadata>(wire).is_ok());
+        for error in [
+            parse_str(&source).unwrap_err().to_string(),
+            serde_json::from_value::<Metadata>(wire)
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(error.contains("metadata `effect`"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
     }
-    let source = "(handle-effect {effect: teleport} (lit {} 1) (lit {} 2))";
-    let value = Expr::Atom(Atom::Name("teleport".into()), Span::new(0, 0));
-    let wire = serde_json::json!({"entries": [["effect", value]]});
-    for error in [
-        parse_str(source).unwrap_err().to_string(),
-        serde_json::from_value::<Metadata>(wire)
-            .unwrap_err()
-            .to_string(),
-    ] {
-        assert!(error.contains("metadata `effect`"), "{error}");
-        assert!(error.contains("unknown effect kind `teleport`"), "{error}");
-    }
-    let wrong_owner = parse_str("(var {effect: random} x)")
+    let wrong_owner = parse_str("(var {effect: resource} x)")
         .unwrap_err()
         .to_string();
     assert!(wrong_owner.contains("handle-effect"), "{wrong_owner}");

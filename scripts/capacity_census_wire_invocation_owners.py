@@ -429,6 +429,64 @@ def codec_specialization_owner(call, templates, serialize_trait, definitions):
     return "wire-codec/" + identity(receiver["nominal"])
 
 
+# The one serde `with` codec the schema graph admits (the tensor execution
+# wire's `data` field; see capacity_census_wire_schema._EXECUTION_STORAGE).
+_EXECUTION_STORAGE_SERIALIZE = (
+    "chelis_types::dtype_semantics::wire_codec::execution_storage::serialize"
+)
+
+
+def serialize_with_helper_owner(row, codec_calls, definitions):
+    """Own a serde-generated `__SerializeWith` field helper by its derive.
+
+    Serde's derive of a struct with a `#[serde(with = ...)]` field defines a
+    local `__SerializeWith` inside that struct's `serialize` and calls the
+    `with` module from the helper's own `Serialize`. The helper is owned by
+    the enclosing derive only when the helper's parent is exactly the
+    `serialize` of a derived implementation whose owner is in the graph,
+    that derive serializes the helper as a field payload, and the helper
+    calls exactly the admitted execution storage codec.
+    """
+    helper = row["caller"]["implementation"]["self_type"]["nominal"]
+    path = helper.get("path", "")
+    if helper.get("item_name") != "__SerializeWith" or not path.endswith(
+        "::serialize::__SerializeWith"
+    ):
+        return None
+    if identity(row["callee"]) != _EXECUTION_STORAGE_SERIALIZE:
+        raise GraphError("a serde field helper calls an unadmitted codec")
+    parent = next(
+        (
+            ancestor
+            for ancestor in row["caller"].get("ancestors", ())
+            if ancestor.get("crate") == helper.get("crate")
+            and ancestor.get("path") == path[: -len("::__SerializeWith")]
+        ),
+        None,
+    )
+    if parent is None:
+        raise GraphError("a serde field helper has no enclosing derive")
+    owners = [
+        candidate
+        for candidate in codec_calls
+        if candidate is not row
+        and candidate["caller"]["definition"].get("def_path_hash")
+        == parent.get("def_path_hash")
+        and any(
+            "::__SerializeWith" in payload.get("text", "")
+            for payload in candidate.get("payloads", ())
+        )
+    ]
+    derived = {
+        identity(candidate["caller"]["implementation"]["self_type"]["nominal"])
+        for candidate in owners
+        if candidate["caller"].get("implementation") is not None
+    }
+    if len(derived) != 1 or not derived <= definitions.keys():
+        raise GraphError("a serde field helper's derive owner is absent or ambiguous")
+    return next(iter(derived))
+
+
 def discharge_invocations(raw, definitions):
     from capacity_census_wire_schema_publication import (
         check_report_publisher_owner,
@@ -464,6 +522,8 @@ def discharge_invocations(raw, definitions):
                 "generic codec call has no actual Serialize implementation owner"
             )
         owner = identity(implementation["self_type"]["nominal"])
+        if owner not in definitions:
+            owner = serialize_with_helper_owner(row, raw["codec_calls"], definitions) or owner
         if owner not in definitions:
             raise GraphError(
                 f"codec implementation is absent from the discovered graph: {owner}"

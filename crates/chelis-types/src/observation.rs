@@ -212,6 +212,24 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
     }
 }
 
+/// THE printed form of a random key: `key(` then its 64 bits as the 16
+/// lowercase hex digits of spec/10 section 3.1's key carrier, then `)`. A
+/// key has no numeric value, so no numeric formatter renders it.
+pub fn format_key(key: crate::dtype_semantics::RandomKey) -> String {
+    format_key_bits(key.bits())
+}
+
+/// [`format_key`] over a key's stored 64 bits, for a native runtime that
+/// holds a key as its storage word ([05-OBS-2]).
+pub fn format_key_bits(bits: u64) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let hex = (0..16)
+        .rev()
+        .map(|nibble| char::from(DIGITS[((bits >> (nibble * 4)) & 0xf) as usize]))
+        .collect::<String>();
+    format!("key({hex})")
+}
+
 /// Shortest-round-trip rendering for a half-precision value, in the
 /// normative grammar. `image` is the exact f64 widening of the stored
 /// value, `stored_bits` its bit pattern (widened to u64), and `narrow`

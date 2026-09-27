@@ -82,7 +82,7 @@ The semantic contract is:
 The initial accepted surface is deliberately narrow:
 
 - rank >= 2 `f32` matmul with the same constraints as the IR BLAS recognizer
-- helper body is pure tensor code with no `Random`, `IO`, or host-side effects
+- helper body is pure tensor code with no random draws, `IO`, or host-side effects
 - no data-dependent control flow around the equivalent operation
 - no hidden allocation or mutation semantics beyond the ordinary tensor DAG nodes
 

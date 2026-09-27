@@ -60,18 +60,21 @@ mod rejection_authority_tests {
     #[test]
     fn verified_drop_is_typed_no_device_owner() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
         };
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![source], ty, None);
+        dag.add_node(decl, RiscOp::Drop, vec![source], ty, None);
         let output = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             TensorType {
@@ -93,12 +96,19 @@ mod rejection_authority_tests {
     #[test]
     fn verified_borrowed_drop_is_typed_no_device_owner() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
         };
-        let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        dag.add_node(RiscOp::Drop, vec![borrowed], ty, None);
+        let borrowed = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Drop, vec![borrowed], ty, None);
         dag.add_root(borrowed);
         let verified = crate::testing::verified_dag(&dag).unwrap();
         let plan = crate::plan_metal(verified);

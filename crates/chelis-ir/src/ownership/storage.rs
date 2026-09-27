@@ -618,14 +618,19 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
     for node in dag.nodes() {
         for (slot, input) in node.inputs.iter().enumerate() {
             let literal = match node.op {
-                RiscOp::DrawKey { .. } | RiscOp::KeyFromSeed => true,
+                RiscOp::KeyFromSeed => true,
                 RiscOp::FoldIn => slot == 1,
                 RiscOp::UniformLike => matches!(slot, 1 | 2),
                 _ => false,
             };
             read(*input, literal);
         }
-        for dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
+        for dependency in node
+            .shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .chain(&node.owner.activation)
+        {
             read(*dependency, false);
         }
     }
@@ -683,16 +688,15 @@ fn classify_nodes(
                         },
                     }
                 }
-                // A key is one word that the emitter keeps in a local, never
-                // tensor storage with a slot and a lifetime.
-                RiscOp::DrawKey { .. } => StoragePlacement::Skipped,
-                // A derived key is an ordinary key tensor on the C lane. The
-                // HIP lane computes rank-0 derivations while it emits, as it
-                // does a scoped draw key, so they take no device storage.
+                // A derived or joined key is an ordinary key tensor on the C
+                // lane. The HIP lane computes rank-0 derivations while it
+                // emits, and refuses the rest, so they take no device
+                // storage.
                 RiscOp::KeyFromSeed
                 | RiscOp::Split { .. }
                 | RiscOp::FoldIn
-                | RiscOp::SplitN { .. } => match lane {
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => match lane {
                     StorageLaneKind::C => StoragePlacement::OwnedSlot {
                         slot: StorageSlotId::UNASSIGNED,
                     },
@@ -879,6 +883,8 @@ fn extend_lifetimes(
         // reusing its allocation earlier changes the obligation itself.
         effective_inputs.extend(node.shape_deps.iter().copied());
         effective_inputs.extend(node.result_claim_deps.iter().copied());
+        // A node reads its activation to decide whether it checks.
+        effective_inputs.extend(node.owner.activation);
         for input in effective_inputs {
             if let Some(owner) = owner_of[input.0]
                 && let Some(requirement) = requirements.get_mut(&owner)
@@ -1214,12 +1220,14 @@ mod tests {
     #[test]
     fn hip_reshape_materializes_independent_storage_while_permute_retains_source() {
         let mut dag = crate::dag::Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![crate::dag::DimInfo::Lit(2), crate::dag::DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
+        let input = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty, None);
         let permute = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![input],
             TensorType {
@@ -1229,6 +1237,7 @@ mod tests {
             None,
         );
         let reshape = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![crate::dag::RtDim::Lit(6)],
             },
@@ -1276,14 +1285,17 @@ mod tests {
 
     fn dropped_then_root(first: TensorType, second: TensorType) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let first_node = dag.add_node(
+            decl,
             RiscOp::synth_const(first.precision, 1.0),
             vec![],
             first.clone(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![first_node], first, None);
+        dag.add_node(decl, RiscOp::Drop, vec![first_node], first, None);
         let second_node = dag.add_node(
+            decl,
             RiscOp::synth_const(second.precision, 2.0),
             vec![],
             second,
@@ -1317,7 +1329,9 @@ mod tests {
     fn c_excludes_entry_borrows_while_hip_counts_input_mirrors() {
         fn input_dag() -> Dag {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 vector(4, Prim::F32),
@@ -1335,13 +1349,16 @@ mod tests {
     #[test]
     fn c_materialized_store_has_storage_independent_of_its_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let store = dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![source],
             vector(4, Prim::F32),
@@ -1364,20 +1381,24 @@ mod tests {
     #[test]
     fn program_owned_fused_reuse_mints_one_take_only_token() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             vector(4, Prim::F32),
             None,
         );
-        let owned = dag.add_node(RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,

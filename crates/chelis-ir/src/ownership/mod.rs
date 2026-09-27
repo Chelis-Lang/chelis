@@ -142,6 +142,11 @@ pub struct VerifiedDagView<'a> {
 }
 
 impl<'a> VerifiedDagView<'a> {
+    /// The declaration `decl` names in the verified graph.
+    pub fn declaration(self, decl: crate::dag::DeclId) -> &'a crate::dag::Declaration {
+        self.dag.declaration(decl)
+    }
+
     pub fn nodes(self) -> &'a [DagNode] {
         self.dag.nodes()
     }
@@ -164,6 +169,14 @@ impl<'a> VerifiedDagView<'a> {
 
     pub fn is_root(self, id: NodeId) -> bool {
         self.dag.is_root(id)
+    }
+
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`crate::dag::TrapSeeds`]: whether a node checks nothing where its
+    /// activation is false, the one gate declaration, and the literal result
+    /// claims a witness checks). An emitter takes one per graph.
+    pub fn trap_seeds(self) -> crate::dag::TrapSeeds<'a> {
+        self.dag.trap_seeds()
     }
 
     pub fn topological_order(self) -> Vec<NodeId> {
@@ -264,13 +277,6 @@ impl<'a> VerifiedDagView<'a> {
     ) -> Option<crate::axis_sources::SameShapeAgreement> {
         crate::axis_sources::same_shape_result_agreement(self.dag, node)
             .expect("verified same-shape result agreement")
-    }
-
-    pub fn literal_result_witness_requirements(
-        self,
-        witness: NodeId,
-    ) -> Vec<chelis_types::ScalarValue> {
-        crate::axis_sources::literal_result_witness_requirements(self.dag, witness)
     }
 
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
@@ -476,7 +482,6 @@ pub struct VerifiedUnitId {
 pub struct VerifiedHostSourceSite<'a> {
     site: VerifiedHostSiteView<'a>,
     expression: &'a ConcreteHostExpr,
-    seed_parent: Option<HostSiteId>,
 }
 
 #[cfg(feature = "lowering-trace")]
@@ -487,18 +492,12 @@ impl<'a> VerifiedHostSourceSite<'a> {
     pub fn expression(self) -> &'a ConcreteHostExpr {
         self.expression
     }
-    pub fn seed_parent(self) -> Option<HostSiteId> {
-        self.seed_parent
-    }
     /// Observation-only words in distinct unit and host-site namespaces.
     pub fn unit_word(self) -> usize {
         self.site.record.unit
     }
     pub fn site_word(self) -> usize {
         self.site.id().index()
-    }
-    pub fn seed_parent_word(self) -> Option<usize> {
-        self.seed_parent.map(HostSiteId::index)
     }
     pub fn direct_callee_word(self) -> Option<usize> {
         self.direct_callee().map(|callee| callee.key as usize)
@@ -1089,6 +1088,12 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
 
     pub fn specialization(self) -> Option<&'a HostTensorSpecialization> {
         self.helper.specialization.as_ref()
+    }
+
+    /// The input this helper returns unchanged, by the one definition the
+    /// ownership lowering read ([`crate::host::HostTensorHelper::identity_input`]).
+    pub fn identity_input(self) -> Option<&'a HostTensorInput> {
+        self.helper.identity_input()
     }
 
     pub fn summary_rejection(self) -> Option<&'a crate::host::HelperSummaryRejection> {
@@ -1965,7 +1970,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -2177,7 +2183,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -2350,13 +2357,8 @@ fn require_dag_arity(
 }
 
 fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
-    for input in node
-        .inputs
-        .iter()
-        .chain(&node.shape_deps)
-        .chain(&node.result_claim_deps)
-    {
-        if input.0 >= node.id.0 || dag.get(*input).is_none() {
+    for input in node.dependencies() {
+        if input.0 >= node.id.0 || dag.get(input).is_none() {
             return Err(OwnershipError::DagInput {
                 node: node.id.0,
                 input: input.0,
@@ -2371,6 +2373,7 @@ fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
         node.inputs.contains(&owner)
             || node.shape_deps.contains(&owner)
             || node.result_claim_deps.contains(&owner)
+            || node.owner.activation == Some(owner)
     }) || dag.roots().contains(&owner)
 }
 

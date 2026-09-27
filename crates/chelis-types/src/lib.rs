@@ -18,6 +18,7 @@ pub mod errors;
 pub mod fitness;
 pub mod infer;
 pub mod invariants;
+pub mod key_admission;
 pub mod known_tags;
 pub mod linearity;
 pub mod manifest;
@@ -52,8 +53,9 @@ mod source_arch;
 pub use builtins::{
     AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
     BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
-    InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
-    builtin_env, prelude_adt_defs, realizability, shape_class,
+    CaseKeys, InferenceDisposition, KeyParameter, KeyParameterSite, KeyRouting, Realizability,
+    ShapeClass, axis_argument_layout, builtin_decl, builtin_env, case_keys, prelude_adt_defs,
+    realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
@@ -62,7 +64,7 @@ pub use cancel::{
 pub use context::{LibraryProofId, TypeEnv};
 pub use dtype_semantics::{
     ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
-    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
+    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, KeyBits, NUMERIC_TRAP_DIV_ZERO_KIND,
     NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_DTYPE_SEPARATOR, NUMERIC_TRAP_OPERATION_SEPARATOR,
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, PreparedDropout, PreparedUniformLike, RandomKey, RawScalar, RawTensor,
@@ -92,7 +94,7 @@ pub use infer::{
     set_grow_segment_bytes_for_test,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
-pub use observation::{ElementRef, format_element};
+pub use observation::{ElementRef, format_element, format_key, format_key_bits};
 pub use opacity::{
     LinkedProgramGuard, demangle_ident, install_linked_program_guard, is_linker_format_name,
     linked_binding_in_module_of,

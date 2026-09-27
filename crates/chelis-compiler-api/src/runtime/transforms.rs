@@ -515,12 +515,14 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
-        // A draw key advances the handler whether or not a root reads it, so
-        // a graph that draws executes even when it has no roots.
-        let draws = dag
+        // An observable root (spec/06 section 5.2: an abort, or a node that
+        // can trap) must execute, so a graph that holds one executes even
+        // when it has no roots.
+        let seeds = dag.trap_seeds();
+        let observes = dag
             .nodes()
             .iter()
-            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::DrawKey { .. }));
+            .any(|node| seeds.is_observable_root(node));
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -536,7 +538,8 @@ impl<'a> EvalContext<'a> {
         if roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
             // particular, [] must not turn an empty legacy grad into ALL-node
-            // input preparation. A graph that draws still executes below.
+            // input preparation. A graph with an observable root still
+            // executes below.
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
                 && arg_repacks.iter().all(
@@ -555,7 +558,7 @@ impl<'a> EvalContext<'a> {
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 };
-                if !draws {
+                if !observes {
                     return Ok(packed);
                 }
                 empty_packed = Some(packed);
@@ -596,6 +599,29 @@ impl<'a> EvalContext<'a> {
         // inputs requested by the same selection authority as execution.
         // A provider error is an entered initializer's error, not an evaluator
         // missing-input diagnostic; preserve it without the legacy prefix.
+        // spec/03 §4.4: the target's body runs here, after its actuals, so
+        // the value declarations it reaches initialize here even when the
+        // lowered DAG never demands them. A direct declaration's names are
+        // declaration scope; an inline `fn`'s free names may be the caller's.
+        match fn_expr {
+            Some(target)
+                if var_name(target).is_some_and(|name| {
+                    !captured_env.contains_key(name) && self.lookup_top_level_def(name).is_some()
+                }) =>
+            {
+                let reached = self
+                    .program
+                    .reached_by_call(var_name(target).unwrap_or_default());
+                self.initialize_reached_values(&reached)?;
+            }
+            Some(target) if target.tag() == Some(DeepTag::Fn) => {
+                let reached = self
+                    .program
+                    .reached_by_applying(target, &|name| captured_env.contains_key(name));
+                self.initialize_reached_values(&reached)?;
+            }
+            _ => {}
+        }
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
             // eval_compiled supplies manifested Tensor-lane root values in
@@ -674,9 +700,7 @@ impl<'a> EvalContext<'a> {
             }
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
-        let mut frame = self.random_frame();
-        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
-        self.commit_random_frame(&frame);
+        let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
@@ -1346,6 +1370,15 @@ pub(super) fn runtime_value_to_dag_input_lossy(
             };
             Ok((tensor.value.clone(), ty))
         }
+        // A scalar key enters the transformed graph as the rank-0 key tensor
+        // its key `Load` reads; it carries no cotangent (spec/06 section 2.11).
+        RuntimeValue::Key(key) => Ok((
+            IrTensorValue::from_storage(vec![], chelis_types::TensorStorage::from_keys(vec![*key])),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Key,
+            },
+        )),
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
@@ -1567,6 +1600,7 @@ pub(super) fn prim_from_name(name: &str) -> Option<Prim> {
         "i64" => Prim::Int64,
         "bool" => Prim::Bool,
         "string" => Prim::String,
+        "key" => Prim::Key,
         _ => return None,
     })
 }
@@ -1596,7 +1630,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         Prim::Int64 => "i64",
         Prim::Bool => "bool",
         Prim::String => "string",
-        Prim::Key => panic!("a random key has no Deep type spelling and never binds a variable"),
+        Prim::Key => "key",
     };
     let prim_node = empty_node(
         DeepTag::TPrim,

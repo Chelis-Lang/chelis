@@ -458,7 +458,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Store { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
-        | RiscOp::FoldIn => shape_preserving(dag, node),
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect => shape_preserving(dag, node),
 
         // [05-OP-71]: the key's axes pass through and the new last axis is
         // the count's own typed carrier.
@@ -470,9 +471,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             _ => op_computed(id, rank),
         },
 
-        // Rank-0 results: a bound adjoint is a scalar sum and a draw key is
-        // a key word; neither has an axis.
-        RiscOp::UniformBoundAdjoint { .. } | RiscOp::DrawKey { .. } => op_computed(id, rank),
+        // Rank-0 result: a bound adjoint is a scalar sum with no axis.
+        RiscOp::UniformBoundAdjoint { .. } => op_computed(id, rank),
 
         // chelis#1464 / [05-OP-68]: the result IS the fallback, so every
         // output axis comes from input slot 1.
@@ -1496,6 +1496,40 @@ fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
         .collect()
 }
 
+/// The nodes whose declared extent rests on a claim checked under their
+/// activation ([`crate::dag::TrapSeeds::is_claim_sized`]): the node each local
+/// guard site claims an extent of ([`GuardActivation::claimed`]), whatever
+/// the claim (a call's or a callee's result claim, a local ascription, an
+/// extent an operation computes or a carrier sets, a restamp, a unit
+/// extent), and every [`RiscOp::CheckedUnitAxis`], whose unit extent rests on
+/// its witness's requirement. Where its activation holds in no row such a
+/// node checks nothing and produces zeros of its declared type, each claimed
+/// axis taking the claim's extent, rather than reading an operand whose
+/// extent need not be the one it declares.
+///
+/// Only a node with an activation is gated, so a graph with none has no
+/// member worth deriving.
+pub fn claim_sized_nodes(dag: &Dag) -> Result<std::collections::BTreeSet<NodeId>, String> {
+    if dag
+        .nodes()
+        .iter()
+        .all(|node| node.owner.activation.is_none())
+    {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let mut nodes = local_dim_guard_sites(dag)?
+        .into_iter()
+        .map(|(_, claim)| claim.activation.claimed())
+        .collect::<std::collections::BTreeSet<_>>();
+    nodes.extend(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::CheckedUnitAxis { .. }))
+            .map(|node| node.id),
+    );
+    Ok(nodes)
+}
+
 /// Whether `(node, axis)` is a guarded restamp or forwards one unchanged
 /// through pass-through axes.
 fn forwards_a_guarded_restamp(
@@ -1712,10 +1746,11 @@ fn root_reach(dag: &Dag) -> Vec<u128> {
                 continue;
             }
             *slot |= bit;
+            // Every dependency, the owner's activation included: a restamp
+            // (`restamps_input_axis`) that feeds only an activation is in its
+            // consumer's scope and owes that scope's guard.
             if let Some(node) = dag.get(id) {
-                stack.extend(node.inputs.iter().copied());
-                stack.extend(node.shape_deps.iter().copied());
-                stack.extend(node.result_claim_deps.iter().copied());
+                stack.extend(node.dependencies());
             }
         }
     }
@@ -3067,15 +3102,85 @@ pub struct LocalGuardClaim {
     pub op: &'static str,
     /// How to read the extent this guard observes.
     pub observed: LocalGuardObservation,
-    /// Runtime branch activation for a path-local authored ascription.
-    ///
-    /// The lowering owner carries this scalar Bool beside its claim token as
-    /// a non-value dependency. `None` is the ordinary unconditional guard.
-    pub activation: Option<NodeId>,
+    /// The activation the guard is checked under, derived from the owner of
+    /// the node whose extent it claims ([`GuardActivation`]).
+    pub activation: GuardActivation,
     /// The declaring parameter axis of a caller's named result claim, which
     /// the context names beside the binder (spec/04 section 4.7). `None`
     /// renders the canonical value as `claimed = N`.
     pub source: Option<ClaimSource>,
+}
+
+/// The activation a local guard is checked under (spec/10 section 3.2, a
+/// node whose activation is false checks nothing), and the node whose
+/// declared extent rests on the claim it checks.
+///
+/// Its constructors read the claimed node's [`crate::dag::Owner`], and it
+/// has no other: a guard's activation is derived from the node it guards,
+/// never stamped beside it, so a site cannot run a check its claimed node
+/// does not make. A check that runs unconditionally derives it from a node
+/// whose owner has no activation. Where the activation holds in no row, the
+/// claimed node checks nothing and produces zeros of its declared type
+/// ([`claim_sized_nodes`]).
+#[derive(Debug, Clone, Copy)]
+pub struct GuardActivation {
+    claimed: NodeId,
+    sized_axis: Option<usize>,
+    activation: Option<NodeId>,
+}
+
+/// Two sites checked under one activation are one check, whichever node
+/// each claim sizes: two `expand`s claiming one operand axis is unit are
+/// discharged by one comparison.
+impl PartialEq for GuardActivation {
+    fn eq(&self, other: &Self) -> bool {
+        self.activation == other.activation
+    }
+}
+
+impl Eq for GuardActivation {}
+
+impl GuardActivation {
+    /// A claim stating `claimed`'s own extent at `axis`, checked under
+    /// `claimed`'s activation.
+    pub fn sizing(dag: &Dag, claimed: NodeId, axis: usize) -> Result<Self, String> {
+        Self::derive(dag, claimed, Some(axis))
+    }
+
+    /// A claim about an extent `claimed` reads rather than states (a unit
+    /// claim, about the operand of the `expand` making it), checked under
+    /// `claimed`'s activation.
+    pub fn reading(dag: &Dag, claimed: NodeId) -> Result<Self, String> {
+        Self::derive(dag, claimed, None)
+    }
+
+    fn derive(dag: &Dag, claimed: NodeId, sized_axis: Option<usize>) -> Result<Self, String> {
+        let node = dag
+            .get(claimed)
+            .ok_or_else(|| format!("claimed node {} is missing", claimed.0))?;
+        Ok(Self {
+            claimed,
+            sized_axis,
+            activation: node.owner.activation,
+        })
+    }
+
+    /// The rank-0 Bool (one per row under `vmap`) the guard is checked
+    /// under; `None` when the claimed node runs unconditionally.
+    pub fn node(self) -> Option<NodeId> {
+        self.activation
+    }
+
+    /// The node whose declared extent rests on the claim.
+    pub fn claimed(self) -> NodeId {
+        self.claimed
+    }
+
+    /// The axis of [`Self::claimed`] whose extent the claim states; `None`
+    /// for a claim about an extent it reads ([`Self::reading`]).
+    pub fn sized_axis(self) -> Option<usize> {
+        self.sized_axis
+    }
 }
 
 /// A named claim's binder and the parameter axis whose extent it requires.
@@ -3597,18 +3702,24 @@ fn literal_result_interface_claims(
 /// and also moves an invocation-local obligation ahead of the call that owns
 /// it. Only a raw input-axis observation with no witness enters the common
 /// entry schedule above.
+///
+/// Every witness's obligations, keyed by witness, in claim order, derived in
+/// one walk of the graph. It is a whole-graph derivation, so a pass reads it
+/// once ([`crate::dag::Dag::trap_seeds`] holds it for the trap seed, the
+/// activation gate and the lanes' witness checks) rather than once per
+/// witness, which made every seed query quadratic in the graph.
 pub fn literal_result_witness_requirements(
     dag: &Dag,
-    witness: NodeId,
-) -> Vec<chelis_types::ScalarValue> {
-    literal_result_interface_claims(dag)
-        .into_iter()
-        .filter_map(|(_, observed, required)| {
-            (observed == LiteralResultInterfaceObservation::Witness(witness)
-                && observed.entry_axis(dag).is_none())
-            .then_some(required)
-        })
-        .collect()
+) -> std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>> {
+    let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
+    for (_, observed, required) in literal_result_interface_claims(dag) {
+        if let LiteralResultInterfaceObservation::Witness(witness) = observed
+            && observed.entry_axis(dag).is_none()
+        {
+            requirements.entry(witness).or_default().push(required);
+        }
+    }
+    requirements
 }
 
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
@@ -3648,17 +3759,24 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                 let axis = usize::try_from(*axis)
                     .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
                 let site = checked_result_extent_site(dag, node.id, axis)?;
-                let (producer, observed) = if required.0 < site.producer.0 {
-                    (site.producer, site.observation)
-                } else {
-                    (
-                        node.id,
-                        LocalGuardObservation::Carrier(RtDim::InputAxis {
-                            tensor: 0,
-                            axis: RtAxis::Lit(axis as i32),
-                        }),
-                    )
-                };
+                let activation = claim_carrier_activation(dag, node.id)?;
+                // The guard runs at the producer only when the producer can
+                // read both the claim and the activation and runs under that
+                // activation; a value produced before either (before its
+                // arm, say) is checked at the carrier, which reads the same
+                // extent from its input.
+                let (producer, observed) =
+                    if producer_reads(dag, *required, activation, site.producer) {
+                        (site.producer, site.observation)
+                    } else {
+                        (
+                            node.id,
+                            LocalGuardObservation::Carrier(RtDim::InputAxis {
+                                tensor: 0,
+                                axis: RtAxis::Lit(axis as i32),
+                            }),
+                        )
+                    };
                 sites.push((
                     (producer.0, axis),
                     LocalGuardClaim {
@@ -3666,7 +3784,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: local_ascription_guard_activation(dag, node.id, *required)?,
+                        activation: GuardActivation::sizing(dag, node.id, axis)?,
                         source: None,
                     },
                 ));
@@ -3691,19 +3809,25 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                     continue;
                 }
                 let site = checked_result_extent_site(dag, node.id, axis)?;
-                // A claim captured after an existing value's production belongs
-                // to this invocation's carrier; never add a backward dependency.
-                let (producer, observed) = if required.0 < site.producer.0 {
-                    (site.producer, site.observation)
-                } else {
-                    (
-                        node.id,
-                        LocalGuardObservation::Carrier(RtDim::InputAxis {
-                            tensor: 0,
-                            axis: RtAxis::Lit(axis as i32),
-                        }),
-                    )
-                };
+                // The call's claim is checked under its carrier's owner
+                // activation, as a local ascription's is: a callee inlined
+                // into an untaken arm claims nothing.
+                let activation = claim_carrier_activation(dag, node.id)?;
+                // A claim captured after an existing value's production, or
+                // under an activation computed after it, belongs to this
+                // invocation's carrier; never add a backward dependency.
+                let (producer, observed) =
+                    if producer_reads(dag, *required, activation, site.producer) {
+                        (site.producer, site.observation)
+                    } else {
+                        (
+                            node.id,
+                            LocalGuardObservation::Carrier(RtDim::InputAxis {
+                                tensor: 0,
+                                axis: RtAxis::Lit(axis as i32),
+                            }),
+                        )
+                    };
                 let literal = requirements[0]
                     .as_i64_exact()
                     .expect("verified literal requirement");
@@ -3714,7 +3838,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: None,
+                        activation: GuardActivation::sizing(dag, node.id, axis)?,
                         source: None,
                     },
                 ));
@@ -3738,17 +3862,35 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             let axis = usize::try_from(*axis)
                 .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
             let site = checked_result_extent_site(dag, node.id, axis)?;
-            let RtAxis::Lit(producer_axis) = site.producer_axis;
-            let producer_axis =
-                usize::try_from(producer_axis).expect("verified result producer axis");
+            // Checked under the carrier's owner activation, as above. The
+            // producer is the carrier or sits behind its `Copy`/`Cast` chain,
+            // which keeps every axis, so a producer that precedes the
+            // activation is observed through the carrier's input instead.
+            let activation = claim_carrier_activation(dag, node.id)?;
+            let (producer, producer_axis, observed) =
+                if producer_reads(dag, *required, activation, site.producer) {
+                    let RtAxis::Lit(producer_axis) = site.producer_axis;
+                    let producer_axis =
+                        usize::try_from(producer_axis).expect("verified result producer axis");
+                    (site.producer, producer_axis, site.observation)
+                } else {
+                    (
+                        node.id,
+                        axis,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
+                };
             sites.push((
-                (site.producer.0, producer_axis),
+                (producer.0, producer_axis),
                 LocalGuardClaim {
                     claim: claim.clone(),
                     canonical: CanonicalExtent::Witness(*required),
                     op: site.operation,
-                    observed: site.observation,
-                    activation: None,
+                    observed,
+                    activation: GuardActivation::sizing(dag, node.id, axis)?,
                     source: None,
                 },
             ));
@@ -3849,7 +3991,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         },
                         op: crate::grad::risc_op_name(&node.op),
                         observed: LocalGuardObservation::ComputedExtent(observed),
-                        activation: None,
+                        activation: GuardActivation::sizing(dag, member.node, member.axis)?,
                         source: None,
                     },
                 ));
@@ -3857,10 +3999,30 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             }
             if restamps_input_axis(dag, member.node, member.axis) {
                 // The restating operation observes the extent it forwards,
-                // before it allocates, and names itself.
+                // before it allocates, and names itself. It is checked under
+                // its own owner activation (spec/10 section 3.2), as a claim
+                // token's carrier is: a restamp in an untaken arm checks
+                // nothing. A producer a `Copy` restamp attributes the extent
+                // to that runs before that activation is observed through the
+                // restamping node's input instead, which keeps every axis.
                 let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                let activation = claim_carrier_activation(dag, member.node)?;
+                let (producer, observed) = if activation
+                    .is_none_or(|activation| activation.0 < site.producer.0)
+                    && owner_activation(dag, site.producer)? == activation
+                {
+                    (site.producer, site.observation)
+                } else {
+                    (
+                        member.node,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(member.axis as i32),
+                        }),
+                    )
+                };
                 sites.push((
-                    (site.producer.0, member.axis),
+                    (producer.0, member.axis),
                     LocalGuardClaim {
                         claim: name.clone(),
                         canonical: match resolved {
@@ -3868,8 +4030,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                             None => CanonicalExtent::Binder(name.clone()),
                         },
                         op: site.operation,
-                        observed: site.observation,
-                        activation: None,
+                        observed,
+                        activation: GuardActivation::sizing(dag, member.node, member.axis)?,
                         source: None,
                     },
                 ));
@@ -3942,7 +4104,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                     },
                     op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
-                    activation: None,
+                    activation: GuardActivation::sizing(dag, member.node, member.axis)?,
                     source: None,
                 },
             ));
@@ -3972,6 +4134,19 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
         if claim.placement(dag) != GuardPlacement::Local {
             continue;
         }
+        // The claim is the `expand`'s, so it is checked under the `expand`'s
+        // activation, read where the operand's extent is: an activation the
+        // operand runs before has no site that reads both.
+        let activation = GuardActivation::reading(dag, claim.node)?;
+        if let Some(node) = activation.node()
+            && node.0 > claim.operand.0
+        {
+            return Err(format!(
+                "the unit-extent claim of `expand` node {} is checked under activation {}, which \
+                 its operand {} runs before: no guard site reads both (unimplemented chelis#2413)",
+                claim.node.0, node.0, claim.operand.0
+            ));
+        }
         sites.push((
             (claim.operand.0, claim.axis),
             LocalGuardClaim {
@@ -3984,7 +4159,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                 // shape, which is why the read instruction is data rather than
                 // something a consumer infers from the site's `op`.
                 observed: LocalGuardObservation::RealizedExtent,
-                activation: None,
+                activation,
                 source: None,
             },
         ));
@@ -3992,39 +4167,47 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
     Ok(sites)
 }
 
-/// The one scalar Bool dependency that activates a path-local ascription.
+/// The activation a claim token's guard is checked under: the owner
+/// activation of the node carrying the token (spec/10 section 3.2, a node
+/// whose activation is false checks nothing). A path-local ascription's
+/// claims, a call's named result claim and a callee's literal result claim
+/// all read it.
 ///
-/// Claim tokens and ordinary shape sources share `shape_deps`; the activation
-/// is structurally distinct because it is rank-0 Bool. More than one such
-/// dependency is ambiguous and therefore malformed rather than ordered or
-/// guessed.
-pub(crate) fn local_ascription_guard_activation(
+/// It is the carrier's [`crate::dag::Owner`], not a second record, so it
+/// cannot disagree with the activation the node itself runs under. Lowering
+/// stamps the carrier with the claim's position: the ascription's, or the
+/// call's, whose inlined callee runs under the caller's activation; inside a
+/// `grad` or `vmap` body spliced into a runtime `if` arm that is the call
+/// site's activation. `vmap` batches it per row, and an extent every row
+/// shares is checked when any row is active.
+fn claim_carrier_activation(dag: &Dag, carrier: NodeId) -> Result<Option<NodeId>, String> {
+    dag.get(carrier)
+        .map(|carrier| carrier.owner.activation)
+        .ok_or_else(|| "claim carrier is missing".to_string())
+}
+
+fn owner_activation(dag: &Dag, node: NodeId) -> Result<Option<NodeId>, String> {
+    dag.get(node)
+        .map(|node| node.owner.activation)
+        .ok_or_else(|| format!("claim producer {} is missing", node.0))
+}
+
+/// Whether a claim's guard can sit at its `producer`: the producer runs
+/// after the claim's canonical token and after its activation, so both are
+/// available there, and under that activation, so the guard's activation
+/// ([`GuardActivation`], the producer's own) is the claim's. Otherwise the
+/// guard sits at the carrier.
+fn producer_reads(
     dag: &Dag,
-    owner: NodeId,
-    claim: NodeId,
-) -> Result<Option<NodeId>, String> {
-    let owner = dag
-        .get(owner)
-        .ok_or_else(|| "local ascription owner is missing".to_string())?;
-    let activations = owner
-        .shape_deps
-        .iter()
-        .copied()
-        .filter(|dependency| *dependency != claim)
-        .filter(|dependency| {
-            dag.get(*dependency).is_some_and(|node| {
-                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
-            })
-        })
-        .collect::<Vec<_>>();
-    match activations.as_slice() {
-        [] => Ok(None),
-        [activation] => Ok(Some(*activation)),
-        _ => Err(format!(
-            "local ascription owner {} has multiple runtime branch activations",
-            owner.id.0
-        )),
-    }
+    required: NodeId,
+    activation: Option<NodeId>,
+    producer: NodeId,
+) -> bool {
+    required.0 < producer.0
+        && activation.is_none_or(|activation| activation.0 < producer.0)
+        && dag
+            .get(producer)
+            .is_some_and(|producer| producer.owner.activation == activation)
 }
 
 #[cfg(test)]
@@ -4039,15 +4222,18 @@ mod tests {
     #[test]
     fn claimed_producers_cover_named_literal_local_and_the_owned_admin_chain() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor.clone(),
             None,
         );
-        let producer = dag.add_node(RiscOp::Mul, vec![input, input], tensor.clone(), None);
+        let producer = dag.add_node(decl, RiscOp::Mul, vec![input, input], tensor.clone(), None);
         let cast = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -4056,6 +4242,7 @@ mod tests {
             None,
         );
         let claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
@@ -4067,9 +4254,10 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let owner = dag.add_node(RiscOp::Copy, vec![cast], tensor.clone(), None);
+        let owner = dag.add_node(decl, RiscOp::Copy, vec![cast], tensor.clone(), None);
         dag.add_shape_dep(owner, claim);
         let named_claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::ResultClaim {
                     claim: "n".into(),
@@ -4084,9 +4272,10 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let named_owner = dag.add_node(RiscOp::Add, vec![input, input], tensor.clone(), None);
+        let named_owner = dag.add_node(decl, RiscOp::Add, vec![input, input], tensor.clone(), None);
         dag.add_result_claim_dep(named_owner, named_claim);
         let local_claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: 0,
@@ -4103,9 +4292,9 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let local_owner = dag.add_node(RiscOp::Exp, vec![input], tensor.clone(), None);
+        let local_owner = dag.add_node(decl, RiscOp::Exp, vec![input], tensor.clone(), None);
         dag.add_shape_dep(local_owner, local_claim);
-        let unrelated = dag.add_node(RiscOp::Copy, vec![input], tensor, None);
+        let unrelated = dag.add_node(decl, RiscOp::Copy, vec![input], tensor, None);
 
         let protected = claimed_producers(&dag);
         assert!(protected[owner.0]);
@@ -4123,13 +4312,16 @@ mod tests {
     #[test]
     fn a_sym_reshape_target_is_the_operations_own_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let reshaped = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Sym("n".into())],
             },
@@ -4149,13 +4341,16 @@ mod tests {
     #[test]
     fn a_permute_reads_the_permuted_input_axis_not_the_output_index() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let permuted = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![operand],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
@@ -4179,7 +4374,9 @@ mod tests {
     #[test]
     fn a_gather_composes_both_operands_shapes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load { name: "v".into() },
             vec![],
             ty(
@@ -4189,12 +4386,14 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 1 },
             vec![values, indices],
             ty(
@@ -4228,7 +4427,9 @@ mod tests {
         use crate::dag::DimExpr;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(
@@ -4238,6 +4439,7 @@ mod tests {
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(
@@ -4247,6 +4449,7 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![DimExpr::Concrete(2)],
                 m: DimExpr::Concrete(4),
@@ -4283,19 +4486,23 @@ mod tests {
 
         // Negative parity: an unbatched matmul has no pass-through axis.
         let mut flat = Dag::new();
+        let flat_decl = flat.declare("test");
         let lhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let rhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(5)], Prim::F32),
             None,
         );
         let product = flat.add_node(
+            flat_decl,
             RiscOp::BlasMatmul {
                 batch_dims: Vec::new(),
                 m: DimExpr::Concrete(4),
@@ -4325,13 +4532,16 @@ mod tests {
     #[test]
     fn a_shape_dep_sibling_supplies_an_input_less_nodes_wildcard_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sibling = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let mask = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty(vec![DimInfo::Named("*".into(), None)], Prim::F32),
@@ -4357,13 +4567,16 @@ mod tests {
     #[test]
     fn a_duplicated_or_misdirected_source_vector_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![operand],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4404,13 +4617,16 @@ mod tests {
     #[test]
     fn an_external_axis_source_must_name_a_real_load_and_a_real_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4459,13 +4675,16 @@ mod tests {
     #[test]
     fn an_input_axis_source_must_be_a_normalized_in_range_axis_of_a_real_slot() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4505,7 +4724,9 @@ mod tests {
     #[test]
     fn a_scalar_input_source_must_be_a_rank_zero_int64_outside_slot_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -4514,6 +4735,7 @@ mod tests {
             None,
         );
         let extent = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "extent".into(),
             },
@@ -4522,6 +4744,7 @@ mod tests {
             None,
         );
         let tensor = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "tensor".into(),
             },
@@ -4530,6 +4753,7 @@ mod tests {
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -4569,7 +4793,9 @@ mod tests {
     #[test]
     fn a_negative_literal_extent_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4598,13 +4824,16 @@ mod tests {
     #[test]
     fn a_reduce_window_passes_leading_axes_and_computes_the_windowed_ones() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let windowed = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -4634,19 +4863,23 @@ mod tests {
     #[test]
     fn a_reduce_window_grad_restores_the_forward_inputs_shape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let forward_input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let adjoint = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -4676,13 +4909,16 @@ mod tests {
     #[test]
     fn a_one_hot_appends_the_vocab_literal_to_the_index_axes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let dense = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 5 },
             vec![indices],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
@@ -4709,7 +4945,9 @@ mod tests {
             RiscOp::ScatterElements { axis: 1 },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let target = dag.add_node(
+                decl,
                 RiscOp::Load { name: "t".into() },
                 vec![],
                 ty(
@@ -4719,12 +4957,14 @@ mod tests {
                 None,
             );
             let indices = dag.add_node(
+                decl,
                 RiscOp::Load { name: "i".into() },
                 vec![],
                 ty(vec![DimInfo::Lit(4)], Prim::Int64),
                 None,
             );
             let updates = dag.add_node(
+                decl,
                 RiscOp::Load { name: "u".into() },
                 vec![],
                 ty(
@@ -4734,6 +4974,7 @@ mod tests {
                 None,
             );
             let scattered = dag.add_node(
+                decl,
                 op.clone(),
                 vec![target, indices, updates],
                 ty(

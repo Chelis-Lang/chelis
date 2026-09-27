@@ -51,6 +51,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::UseAfterConsume, "UseAfterConsume"),
         (DiagnosticKind::UnconsumedLinear, "UnconsumedLinear"),
         (DiagnosticKind::InvalidBorrow, "InvalidBorrow"),
+        (DiagnosticKind::KeyReuse, "KeyReuse"),
         (DiagnosticKind::CycleDetected, "CycleDetected"),
         (
             DiagnosticKind::UnsupportedTensorPrecision,
@@ -139,6 +140,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::UseAfterConsume
             | DiagnosticKind::UnconsumedLinear
             | DiagnosticKind::InvalidBorrow
+            | DiagnosticKind::KeyReuse
             | DiagnosticKind::CycleDetected
             | DiagnosticKind::UnsupportedTensorPrecision
             | DiagnosticKind::DuplicateDefinition
@@ -166,10 +168,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
 
 #[test]
 fn effect_kind_canonical_symbols_round_trip() {
-    let expected = [
-        (EffectKind::Random, "random"),
-        (EffectKind::Resource, "resource"),
-    ];
+    let expected = [(EffectKind::Resource, "resource")];
     assert_eq!(EffectKind::ALL, expected.map(|(kind, _)| kind));
 
     for (kind, symbol) in expected {
@@ -206,6 +205,20 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
 }
 
 #[test]
+fn effect_kind_random_is_a_retired_spelling_that_points_at_keys() {
+    // The `random` handler kind was retired with the counter stream (#2413):
+    // randomness flows through explicit key values, so `random` decodes as
+    // the typed retired spelling, which names the key operations.
+    let error = EffectKind::decode(EffectKindInput::Symbol("random")).expect_err("retired kind");
+    assert_eq!(error, EffectKindDecodeError::RetiredRandom);
+    let text = error.to_string();
+    assert!(
+        text.contains("`random` is retired") && text.contains("key_from_seed"),
+        "{text}"
+    );
+}
+
+#[test]
 fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
     let decoded: Result<EffectKind, EffectKindDecodeError<'_>> =
         EffectKind::decode(EffectKindInput::Symbol("not-a-kind"));
@@ -219,7 +232,6 @@ fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
 fn effect_kind_consumer_match_is_a_compile_time_ratchet() {
     fn semantic_decision(kind: EffectKind) -> &'static str {
         match kind {
-            EffectKind::Random => "seed scope",
             EffectKind::Resource => "device scope",
         }
     }

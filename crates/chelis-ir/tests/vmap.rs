@@ -17,8 +17,16 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
     ] {
         let count = if batch == DimInfo::Lit(0) { 0 } else { 2 };
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(3),
+            None,
+        );
         let shape = dag.add_node(
+            decl,
             RiscOp::Shape { axis: 0 },
             vec![x],
             TensorType {
@@ -28,6 +36,7 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
             None,
         );
         let cast = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -39,6 +48,7 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
             None,
         );
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -51,6 +61,7 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
             None,
         );
         let mixed = dag.add_node(
+            decl,
             RiscOp::Add,
             vec![sum, cast],
             TensorType {
@@ -96,8 +107,16 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
 #[test]
 fn vmap_ordinary_shape_rejects_a_malformed_ranked_read() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let bad = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         TensorType {
@@ -138,8 +157,15 @@ fn eval_root(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
 #[test]
 fn vmap_elementwise_vectorizes_axis_zero() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let y = dag.add_node(decl, RiscOp::Neg, vec![x], vec_f32(3), None);
     dag.add_root(y);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -160,9 +186,22 @@ fn vmap_elementwise_vectorizes_axis_zero() {
 #[test]
 fn vmap_capture_keeps_authored_load_rank_and_maps_to_explicit_insert() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
-    let w = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], vec_f32(2), None);
-    let product = dag.add_node(RiscOp::Mul, vec![x, w], vec_f32(2), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(2),
+        None,
+    );
+    let w = dag.add_node(
+        decl,
+        RiscOp::Load { name: "w".into() },
+        vec![],
+        vec_f32(2),
+        None,
+    );
+    let product = dag.add_node(decl, RiscOp::Mul, vec![x, w], vec_f32(2), None);
     dag.add_root(product);
 
     let captures = UnordSet::from(["w".to_string()]);
@@ -216,14 +255,22 @@ fn vmap_capture_keeps_authored_load_rank_and_maps_to_explicit_insert() {
 #[test]
 fn vmap_broadcasts_nonshared_constant_tensors_with_a_real_batched_identity() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let constant = dag.add_node(
+        decl,
         RiscOp::synth_const_tensor(Prim::F32, vec![10.0, 20.0, 30.0]),
         vec![],
         vec_f32(3),
         None,
     );
-    let sum = dag.add_node(RiscOp::Add, vec![x, constant], vec_f32(3), None);
+    let sum = dag.add_node(decl, RiscOp::Add, vec![x, constant], vec_f32(3), None);
     dag.add_root(sum);
 
     let (mapped, node_map) =
@@ -272,7 +319,9 @@ fn vmap_broadcasts_nonshared_constant_tensors_with_a_real_batched_identity() {
 #[test]
 fn vmap_rejects_a_shape_dependency_without_a_mapped_identity() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 2.0]),
         vec![],
         vec_f32(2),
@@ -294,13 +343,16 @@ fn vmap_rejects_a_shape_dependency_without_a_mapped_identity() {
 #[test]
 fn vmap_reduction_shifts_the_reduced_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -331,7 +383,14 @@ fn vmap_reduction_shifts_the_reduced_axis() {
 #[test]
 fn vmap_nested_adds_multiple_batch_axes() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     dag.add_root(x);
 
     let inner = vectorize_axis0(&dag, DimInfo::Lit(3)).expect("inner vmap should succeed");
@@ -350,19 +409,23 @@ fn vmap_nested_adds_multiple_batch_axes() {
 #[test]
 fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let a_exp = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -375,6 +438,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         None,
     );
     let b_exp = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -387,6 +451,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         None,
     );
     let prod = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![a_exp, b_exp],
         TensorType {
@@ -396,6 +461,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -663,10 +729,18 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
     };
 
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     // One shape read serving a movement bound, which is what marks it shared.
-    let extent = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], int64_scalar, None);
+    let extent = dag.add_node(decl, RiscOp::Shape { axis: 0 }, vec![x], int64_scalar, None);
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
         },
@@ -676,6 +750,7 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
     );
     // `cast` is a shared scalar operation, so the shared chain reaches here...
     let as_f32 = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -685,7 +760,7 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
     );
     // ... and stops: `sqrt` is not one, so it is batched and its shared operand
     // is expanded to the batch, inserting a node ahead of it.
-    let root = dag.add_node(RiscOp::Sqrt, vec![as_f32], f32_scalar, None);
+    let root = dag.add_node(decl, RiscOp::Sqrt, vec![as_f32], f32_scalar, None);
     dag.add_root(shrunk);
     dag.add_root(root);
 

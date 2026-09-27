@@ -9,11 +9,13 @@ fn scalar(value: i64) -> ScalarValue {
 
 fn graph(axis: i32) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar_type = TensorType {
         dims: vec![],
         precision: Prim::Int64,
     };
     let source = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "source".into(),
         },
@@ -25,12 +27,14 @@ fn graph(axis: i32) -> Dag {
         None,
     );
     let input = dag.add_node(
+        decl,
         RiscOp::Const { value: scalar(1) },
         vec![],
         scalar_type.clone(),
         None,
     );
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
@@ -43,6 +47,7 @@ fn graph(axis: i32) -> Dag {
         None,
     );
     let producer = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -129,12 +134,14 @@ fn forwarded_axis_observation_and_physical_claim_keep_their_owners() {
     use chelis_ir::axis_sources::{LocalGuardObservation, result_extent_sites};
     for token in [false, true] {
         let mut dag = graph(1);
+        let decl = dag.nodes()[0].owner.decl;
         let inner = dag.roots()[0];
         let claim = dag.node_mut(inner).unwrap().shape_deps.remove(0);
         if !token {
             dag.node_mut(inner).unwrap().output_type.dims = vec![DimInfo::Lit(3)];
         }
         let outer = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),

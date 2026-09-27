@@ -247,11 +247,11 @@ Effects reached by an exported stdlib definition use a companion registry
 owned by `chelis-types`, not an implied field on Table B. Its key is exactly
 **(`CanonicalEffectRequirement`, `BackendId`)**. The requirement is a closed
 typed value matching the type layer's complete effect domain:
-`Random | Accum | IO | Test | Resource(ResourceId)`. `ResourceId` preserves
+`Accum | IO | Test | Resource(ResourceId)`. `ResourceId` preserves
 the exact checked UTF-8 string literal; it is not an author-written row label,
 an inferred device class, or a normalization rule.
 
-The finite row universe is the four payload-free requirements crossed with
+The finite row universe is the three payload-free requirements crossed with
 the exact backend set `eval | c-host | c-dag | hip | metal`, plus every exact
 `ResourceId` discovered by the completed checked-body dependency closure of
 the exported-stdlib manifest crossed with that same backend set. Adding a

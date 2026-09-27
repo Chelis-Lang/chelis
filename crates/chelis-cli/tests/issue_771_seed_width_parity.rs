@@ -1,6 +1,9 @@
-//! chelis#771 - a `with seed(N)` literal `>= 2^31` must derive the SAME u64
-//! seed in `chelis eval` as in the compiled C lane, so both lanes sample the
-//! same random stream.
+//! chelis#771 - a seed literal `>= 2^31` must derive the SAME u64 seed in
+//! `chelis eval` as in the compiled C lane, so both lanes sample the same
+//! random stream. Under explicit keys (chelis#2413) the seed reaches the draw
+//! through `key_from_seed(Ni64)`, whose key is the seed's two's-complement
+//! bits ([05-RNG-2]); the parity rows also compare eval with the
+//! `common::key_ref` reference, so both lanes agreeing on a wrong key fails.
 //!
 //! ## The bug (verified against origin/main 7412d44f, pre-fix)
 //!
@@ -41,14 +44,14 @@ mod common;
 
 use common::{build_and_run, parse_tensor_data, write_file};
 
-/// An 8-element f32 template sampled through `with seed(seed)` on a `[0, 1)`
+/// An 8-element f32 template sampled through `key_from_seed(seed)` on a `[0, 1)`
 /// uniform with bare-literal bounds. No explicit `print`: both lanes dump every
 /// top-level binding, so the `sampled = tensor(...)` line is present either way.
 fn seeded_uniform(seed: u64) -> String {
     let zeros = ["cast(0.0, f32)"; 8].join(", ");
     format!(
         "template = to_tensor([{zeros}])\n\
-         sampled = with seed({seed}i64) {{ uniform_like(copy(template), 0.0, 1.0) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), copy(template), 0.0, 1.0)\n"
     )
 }
 
@@ -88,6 +91,15 @@ fn streams_bit_equal(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| f32_bits(*x) == f32_bits(*y))
 }
 
+/// The reference `[0, 1)` f32 stream of `key_from_seed(seed)` from
+/// `common::key_ref`'s [05-OP-8] transcription.
+fn reference_stream(seed: u64) -> Vec<f64> {
+    common::key_ref::uniform_f32(common::key_ref::key_from_seed(seed as i64), 8, 0.0, 1.0)
+        .into_iter()
+        .map(f64::from)
+        .collect()
+}
+
 /// Assert two sampled streams are element-wise **bit-identical in f32**.
 fn assert_f32_bit_equal(label: &str, eval: &[f64], c: &[f64]) {
     assert_eq!(
@@ -114,7 +126,13 @@ fn assert_f32_bit_equal(label: &str, eval: &[f64], c: &[f64]) {
 #[test]
 fn seed_literal_parity_across_lanes() {
     for &seed in &[2_147_483_647_u64, 2_147_483_648, 4_294_967_295] {
-        assert_f32_bit_equal(&format!("seed {seed}"), &eval_stream(seed), &c_stream(seed));
+        let eval = eval_stream(seed);
+        assert_f32_bit_equal(&format!("seed {seed}"), &eval, &c_stream(seed));
+        assert_f32_bit_equal(
+            &format!("seed {seed} reference"),
+            &eval,
+            &reference_stream(seed),
+        );
     }
 }
 
@@ -141,5 +159,7 @@ fn distinct_large_seeds_differ() {
 /// refactor of the literal peel cannot silently break small seeds.
 #[test]
 fn small_seed_42_parity_across_lanes() {
-    assert_f32_bit_equal("seed 42", &eval_stream(42), &c_stream(42));
+    let eval = eval_stream(42);
+    assert_f32_bit_equal("seed 42", &eval, &c_stream(42));
+    assert_f32_bit_equal("seed 42 reference", &eval, &reference_stream(42));
 }

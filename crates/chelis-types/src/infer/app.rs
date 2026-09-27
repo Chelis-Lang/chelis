@@ -323,6 +323,10 @@ fn infer_app_inner(
             }
         }
     } else {
+        product.callee_reference = matches!(
+            kids[0].carrier(),
+            chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
+        );
         infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // The constructor callee no longer passes through `infer_expr`, but it is
@@ -413,6 +417,38 @@ fn infer_app_inner(
             ));
         }
         return_with_collection_cleanup!(Type::Unit);
+    }
+
+    // #2413: the counter-stream draws took no key. A call at the retired
+    // arity names the retired spelling and points at explicit keys, rather
+    // than reporting a bare arity count.
+    let retired_draw = match func_name.as_deref() {
+        Some("dropout") if arg_tys.len() == 2 => Some(("dropout(x, rate)", "dropout(k, x, rate)")),
+        Some("uniform_like") if arg_tys.len() == 3 => Some((
+            "uniform_like(t, low, high)",
+            "uniform_like(k, t, low, high)",
+        )),
+        _ => None,
+    };
+    if let Some((retired, keyed)) = retired_draw {
+        return_with_collection_cleanup!(report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_node_provenance(
+                    node,
+                    format!(
+                        "`{retired}` is the retired counter-stream spelling: a random draw \
+                         takes an explicit key first, `{keyed}` (spec/05-risc-primitives.md \
+                         section 2.7)"
+                    ),
+                ),
+                vec![format!(
+                    "Pass a key first: make one with `key_from_seed(seed)` and derive more \
+                     with `split_key`, `split_keys` or `fold_in`, as in `{keyed}`"
+                )],
+            ),
+        ));
     }
 
     // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.

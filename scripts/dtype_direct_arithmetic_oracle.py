@@ -53,14 +53,21 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "direct Sub lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
             ),
         ),
         SourceContract(
             "direct MinElem lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(\n"
+                "        owner,\n"
+                "        dag,\n"
+                "        RiscOp::MinElem,\n"
+                "        vec![a, b],\n"
+                "        ty.clone(),\n"
+                "        parent_span,\n"
+                "    )",
             ),
         ),
         SourceContract(
@@ -203,7 +210,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "current WireDag identities",
             "crates/chelis-compiler-api/src/schema.rs",
             (
-                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 18;",
+                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;",
                 "pub enum WireFusedStepOp {\n    Add,\n    Sub,",
                 "MaxElem,\n    MinElem,\n    ExtremaAdjoint {",
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',

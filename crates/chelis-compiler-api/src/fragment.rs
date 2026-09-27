@@ -406,7 +406,7 @@ mod tests {
         let fixtures = [
             ("module M\ndef broken() -> i32 = missing\n", "check"),
             (
-                "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+                "module M\ndef noisy() -> unit ! { } = test_assert(true, \"leak\")\n",
                 "effects",
             ),
             (

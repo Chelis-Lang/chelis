@@ -87,19 +87,35 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class TensorValue:
-    """A decoded wire tensor (execution wire v3, spec/10 §3.2).
+    """A decoded wire tensor (execution wire v4, spec/10 §3.2).
 
     ``dtype`` is the element dtype tag (``f64``/``f32``/``f16``/``bf16``/
-    ``int64``/``int32``/``int16``/``int8``/``bool``); ``data`` carries the
+    ``int64``/``int32``/``int16``/``int8``/``bool``/``key``); ``data`` carries the
     elements exactly at that dtype (Python ints for the integer families,
     NumPy own-width scalars for the float families, ``ml_dtypes.bfloat16``
-    for bf16, bools for ``bool``). Float transport preserves every stored
+    for bf16, bools for ``bool``, :class:`Key` for ``key``). Float transport preserves every stored
     bit, including signaling NaNs; ``float(value)`` is an explicit conversion.
     """
 
     shape: tuple[int, ...]
     data: tuple[Any, ...]
     dtype: str
+
+
+_KEY_BITS = re.compile("[0-9a-f]{16}")
+
+
+@dataclass(frozen=True)
+class Key:
+    """A random key (spec/10 §3.2): its 64 bits as exactly 16 lowercase hex
+    digits. A key is not a number, so it has no integer or NumPy form; it
+    crosses the boundary only inside execution values."""
+
+    bits: str
+
+    def __post_init__(self) -> None:
+        if type(self.bits) is not str or _KEY_BITS.fullmatch(self.bits) is None:
+            raise ValueError("key bits require exactly 16 lowercase hexadecimal digits")
 
 
 @dataclass(frozen=True)
@@ -334,7 +350,7 @@ def eval(
     """Evaluate Chelis source.
 
     Tensor inputs cross the boundary as per-dtype stored-bit payloads (execution
-    wire v3): the numpy array's dtype selects the wire tag. Integers and float
+    wire v4): the numpy array's dtype selects the wire tag. Integers and float
     bits stay exact end-to-end. uint8/uint16/uint32 widen
     losslessly to int16/int32/int64; u64 and unmapped float widths raise
     `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
@@ -373,8 +389,8 @@ def eval(
 
 
 def _eval_result(payload: dict[str, Any]) -> EvalResult:
-    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 3:
-        raise ValueError("execution schema_version must be exactly 3 before decoding values")
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 4:
+        raise ValueError("execution schema_version must be exactly 4 before decoding values")
     # The compiler's root manifest is routing metadata; this facade projects
     # evaluated values. The codec omits an empty transcript.
     _object(payload, {"schema_version", "roots"}, {"manifest", "transcript"})
@@ -566,12 +582,13 @@ def _tensor_value(payload: dict[str, Any]) -> TensorValue:
     if type(data) is not dict:
         raise ValueError("tensor storage must be an object")
     dtype = _string(data.get("dtype"))
-    if dtype not in _INT_DTYPES and dtype not in _FLOAT_DTYPES and dtype != "bool":
+    if dtype not in _INT_DTYPES and dtype not in _FLOAT_DTYPES and dtype not in ("bool", "key"):
         raise ValueError(f"unknown tensor element dtype: {dtype}")
-    field = "bits" if dtype in _FLOAT_DTYPES else "values"
+    field = "bits" if dtype in _FLOAT_DTYPES or dtype == "key" else "values"
     _object(data, {"dtype", field})
     values = _array(data[field])
-    width = _FLOAT_DTYPES[dtype].itemsize if dtype in _FLOAT_DTYPES else np.dtype(dtype).itemsize
+    width = (_FLOAT_DTYPES[dtype].itemsize if dtype in _FLOAT_DTYPES
+             else 8 if dtype == "key" else np.dtype(dtype).itemsize)
     count = 0 if 0 in shape else math.prod(shape)
     if count > sys.maxsize // width:
         raise ValueError("tensor storage exceeds host byte capacity")
@@ -582,6 +599,8 @@ def _tensor_value(payload: dict[str, Any]) -> TensorValue:
     elif dtype in _FLOAT_DTYPES:
         bits = [_float_bits(value, dtype) for value in values]
         decoded = tuple(_float_values(bits, dtype))
+    elif dtype == "key":
+        decoded = tuple(Key(_string(value)) for value in values)
     else:
         decoded = tuple(_boolean(value) for value in values)
     return TensorValue(shape=shape, data=decoded, dtype=dtype)
@@ -592,7 +611,7 @@ def _execution_value(payload: dict[str, Any]) -> Any:
         raise ValueError("execution value must be an object")
     kind = _string(payload.get("type"))
     members = {
-        "tensor": {"value"}, "scalar": {"value"}, "bool": {"value"},
+        "tensor": {"value"}, "scalar": {"value"}, "bool": {"value"}, "key": {"bits"},
         "string": {"value"}, "list": {"value"}, "tuple": {"value"},
         "dict": {"entries"}, "adt": {"ctor", "fields"}, "unit": set(),
     }
@@ -605,6 +624,8 @@ def _execution_value(payload: dict[str, Any]) -> Any:
         return _numeric_scalar(payload["value"])
     if kind == "bool":
         return _boolean(payload["value"])
+    if kind == "key":
+        return Key(_string(payload["bits"]))
     if kind == "string":
         return _string(payload["value"])
     if kind in ("list", "tuple"):
@@ -625,7 +646,7 @@ def _execution_value(payload: dict[str, Any]) -> Any:
     return ()
 
 
-# numpy kind/itemsize -> execution wire v3 dtype tag. Unsigned widths that
+# numpy kind/itemsize -> execution wire v4 dtype tag. Unsigned widths that
 # fit exactly in the next signed family widen losslessly; u64 and every
 # other unmapped dtype are rejected rather than falling through an f64
 # funnel.
@@ -645,6 +666,24 @@ _NUMPY_WIRE_DTYPES: dict[tuple[str, int], str] = {
 
 
 def _tensor_value_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, Key):
+        # Bindings supply tensor parameters only; a scalar key has no tensor
+        # form of its own to guess at.
+        raise ChelisError(
+            "a scalar `chelis.Key` is not a binding: bindings supply tensor parameters "
+            "only. Make the key in the source with `key_from_seed(seed)`, or bind a key "
+            "tensor (the `TensorValue` of dtype `key` that `chelis.eval` returns for "
+            "`split_keys(k, n)`) to a `tensor[n, key]` parameter."
+        )
+    if isinstance(value, TensorValue) and value.dtype == "key":
+        # A key tensor has no NumPy form; it feeds back as the storage object
+        # it was printed in.
+        if not all(isinstance(key, Key) for key in value.data):
+            raise ValueError("a key tensor's elements must be chelis.Key values")
+        return {
+            "shape": [int(dim) for dim in value.shape],
+            "data": {"dtype": "key", "bits": [key.bits for key in value.data]},
+        }
     array = _tensor_to_numpy(value)
     dtype = ("bf16" if array.dtype.newbyteorder("=") == np.dtype(bfloat16)
              else _NUMPY_WIRE_DTYPES.get((array.dtype.kind, array.dtype.itemsize)))
@@ -731,6 +770,7 @@ __all__ = [
     "EvaluatedRoot",
     "FitnessComponents",
     "GeneratedFile",
+    "Key",
     "TensorValue",
     "ValidateResult",
     "check",

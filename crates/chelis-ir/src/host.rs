@@ -954,32 +954,6 @@ impl HostExecutionPlan {
         }
     }
 
-    /// Whether a tensor helper of this program draws `dropout`. The C
-    /// execution lane selects the host program for such a program, so a
-    /// public entry that draws keeps the host ABI whether or not its dropout
-    /// result is read: the draw key stays in the helper when the value does
-    /// not (`spec/design/randomness_counter_stream.md` section 2).
-    pub fn has_dropout_helpers(&self) -> bool {
-        fn draws_dropout(helper: &HostTensorHelper) -> bool {
-            helper.dag.nodes().iter().any(|node| {
-                matches!(
-                    node.op,
-                    crate::dag::RiscOp::DrawKey {
-                        draw: crate::dag::RandomDraw::Dropout,
-                        ..
-                    }
-                )
-            })
-        }
-        self.program.global_tensor_helpers.iter().any(draws_dropout)
-            || self
-                .program
-                .functions
-                .iter()
-                .flat_map(|function| &function.tensor_helpers)
-                .any(draws_dropout)
-    }
-
     /// Apply a manifest-owned rewrite to global observation metadata. Tensor
     /// helpers and function bodies are not exposed through this capability.
     pub fn try_transform_globals<E>(
@@ -1326,6 +1300,31 @@ pub struct HostTensorHelper {
     /// `HostFunction::summary_rejections` and
     /// `HostProgram::summary_rejections`.
     pub summary_rejection: Option<HelperSummaryRejection>,
+}
+
+impl HostTensorHelper {
+    /// The input this helper returns unchanged, or `None` when it computes
+    /// anything: its one value root is a `Load` of its one input at the
+    /// helper's output type, and an evaluation of that root runs nothing
+    /// else ([`crate::eval::runs_discarded_work`]). A discarded trapping node
+    /// beside the returned parameter (`dead = add(copy(v), copy(v))` then
+    /// `v`) is work the evaluator runs, so such a helper is a kernel.
+    ///
+    /// Ownership lowering, its verifier and the C emitter all read this one
+    /// definition, so no helper can be an alias of its argument in one of
+    /// them and a kernel with a fresh result in another.
+    pub fn identity_input(&self) -> Option<&HostTensorInput> {
+        let ([root], [input]) = (self.dag.roots(), self.inputs.as_slice()) else {
+            return None;
+        };
+        let node = self.dag.get(*root)?;
+        let returns_input = matches!(
+            &node.op,
+            RiscOp::Load { name } if node.output_type == self.output && input.name == *name
+        );
+        (returns_input && !crate::eval::runs_discarded_work(&self.dag, self.dag.roots()))
+            .then_some(input)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2157,11 +2156,6 @@ pub enum HostExprKind<T = HostTypeTerm> {
         list: Box<HostExpr<T>>,
         ty: T,
     },
-    WithSeed {
-        seed: Box<HostExpr<T>>,
-        body: Box<HostExpr<T>>,
-        ty: T,
-    },
     TensorCall {
         helper: usize,
         args: Vec<HostExpr<T>>,
@@ -2494,11 +2488,6 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
         HostExprKind::FlatMap { callback, list, ty } => ConcreteHostExprKind::FlatMap {
             callback: resolve_host_callback(callback)?,
             list: Box::new(resolve_host_expr(*list)?),
-            ty: ty.into_concrete()?,
-        },
-        HostExprKind::WithSeed { seed, body, ty } => ConcreteHostExprKind::WithSeed {
-            seed: Box::new(resolve_host_expr(*seed)?),
-            body: Box::new(resolve_host_expr(*body)?),
             ty: ty.into_concrete()?,
         },
         HostExprKind::TensorCall { helper, args, ty } => ConcreteHostExprKind::TensorCall {
@@ -3208,15 +3197,12 @@ fn lower_host_program_with_execution(
         // #1872: a tensor entry that reaches `dropout` gets its own host
         // wrapper on the C execution lane even when no sibling happens to
         // select the host lane, so its public entry keeps the host ABI. Only
-        // an inferred closed body may introduce this standalone wrapper,
-        // whose public ABI has no RNG frame; a body that inherits Random
-        // keeps its ordinary lane.
+        // a body with an inferred effect row may introduce this standalone
+        // wrapper.
         let closed_dropout_entry = c_execution_lane
             && is_fn_body
             && !has_callable_params
-            && cached_def_effect_rows(program)
-                .get(name)
-                .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
+            && cached_def_effect_rows(program).contains_key(name)
             && cached_dropout_reaching_defs(program).contains(name)
             && named_tensor_entry_lowering_inputs(program, name).is_some();
         // chelis#2522: the DAG entry takes each parameter as an input tensor,
@@ -3227,15 +3213,11 @@ fn lower_host_program_with_execution(
         // Such a def always gets its host wrapper. A tensor or numeric/bool
         // scalar parameter stays a DAG input (chelis#1294's scalar kernel
         // inputs); non-f32/bool tensors are the rule above, and callable and
-        // still-polymorphic parameters keep theirs. A def that inherits
-        // Random keeps its lane: the DAG entry refuses an inherited draw at
-        // build time, while a host public entry has no handler to give it and
-        // aborts only when it draws (chelis#1872).
-        let inherits_random = cached_def_effect_rows(program)
-            .get(name)
-            .is_some_and(|row| row.contains(&chelis_types::types::Effect::Random));
-        let has_param_outside_dag_entry = !inherits_random
-            && lookup_declared_fn_type(program, name).is_some_and(|(params, _)| {
+        // still-polymorphic parameters keep theirs. A scalar `key` parameter
+        // is a rank-0 key tensor input like any other scalar (spec/08), so a
+        // keyed draw's definition keeps its lane.
+        let has_param_outside_dag_entry =
+            lookup_declared_fn_type(program, name).is_some_and(|(params, _)| {
                 params.iter().any(|ty| match ty {
                     HostTypeTerm::Fn(..) | HostTypeTerm::PolymorphicTensor(_) => false,
                     other => tensor_type_from_host_input(other).is_none(),
@@ -3746,9 +3728,6 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
                 || host_body_uses_builtin(init, builtin)
                 || host_body_uses_builtin(list, builtin)
         }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            host_body_uses_builtin(seed, builtin) || host_body_uses_builtin(body, builtin)
-        }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
         | HostExprKind::Bool(_)
@@ -3925,10 +3904,6 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
             HostExprKind::Fold { init, list, .. } | HostExprKind::Scan { init, list, .. } => {
                 walk(init, out);
                 walk(list, out);
-            }
-            HostExprKind::WithSeed { seed, body, .. } => {
-                walk(seed, out);
-                walk(body, out);
             }
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
             HostExprKind::FormalIngress { value, .. } => walk(value, out),
@@ -4237,7 +4212,6 @@ fn host_body_has_call_matching<T>(
                 || default_expr.as_ref().is_some_and(|d| recurse(d))
         }
         HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(recurse),
-        HostExprKind::WithSeed { seed, body, .. } => recurse(seed) || recurse(body),
         HostExprKind::ResultClaimScope { body, .. } => recurse(body),
         HostExprKind::FormalIngress { value, .. } => recurse(value),
         _ => false,
@@ -5578,6 +5552,7 @@ fn lower_def_body_kernel(
         dag,
         #[cfg(feature = "lowering-trace")]
         _trace,
+        program,
         &signature.scope,
         tensor_helpers,
         expected,
@@ -5617,18 +5592,14 @@ fn kernel_dag_loads_builtin(
     dag: &crate::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<String> {
-    dag.nodes().iter().find_map(|node| match &node.op {
-        crate::dag::RiscOp::Load { name }
-            if BUILTIN_NAMES.contains(&name.as_str())
-                && scope
-                    .get(name.as_str())
-                    .and_then(tensor_type_from_host_input)
-                    .is_none() =>
-        {
-            Some(name.as_str().to_string())
-        }
-        _ => None,
-    })
+    crate::lower::builtin_loads(dag)
+        .find(|name| {
+            scope
+                .get(*name)
+                .and_then(tensor_type_from_host_input)
+                .is_none()
+        })
+        .map(str::to_string)
 }
 
 /// The one kernel lowering: the body over its declared tensor scope, then
@@ -6012,6 +5983,7 @@ fn try_lower_tensor_helper_call_inner(
         product.dag,
         #[cfg(feature = "lowering-trace")]
         product.trace,
+        program,
         scope,
         tensor_helpers,
         expected,
@@ -6589,6 +6561,7 @@ fn lower_tensor_helper_dag_with_controls(
 
 fn finish_tensor_helper_call(
     dag: crate::Dag,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -6597,6 +6570,7 @@ fn finish_tensor_helper_call(
         dag,
         #[cfg(feature = "lowering-trace")]
         None,
+        program,
         scope,
         tensor_helpers,
         expected,
@@ -6606,6 +6580,7 @@ fn finish_tensor_helper_call(
 fn finish_tensor_helper_product(
     dag: crate::Dag,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -6645,22 +6620,27 @@ fn finish_tensor_helper_product(
         [] => HostTypeTerm::Tensor(expected.clone()),
         _ => HostTypeTerm::Tuple(root_tys),
     };
-    let args = tensor_helper_args(&inputs, scope);
+    let args = tensor_helper_args(program, &inputs, scope);
+    // A summary runs the helper's root operation and nothing else, so a
+    // helper whose evaluation runs discarded work, such as a trapping `let`
+    // nothing reads, is not a summary candidate: the summary would drop that
+    // work and its trap ([`crate::eval::runs_discarded_work`]).
+    let summarizable = !crate::eval::runs_discarded_work(&dag, dag.roots());
     let (sparse_specialization, sparse_rejection) =
-        match try_summarize_sparse_helper(&dag, &inputs, &output) {
-            Ok(spec) => (Some(spec), None),
-            Err(SparseSummaryAttempt::NotEligible) => (None, None),
-            Err(SparseSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        match summarizable.then(|| try_summarize_sparse_helper(&dag, &inputs, &output)) {
+            Some(Ok(spec)) => (Some(spec), None),
+            None | Some(Err(SparseSummaryAttempt::NotEligible)) => (None, None),
+            Some(Err(SparseSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
     // W6 Task A — drive the BLAS recognizer through the structured
     // entry point so a BLAS-near rejection threads through to
     // `summary_rejection` as a `Blas*` `SummaryRejection` (rather
     // than the prior silent `Option::None` drop).
     let (blas_specialization, blas_rejection) =
-        match try_summarize_blas_helper(&dag, &inputs, &output) {
-            Ok(spec) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
-            Err(BlasSummaryAttempt::NotEligible) => (None, None),
-            Err(BlasSummaryAttempt::Rejected(rejection)) => (None, Some(rejection)),
+        match summarizable.then(|| try_summarize_blas_helper(&dag, &inputs, &output)) {
+            Some(Ok(spec)) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
+            None | Some(Err(BlasSummaryAttempt::NotEligible)) => (None, None),
+            Some(Err(BlasSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
     let specialization = blas_specialization.or(sparse_specialization);
     // Reconcile sparse vs BLAS rejections:
@@ -6829,7 +6809,8 @@ fn lower_staged_host_plan(
                     .expect("kernel root")
                     .output_type
                     .clone();
-                let call = finish_tensor_helper_call(dag.clone(), &scope, helpers, expected);
+                let call =
+                    finish_tensor_helper_call(dag.clone(), program, &scope, helpers, expected);
                 let ty = host_expr_type(&call);
                 if outputs.len() == 1 {
                     bindings.push(HostBinding {
@@ -8406,15 +8387,13 @@ fn lower_host_expr_kind(
             ));
         }
         Expr::Node(list, _) if list.tag() == DeepTag::HandleEffect => {
-            // `with seed(...) { body }` and similar effect handlers are
-            // pure-result from the host emitter's perspective. Random
-            // handlers still need a host-lane seed scope so calls into
-            // separately emitted stdlib/helper functions see the active seed.
+            // `with device(...) { body }` is pure-result from the host
+            // emitter's perspective.
             let kids = list.children_slice();
             // chelis#730 Phase 1 (census row 20; the host-lane sibling of
             // row 9, discovered during the row 9 conversion): the former
             // unconditional body-passthrough silently dropped the handler
-            // for every non-`random` effect kind, including unknown ones.
+            // for every effect kind, including unknown ones.
             // chelis#730 Phase 2 (section C4.4): the kind is parsed once
             // into the closed [`EffectKind`] set and dispatched with an
             // exhaustive `match` (no `_` arm), so a new kind is a compile
@@ -8427,7 +8406,7 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::Stage::Lowering,
                     chelis_types::deliberate_rejection!(
                         "[04-EFF-1]",
-                        "known effect kinds are `random` and `resource` \
+                        "the known effect kind is `resource` \
                          (spec/03-deep-syntax.md); an unknown kind previously dropped its \
                          handler silently (chelis#730 census rows 9/20)"
                     ),
@@ -8443,19 +8422,6 @@ fn lower_host_expr_kind(
                 host_expr_lowering_error(expr, "a `handle-effect` node has no body")
             })?;
             match effect_kind {
-                EffectKind::Random => {
-                    let seed_expr = kids.first().ok_or_else(|| {
-                        host_expr_lowering_error(expr, "a random handler has no seed")
-                    })?;
-                    let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers)?;
-                    let body = lower_host_expr(body, program, scope, tensor_helpers)?;
-                    let ty = host_expr_type(&body);
-                    return Ok(HostExpr::new(HostExprKind::WithSeed {
-                        seed: Box::new(seed),
-                        body: Box::new(body),
-                        ty,
-                    }));
-                }
                 EffectKind::Resource => lower_host_expr(body, program, scope, tensor_helpers)?,
             }
         }
@@ -8871,10 +8837,6 @@ fn collect_named_callback_signatures(
                 collect_named_callback_signatures(arg, out);
             }
         }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            collect_named_callback_signatures(seed, out);
-            collect_named_callback_signatures(body, out);
-        }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -9050,10 +9012,6 @@ fn infer_callable_param_types_in_expr(
             for arg in args {
                 infer_callable_param_types_in_expr(arg, unknown, out);
             }
-        }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            infer_callable_param_types_in_expr(seed, unknown, out);
-            infer_callable_param_types_in_expr(body, unknown, out);
         }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
@@ -9379,17 +9337,6 @@ fn refine_host_expr_types(
         HostExprKind::TensorCall { args, .. } => {
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
-            }
-        }
-        HostExprKind::WithSeed { seed, body, ty } => {
-            changed |= refine_host_expr_types(seed, scope, signatures);
-            changed |= refine_host_expr_types(body, scope, signatures);
-            if ty.is_unresolved() {
-                let inferred = host_expr_type(body);
-                if !inferred.is_unresolved() {
-                    *ty = inferred;
-                    changed = true;
-                }
             }
         }
         HostExprKind::Int(_)
@@ -10182,10 +10129,6 @@ fn collect_lowered_host_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             collect_lowered_callback_names(callback, out);
             collect_lowered_host_names(init, out);
             collect_lowered_host_names(list, out);
-        }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            collect_lowered_host_names(seed, out);
-            collect_lowered_host_names(body, out);
         }
     }
 }
@@ -11709,7 +11652,7 @@ fn try_lower_general_list_grad_app(
     }
 
     let helper_number = tensor_helpers.len();
-    let call = finish_tensor_helper_call(lowered.dag, scope, tensor_helpers, expected);
+    let call = finish_tensor_helper_call(lowered.dag, program, scope, tensor_helpers, expected);
     let binding_name = format!("__grad_result_{helper_number}");
     let binding_ty = host_expr_type(&call);
     let mut value_roots = (0..lowered.value_root_count)
@@ -16108,7 +16051,15 @@ fn lower_list_literal_items(
     }
 }
 
+/// The host values a tensor helper's inputs read, one per input `Load`, each
+/// typed as the value the host holds under that name: a binding in `scope`,
+/// or else the top-level value declaration the name resolves to (a global,
+/// which a function body reads when a helper re-lowers a referenced value's
+/// initializer, spec/06 §5.2). A rank-zero input is ambiguous between a host
+/// scalar and a rank-zero tensor, so only a name that is neither is typed
+/// from its `Load` alone.
 fn tensor_helper_args(
+    program: &HostLoweringSession<'_>,
     inputs: &[HostTensorInput],
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Vec<HostExpr> {
@@ -16120,10 +16071,31 @@ fn tensor_helper_args(
                 scope
                     .get(&input.name)
                     .cloned()
+                    .or_else(|| top_level_value_host_type(program, &input.name))
                     .unwrap_or_else(|| host_type_from_tensor_input(&input.ty)),
             ))
         })
         .collect()
+}
+
+/// The host type of the top-level value declaration `name` resolves to: the
+/// checked type of its initializer, which its global holds. `None` when
+/// `name` resolves to no declaration or to a function.
+///
+/// The checked type the checker recorded for the declaration comes first: a
+/// block initializer's names are bound only inside it, so inferring the
+/// initializer again here, outside any scope, can leave a host inference
+/// variable unresolved (chelis#2547).
+fn top_level_value_host_type(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> Option<HostTypeTerm> {
+    let (declaration, value) = program.def_named(name)?;
+    if matches!(stamped_parts(value), Some((DeepTag::Fn, _, _))) {
+        return None;
+    }
+    lookup_declared_host_type(program, declaration)
+        .or_else(|| Some(expr_host_type(value, program, &UnordMap::new())))
 }
 
 fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
@@ -18181,12 +18153,17 @@ fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) 
         )
 }
 
+/// The operand-derived type may replace the checker's only to name the
+/// dimensions the checker left synthetic. The checker owns the element
+/// dtype, so an inferred tensor of another dtype never displaces it.
 fn should_prefer_inferred_app_type(explicit: &HostTypeTerm, inferred: &HostTypeTerm) -> bool {
     explicit.is_unresolved()
         || matches!(
             (explicit, inferred),
-            (HostTypeTerm::Tensor(_), HostTypeTerm::Tensor(_)) if host_type_has_synthetic_tensor_dims(explicit)
-                && !host_type_has_synthetic_tensor_dims(inferred)
+            (HostTypeTerm::Tensor(checked), HostTypeTerm::Tensor(operand))
+                if checked.precision == operand.precision
+                    && host_type_has_synthetic_tensor_dims(explicit)
+                    && !host_type_has_synthetic_tensor_dims(inferred)
         )
 }
 
@@ -18887,7 +18864,6 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::Scan { ty, .. }
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
-        | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
         | HostExprKind::ResultClaimScope { ty, .. }
         | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
@@ -19092,11 +19068,6 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         HostExprKind::FlatMap { callback, list, .. } => {
             HostExprKind::FlatMap { callback, list, ty }
         }
-        HostExprKind::WithSeed { seed, body, .. } => HostExprKind::WithSeed {
-            seed: Box::new(force_host_expr_type(*seed, HostTypeTerm::Int64)),
-            body: Box::new(force_host_expr_type(*body, ty.clone())),
-            ty,
-        },
         HostExprKind::TensorCall { helper, args, .. } => {
             HostExprKind::TensorCall { helper, args, ty }
         }
@@ -19412,9 +19383,17 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         _ => None,
     });
     match name {
+        // [05-OP-8] and [05-OP-37]: a draw's result has the type of its
+        // data operand, which follows the key. Position decides it: the key
+        // is itself a rank-zero key tensor wherever it was projected from a
+        // `split_key` result, so a search for the first tensor operand
+        // would type the draw as its key.
+        "uniform_like" | "dropout" => {
+            Some(arg_tys.get(1).cloned().unwrap_or_else(fresh_host_inference))
+        }
         "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "neg" | "exp" | "log"
         | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
-        | "min_elem" | "copy" | "uniform_like" | "dropout" | "softmax" => {
+        | "min_elem" | "copy" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostTypeTerm::Tensor(tensor_ty))
             } else if arg_tys
@@ -21028,7 +21007,9 @@ mod tests {
     fn kernel_builtin_load_rejection_requires_a_typed_lexical_input() {
         for name in ["mean", "fold", "map"] {
             let mut dag = crate::Dag::new();
+            let decl = dag.declare("test");
             dag.add_node(
+                decl,
                 RiscOp::Load { name: name.into() },
                 vec![],
                 TensorType {
@@ -21095,19 +21076,30 @@ mod tests {
 
     #[test]
     fn literal_result_claim_transfer_requires_a_pure_called_helper() {
+        // A keyed draw is a pure function of its key (spec/05 §2.7), so its
+        // helper transfers like any other pure helper; an `IO` helper is the
+        // effecting case that keeps the direct lowering contract.
         let checked = surf_check(
             "def pure[n](x: tensor[n, f32]) -> tensor[2, f32] = \
                  shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def random[n](x: tensor[n, f32]) -> tensor[2, f32] = \
-                 dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
-             def caller[n](x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
+             def keyed[n](k: key, x: tensor[n, f32]) -> tensor[2, f32] = \
+                 dropout(k, shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
+             def loud[n](x: tensor[n, f32]) -> tensor[2, f32] ! { IO } = {\n\
+               _ = print(\"loud\")\n\
+               shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             }\n\
+             def caller[n](k: key, x: tensor[n, f32]) = \
+                 (pure(copy(x)), keyed(k, copy(x)), loud(x))\n",
         );
         let session = HostLoweringSession::new(&checked);
         assert!(top_level_fn_transfers_literal_result_claims(
             &session, "pure"
         ));
+        assert!(top_level_fn_transfers_literal_result_claims(
+            &session, "keyed"
+        ));
         assert!(!top_level_fn_transfers_literal_result_claims(
-            &session, "random"
+            &session, "loud"
         ));
     }
 
@@ -21119,7 +21111,9 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = crate::Dag::new();
+        let decl = dag.declare("test");
         let root = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "index".into(),
             },
@@ -21807,64 +21801,12 @@ def bad[b](box: Box[b]) -> bool =
         }
     }
 
-    fn draw_keys(dag: &crate::Dag) -> Vec<crate::dag::RandomHandler> {
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                crate::dag::RiscOp::DrawKey {
-                    handler,
-                    draw: crate::dag::RandomDraw::Dropout,
-                    ..
-                } => Some(handler),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn named_tensor_entry_lowers_its_dropout_to_a_scoped_draw_key() {
-        let scoped = surf_check(
-            r#"
-def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
-"#,
-        );
-        let dag = lower_named_tensor_entry_dag(&scoped, "main").expect("scoped entry lowers");
-        assert!(matches!(
-            draw_keys(&dag).as_slice(),
-            [crate::dag::RandomHandler::Scoped { .. }]
-        ));
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout)),
-            "the key-operand dropout consumes the draw key"
-        );
-
-        let ordinary = surf_check("def main(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)");
-        let dag = lower_named_tensor_entry_dag(&ordinary, "main").expect("ordinary entry lowers");
-        assert!(
-            draw_keys(&dag).is_empty(),
-            "a no-Dropout entry takes no key"
-        );
-
-        // chelis#2405: runtime control that reaches no draw lowers as before.
-        let control = surf_check(
-            "def main(x: tensor[4, f32], c: bool) -> tensor[4, f32] = if c then x else neg(x)",
-        );
-        let dag = lower_named_tensor_entry_dag(&control, "main")
-            .expect("a draw-free entry with runtime control lowers");
-        assert!(draw_keys(&dag).is_empty());
-    }
-
     #[test]
     fn named_entry_lowering_keeps_authored_unused_interface_obligations() {
         let checked = surf_check(
             r#"
-def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
+def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] =
+  dropout(key_from_seed(0i64), x, 0.5f32)
 "#,
         );
         let dag = lower_named_tensor_entry_dag(&checked, "main").expect("scoped entry lowers");
@@ -21892,9 +21834,8 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with 
     fn named_tensor_entry_lowers_a_runtime_dropout_rate_as_an_operand() {
         let checked = surf_check(
             r#"
-def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, rate)
-}
+def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
+  dropout(key_from_seed(0i64), x, rate)
 "#,
         );
         let dag =
@@ -23318,6 +23259,90 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 
+    fn rank_zero_key() -> HostTypeTerm {
+        HostTypeTerm::Tensor(TensorType {
+            dims: vec![],
+            precision: Prim::Key,
+        })
+    }
+
+    fn named_f32_vector(name: &str) -> HostTypeTerm {
+        HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Named(name.to_owned(), None)],
+            precision: Prim::F32,
+        })
+    }
+
+    /// [05-OP-8] and [05-OP-37]: a draw's result is its data operand's type.
+    /// A key projected from `split_key` is a rank-zero key tensor, which
+    /// precedes the data operand, so it must never be taken as the result.
+    #[test]
+    fn draw_result_types_follow_the_data_operand_not_the_key() {
+        let scalar_key = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Key));
+        for key in [rank_zero_key(), scalar_key] {
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "uniform_like",
+                    &[
+                        key.clone(),
+                        named_f32_vector("n"),
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                    ],
+                ),
+                Ok(Some(named_f32_vector("n"))),
+                "uniform_like keyed by {key:?}",
+            );
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "dropout",
+                    &[key.clone(), named_f32_vector("n"), HostTypeTerm::Float32],
+                ),
+                Ok(Some(named_f32_vector("n"))),
+                "dropout keyed by {key:?}",
+            );
+            // A scalar template draws a scalar of the template's type.
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "uniform_like",
+                    &[
+                        key.clone(),
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                    ],
+                ),
+                Ok(Some(HostTypeTerm::Float32)),
+                "scalar uniform_like keyed by {key:?}",
+            );
+        }
+    }
+
+    /// The operand-derived application type may name dimensions the checker
+    /// left synthetic, never change the checker's element dtype.
+    #[test]
+    fn operand_inference_names_synthetic_dims_without_changing_the_dtype() {
+        let checked = named_f32_vector("d47");
+        assert!(
+            should_prefer_inferred_app_type(&checked, &named_f32_vector("n")),
+            "a same-dtype operand type names the synthetic dimension",
+        );
+        assert!(
+            !should_prefer_inferred_app_type(&checked, &rank_zero_key()),
+            "a key operand's type must not displace a checked f32 draw",
+        );
+        assert!(
+            !should_prefer_inferred_app_type(
+                &checked,
+                &HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("n".to_owned(), None)],
+                    precision: Prim::F64,
+                }),
+            ),
+            "an operand of another float dtype must not displace the checked dtype",
+        );
+    }
+
     // ── chelis#631: host-lane concat result typing ──
     //
     // The host lane must never carry the ELEMENT's extent on the concat
@@ -24027,7 +24052,14 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::F32,
         };
         let mut before = Dag::new();
-        let root = before.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        let before_decl = before.declare("test");
+        let root = before.add_node(
+            before_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic,
+            None,
+        );
         before.add_root(root);
         let mut scope = UnordMap::new();
         scope.insert("x".into(), HostTypeTerm::Tensor(concrete.clone()));
@@ -24125,7 +24157,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let d417 = DimInfo::Named("d417".into(), None);
         let d420 = DimInfo::Named("d420".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24135,6 +24169,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let w = dag.add_node(
+            decl,
             RiscOp::Load { name: "w".into() },
             vec![],
             TensorType {
@@ -24144,6 +24179,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded_x = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::InputAxis {
@@ -24159,6 +24195,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded_w = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -24174,6 +24211,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded_x, expanded_w],
             TensorType {
@@ -24183,6 +24221,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -24233,9 +24272,11 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let n = DimInfo::Named("n".into(), None);
         let d47 = DimInfo::Named("d47".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Load typed with the minted alias; the scope knows the
         // user-facing symbol.
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24246,6 +24287,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         // Scalar upstream gradient, as the Sum adjoint produces.
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -24256,6 +24298,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         // The Sum adjoint's expand-back reads the original tensor shape.
         let expanded_g = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -24271,6 +24314,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded_g, x],
             TensorType {
@@ -24322,7 +24366,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -24332,6 +24378,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24341,6 +24388,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -24356,6 +24404,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded, x],
             TensorType {
@@ -24395,7 +24444,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "expanded".into(),
             },
@@ -24408,6 +24459,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![
                     (RtDim::Lit(0), RtDim::Lit(1)),
@@ -24449,7 +24501,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24459,6 +24513,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
@@ -24511,7 +24566,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24525,6 +24582,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::F32,
         };
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
             },
@@ -24562,7 +24620,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24581,6 +24641,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let malformed = [
             dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(input_axis(), RtDim::Lit(2))],
                 },
@@ -24589,6 +24650,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(RtDim::Lit(0), input_axis())],
                 },
@@ -24597,6 +24659,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Stride {
                     strides: vec![input_axis()],
                 },
@@ -24636,6 +24699,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     fn runtime_shrink_bound_nodes(
         dag: &mut crate::dag::Dag,
+        decl: crate::dag::DeclId,
     ) -> (crate::dag::NodeId, crate::dag::NodeId) {
         use crate::dag::{RiscOp, TensorType};
 
@@ -24644,12 +24708,14 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::Int64,
         };
         let start = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 1.0),
             vec![],
             scalar_i64.clone(),
             None,
         );
         let end = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 3.0),
             vec![],
             scalar_i64,
@@ -24663,7 +24729,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24672,8 +24740,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24724,7 +24793,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         for internal_before_shrink in [false, true] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 TensorType {
@@ -24733,12 +24804,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 },
                 None,
             );
-            let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+            let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
             let expected_shrink_id = if internal_before_shrink { 4 } else { 3 };
             let base = format!("_rt_shrink_dim_{expected_shrink_id}_0");
             let internal_shape = vec![RtDim::Sym(base.clone()), RtDim::Sym(format!("{base}_1"))];
             let add_internal_carrier = |dag: &mut Dag| {
                 dag.add_node(
+                    decl,
                     RiscOp::Reshape {
                         new_shape: internal_shape.clone(),
                     },
@@ -24754,6 +24826,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 let _ = add_internal_carrier(&mut dag);
             }
             let shrink = dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
                 },
@@ -24795,7 +24868,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24804,12 +24879,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
         let wildcard = TensorType {
             dims: vec![DimInfo::Named("*".into(), None)],
             precision: Prim::F32,
         };
         let shrink_a = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24818,6 +24894,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink_b = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24831,24 +24908,28 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let consumers = [
             dag.add_node(
+                decl,
                 RiscOp::Add,
                 vec![shrink_a, shrink_a],
                 synthetic("d701"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Mul,
                 vec![shrink_a, shrink_a],
                 synthetic("d702"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Add,
                 vec![shrink_b, shrink_b],
                 synthetic("d703"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Mul,
                 vec![shrink_b, shrink_b],
                 synthetic("d704"),

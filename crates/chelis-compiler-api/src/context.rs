@@ -867,14 +867,38 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// variants, so bincode variant indices shifted, and the lowered library's
 /// program definitions and signatures are node-spelled on every ingress.
 /// V29 (chelis#2413): the lowered library's random draws are key-operand
-/// nodes fed by `DrawKey` and the baked random variants are gone, so bincode
-/// variant indices shift. V28 was an intermediate state of the same change
+/// nodes fed by a counter-stream bridge operation and the baked random
+/// variants are gone, so bincode variant indices shift. V28 was an intermediate state of the same change
 /// and never shipped.
 /// V30 (chelis#2413): the explicit key operations join `RiscOp` and `key`
 /// becomes a storage dtype, so bincode variant indices shift again.
-/// V31 (chelis#2616): the embedded prepared graph's package source kinds
-/// carry their filesystem roots, and the bundled runtime has none.
-const CACHE_FORMAT_VERSION: u32 = 31;
+/// V33 (chelis#2413): the counter-stream bridge `RiscOp` variant, the `Random`
+/// effect and the `random` handler kind are deleted with the counter stream,
+/// so bincode variant indices shift again, and every DAG node carries its
+/// declaration as a required field (chelis#2476). V31 and V32 were
+/// intermediate states of the same change and never shipped.
+/// V35 (chelis#2413): every DAG node's required declaration widens into an
+/// owner, its declaration and its activation, so each node's bincode shape
+/// changes, and a declaration no longer records the value declarations it
+/// references. V34 was an intermediate state of the same change and never
+/// shipped.
+/// V36 (chelis#2413): a draw's and a key operation's activation is its
+/// node's owner's and no longer a trailing input, so a cached lowered
+/// library's draw and key-operation inputs change meaning while their bincode
+/// shape does not. V35 was an intermediate state of the same change and never
+/// shipped.
+/// V37 (chelis#2413): a local ascription's claims are carried on a node owned
+/// by the ascription's position and checked under that owner's activation,
+/// where the activation had been a Bool shape dependency, and a potentially
+/// trapping integer reduction, empty reduced axis, runtime movement bound or
+/// extent claim is a trap seed, so a cached lowered library's claim carriers
+/// and retained dead nodes change meaning while their bincode shape does not.
+/// V38 (chelis#2413, chelis#2616): V37's formats, plus the embedded prepared
+/// graph's package source kinds carrying their filesystem roots, the bundled
+/// runtime having none. That change shipped on main as V31, a number the
+/// explicit-key switch's unshipped intermediate state had already used, so
+/// the merged format takes the next number above both.
+const CACHE_FORMAT_VERSION: u32 = 38;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1606,7 +1630,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 31);
+        assert_eq!(CACHE_FORMAT_VERSION, 38);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

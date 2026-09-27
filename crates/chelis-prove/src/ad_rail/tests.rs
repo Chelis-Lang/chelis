@@ -556,7 +556,10 @@ fn single_op_grad_result(op: WireRiscOp) -> GradResult {
     GradResult {
         dag: WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: vec!["entry".to_owned()],
             nodes: vec![WireDagNode {
+                declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],

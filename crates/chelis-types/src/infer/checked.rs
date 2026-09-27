@@ -82,6 +82,11 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+    /// [04-LIN-9] and spec/04 section 1.1: set by the application rule just
+    /// before it infers a `var` callee and taken by the Var rule, which so
+    /// tells a builtin called here from a builtin named as a value
+    /// (`infer_var`).
+    pub(super) callee_reference: bool,
     /// Explicit local tensor ascriptions, recorded independently from the
     /// ordinary inferred `type` metadata that annotation writes on every
     /// checked expression. Lowering consumes this checker-owned carrier at

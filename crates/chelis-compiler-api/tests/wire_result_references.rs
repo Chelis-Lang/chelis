@@ -5,7 +5,7 @@ use chelis_compiler_api::schema::{
 use serde_json::json;
 
 fn dag() -> serde_json::Value {
-    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":[{"shape_deps":[],"span_id":null,"merged_spans":[],"id":0,"inputs":[],"op":{"kind":"load","name":"x"},"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]})
+    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":[{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":0,"inputs":[],"op":{"kind":"load","name":"x"},"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]})
 }
 
 #[test]

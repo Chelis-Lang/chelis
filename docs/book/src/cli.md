@@ -185,13 +185,11 @@ preceding effects is retained even when redirected to a pipe or file. The
 program still fails, and effects after the trap do not run.
 
 Fixed-control `dropout` builds to C through its sealed source execution plan.
-A concrete tensor function with a source-fixed rate and seed is supported on
+A concrete tensor function with a source-fixed rate and key is supported on
 its own or beside other definitions, in both Surf and Deep; see
 `examples/dropout_entry.ch`. Whole-program builds emit its named host wrapper.
 Pure tensor entries and selected compiler-API entries keep their existing ABIs.
 Raw-DAG dropout, runtime-rate entries, HIP and Metal remain unsupported.
-Standalone admission requires the inferred body to handle Random; an extra
-declared `Random` effect does not make a closed seeded body depend on a caller.
 
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
@@ -266,7 +264,7 @@ declaration unentered; invalid required wire tensors fail before entry.
 Genuinely dead parameters and unrelated
 bindings are not decoded. Preparation can inspect Host lowering metadata again
 per request; it does not cache a speculative execution plan or change runtime
-error and Random-state ownership. The
+error ownership. The
 [selected Host API tests](../../../crates/chelis-compiler-api/tests/issue_2013_selected_host_inputs.rs)
 demonstrate supplied bindings; `chelis eval --file` supplies an empty binding map.
 

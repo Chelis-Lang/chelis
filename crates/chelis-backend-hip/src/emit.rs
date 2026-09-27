@@ -122,13 +122,37 @@ pub struct HipEmitter {
     device_entrypoint_mode: bool,
     /// Shared specialization for every kernel and its launch arguments.
     kernel_rank: usize,
-    /// The next ordinal of each scoped Random handler region, advanced in
-    /// node order as each of its draw keys is emitted. One entry point's walk
-    /// is one activation, so [`Self::begin_activation`] resets it per entry.
-    scoped_draws: BTreeMap<u32, u64>,
-    /// The emission-time key of each emitted draw key and rank-0 key
-    /// derivation, by node.
+    /// The emission-time key of each rank-0 key derivation, by node. One
+    /// entry point's walk is one activation, so [`Self::begin_activation`]
+    /// resets it per entry.
     draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
+    /// The activation gate of the checking node being emitted, until its
+    /// kernel launch consumes it ([`Self::activation_gate`]).
+    gate: Option<HipActivationGate>,
+    /// Per node id, whether it checks nothing where its activation is false
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// query over the graph.
+    activation_gated: Vec<bool>,
+    /// Per node id, whether its declared extent rests on a claim checked
+    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]),
+    /// which this lane has no zero value for.
+    claim_sized: Vec<bool>,
+}
+
+/// How a checking node under an activation (spec/10 section 3.2) reads it:
+/// where the activation is false the node computes but checks nothing, so
+/// its kernel reads each operand through a [`kernels::OperandGate`]. The
+/// checked set is [`DagNode::inactive_operand`]'s, the one the evaluator
+/// and the C lane substitute from.
+#[derive(Debug, Clone)]
+struct HipActivationGate {
+    /// The node's activation, a bool tensor.
+    activation: NodeId,
+    /// Whether the activation indexes the node's output rows (its rank is
+    /// at most the node's); otherwise an element is active when any row is.
+    per_row: bool,
+    /// Each operand slot's value where the element is inactive.
+    operands: kernels::OperandGate,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +256,134 @@ impl HipEmitter {
             ));
         }
         Ok(())
+    }
+
+    /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
+    /// `emit_activation_gate` derives it: a gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]) whose operation checks its
+    /// operands' values reads every operand through the gate, taking
+    /// [`DagNode::inactive_operand`]'s value for its slot where the
+    /// activation is false. `None` for a node that is not gated, and for a
+    /// gated node whose check is not of every operand's values (an extent,
+    /// a bound, an empty axis, an abort's condition beside its fallback, a
+    /// claim-sized node's zero value), which this lane has no gate for:
+    /// [`Self::begin_node_gate`] refuses it.
+    fn activation_gate(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Option<HipActivationGate> {
+        if !self.activation_gated[node.id.0] || self.claim_sized[node.id.0] {
+            return None;
+        }
+        let activation = node.owner.activation?;
+        let inactive = (0..node.inputs.len())
+            .map(|slot| node.inactive_operand(slot))
+            .collect::<Option<Vec<_>>>()?;
+        let rank = dag
+            .get(activation)
+            .expect("verified activation")
+            .output_type
+            .dims
+            .len();
+        Some(HipActivationGate {
+            activation,
+            per_row: rank <= node.output_type.dims.len(),
+            operands: kernels::OperandGate { inactive },
+        })
+    }
+
+    /// The name of `name`'s kernel read through `gate`: each slot's
+    /// inactive value is part of the kernel's source, so it is part of its
+    /// name, and two gated kernels share a name only when they share it.
+    fn gated_kernel_name(name: String, gate: &kernels::OperandGate) -> String {
+        gate.inactive
+            .iter()
+            .fold(format!("{name}_gated"), |name, value| {
+                format!("{name}_{}", value.to_string().replace('-', "m"))
+            })
+    }
+
+    /// A checking node under an activation whose HIP emitter reads its
+    /// operands without the activation gate: compiled, it would check where
+    /// its activation is false (spec/10 section 3.2), so it is refused.
+    fn ungated_check_unsupported(node: &DagNode, detail: &str) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+            format!(
+                "a checking operation under an activation at HIP DAG node {}: {detail}",
+                node.id.0
+            ),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2413,
+                "this HIP emitter has no activation gate, so it would check where the \
+                 activation is false (spec/10 section 3.2); use `--target c`"
+            ),
+        )
+    }
+
+    /// Set [`Self::gate`] for `node` before its emitter runs. A gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], the one declaration every lane
+    /// reads) whose check this lane cannot gate by operand substitution is
+    /// refused here, so a newly gated kind compiles only once its HIP
+    /// emitter takes the gate.
+    fn begin_node_gate(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        self.gate = self.activation_gate(node, dag);
+        if self.activation_gated[node.id.0] && self.gate.is_none() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "HIP has no activation gate for this kind of check",
+            ));
+        }
+        Ok(())
+    }
+
+    /// End `node`'s emission: its launch must have consumed the gate.
+    fn end_node_gate(&mut self, node: &DagNode) -> Result<(), Unsupported> {
+        match self.gate.take() {
+            Some(_) => Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP emitter reads its operands without the gate",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Consume the node's gate at its launch: bind the activation's layout
+    /// (it may be a view, such as a call site's activation expanded to every
+    /// row), its element count and its row width beside the launch's other
+    /// metadata, and return the extra kernel arguments, empty for an ungated
+    /// launch.
+    fn emit_gate_launch_args(&mut self, id: usize) -> String {
+        let Some(gate) = self.gate.take() else {
+            return String::new();
+        };
+        let act = gate.activation.0;
+        self.emit_shape_vars(id, "act", act);
+        self.emit_stride_vars(id, "act", act);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_ndim = d_t{act}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_count = d_t{act}->count;"
+        ));
+        if gate.per_row {
+            self.line(&format!(
+                "chelis_device_metadata t{id}_act_row = t{id}_act_count > 0 ? t{id}_size / t{id}_act_count : 0;"
+            ));
+        } else {
+            self.line(&format!("chelis_device_metadata t{id}_act_row = 0;"));
+        }
+        format!(
+            ", &p_t{act}, {}, {}, &t{id}_act_ndim, &t{id}_act_count, &t{id}_act_row",
+            self.shape_arg_refs(id, "act"),
+            self.stride_arg_refs(id, "act"),
+        )
     }
 
     fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
@@ -427,6 +579,7 @@ impl HipEmitter {
             }
         }
         let dag = storage_plan.emission();
+        let seeds = dag.trap_seeds();
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -440,8 +593,18 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
-            scoped_draws: BTreeMap::new(),
             draw_keys: BTreeMap::new(),
+            gate: None,
+            activation_gated: dag
+                .nodes()
+                .iter()
+                .map(|node| seeds.is_activation_gated(node))
+                .collect(),
+            claim_sized: dag
+                .nodes()
+                .iter()
+                .map(|node| node.owner.activation.is_some() && seeds.is_claim_sized(node))
+                .collect(),
             kernel_rank: match dag
                 .nodes()
                 .iter()
@@ -642,10 +805,8 @@ impl HipEmitter {
     }
 
     /// Start one entry point's walk. Each entry runs the graph as its own
-    /// activation, so every scoped region's ordinals count from zero again
-    /// (`spec/design/randomness_counter_stream.md` §2).
+    /// activation, so its emission-time keys are its own.
     fn begin_activation(&mut self) {
-        self.scoped_draws.clear();
         self.draw_keys.clear();
     }
 
@@ -1328,7 +1489,22 @@ impl HipEmitter {
         })
     }
 
+    /// The kernel `node` launches: its operation's kernel, read through the
+    /// node's activation gate when it has one ([`Self::activation_gate`]).
     fn kernel_name_for_op(
+        &self,
+        op: &RiscOp,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<Option<String>, Unsupported> {
+        let name = self.ungated_kernel_name_for_op(op, node, dag)?;
+        Ok(match self.activation_gate(node, dag) {
+            Some(gate) => name.map(|name| Self::gated_kernel_name(name, &gate.operands)),
+            None => name,
+        })
+    }
+
+    fn ungated_kernel_name_for_op(
         &self,
         op: &RiscOp,
         node: &DagNode,
@@ -1436,11 +1612,11 @@ impl HipEmitter {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
-            | RiscOp::SplitN { .. } => None,
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -1646,7 +1822,17 @@ impl HipEmitter {
         let elem_for_unary =
             || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        Ok(match op {
+        // The node's activation gate. Exactly the arms whose templates read
+        // their operands through it take it; a gate left untaken is refused
+        // below rather than compiled into a kernel that checks where the
+        // activation is false (spec/10 section 3.2).
+        let gate = self.activation_gate(node, dag).map(|gate| gate.operands);
+        let gate_taken = std::cell::Cell::new(false);
+        let take_gate = || {
+            gate_taken.set(true);
+            gate.as_ref()
+        };
+        let source = match op {
             // WS-A4: Add / Mul dispatch on operand precision so each
             // dtype gets its own kernel source. f32/f64 route through
             // the WS-A2 `ElemKind` template (which now also handles
@@ -1654,11 +1840,12 @@ impl HipEmitter {
             RiscOp::Add => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "+",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
                     kernels::binary_elementwise_typed(
@@ -1666,6 +1853,7 @@ impl HipEmitter {
                         name,
                         "+",
                         Self::dtype_c_type(prec),
+                        take_gate(),
                     )
                 }
             }
@@ -1679,26 +1867,29 @@ impl HipEmitter {
                         Self::dtype_c_type(precision),
                         minimum,
                         maximum,
+                        take_gate(),
                     )
                 } else if let Some(kind) = Self::reduced_float_kind(precision) {
                     kernels::binary_sub_reduced(self.kernel_rank, name, kind)
                 } else {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "-",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 }
             }
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "*",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
                     kernels::binary_elementwise_typed(
@@ -1706,6 +1897,7 @@ impl HipEmitter {
                         name,
                         "*",
                         Self::dtype_c_type(prec),
+                        take_gate(),
                     )
                 }
             }
@@ -1725,11 +1917,12 @@ impl HipEmitter {
                      codegen; the type checker should reject this at \
                      spec/04-type-system.md \u{00a7}5.4 before lowering"
                 );
-                kernels::binary_elementwise(
+                kernels::binary_elementwise_typed(
                     self.kernel_rank,
                     name,
                     "/",
-                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                    take_gate(),
                 )
             }
             // chelis#178: floor division (round toward -inf). Integer
@@ -1742,6 +1935,7 @@ impl HipEmitter {
                     name,
                     Self::dtype_c_type(prec),
                     prec.is_integer(),
+                    take_gate(),
                 )
             }
             // chelis#178: truncating (round-toward-zero) division. Integer
@@ -1761,6 +1955,7 @@ impl HipEmitter {
                     name,
                     "/",
                     Self::dtype_c_type(prec),
+                    take_gate(),
                 )
             }
             RiscOp::Compare(kind) => {
@@ -1943,7 +2138,7 @@ impl HipEmitter {
                     .expect("verified numeric representation")
                     .byte_width(),
             ),
-            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag)?,
+            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag, take_gate())?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
             }
@@ -1960,7 +2155,7 @@ impl HipEmitter {
                     Self::dtype_c_type(node.output_type.precision),
                 )
             }
-            RiscOp::Copy => self.cast_kernel_source(name, node, dag)?,
+            RiscOp::Copy => self.cast_kernel_source(name, node, dag, None)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
                     let reusable = reuse.mechanics(node.id).reusable_input;
@@ -2069,7 +2264,14 @@ impl HipEmitter {
                 Self::dtype_c_type(node.output_type.precision),
             ),
             _ => unreachable!("no kernel for op: {op:?}"),
-        })
+        };
+        if gate.is_some() && !gate_taken.get() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP kernel reads its operands without the gate",
+            ));
+        }
+        Ok(source)
     }
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
@@ -2079,12 +2281,13 @@ impl HipEmitter {
         name: &str,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
+        gate: Option<&kernels::OperandGate>,
     ) -> Result<String, Unsupported> {
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
-            kernels::cast(self.kernel_rank, name, dst_kind)
+            kernels::cast(self.kernel_rank, name, dst_kind, gate)
         } else {
-            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind)
+            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind, gate)
         })
     }
 
@@ -2132,6 +2335,10 @@ impl HipEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        // A checking node under an activation checks nothing where it is
+        // false (spec/10 section 3.2): its launch consumes the gate, and
+        // `end_node_gate` refuses a node whose emitter did not.
+        self.begin_node_gate(node, dag)?;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
@@ -2326,11 +2533,6 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::DrawKey {
-                handler,
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype,
-            } => self.record_scoped_draw_key(node, *handler, *dtype, dag)?,
             RiscOp::UniformLike => {
                 let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
                 self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
@@ -2341,8 +2543,8 @@ impl HipEmitter {
             RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
-            | RiscOp::SplitN { .. } => {
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
                     "a key-operand random node in the HIP DAG emitter",
@@ -2577,7 +2779,7 @@ impl HipEmitter {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
-        Ok(())
+        self.end_node_gate(node)
     }
 
     // ------------------------------------------------------------------
@@ -2927,11 +3129,12 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
         ));
+        let gate_args = self.emit_gate_launch_args(id);
         // Build args array
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -3037,9 +3240,10 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
         ));
+        let gate_args = self.emit_gate_launch_args(id);
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
@@ -3055,64 +3259,12 @@ impl HipEmitter {
     }
 
     /// A constant the storage plan gives no storage because only draw
-    /// emission reads it, as a literal: a `with seed` region's seed and a
-    /// draw's bounds, which [`Self::record_scoped_draw_key`] and
+    /// emission reads it, as a literal: a key derivation's seed or index and
+    /// a draw's bounds, which [`Self::record_derived_key`] and
     /// [`Self::keyed_uniform_like_parameters`] fold into the launch.
     fn is_emission_literal(&self, node: &DagNode) -> bool {
         matches!(node.op, RiscOp::Const { .. })
             && *self.plan.node_kind(node.id) == NodeMemoryKind::Skipped
-    }
-
-    /// The HIP lane's counter-stream bridge
-    /// (`spec/design/randomness_counter_stream.md` §2): a device kernel has no
-    /// host Random frame, so only a draw key of a `with seed` region lowered
-    /// inside this graph, with literal bounds and no activation, has a key the
-    /// emitter can compute. Each region's ordinals count from zero in node
-    /// order, as its scoped counter does in the other lanes, and the bounds
-    /// are validated before the ordinal is taken ([05-OP-8]).
-    fn record_scoped_draw_key(
-        &mut self,
-        node: &DagNode,
-        handler: chelis_ir::dag::RandomHandler,
-        dtype: Prim,
-        dag: VerifiedDagView<'_>,
-    ) -> Result<(), Unsupported> {
-        let bridge = |reason: &str| {
-            Unsupported::new(
-                UnsupportedKind::Op("DrawKey".to_string()),
-                format!("a HIP draw key {reason}"),
-                Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
-                    1192,
-                    "the HIP lane computes a draw key only for a `with seed` region in the \
-                     same kernel with literal bounds; compiled randomness on every target is \
-                     phase 6 of chelis#2413"
-                ),
-            )
-        };
-        let chelis_ir::dag::RandomHandler::Scoped { instance } = handler else {
-            return Err(bridge("that inherits its caller's Random stream"));
-        };
-        if node.inputs.len() != 3 {
-            return Err(bridge("under a runtime activation"));
-        }
-        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
-            Some(RiscOp::Const { value }) => Some(*value),
-            _ => None,
-        };
-        let seed = literal(node.inputs[0])
-            .and_then(|seed| seed.as_i64_exact())
-            .ok_or_else(|| bridge("without its literal seed"))?;
-        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
-            return Err(bridge("with runtime bounds"));
-        };
-        chelis_types::dtype_semantics::UniformLikeParameters::new(dtype, low, high)
-            .map_err(|error| bridge(&format!("whose literal bounds trap: {error}")))?;
-        let ordinal = self.scoped_draws.entry(instance).or_insert(0);
-        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal);
-        *ordinal += 1;
-        self.draw_keys.insert(node.id, key);
-        Ok(())
     }
 
     /// A key the HIP lane computes at emission has no device value, so no
@@ -3140,8 +3292,8 @@ impl HipEmitter {
 
     /// A rank-0 key operation ([05-OP-69], [05-OP-70], [05-OP-72]) whose
     /// operands are literals or emission-time keys: the HIP lane computes its
-    /// key while it emits, as it does a scoped draw key, since a device kernel
-    /// receives keys only as launch arguments.
+    /// key while it emits, since a device kernel receives keys only as launch
+    /// arguments.
     fn record_derived_key(
         &mut self,
         node: &DagNode,
@@ -3202,7 +3354,7 @@ impl HipEmitter {
     }
 
     /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
-    /// whose draw key [`Self::record_scoped_draw_key`] computed.
+    /// whose key [`Self::record_derived_key`] computed.
     fn keyed_uniform_like_parameters(
         &self,
         node: &DagNode,
@@ -3211,17 +3363,19 @@ impl HipEmitter {
         let unsupported = || {
             Unsupported::new(
                 UnsupportedKind::Op("UniformLike".to_string()),
-                "a HIP uniform_like without an emission-time draw key",
+                "a HIP uniform_like without an emission-time key",
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
                     1192,
-                    "the HIP lane computes a draw key only for a `with seed` region in the \
-                     same kernel with literal bounds; compiled randomness on every target is \
-                     phase 6 of chelis#2413"
+                    "the HIP lane draws only with a rank-0 key it derives at emission from \
+                     literal seeds and indices, with literal bounds; compiled randomness on \
+                     every target is phase 6 of chelis#2413"
                 ),
             )
         };
-        if node.inputs.len() != 4 {
+        // Whether a draw under an activation draws is decided when the graph
+        // runs, which this lane does not do yet.
+        if node.owner.activation.is_some() {
             return Err(unsupported());
         }
         let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
@@ -3233,27 +3387,20 @@ impl HipEmitter {
             .get(&node.inputs[3])
             .copied()
             .ok_or_else(unsupported)?;
-        // A counter-stream draw key validated these bounds before it took
-        // its ordinal; a derived key validates nothing, so the draw does.
-        let derived = !matches!(
-            dag.get(node.inputs[3]).map(|key| &key.op),
-            Some(RiscOp::DrawKey { .. })
-        );
-        if derived {
-            let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
-                Some(RiscOp::Const { value }) => Some(*value),
-                _ => None,
-            };
-            let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
-                return Err(unsupported());
-            };
-            chelis_types::dtype_semantics::UniformLikeParameters::new(
-                node.output_type.precision,
-                low,
-                high,
-            )
-            .map_err(|_| unsupported())?;
-        }
+        // A key validates nothing, so the draw validates its bounds.
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+            return Err(unsupported());
+        };
+        chelis_types::dtype_semantics::UniformLikeParameters::new(
+            node.output_type.precision,
+            low,
+            high,
+        )
+        .map_err(|_| unsupported())?;
         match (bound(node.inputs[1]), bound(node.inputs[2])) {
             (Some(low), Some(high)) => Ok((low, high, key.bits())),
             _ => Err(unsupported()),
@@ -4920,11 +5067,11 @@ impl HipEmitter {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
             | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }
@@ -5378,13 +5525,21 @@ mod tests {
     #[test]
     fn drop_releases_exact_device_descriptor_once() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![source],
+            TensorType::scalar_f32(),
+            None,
+        );
 
         let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
         assert_eq!(
@@ -5399,14 +5554,28 @@ mod tests {
     #[test]
     fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let borrowed = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
-        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let output = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_root(output);
 
         let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
@@ -5567,8 +5736,15 @@ mod tests {
         let ty = vec_i64(1);
 
         let mut direct = Dag::new();
-        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        let direct_decl = direct.declare("test");
+        let x = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
         let err = match emit_test_dag(&direct, "integer_abs") {
             Err(error) => error,
@@ -5577,8 +5753,16 @@ mod tests {
         assert!(err.to_string().contains("unsupported: op `Abs`"));
 
         let mut fused = Dag::new();
-        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let fused_decl = fused.declare("test");
+        let x = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let out = fused.add_node(
+            fused_decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Abs,
@@ -5606,27 +5790,16 @@ mod tests {
 
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(
-            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
             vec![],
             vec_f32(4),
             None,
         );
-        let ops = vec![FusedStep {
-            op: FusedStepOp::Mul,
-            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
-        }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
-        dag.set_reusable_input(fused, x);
-        dag
-    }
-
-    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
-        let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -5637,6 +5810,40 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(
+            decl,
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem { ops },
             vec![owned, scale],
             vec_f32(4),
@@ -5650,7 +5857,9 @@ mod tests {
     #[test]
     fn sparse_scatter_add_emits_hip_atomic_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -5659,6 +5868,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -5667,6 +5877,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -5675,6 +5886,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             mat_f32(3, 2),
@@ -5728,13 +5940,16 @@ mod tests {
     #[test]
     fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 2),
             None,
         );
         let flat = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(4)],
             },
@@ -5743,12 +5958,14 @@ mod tests {
             None,
         );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,
@@ -5775,8 +5992,16 @@ mod tests {
     #[test]
     fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -5786,7 +6011,13 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
@@ -5813,7 +6044,9 @@ mod tests {
         // reparses to a different (zero) bit pattern.
         let value = 1e-40_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, value),
             vec![],
             vec_f32(4),
@@ -5847,7 +6080,9 @@ mod tests {
         // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
         let value = 1.0_f64 / 3.0_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F64, value),
             vec![],
             vec_f64(4),
@@ -5865,10 +6100,11 @@ mod tests {
         );
     }
 
-    /// `uniform_like(template, low, high)` as the first draw of a `with
-    /// seed(seed)` region in the graph, whose key the HIP lane computes.
-    fn scoped_uniform(
+    /// `uniform_like(key_from_seed(seed), template, low, high)`, whose key
+    /// the HIP lane computes at emission.
+    fn seeded_uniform(
         dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
         template: NodeId,
         ty: TensorType,
         (low, high): (f64, f64),
@@ -5879,34 +6115,35 @@ mod tests {
             precision,
         };
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, low),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, high),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, seed as f64),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: ty.precision,
-            },
-            vec![seed, low, high],
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
             rank0(Prim::Key),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,
@@ -5922,7 +6159,9 @@ mod tests {
         let low = 1e-40_f64; // denormal f32: lost by `%.8`
         let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -5930,7 +6169,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = scoped_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
+        let u = seeded_uniform(&mut dag, decl, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -5960,56 +6199,6 @@ mod tests {
         );
     }
 
-    /// [05-RNG-1]: each generated entry point runs the graph as its own
-    /// activation, so a `with seed` region's two draws take ordinals 0 and 1
-    /// in the host entry and again in its device twin. The expected keys are
-    /// transcribed from the spec, not from `RandomKey`.
-    ///
-    /// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the region counter
-    /// was set once per emitter, so the device entry took ordinals 2 and 3.
-    #[test]
-    fn each_entry_point_keys_its_scoped_draws_from_ordinal_zero() {
-        fn splitmix64(mut value: u64) -> u64 {
-            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            value ^ (value >> 31)
-        }
-        let key = |ordinal: u64| 7 ^ splitmix64(ordinal).rotate_left(17);
-        let mut dag = Dag::new();
-        let like = dag.add_node(
-            RiscOp::Load {
-                name: "like".into(),
-            },
-            vec![],
-            vec_f32(8),
-            None,
-        );
-        let first = scoped_uniform(&mut dag, like, vec_f32(8), (0.0, 1.0), 7);
-        let second = scoped_uniform(&mut dag, first, vec_f32(8), (-1.0, 1.0), 7);
-        dag.add_root(second);
-        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
-        let entry_keys = |signature: &str| {
-            let body = hip
-                .split_once(signature)
-                .unwrap_or_else(|| panic!("no `{signature}` in:\n{hip}"))
-                .1;
-            let body = body.split("\nextern \"C\"").next().unwrap();
-            body.lines()
-                .filter_map(|line| {
-                    let (name, value) = line.trim().split_once(" = ")?;
-                    name.strip_prefix("unsigned long long t")?
-                        .strip_suffix("_key")?;
-                    value.strip_suffix("ULL;")?.parse::<u64>().ok()
-                })
-                .collect::<Vec<_>>()
-        };
-        let expected = vec![key(0), key(1)];
-        assert_ne!(expected[0], expected[1]);
-        assert_eq!(entry_keys("extern \"C\" void test_fn("), expected);
-        assert_eq!(entry_keys("extern \"C\" void test_fn_device("), expected);
-    }
-
     /// A draw's seed and literal bounds are read only while the draw is
     /// emitted, so they take no device slot, fill launch or release, and
     /// every owner and slot an entry point names is one it declares.
@@ -6019,7 +6208,7 @@ mod tests {
     /// the host entry released an undeclared `o_t` and `chelis_slot`, and
     /// each bound was filled on the device by `kernel_fill_f32`.
     #[test]
-    fn scoped_draw_literals_take_no_device_storage() {
+    fn seeded_draw_literals_take_no_device_storage() {
         fn used_and_declared(body: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
             let mut used = BTreeSet::new();
             let mut declared = BTreeSet::new();
@@ -6044,7 +6233,9 @@ mod tests {
         }
         for ty in [vec_f32(8), vec_f64(8)] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let like = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "like".into(),
                 },
@@ -6052,8 +6243,8 @@ mod tests {
                 ty.clone(),
                 None,
             );
-            let first = scoped_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
-            let second = scoped_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
+            let first = seeded_uniform(&mut dag, decl, like, ty.clone(), (0.0, 1.0), 7);
+            let second = seeded_uniform(&mut dag, decl, first, ty.clone(), (-1.0, 1.0), 7);
             dag.add_root(second);
             let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
             let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
@@ -6069,20 +6260,19 @@ mod tests {
         }
     }
 
-    /// `spec/design/randomness_counter_stream.md` §2: whether a draw under a
-    /// runtime activation takes its ordinal is decided when the graph runs,
-    /// so the HIP lane refuses an activated draw key with its typed rejection
-    /// instead of computing a key at emission.
-    ///
-    /// Evidentiary status: LOCK on behaviour present at 7d0b996ca.
+    /// Whether a draw under a runtime activation draws is decided when the
+    /// graph runs, so the HIP lane refuses an activated draw with its typed
+    /// rejection instead of launching it unconditionally.
     #[test]
-    fn an_activated_draw_key_is_refused_on_the_device() {
+    fn an_activated_draw_is_refused_on_the_device() {
         let rank0 = |precision| TensorType {
             dims: vec![],
             precision,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6091,6 +6281,7 @@ mod tests {
             None,
         );
         let active = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "active".into(),
             },
@@ -6099,36 +6290,37 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high, active],
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
             rank0(Prim::Key),
             None,
         );
         let draw = dag.add_node(
+            chelis_ir::dag::Owner::new(decl, Some(active)),
             RiscOp::UniformLike,
-            vec![like, low, high, key, active],
+            vec![like, low, high, key],
             vec_f32(8),
             None,
         );
@@ -6138,26 +6330,27 @@ mod tests {
         };
         assert_eq!(
             *error.what,
-            UnsupportedKind::Op("DrawKey".to_string()),
-            "{error}"
-        );
-        assert!(
-            error
-                .context
-                .contains("a HIP draw key under a runtime activation"),
+            UnsupportedKind::Op("UniformLike".to_string()),
             "{error}"
         );
     }
 
     /// `uniform_like(0, 1)` of `ty` keyed by the chain `fold_in(split(
     /// key_from_seed(seed)).1, index)`, every operand a literal.
-    fn derived_uniform(dag: &mut Dag, ty: TensorType, seed: i64, index: i64) -> NodeId {
+    fn derived_uniform(
+        dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
+        ty: TensorType,
+        seed: i64,
+        index: i64,
+    ) -> NodeId {
         let rank0 = |precision| TensorType {
             dims: vec![],
             precision,
         };
         let i64_const = |dag: &mut Dag, value: i64| {
             dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
                 },
@@ -6167,6 +6360,7 @@ mod tests {
             )
         };
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6175,8 +6369,15 @@ mod tests {
             None,
         );
         let seed = i64_const(dag, seed);
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let right = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Right,
             },
@@ -6185,6 +6386,7 @@ mod tests {
             None,
         );
         let left = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Left,
             },
@@ -6193,20 +6395,34 @@ mod tests {
             None,
         );
         let index = i64_const(dag, index);
-        let folded = dag.add_node(RiscOp::FoldIn, vec![right, index], rank0(Prim::Key), None);
+        let folded = dag.add_node(
+            decl,
+            RiscOp::FoldIn,
+            vec![right, index],
+            rank0(Prim::Key),
+            None,
+        );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
-        let draw = dag.add_node(RiscOp::UniformLike, vec![like, low, high, folded], ty, None);
+        let draw = dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![like, low, high, folded],
+            ty,
+            None,
+        );
         // The left half is unused: an affine key may be dropped.
         let _ = left;
         draw
@@ -6221,7 +6437,8 @@ mod tests {
         const G_KEY: u64 = 0x2334_cf03_8b09_85b4;
         for ty in [vec_f32(8), vec_f64(8)] {
             let mut dag = Dag::new();
-            let draw = derived_uniform(&mut dag, ty, -3, 9);
+            let decl = dag.declare("test");
+            let draw = derived_uniform(&mut dag, decl, ty, -3, 9);
             dag.add_root(draw);
             let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
             // Pruning the unused left half renumbers the draw, so match the
@@ -6242,7 +6459,9 @@ mod tests {
         };
         // A key split produces a key tensor.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
             },
@@ -6250,8 +6469,15 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let rows = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: RtDim::Lit(3),
             },
@@ -6263,6 +6489,7 @@ mod tests {
             None,
         );
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6274,18 +6501,21 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![like, low, high, rows],
             TensorType {
@@ -6305,7 +6535,9 @@ mod tests {
         );
         // A runtime seed.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "seed".into(),
             },
@@ -6313,8 +6545,15 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6323,18 +6562,21 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![like, low, high, root],
             vec_f32(8),
@@ -6347,7 +6589,9 @@ mod tests {
         assert!(error.context.contains("with a runtime seed"), "{error}");
         // A key result has no device value.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
             },
@@ -6355,7 +6599,13 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         dag.add_root(root);
         let Err(error) = emit_test_dag(&dag, "test_fn") else {
             panic!("the HIP lane returned a key");
@@ -6363,7 +6613,8 @@ mod tests {
         assert!(error.context.contains("a key result"), "{error}");
         // Bounds that trap under a derived key: the draw validates them.
         let mut dag = Dag::new();
-        let draw = derived_uniform(&mut dag, vec_f32(8), -3, 9);
+        let decl = dag.declare("test");
+        let draw = derived_uniform(&mut dag, decl, vec_f32(8), -3, 9);
         let (low, high) = (
             dag.get(draw).unwrap().inputs[1],
             dag.get(draw).unwrap().inputs[2],
@@ -6386,7 +6637,9 @@ mod tests {
         let low = 0.1_f64;
         let high = 0.9_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6394,7 +6647,7 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = scoped_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
+        let u = seeded_uniform(&mut dag, decl, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 

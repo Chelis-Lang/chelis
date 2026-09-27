@@ -56,7 +56,9 @@ fn t_i32(dims: Vec<usize>) -> TensorType {
 #[test]
 fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "data".into(),
         },
@@ -65,6 +67,7 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -73,6 +76,7 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -81,6 +85,7 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::ScatterElements { axis: 0 },
         vec![data, indices, updates],
         t(vec![3, 3]),
@@ -141,7 +146,9 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
 #[test]
 fn scatter_elements_forward_axis1_substitutes_column() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "data".into(),
         },
@@ -150,6 +157,7 @@ fn scatter_elements_forward_axis1_substitutes_column() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -158,6 +166,7 @@ fn scatter_elements_forward_axis1_substitutes_column() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -166,6 +175,7 @@ fn scatter_elements_forward_axis1_substitutes_column() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::ScatterElements { axis: 1 },
         vec![data, indices, updates],
         t(vec![2, 3]),
@@ -212,7 +222,9 @@ fn scatter_elements_forward_axis1_substitutes_column() {
 #[test]
 fn scatter_elements_forward_duplicate_last_write_wins() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "data".into(),
         },
@@ -221,6 +233,7 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -229,6 +242,7 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -237,6 +251,7 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::ScatterElements { axis: 0 },
         vec![data, indices, updates],
         t(vec![3, 2]),
@@ -283,7 +298,9 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
 #[test]
 fn scatter_elements_ad_returns_structured_not_supported_error() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "data".into(),
         },
@@ -292,12 +309,14 @@ fn scatter_elements_ad_returns_structured_not_supported_error() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![2, 2]).precision, 0.0),
         vec![],
         t_i32(vec![2, 2]),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -306,12 +325,14 @@ fn scatter_elements_ad_returns_structured_not_supported_error() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::ScatterElements { axis: 0 },
         vec![data, indices, updates],
         t(vec![3, 2]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -321,6 +342,7 @@ fn scatter_elements_ad_returns_structured_not_supported_error() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -359,7 +381,9 @@ fn scatter_elements_ad_returns_structured_not_supported_error() {
 #[test]
 fn scatter_elements_verify_rejects_mismatched_index_update_dims() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "data".into(),
         },
@@ -371,6 +395,7 @@ fn scatter_elements_verify_rejects_mismatched_index_update_dims() {
     // Scatter accepts but ScatterElements must reject (different ranks
     // AND indices.dims != updates.dims).
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -379,6 +404,7 @@ fn scatter_elements_verify_rejects_mismatched_index_update_dims() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -387,6 +413,7 @@ fn scatter_elements_verify_rejects_mismatched_index_update_dims() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ScatterElements { axis: 0 },
         vec![data, indices, updates],
         t(vec![3, 2]),

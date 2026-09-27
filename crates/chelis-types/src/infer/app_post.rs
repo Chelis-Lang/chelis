@@ -414,6 +414,10 @@ pub(super) fn finish_unified_app(
                 result_ty =
                     check_conv_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
             }
+            "split_keys" => {
+                checked_route_observed = true;
+                result_ty = check_split_keys_signature(&kids[1..], &result_ty, env, subst, errors);
+            }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;
                 product.defer_shape_check(
@@ -2551,6 +2555,32 @@ pub(super) fn finish_unified_app(
                                 .and_then(|arg| static_to_tensor_shape(arg, rank))
                                 .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                             return Type::Tensor(dims, TensorPrec::Concrete(precision));
+                        }
+                        // [05-OP-57]: the leaf of `to_tensor`'s List is one
+                        // scalar tensor-element dtype. A leaf variable restricted
+                        // to the `Float`, `Int` or `Numeric` family can only be
+                        // such a scalar, so the nesting depth already fixes the
+                        // rank and the variable is the result precision, exactly
+                        // as `to_list` maps `tensor[n, p]` to `List[p]`. Returning
+                        // the scheme's opaque result here left every consumer of
+                        // a generic `to_tensor` (a `reshape`, say) suspended past
+                        // its declaration boundary.
+                        ToTensorPeel::Pending { rank, element }
+                            if rank > 0
+                                && matches!(
+                                    subst.tvar_restriction(element),
+                                    Some(
+                                        TypeVarRestriction::ActiveFloat
+                                            | TypeVarRestriction::ActiveInt
+                                            | TypeVarRestriction::ActiveNumeric
+                                    )
+                                ) =>
+                        {
+                            let dims = kids
+                                .get(1)
+                                .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
+                            return Type::Tensor(dims, TensorPrec::Var(element));
                         }
                         // chelis#2523: `to_tensor` maps `List` nested `r`
                         // deep around a numeric or bool dtype `p` to a rank-`r`

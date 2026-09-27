@@ -15,15 +15,23 @@ fn vector(precision: Prim) -> TensorType {
 
 fn binary_source(op: RiscOp, input: Prim, output: Prim, name: &str) -> String {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input_ty = vector(input);
     let lhs = dag.add_node(
+        decl,
         RiscOp::Load { name: "lhs".into() },
         vec![],
         input_ty.clone(),
         None,
     );
-    let rhs = dag.add_node(RiscOp::Load { name: "rhs".into() }, vec![], input_ty, None);
-    let out = dag.add_node(op, vec![lhs, rhs], vector(output), None);
+    let rhs = dag.add_node(
+        decl,
+        RiscOp::Load { name: "rhs".into() },
+        vec![],
+        input_ty,
+        None,
+    );
+    let out = dag.add_node(decl, op, vec![lhs, rhs], vector(output), None);
     dag.add_root(out);
     codegen_hip(&dag, name)
         .expect("direct nonnumeric HIP codegen")
@@ -122,8 +130,10 @@ fn logical_kernels_are_eager_bool8_truth_operations() {
     }
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vector(Prim::Bool);
     let input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "input".into(),
         },
@@ -131,7 +141,13 @@ fn logical_kernels_are_eager_bool8_truth_operations() {
         ty.clone(),
         None,
     );
-    let out = dag.add_node(RiscOp::Logical(LogicalKind::Not), vec![input], ty, None);
+    let out = dag.add_node(
+        decl,
+        RiscOp::Logical(LogicalKind::Not),
+        vec![input],
+        ty,
+        None,
+    );
     dag.add_root(out);
     let source = codegen_hip(&dag, "logical_not")
         .expect("logical not HIP codegen")
@@ -154,7 +170,9 @@ fn where_selects_raw_stored_bits_for_every_admitted_branch_dtype() {
         (Prim::Bool, "unsigned char"),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let cond = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "cond".into(),
             },
@@ -164,18 +182,20 @@ fn where_selects_raw_stored_bits_for_every_admitted_branch_dtype() {
         );
         let branch_ty = vector(precision);
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             branch_ty.clone(),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             branch_ty.clone(),
             None,
         );
-        let out = dag.add_node(RiscOp::Where, vec![cond, lhs, rhs], branch_ty, None);
+        let out = dag.add_node(decl, RiscOp::Where, vec![cond, lhs, rhs], branch_ty, None);
         dag.add_root(out);
         let source = codegen_hip(&dag, &format!("where_{}", precision.name()))
             .expect("where HIP codegen")
@@ -207,24 +227,28 @@ fn permuted_stepped_views_feed_comparison_logical_and_where_stride_metadata() {
     let stepped_f32 = matrix(2, 2, Prim::F32);
     let stepped_bool = matrix(2, 2, Prim::Bool);
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let view = |dag: &mut Dag,
                 name: &str,
                 input: &TensorType,
                 permuted: &TensorType,
                 stepped: &TensorType| {
         let load = dag.add_node(
+            decl,
             RiscOp::Load { name: name.into() },
             vec![],
             input.clone(),
             None,
         );
         let permute = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![load],
             permuted.clone(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },
@@ -257,18 +281,26 @@ fn permuted_stepped_views_feed_comparison_logical_and_where_stride_metadata() {
         &stepped_bool,
     );
     let comparison = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::Gte),
         vec![lhs, rhs],
         stepped_bool.clone(),
         None,
     );
     let logical = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::And),
         vec![logical_lhs, logical_rhs],
         stepped_bool,
         None,
     );
-    let selected = dag.add_node(RiscOp::Where, vec![condition, lhs, rhs], stepped_f32, None);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![condition, lhs, rhs],
+        stepped_f32,
+        None,
+    );
     dag.add_root(comparison);
     dag.add_root(logical);
     dag.add_root(selected);

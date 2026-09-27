@@ -271,7 +271,7 @@ mod tests {
             "result = vmap(f, axis=1,)\n",
             "result = cast(x, f64,)\n",
             "result = cast_trunc(x, i32,)\n",
-            "result = with seed(1,) { x }\n",
+            "result = with device(\"gpu:0\",) { x }\n",
             "def resource() ! { Resource(\"gpu:0\",), } = ()\n",
             "value = \"\\u{08}\\u{0}\\u{9}\\u{a}\\u{d}\\u{22}\\u{5c}\\u{41}\\u{B}\"\n",
             "value = match x with { | -9_223_372_036_854_775_808 => 0 }\n",
@@ -371,6 +371,30 @@ mod tests {
             "result = x > fn (v) -> f(v)\n",
         ] {
             assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// spec/02 §P5a: randomness has no handler and no effect, so the
+    /// retired `with seed(...)` handler and the `Random` effect name are
+    /// parse errors in both parsers. The property-test option
+    /// `with seed = ...` is a different production and stays accepted.
+    #[test]
+    fn surf_tree_sitter_rejects_the_retired_randomness_spellings() {
+        for source in [
+            "result = with seed(1i64) { x }\n",
+            "result = with seed(1,) { x }\n",
+            "def f() -> i32 ! { Random } = 1i32\n",
+            "def f() -> i32 ! { IO, Random } = 1i32\n",
+            "sig f: i32 -> i32 ! { Random }\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+        for source in [
+            "result = with device(\"gpu:0\") { x }\n",
+            "def f() -> i32 ! { IO } = 1i32\n",
+            "@property p forall(): true\n  with seed = 1i64\n",
+        ] {
+            assert_surf_parser_parity(source, true);
         }
     }
 

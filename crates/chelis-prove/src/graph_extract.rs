@@ -78,6 +78,9 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
                 return Err("scalar closure requires dense IDs and no shape dependencies".into());
             }
             pending.extend(node.inputs.iter().copied());
+            // The activation decides whether the node checks; it is part
+            // of the closure like an input.
+            pending.extend(node.activation);
         }
     }
     let mapping: std::collections::BTreeMap<_, _> = retained
@@ -92,6 +95,7 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
             let mut node = wire.nodes[*id as usize].clone();
             node.id = mapping[id];
             node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
+            node.activation = node.activation.map(|activation| mapping[&activation]);
             node
         })
         .collect();
@@ -239,10 +243,10 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Dropout {}
             | WireRiscOp::DropoutReplay {}
             | WireRiscOp::UniformBoundAdjoint { .. }
-            | WireRiscOp::DrawKey { .. }
             | WireRiscOp::KeyFromSeed {}
             | WireRiscOp::Split { .. }
             | WireRiscOp::FoldIn {}
+            | WireRiscOp::KeySelect {}
             | WireRiscOp::SplitN { .. }
             | WireRiscOp::Sum { .. }
             | WireRiscOp::Count { .. }
@@ -584,7 +588,9 @@ const _: () = {
     // Version 18 (chelis#2413) adds the explicit key operations. They produce
     // keys, not float values; `SplitN`'s count is the tagged `WireRtDim` an
     // `Expand` size is, so they join the same group.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 18);
+    // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
+    // it adds no operation.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 19);
 };
 
 #[cfg(test)]

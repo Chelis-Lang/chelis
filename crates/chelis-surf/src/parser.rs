@@ -60,6 +60,18 @@ pub enum ParseError {
         "integer magnitude `{found}` is only valid after unary `-`; write `-{found}` at byte {offset}"
     )]
     SignedMinimumMagnitudeRequiresNegation { found: String, offset: usize },
+    /// A retired counter-stream spelling: the `with seed(...)` handler or the
+    /// `Random` effect name. Randomness has no handler and no effect; a random
+    /// primitive takes an explicit key (spec/02 §P5a, spec/05 §2.7).
+    #[error(
+        "`{spelling}` is not Surf: randomness has no handler or effect; a random \
+         primitive takes an explicit key, for example \
+         `dropout(key_from_seed(42i64), x, 0.5)` (spec/02 §P5a) at byte {offset}"
+    )]
+    RetiredRandomness {
+        spelling: &'static str,
+        offset: usize,
+    },
 }
 
 struct Parser {
@@ -2764,7 +2776,14 @@ impl Parser {
 
     fn parse_with_handler(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume With
+        let handler_offset = self.current_offset();
         let (handler_name, _) = self.expect_ident()?;
+        if handler_name == "seed" {
+            return Err(ParseError::RetiredRandomness {
+                spelling: "with seed",
+                offset: handler_offset,
+            });
+        }
         self.expect(&TokenKind::LParen)?;
         let arg = self.parse_expr(0)?;
         self.consume_trailing_comma_before(&TokenKind::RParen);
@@ -2772,10 +2791,9 @@ impl Parser {
         let body = self.parse_block_inner(true)?;
         let span = start.merge(expr_span(&body));
         match handler_name.as_str() {
-            "seed" => Ok(Expr::WithSeed(Box::new(arg), Box::new(body), span)),
             "device" => Ok(Expr::WithDevice(Box::new(arg), Box::new(body), span)),
             _ => Err(ParseError::Expected {
-                expected: "`seed` or `device` effect handler".into(),
+                expected: "`device` effect handler".into(),
                 found: handler_name,
                 offset: self.current_offset(),
             }),
@@ -3767,7 +3785,10 @@ impl Parser {
                 match name.as_str() {
                     "diff" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Diff(tok.span)),
                     "random" if self.mode == ParseMode::LegacyV018 => {
-                        Ok(EffectExpr::Random(tok.span))
+                        Err(ParseError::RetiredRandomness {
+                            spelling: "random",
+                            offset: tok.span.offset,
+                        })
                     }
                     "accum" if self.mode == ParseMode::LegacyV018 => {
                         Ok(EffectExpr::Accum(tok.span))
@@ -3785,7 +3806,10 @@ impl Parser {
                 let tok = self.advance();
                 match name.as_str() {
                     "Diff" => Ok(EffectExpr::Diff(tok.span)),
-                    "Random" => Ok(EffectExpr::Random(tok.span)),
+                    "Random" => Err(ParseError::RetiredRandomness {
+                        spelling: "Random",
+                        offset: tok.span.offset,
+                    }),
                     "Accum" => Ok(EffectExpr::Accum(tok.span)),
                     "IO" => Ok(EffectExpr::Io(tok.span)),
                     "Test" => Ok(EffectExpr::Test(tok.span)),
@@ -3892,7 +3916,6 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Realize(_, s) => *s,
         Expr::Copy(_, s) => *s,
         Expr::Borrow(_, s) => *s,
-        Expr::WithSeed(_, _, s) => *s,
         Expr::WithDevice(_, _, s) => *s,
         Expr::Par(_, s) => *s,
         Expr::Do(_, s) => *s,
@@ -4031,19 +4054,37 @@ mod tests {
 
     #[test]
     fn sig_effect_annotation() {
-        let decls = p("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}");
+        let decls = p("sig f: f32 -> f32 ! {Diff, Resource(\"gpu:0\")}");
         match &decls[0] {
             Decl::Sig { effects, .. } => {
                 let effects = effects.as_ref().expect("effects");
-                assert_eq!(effects.len(), 3);
+                assert_eq!(effects.len(), 2);
                 assert!(matches!(effects[0], EffectExpr::Diff(_)));
-                assert!(matches!(effects[1], EffectExpr::Random(_)));
                 assert!(
-                    matches!(effects[2], EffectExpr::Resource(ref device, _) if device == "gpu:0")
+                    matches!(effects[1], EffectExpr::Resource(ref device, _) if device == "gpu:0")
                 );
             }
             _ => panic!("expected Sig"),
         }
+    }
+
+    #[test]
+    fn random_effect_name_is_a_typed_rejection() {
+        // The counter stream's `Random` effect was retired with the explicit
+        // key switch (#2413): naming it is a typed parse error that points at
+        // keys, never a silently accepted or unknown-effect crash.
+        let err = p_err("sig f: f32 -> f32 ! {Diff, Random}");
+        assert!(
+            matches!(
+                err,
+                ParseError::RetiredRandomness {
+                    spelling: "Random",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("key_from_seed"), "got {err}");
     }
 
     #[test]
@@ -4642,24 +4683,24 @@ mod tests {
     }
 
     #[test]
-    fn with_seed_block_binding_then_tail_parses() {
+    fn with_device_block_binding_then_tail_parses() {
         // Positive #5b: parse_with_handler routes through parse_block, so
-        // the bounded tail applies to `with seed(..) { .. }` too.
+        // the bounded tail applies to `with device(..) { .. }` too.
         let e = body(
-            "def f(x) = with seed(42) {
+            "def f(x) = with device(\"gpu:0\") {
                 y = 1
                 f(y)
             }",
         );
         match e {
-            Expr::WithSeed(_, body, _) => match *body {
+            Expr::WithDevice(_, body, _) => match *body {
                 Expr::Block(ref bindings, ref tail, _) => {
                     assert_eq!(bindings.len(), 1);
                     assert!(matches!(**tail, Expr::Apply(_, _, _)));
                 }
                 ref other => panic!("expected Block body, got {other:?}"),
             },
-            _ => panic!("expected WithSeed, got {e:?}"),
+            _ => panic!("expected WithDevice, got {e:?}"),
         }
     }
 
@@ -5035,15 +5076,21 @@ mod tests {
     }
 
     #[test]
-    fn with_seed_handler_expr() {
-        let e = body("def f() = with seed(42) { dropout(x, 0.5) }");
-        match e {
-            Expr::WithSeed(seed, body, _) => {
-                assert!(matches!(*seed, Expr::Lit(Literal::Int(42), _)));
-                assert!(matches!(*body, Expr::Block(_, _, _)));
-            }
-            _ => panic!("expected WithSeed, got {e:?}"),
-        }
+    fn retired_seed_handler_is_a_typed_rejection() {
+        // `with seed` was retired with the explicit key switch (#2413): the
+        // parser names the retired form and points at explicit keys.
+        let err = p_err("def f() = with seed(42i64) { dropout(x, 0.5) }");
+        assert!(
+            matches!(
+                err,
+                ParseError::RetiredRandomness {
+                    spelling: "with seed",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("key_from_seed"), "got {err}");
     }
 
     #[test]

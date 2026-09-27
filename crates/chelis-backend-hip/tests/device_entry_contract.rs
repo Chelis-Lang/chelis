@@ -9,7 +9,9 @@ use chelis_types::types::Prim;
 fn device_entry_borrows_opaque_inputs_and_clones_escaping_results_at_dynamic_rank() {
     for rank in [0, 1, 8, 9, 33] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -76,12 +78,19 @@ fn kernel_marshaling_uses_checked_program_rank_and_int64_geometry() {
     for rank in [0, 1, 8, 9, 33] {
         for extent in [0, 1] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let ty = TensorType {
                 dims: vec![DimInfo::Lit(extent); rank],
                 precision: Prim::F32,
             };
-            let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-            let output = dag.add_node(RiscOp::Neg, vec![input], ty, None);
+            let input = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let output = dag.add_node(decl, RiscOp::Neg, vec![input], ty, None);
             dag.add_root(output);
             let generated = support::codegen_hip(&dag, "rank_entry").unwrap();
             let source = &generated.c_source;
@@ -108,7 +117,9 @@ fn kernel_marshaling_uses_checked_program_rank_and_int64_geometry() {
 #[test]
 fn movement_views_are_complete_before_publication_and_released_before_slots() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -118,6 +129,7 @@ fn movement_views_are_complete_before_publication_and_released_before_slots() {
         None,
     );
     let permuted = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![input],
         TensorType {
@@ -145,12 +157,19 @@ fn movement_views_are_complete_before_publication_and_released_before_slots() {
 #[test]
 fn input_device_preflight_precedes_projection_and_modules_belong_to_the_invocation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = TensorType {
         dims: vec![DimInfo::Lit(1)],
         precision: Prim::F32,
     };
-    let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let output = dag.add_node(RiscOp::Neg, vec![input], ty, None);
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let output = dag.add_node(decl, RiscOp::Neg, vec![input], ty, None);
     dag.add_root(output);
     let source = support::codegen_hip(&dag, "context_entry")
         .unwrap()

@@ -42,13 +42,15 @@ const FIXTURE_DIR: &str = concat!(
 fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
     let ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let source = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let drop = dag.add_node(RiscOp::Drop, vec![source], ty, None);
+    let drop = dag.add_node(decl, RiscOp::Drop, vec![source], ty, None);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
 
     assert_eq!(
@@ -61,15 +63,23 @@ fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
 fn verified_dag_distinguishes_a_borrowed_logical_drop_from_an_owned_terminal() {
     let ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
-    let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let borrowed_drop = dag.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let decl = dag.declare("test");
+    let borrowed = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let borrowed_drop = dag.add_node(decl, RiscOp::Drop, vec![borrowed], ty.clone(), None);
     let owned = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let owned_drop = dag.add_node(RiscOp::Drop, vec![owned], ty, None);
+    let owned_drop = dag.add_node(decl, RiscOp::Drop, vec![owned], ty, None);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
 
     assert_eq!(
@@ -779,7 +789,6 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
         "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
         "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
         "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
-        "sampled = with seed(7i64) { 1i64 }\n",
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
     }
@@ -802,7 +811,6 @@ fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
     );
     assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects("sampled = with seed(7i64) { missing }\n");
 }
 
 #[test]
@@ -1026,11 +1034,11 @@ fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
     ]
     .into_iter()
     .collect();
-    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap", "WithSeed"]
+    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap"]
         .into_iter()
         .collect();
     assert!(lowered.is_disjoint(&successor));
-    assert_eq!(lowered.len() + successor.len(), 24);
+    assert_eq!(lowered.len() + successor.len(), 23);
 }
 
 #[test]
@@ -1146,34 +1154,57 @@ fn scalar_tensor() -> TensorType {
 #[test]
 fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let neg = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_root(neg);
     let dag = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
     assert!(dag.render().contains("borrow load n0"));
     assert!(dag.render().contains("root move n1"));
 
     let mut terminal_dag = Dag::new();
+    let terminal_dag_decl = terminal_dag.declare("test");
     let load = terminal_dag.add_node(
+        terminal_dag_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let produced = terminal_dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let copied = terminal_dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Neg,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
+    let copied = terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     terminal_dag.add_node(
+        terminal_dag_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    terminal_dag.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Drop,
+        vec![copied],
+        scalar_tensor(),
+        None,
+    );
     let terminal = verify_ownership(lower_dag_ownership(terminal_dag).unwrap()).unwrap();
     let terminal = terminal.render();
     assert!(terminal.contains("clone n2 from n1"), "{terminal}");
@@ -1192,20 +1223,23 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
 #[test]
 fn a_dag_owner_cannot_have_two_terminal_directives() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    dag.add_node(RiscOp::Drop, vec![produced], scalar_tensor(), None);
+    dag.add_node(decl, RiscOp::Drop, vec![produced], scalar_tensor(), None);
     assert!(matches!(
         lower_dag_ownership(dag),
         Err(OwnershipError::DagDuplicateTerminal { owner: 1 })
@@ -1215,7 +1249,9 @@ fn a_dag_owner_cannot_have_two_terminal_directives() {
 #[test]
 fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1223,8 +1259,8 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
         scalar_tensor(),
         None,
     );
-    let discarded = dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
-    let copied_after_discard = dag.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    let discarded = dag.add_node(decl, RiscOp::Drop, vec![load], scalar_tensor(), None);
+    let copied_after_discard = dag.add_node(decl, RiscOp::Copy, vec![load], scalar_tensor(), None);
     dag.add_root(copied_after_discard);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
     assert_eq!(
@@ -1236,7 +1272,9 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     );
 
     let mut twin = Dag::new();
+    let twin_decl = twin.declare("test");
     let load = twin.add_node(
+        twin_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1244,15 +1282,17 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
         scalar_tensor(),
         None,
     );
-    let copied = twin.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
-    twin.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    let copied = twin.add_node(twin_decl, RiscOp::Copy, vec![load], scalar_tensor(), None);
+    twin.add_node(twin_decl, RiscOp::Drop, vec![copied], scalar_tensor(), None);
     verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
 }
 
 #[test]
 fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source() {
     let mut borrowed = Dag::new();
+    let borrowed_decl = borrowed.declare("test");
     let load = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1260,8 +1300,20 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let realized = borrowed.add_node(RiscOp::Realize, vec![load], scalar_tensor(), None);
-    let later = borrowed.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    let realized = borrowed.add_node(
+        borrowed_decl,
+        RiscOp::Realize,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
+    let later = borrowed.add_node(
+        borrowed_decl,
+        RiscOp::Copy,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
     borrowed.add_root(realized);
     borrowed.add_root(later);
     let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
@@ -1274,7 +1326,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     );
 
     let mut fanned = Dag::new();
+    let fanned_decl = fanned.declare("test");
     let load = fanned.add_node(
+        fanned_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1282,9 +1336,21 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let produced = fanned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let realized = fanned.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
-    let later = fanned.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = fanned.add_node(fanned_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = fanned.add_node(
+        fanned_decl,
+        RiscOp::Realize,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    let later = fanned.add_node(
+        fanned_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     fanned.add_root(realized);
     fanned.add_root(later);
     let verified = verify_ownership(lower_dag_ownership(fanned).unwrap()).unwrap();
@@ -1297,7 +1363,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     );
 
     let mut last = Dag::new();
+    let last_decl = last.declare("test");
     let load = last.add_node(
+        last_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1305,8 +1373,14 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let produced = last.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let realized = last.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
+    let produced = last.add_node(last_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = last.add_node(
+        last_decl,
+        RiscOp::Realize,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     last.add_root(realized);
     let verified = verify_ownership(lower_dag_ownership(last).unwrap()).unwrap();
     assert_eq!(
@@ -1321,7 +1395,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
 #[test]
 fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
     let mut borrowed = Dag::new();
+    let borrowed_decl = borrowed.declare("test");
     let load = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1330,6 +1406,7 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         None,
     );
     let stored = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Store { name: "out".into() },
         vec![load],
         scalar_tensor(),
@@ -1346,7 +1423,9 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
     );
 
     let mut owned = Dag::new();
+    let owned_decl = owned.declare("test");
     let load = owned.add_node(
+        owned_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1354,8 +1433,9 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         scalar_tensor(),
         None,
     );
-    let produced = owned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = owned.add_node(owned_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     let stored = owned.add_node(
+        owned_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
@@ -1375,13 +1455,16 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
 #[test]
 fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let unused = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         scalar_tensor(),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         scalar_tensor(),
@@ -1400,7 +1483,9 @@ fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
 #[test]
 fn a_dag_copy_after_store_move_is_rejected() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1408,14 +1493,15 @@ fn a_dag_copy_after_store_move_is_rejected() {
         scalar_tensor(),
         None,
     );
-    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    let copied = dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![produced], scalar_tensor(), None);
     dag.add_root(copied);
     assert!(matches!(
         lower_dag_ownership(dag),
@@ -1426,7 +1512,9 @@ fn a_dag_copy_after_store_move_is_rejected() {
     ));
 
     let mut twin = Dag::new();
+    let twin_decl = twin.declare("test");
     let load = twin.add_node(
+        twin_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1434,9 +1522,16 @@ fn a_dag_copy_after_store_move_is_rejected() {
         scalar_tensor(),
         None,
     );
-    let produced = twin.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let copied = twin.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = twin.add_node(twin_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let copied = twin.add_node(
+        twin_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     twin.add_node(
+        twin_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),

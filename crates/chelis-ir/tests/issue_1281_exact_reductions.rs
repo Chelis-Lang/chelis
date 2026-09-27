@@ -55,19 +55,23 @@ fn lower_surf(source: &str) -> Dag {
 #[test]
 fn extrema_and_window_extrema_preserve_first_nan_and_first_equal_bits() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[3], Prim::F32),
         None,
     );
     let max = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![x],
         scalar_type(Prim::F32),
         None,
     );
     let window = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Min,
             window_shape: vec![3],
@@ -111,13 +115,16 @@ fn extrema_and_window_extrema_preserve_first_nan_and_first_equal_bits() {
 #[test]
 fn arg_reductions_use_exact_i64_comparison_and_lowest_nan_index() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[4], Prim::Int64),
         None,
     );
     let argmax = dag.add_node(
+        decl,
         RiscOp::Argmax { axis: 0 },
         vec![x],
         scalar_type(Prim::Int64),
@@ -141,19 +148,23 @@ fn arg_reductions_use_exact_i64_comparison_and_lowest_nan_index() {
     assert_eq!(exact[&argmax].storage().to_i64_exact_vec(), Some(vec![1]));
 
     let mut nan_dag = Dag::new();
+    let nan_dag_decl = nan_dag.declare("test");
     let n = nan_dag.add_node(
+        nan_dag_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[4], Prim::F32),
         None,
     );
     let max = nan_dag.add_node(
+        nan_dag_decl,
         RiscOp::Argmax { axis: 0 },
         vec![n],
         scalar_type(Prim::Int64),
         None,
     );
     let min = nan_dag.add_node(
+        nan_dag_decl,
         RiscOp::Argmin { axis: 0 },
         vec![n],
         scalar_type(Prim::Int64),
@@ -182,7 +193,9 @@ fn runtime_empty_mean_extrema_and_arg_reductions_trap_domain() {
         (RiscOp::Argmin { axis: 0 }, Prim::Int64, "argmin_reduce"),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -191,7 +204,7 @@ fn runtime_empty_mean_extrema_and_arg_reductions_trap_domain() {
             },
             None,
         );
-        dag.add_node(op, vec![x], scalar_type(precision), None);
+        dag.add_node(decl, op, vec![x], scalar_type(precision), None);
         let error = evaluate_single_input(
             &dag,
             "x",
@@ -209,12 +222,19 @@ fn runtime_empty_mean_extrema_and_arg_reductions_trap_domain() {
 
     for precision in [Prim::F16, Prim::Bf16, Prim::F32] {
         let mut mean_dag = Dag::new();
+        let mean_dag_decl = mean_dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision,
         };
-        let x = mean_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let mean = tier2::lower_mean(&mut mean_dag, x, 0, &ty, None);
+        let x = mean_dag.add_node(
+            mean_dag_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let mean = tier2::lower_mean(mean_dag_decl.into(), &mut mean_dag, x, 0, &ty, None);
         let error = evaluate_single_input(
             &mean_dag,
             "x",
@@ -263,9 +283,16 @@ fn variadic_named_axis_mean_reduces_highest_original_axis_first() {
 #[test]
 fn mean_uses_canonical_sum_then_divide_at_declared_f32_width() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = tensor_type(&[4], Prim::F32);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let mean = tier2::lower_mean(&mut dag, x, 0, &ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &ty, None);
     let values = evaluate_single_input(
         &dag,
         "x",
@@ -284,13 +311,15 @@ fn mean_uses_canonical_sum_then_divide_at_declared_f32_width() {
 
 fn reduction_grad(op: RiscOp, input: TensorValue) -> TensorValue {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[input.len()], Prim::F32),
         None,
     );
-    let out = dag.add_node(op, vec![x], scalar_type(Prim::F32), None);
+    let out = dag.add_node(decl, op, vec![x], scalar_type(Prim::F32), None);
     let grad = grad_dag_checked(&dag, out, &[x]).unwrap();
     let values = evaluate_single_input(&grad.dag, "x", input).unwrap();
     values[&grad.grad_nodes[&x]].clone()
@@ -344,12 +373,20 @@ fn extrema_ad_infinity_ties_split_g_over_equal_positive_and_negative_infinity() 
 #[test]
 fn runtime_extent_extrema_ad_routes_the_first_nan_without_a_static_axis_size() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let runtime_ty = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], runtime_ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        runtime_ty,
+        None,
+    );
     let out = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![x],
         scalar_type(Prim::F32),
@@ -376,13 +413,16 @@ fn runtime_extent_extrema_ad_routes_the_first_nan_without_a_static_axis_size() {
 #[test]
 fn window_extrema_ad_splits_ties_routes_nan_and_accumulates_overlap() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[3], Prim::F32),
         None,
     );
     let window = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2],
@@ -393,6 +433,7 @@ fn window_extrema_ad_splits_ties_routes_nan_and_accumulates_overlap() {
         None,
     );
     let loss = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -445,14 +486,17 @@ fn integer_extrema_and_argument_outputs_are_structurally_non_differentiable() {
         ),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(&[2], Prim::Int64),
             None,
         );
-        let reduced = dag.add_node(op, vec![x], scalar_type(Prim::Int64), None);
+        let reduced = dag.add_node(decl, op, vec![x], scalar_type(Prim::Int64), None);
         let cast = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },

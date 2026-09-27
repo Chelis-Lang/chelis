@@ -1,0 +1,3 @@
+Two checker and lowering gaps met while moving chelis-std and the examples to explicit keys ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413)) are closed:
+- `to_tensor` over a `List` whose leaf is a type parameter bounded by `Float`, `Int` or `Numeric` now has the result `tensor[.., p]` its nesting depth fixes. A `reshape` of that result in a generic body used to stay unresolved at the declaration boundary, and a declared result of the wrong rank was accepted; it is now rejected;
+- a destructured `split_key` pair in a program that stages a host-produced extent, such as `reshape(x, [numel(first), 2i64])`, now lowers in eval and in compiled C. It used to fail with "tuple-get index 0 out of bounds during lowering".

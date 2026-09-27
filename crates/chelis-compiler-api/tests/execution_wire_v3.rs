@@ -149,12 +149,14 @@ fn tensor_shape_rejects_negative_overflow_and_inconsistent_counts() {
 }
 
 #[test]
-fn execution_envelope_accepts_only_version_three() {
-    assert!(serde_json::from_value::<EvalResult>(json!({"schema_version":3,"roots":[]})).is_ok());
+fn execution_envelope_accepts_only_the_current_version() {
+    // Version 4 added the key execution values (chelis#2413); a version-3
+    // stamp is now an older payload.
+    assert!(serde_json::from_value::<EvalResult>(json!({"schema_version":4,"roots":[]})).is_ok());
     for input in [
         json!({"roots":[]}),
-        json!({"schema_version":2,"roots":[]}),
-        json!({"schema_version":4,"roots":[]}),
+        json!({"schema_version":3,"roots":[]}),
+        json!({"schema_version":5,"roots":[]}),
     ] {
         assert!(serde_json::from_value::<EvalResult>(input).is_err());
     }

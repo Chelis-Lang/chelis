@@ -80,15 +80,15 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 18 is explicitly\npresent", "wire v18 presence"),
-            ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
+            ("spec/10-serialization.md", "Schema version 19 is explicitly\npresent", "wire v19 presence"),
+            ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
             ("spec/10-serialization.md", "A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
             ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
             ("spec/10-serialization.md", "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`", "wire literal-witness requirement carrier"),
             ("spec/10-serialization.md", "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes", "wire shape-dependency references"),
-            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields", "wire mandatory invocation fields"),
+            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and\n`declaration` are mandatory fields", "wire mandatory invocation fields"),
             ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
             ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
             ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
@@ -450,10 +450,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-8.*must also be finite",
             ),
             (
-                "These checks, including the equal-bound case, complete before the "
-                "operation\n> consumes a Random call ordinal",
-                "These checks occur after consuming Random",
-                "OP-8.*before the operation consumes",
+                "These checks, including the equal-bound case, complete before any "
+                "element\n> is drawn",
+                "These checks occur after the draw",
+                "OP-8.*before any element is drawn",
             ),
             (
                 "There is no f32 public-bound signature, default bound,\n"
@@ -486,10 +486,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-37.*0 <= rate < 1",
             ),
             (
-                "The accepted call consumes exactly one\n"
-                "> ordinal, including for an empty tensor or `rate = 0`",
-                "Empty and zero-rate calls consume no ordinal",
-                "OP-37.*exactly one ordinal",
+                "The accepted call consumes its key,\n"
+                "> including for an empty tensor or `rate = 0`",
+                "Empty and zero-rate calls leave their key unconsumed",
+                "OP-37.*accepted call consumes its key",
             ),
             (
                 "For f16 and bf16, `sub` exact-widens its stored operands to f32",
@@ -666,19 +666,19 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_rng_ordinals_are_consumed_once_only_after_validation(self) -> None:
+    def test_rng_draw_is_a_pure_function_of_its_key(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "Each entered random primitive consumes exactly one call ordinal",
-                "A random primitive may consume an implementation-defined number "
-                "of call ordinals",
-                "05-RNG-1.*one call ordinal",
+                "No handler, ordinal, execution order, or other state contributes to a\n"
+                "> draw",
+                "The active handler's call ordinal also contributes to a\n> draw",
+                "05-RNG-1.*No handler, ordinal",
             ),
             (
-                "validation\n> that precedes Random consumption consumes none",
-                "validation failures may consume a Random ordinal",
-                "05-RNG-1.*validation",
+                "A draw in an `if` or `match` arm that is not selected is not evaluated",
+                "A draw in an `if` or `match` arm that is not selected is still evaluated",
+                "05-RNG-1.*not selected is not evaluated",
             ),
         )
         for old, new, message in mutations:
@@ -1608,8 +1608,7 @@ class ContractValidationTests(unittest.TestCase):
                 "top-level tuple external owner",
             ),
             (
-                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
-                "recursive-host operation support remains [#729]/[#730] capability "
+                "Recursive-host operation support remains [#729]/[#730] capability "
                 "work",
                 "All secondary recursion observations join this oracle",
                 "recursive support external owners",
@@ -3043,7 +3042,7 @@ class ContractValidationTests(unittest.TestCase):
         block = self.repository_atom("05-OP-35")
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
-            "`init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
+            "`init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
@@ -3057,8 +3056,8 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
-                "(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}",
-                "(&tensor[n,p_float],p_float)->tensor[n,p_float]!{Random}",
+                "(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]",
+                "(key,&tensor[n,p_float],p_float)->tensor[n,p_float]",
             ),
             (
                 "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",
@@ -3506,8 +3505,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_effect_registry_covers_every_fixed_effect(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | IO | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | IO | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
 
@@ -3948,8 +3947,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_effect_requirement_domain_uses_language_IO_spelling(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | Io | Test | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | Io | Test | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
 

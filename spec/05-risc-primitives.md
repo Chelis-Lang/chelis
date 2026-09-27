@@ -884,9 +884,10 @@ from computation on existing tensors.
 `const` is not differentiable (it produces a constant — gradient is zero). `load` is not differentiable.
 
 Root-scoped evaluation resolves external loads and symbolic dimensions only
-for nodes that can affect the selected roots. Generic declarations from
-unrelated dependency modules are dead and cannot create top-level input
-requirements (chelis#991). A load that is outside the value-dependency slice
+for nodes that can affect the selected roots. A declaration the evaluation
+does not enter (spec/06 §5.2) is not part of the evaluated program, so neither
+its loads nor its potentially trapping nodes create top-level input
+requirements. A load that is outside the value-dependency slice
 but supplies a symbolic extent to a live node remains a required shape
 dependency and fails closed when its input is absent (chelis#351).
 
@@ -970,23 +971,24 @@ compile-time-only alias.
 
 (The exact binding shape carrier is not fully implemented; see chelis#1288.)
 
-### 2.6 Effectful Primitive
+### 2.6 Random and Effectful Primitives
 
 | Name | Signature | Semantics | AD / effect note |
 |---|---|---|---|
-| `dropout` | `(&tensor[D, p_float], p_float) -> tensor[D, p_float]` | Apply [05-OP-37]'s inverted-dropout transform using the active `with seed(...)` handler and a same-dtype rate | Introduces `Random`. Its pathwise adjoint reuses the exact forward mask. |
-| `uniform_like` | `(&tensor[D, p_float], p_float, p_float) -> tensor[D, p_float]` | Create a tensor matching the input shape and float dtype, filled by the deterministic affine sampler defined by [05-OP-8] under the active `with seed(...)` handler | Introduces `Random`. The template values are not observed; its adjoint is the zero cotangent. |
+| `dropout` | `(key, &tensor[D, p_float], p_float) -> tensor[D, p_float]` | Apply [05-OP-37]'s inverted-dropout transform, drawn from the given key, with a same-dtype rate | Consumes its key and introduces no effect. The key carries no cotangent; the pathwise adjoint reuses the exact forward mask. |
+| `uniform_like` | `(key, &tensor[D, p_float], p_float, p_float) -> tensor[D, p_float]` | Create a tensor matching the input shape and float dtype, filled from the given key by the deterministic affine sampler defined by [05-OP-8] | Consumes its key and introduces no effect. The key carries no cotangent; the template values are not observed and receive the zero cotangent. |
 | `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `IO`; it is outside AD. |
 
-> **[05-OP-8]** `uniform_like(template, low, high) -> result` admits every
+> **[05-OP-8]** `uniform_like(k, template, low, high) -> result` consumes the
+> key `k`, admits every
 > active float template dtype `p` in spec/04 §1.1, requires `low` and `high`
 > to have that same dtype `p`, and returns `tensor[D, p]` with the template's dimensions. For flat
-> element index `i`, SplitMix64 over the handled seed and `i` supplies a
+> element index `i`, [05-RNG-2]'s unit value of `word(k, i)` is the
 > 53-bit unit value `u` in `[0, 1)`. Both bounds must be finite and `low <=
 > high`. At the selected arithmetic width, `high - low` must also be finite.
-> These checks, including the equal-bound case, complete before the operation
-> consumes a Random call ordinal; failure traps `Domain` as `uniform_like`
-> and consumes none. Equal bounds are valid and produce that stored value.
+> These checks, including the equal-bound case, complete before any element
+> is drawn; failure traps `Domain` as `uniform_like` before any element is
+> produced. Equal bounds are valid and produce that stored value.
 > For `p = f64`, the element is the one f64 fused multiply-add
 > `fma(high - low, u, low)`. For `p = f32`, it is the one f32 fused
 > multiply-add `fma(high - low, round_f32(u), low)`. For `p = f16` or `bf16`,
@@ -996,8 +998,8 @@ compile-time-only alias.
 > or f64 intermediate. Ordinary final rounding may produce the stored high
 > endpoint even though `u < 1`.
 >
-> The operation introduces `Random` and does not observe the template's
-> element values. Under the fixed handled stream used by the forward pass, its
+> The operation does not observe the template's element values, and the key
+> carries no cotangent. With the forward draw's key fixed, its
 > pathwise adjoint contributes zero to the template and, in increasing
 > row-major output order, contributes `g_i * (1-u_i)` to `low` and `g_i *
 > u_i` to `high`, with every primitive executed at `p`'s declared arithmetic
@@ -1006,15 +1008,16 @@ compile-time-only alias.
 > arithmetic width. It has no accumulator parameter. The internal
 > `UniformBoundAdjoint` identity has this cotangent contract for each bound.
 
-> **[05-OP-37]** `dropout(input, rate) -> result` admits every active float
+> **[05-OP-37]** `dropout(k, input, rate) -> result` consumes the key `k`,
+> admits every active float
 > dtype `p`, requires `input: &tensor[D,p]` and a scalar `rate: p`, and returns
 > `tensor[D,p]`. The rate must be finite and satisfy `0 <= rate < 1`; validation
-> completes before Random consumption, and failure traps `Domain` as `dropout`
-> while consuming no call ordinal. The accepted call consumes exactly one
-> ordinal, including for an empty tensor or `rate = 0`.
+> completes before any element is drawn, and failure traps `Domain` as `dropout`
+> before any element is produced. The accepted call consumes its key,
+> including for an empty tensor or `rate = 0`.
 >
-> For flat element index `i`, [05-RNG-1] supplies the same arithmetic-width
-> unit value used by [05-OP-8]. The saved forward mask drops the element exactly
+> For flat element index `i`, [05-RNG-2]'s unit value of `word(k, i)` is taken
+> at the same arithmetic width [05-OP-8] uses. The saved forward mask drops the element exactly
 > when that value is less than the rate widened exactly to the arithmetic
 > width. A dropped element is positive zero at `p`. A kept element computes
 > the exact graph `denom = sub(1p, rate)` then `div(input[i], denom)`, with
@@ -1025,7 +1028,8 @@ compile-time-only alias.
 > Overflow and NaN follow [04-NUM-2]; no f32 public-rate signature, f64 funnel,
 > unscaled-dropout alias, or special `rate >= 1` default exists.
 >
-> Under the fixed handled stream, the pathwise adjoint reuses the exact saved
+> The key carries no cotangent. With the forward draw's key fixed, the
+> pathwise adjoint reuses the exact saved
 > mask. A dropped input receives positive zero. A kept input receives its
 > output cotangent through the exact graph `denom = sub(1p, rate)` then
 > `div(g_i, denom)`; `1p` is the exact integer one represented at `p` and
@@ -1040,49 +1044,42 @@ compile-time-only alias.
 > The operation has no accumulator parameter. The internal `DropoutReplay`
 > identity has this input cotangent contract.
 
-> **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
-> produces byte-identical random results for the same seed, dynamic
-> random-call ordinal, element index, bounds, operation, and dtype. Every lane
-> that supports that operation and dtype produces the same stream and stored
-> result bits; compiler version and target do not vary this result. Reinterpret the
-> signed i64 seed as its uint64 two's-complement bits. For zero-based call
-> ordinal `c` and flat element index `i`, the source word is
-> `splitmix64(seed_bits XOR rotl64(splitmix64(c),17) XOR
-> rotl64(splitmix64(i),41))`; the unit value is the exact rational formed by
-> its high 53 bits divided by `2^53`. `splitmix64(x)` is the standard fixed
+> **[05-RNG-1]** A random primitive is a pure function of the key it is
+> given. Every conforming evaluation produces byte-identical random results
+> for the same key, element index, bounds, operation, and dtype. Every lane
+> that supports that operation and dtype produces the same source words and
+> stored result bits; compiler version and target do not vary this result.
+> Element `i` of a draw keyed by `k` reads [05-RNG-2]'s `word(k, i)` and its
+> unit value. `splitmix64(x)` is the standard fixed
 > map: add `0x9E3779B97F4A7C15`, xor-shift 30 and multiply by
 > `0xBF58476D1CE4E5B9`, xor-shift 27 and multiply by
 > `0x94D049BB133111EB`, then xor-shift 31, all modulo `2^64`.
-> Each entered random primitive consumes exactly one call ordinal, even for
-> an empty tensor or a later trap after Random consumption begins; validation
-> that precedes Random consumption consumes none. Two different accepted
-> seeds define different source streams. The RNG is deterministic, not
-> cryptographic.
+> No handler, ordinal, execution order, or other state contributes to a
+> draw: its key and operands determine it. Two different keys define
+> different source streams. The RNG is deterministic, not cryptographic.
 >
-> The ordinal counts the random primitives entered under the innermost active
-> `with seed` handler, in execution order, from zero at the handler's entry.
-> Calls made inside the handler share its ordinal. Leaving a handler restores
-> the enclosing handler's seed and next ordinal. An `if` or `match` enters only
-> its selected arm, whatever representation an implementation chooses for the
-> condition, so the random primitives of an arm that is not selected consume
-> no ordinal. `vmap(f)(x)` assigns ordinals as its definition `stack([f(x[i]) ...])`
-> would when the rows are evaluated in increasing index order, and `par`
-> assigns them as sequential evaluation of its branches in source order
-> would. (Not every lane meets this rule yet; chelis#2413 tracks the gaps.)
+> A draw in an `if` or `match` arm that is not selected is not evaluated,
+> whatever representation an implementation chooses for the condition, so
+> it neither produces a result nor traps. Under `vmap`, a key formal maps a
+> `tensor[n, key]` actual, and the draws of row `b` use its row-`b` key
+> (spec/06 §3.2).
 
 ### 2.7 Random Keys
 
 A `key` (spec/04 §1.1) names the stream of one random draw. The operations
 below create and derive keys; they are pure and deterministic, and each
-derivation consumes the key it is given. (These operations are not yet
-reachable from source; chelis#2413.)
+derivation consumes the key it is given. Keys are affine under spec/04
+[04-LIN-9]: each key has at most one consuming use on every control-flow
+path.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `key_from_seed` | `(i64) -> key` | The root key of a seed ([05-OP-69]) |
-| `split_key` | `(key) -> (key, key)` | Two child keys ([05-OP-70]) |
-| `split_keys` | `(key, i64) -> tensor[n, key]` | `n` child keys ([05-OP-71]) |
-| `fold_in` | `(key, i64) -> key` | The child key of an integer ([05-OP-72]) |
+| `key_from_seed` | `(i64) -> key`; `(tensor[D,i64]) -> tensor[D,key]` | The root key of a seed ([05-OP-69]) |
+| `split_key` | `(key) -> (key, key)`; `(tensor[D,key]) -> (tensor[D,key], tensor[D,key])` | Two child keys ([05-OP-70]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]`; `(tensor[D,key], i64) -> tensor[D ++ [n],key]` | `n` child keys ([05-OP-71]); `n` is the count's extent under spec/04 §4.7.2 |
+| `fold_in` | `(key, i64) -> key`; `(tensor[D,key], tensor[D,i64]) -> tensor[D,key]` | The child key of an integer ([05-OP-72]) |
+
+(The tensor forms are not fully implemented; see chelis#2656.)
 
 > **[05-RNG-2]** A key is a 64-bit word. For a key `k` and a 64-bit word
 > `j`, `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`, where
@@ -1091,15 +1088,18 @@ reachable from source; chelis#2413.)
 > other is fixed. The source word of flat element index `i` of a draw keyed
 > by `k` is `word(k, i) = splitmix64(k XOR rotl64(splitmix64(i), 41))`, and
 > its unit value is the exact rational formed by the word's high 53 bits
-> divided by `2^53`. [05-RNG-1]'s draw with seed bits `s` and call ordinal
-> `c` is the draw keyed by `s XOR rotl64(splitmix64(c), 17)`. `derive` and
-> `word` are definitions, not callable operations.
+> divided by `2^53`. `derive` and `word` are definitions, not callable
+> operations.
 
 > **[05-OP-69]** `key_from_seed(seed) -> key` takes an `i64` seed and returns
 > the key whose 64 bits are the seed's two's-complement bits, with no mixing.
 > A `tensor[D, i64]` of seeds gives the `tensor[D, key]` of their keys element
 > by element. The operation is non-differentiable: the seed receives no
-> cotangent and the key carries none.
+> cotangent and the key carries none. Its published C form is
+> `chelis_key chelis_key_from_seed(int64_t seed)`, returning spec/08 §2's
+> scalar key carrier `typedef struct { uint64_t bits; } chelis_key;`, whose
+> `bits` are the key's 64 bits. A key's printed form ([05-OBS-2]) is
+> published as `chelis_string chelis_string_from_key(chelis_key key)`.
 
 > **[05-OP-70]** `split_key(k) -> (key, key)` consumes the key `k` and returns
 > the pair `(derive(k, 0), derive(k, 1))` of [05-RNG-2]. For a
@@ -1110,10 +1110,14 @@ reachable from source; chelis#2413.)
 > **[05-OP-71]** `split_keys(k, n) -> tensor[n, key]` consumes the key `k` and
 > takes a runtime `i64` count `n`. Row `j` of the result, for `0 <= j < n`,
 > is `derive(derive(k, 2), j)` of [05-RNG-2], the key that folding `j` into
-> `k` yields. `n` SHALL be non-negative: a negative count traps before
-> allocation, as a negative runtime movement bound does, and `n = 0` gives an
-> empty tensor. For a `tensor[D, key]` operand the result is
-> `tensor[D ++ [n], key]`, the new axis last. No row carries a cotangent.
+> `k` yields. `n` SHALL be non-negative: a runtime negative count traps
+> before allocation, as a negative runtime movement bound does, and `n = 0`
+> gives an empty tensor. The result extent follows spec/04 §4.7.2's rule for
+> `expand` and `insert`: a literal count gives that literal extent, a static
+> negative count is a type error, and any other count gives a fresh runtime
+> extent, checked for equality where it meets another extent. For a
+> `tensor[D, key]` operand the result is `tensor[D ++ [n], key]`, the new
+> axis last. No row carries a cotangent.
 
 > **[05-OP-72]** `fold_in(k, n) -> key` consumes the key `k` and returns
 > `derive(derive(k, 2), n)` of [05-RNG-2], reading the `i64` `n` as its
@@ -2024,13 +2028,13 @@ exact ADT identity by [05-OP-34].
 > This atom's selection rule also governs exactly the language builtin
 > `where(condition, then, else)` with signature
 > `(&tensor[D,bool], &tensor[D,p], &tensor[D,p]) -> tensor[D,p]` and its
-> exact public C counterpart `chelis_tensor_where` in that registry. All four
-> tensors have identical dimensions, both branches and the result have the
-> same active element dtype `p`, and selection copies the chosen stored bits
-> without numeric conversion. On float branches the adjoint routes each
-> cotangent to the selected branch and exact zero to the other; the condition
-> has no cotangent. Signed-integer and bool branches are forward-only. The
-> operation has no accumulator.
+> exact public C counterpart `chelis_tensor_where` in that registry. The
+> tensors' dimensions agree as [05-OP-53] requires, both branches and the
+> result have the same active element dtype `p`, and selection copies the
+> chosen stored bits without numeric conversion. On float branches the
+> adjoint routes each cotangent to the selected branch and exact zero to the
+> other; the condition has no cotangent. Signed-integer and bool branches are
+> forward-only. The operation has no accumulator.
 >
 > Every entry validates every observable input-descriptor invariant from
 > [05-OP-31] and [05-OP-44], including dtype, shape, element count, capacity,
@@ -2919,16 +2923,17 @@ exact ADT identity by [05-OP-34].
 > integers, `p_float` over all four active floats, and `Q` over one static type
 > in [05-OP-36]'s scalar or recursive equality domain (direct tensor arguments
 > use `assert_eq_tensor`). Every repeated variable denotes one
-> common static type. All random parameters
-> are finite and are validated before consuming Random.
+> common static type. Each random callable takes a key as its first
+> parameter and consumes it. All random parameters
+> are finite and are validated before any element is drawn.
 > Kaiming requires finite `fan_in > 0`. Xavier computes
-> `add(fan_in, fan_out)` at `p_float` before consuming Random; that computed
+> `add(fan_in, fan_out)` at `p_float` before drawing; that computed
 > denominator must be finite and strictly positive. An overflowed infinite sum
-> is a `Domain` failure, not a zero scale. `normal_like` requires `std >= 0`
-> and invokes [05-OP-8] twice,
-> first with the direct `p_float` images of decimal bounds `1e-7, 1.0` to
-> obtain `u1` and then with the direct `p_float` images of `0.0, 1.0` to
-> obtain `u2`; [05-OP-8] owns their exact values. The internal 53-bit unit in [05-OP-8] is half-open, but ordinary
+> is a `Domain` failure, not a zero scale. `normal_like(k, ...)` requires
+> `std >= 0`, splits `k` by [05-OP-70] into `(k1, k2)`, and invokes [05-OP-8]
+> twice, keyed by `k1` with the direct `p_float` images of decimal bounds
+> `1e-7, 1.0` to obtain `u1` and keyed by `k2` with the direct `p_float`
+> images of `0.0, 1.0` to obtain `u2`; [05-OP-8] owns their exact values. The internal 53-bit unit in [05-OP-8] is half-open, but ordinary
 > final rounding can make either stored result equal its stored high bound;
 > a rounded result equals the stored upper endpoint for some source words.
 > No stricter range is assumed by this graph. Its
@@ -2944,7 +2949,9 @@ exact ADT identity by [05-OP-34].
 > standalone primitive tolerance. Together with [05-RNG-1], the complete
 > random callable has zero-ULP cross-lane difference for a supported dtype.
 > `trunc_normal` additionally requires `a <= b` and clips that normal result
-> to inclusive `[a,b]`; it is not rejection sampling. Kaiming and Xavier use
+> to inclusive `[a,b]`; it is not rejection sampling. Kaiming, Xavier, and
+> `trunc_normal` pass their key unchanged to their one [05-OP-8] draw or
+> `normal_like` call. Kaiming and Xavier use
 > respectively `sqrt(div(2p, fan_in))` or
 > `sqrt(div(2p, add(fan_in, fan_out)))` as normal scale. Their uniform
 > bounds replace `2p` with `6p` under the same divisions; a uniform
@@ -2952,9 +2959,9 @@ exact ADT identity by [05-OP-34].
 > `mul(sub(mul(2p, u), 1p), bound)`. Here `Np` means the exact integer `N`
 > represented at `p_float`. Violations trap `Domain`.
 >
-> With the handled Random stream fixed to the forward execution, every random
-> stdlib callable has the pathwise adjoint of its exact graph above; source
-> units and mask comparisons contribute zero cotangent. Template element values
+> With the key fixed to the forward execution's, every random
+> stdlib callable has the pathwise adjoint of its exact graph above; the key,
+> source units, and mask comparisons contribute zero cotangent. Template element values
 > are unobserved and receive a same-shaped zero cotangent. `normal_like`
 > combines per-element `g_i` contributions to `mean` and `g_i * z_i`
 > contributions to `std` in increasing row-major order through separate
@@ -3513,7 +3520,12 @@ path even though bare `round` under `grad` remains a structural
 > element is silently narrowed.
 >
 > Result: Where selects stored bits directly from the chosen branch without
-> converting bool to numeric. Cumsum returns inclusive axis-prefix sums;
+> converting bool to numeric. The condition's shape must equal the shape of
+> each branch it selects in some element; a branch selected in no element is
+> neither read nor shape-checked, so a condition selecting one branch in every
+> element yields that branch, and an empty condition yields an empty result of
+> its own shape.
+> Cumsum returns inclusive axis-prefix sums;
 > sort orders each axis slice using [05-OP-33]'s NaN/tie rule; diagonal uses
 > that atom's axis ordering, and trace sums the diagonal. Clamp follows the
 > atom's exact lower/upper selection rule. Split preserves source order,
@@ -3623,11 +3635,12 @@ path even though bare `round` under `grad` remains a structural
 > result. A batched condition aborts when any mapped element is true; the
 > message does not identify the element. The abort is observable under
 > spec/06 section 5.2 and may not be removed or reordered with respect to
-> another observable effect (the reordering rule is not fully implemented:
-> chelis#2440). The fallback is an ordinary operand and is evaluated under
-> the usual rules, so an operand that traps on its own may trap before the
-> guard reports; the
-> guard orders aborts, it does not suppress its operand's.
+> another observable effect (not fully implemented for every trapping
+> operation; see [chelis#2440](https://github.com/Chelis-Lang/chelis/issues/2440)).
+> The fallback is an ordinary operand and
+> is evaluated under the usual rules, so an operand that traps on its own
+> may trap before the guard reports; the guard orders aborts, it does not
+> suppress its operand's.
 >
 > Failure: A non-bool condition, a condition of rank other than the admitted
 > rank-0 or mapped rank-1, and a fallback whose dtype is not an active
@@ -4358,7 +4371,9 @@ count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
-> their own width; `bool` SHALL print `true`/`false` at every exit; the
+> their own width; `bool` SHALL print `true`/`false` at every exit; a
+> `key` SHALL print `key(` followed by its 64 bits ([05-RNG-2]) as 16
+> lowercase hexadecimal digits and `)` at every exit that observes it; the
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 

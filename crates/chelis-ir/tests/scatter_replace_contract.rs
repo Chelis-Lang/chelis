@@ -60,7 +60,9 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     // target: shape [3, 2], initialized via Const to all-zero with the
     // appropriate dtype.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -72,6 +74,7 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     // stress case. With deterministic-order updates-flat iteration,
     // updates[3, :] is the last write and wins per cell.
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -81,6 +84,7 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     );
     // updates: shape [4, 2] — four 2-element rows, all going to row 1.
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -89,6 +93,7 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
@@ -146,7 +151,9 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
 #[test]
 fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -155,6 +162,7 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -163,6 +171,7 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -171,6 +180,7 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
@@ -214,7 +224,9 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
 #[test]
 fn scatter_replace_ad_returns_structured_not_supported_error() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -223,12 +235,14 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
         vec![],
         t_i32(vec![2]),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -237,6 +251,7 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
@@ -244,6 +259,7 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
     );
     // Collapse to scalar so grad_dag_checked has a scalar-float output.
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -253,6 +269,7 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -308,7 +325,9 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
 #[test]
 fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -317,12 +336,14 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
         vec![],
         t_i32(vec![2]),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -331,12 +352,14 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -346,6 +369,7 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -373,7 +397,9 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
 #[test]
 fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -385,18 +411,21 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     // table[0, :]. The gather-then-sum scalar gradient should
     // accumulate to dtable[0, *] = 3, dtable[1, *] = 0.
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
         vec![],
         t_i32(vec![3]),
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         t(vec![3, 2]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -406,6 +435,7 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -476,7 +506,9 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
 #[test]
 fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -485,12 +517,14 @@ fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
         vec![],
         t_i32(vec![2]),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -502,6 +536,7 @@ fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
     // must still equal target (verifier checks both axis AND output
     // shape; we want the axis error to fire and not get masked).
     let _scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 7 },
         vec![target, indices, updates],
         t(vec![3, 2]),

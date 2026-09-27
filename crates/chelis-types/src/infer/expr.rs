@@ -604,31 +604,21 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 
 /// chelis#709 / spec/design/checker_totality.md §C1.5: the `handle-effect`
 /// checker case. Before this, `handle-effect` fell through `infer_expr`'s
-/// wildcard to a silent `Type::Error`, so `with seed` / `with device` bodies
-/// were not type-checked at all and the enclosing `def`'s declared return
-/// type went unenforced.
+/// wildcard to a silent `Type::Error`, so `with device` bodies were not
+/// type-checked at all and the enclosing `def`'s declared return type went
+/// unenforced.
 ///
 /// The typing SHAPE mirrors LaCaDiLE's T-Handle rule (Jeff's 2026-07 note on
 /// chelis#709): type the body in the enclosing context and return the BODY's
 /// type, so the enclosing signature is enforced against it. The handler is
-/// checked per effect kind. chelis#730's `EffectKind` enum does not exist yet,
-/// so the two known kinds are string-matched with a loud `MalformedForm` else
-/// (the pinned §I1 interlock: migrate to the enum when it lands).
+/// checked per effect kind through the closed [`EffectKind`] set, with a loud
+/// `MalformedForm` for a missing, malformed or unknown kind.
 ///
-/// Handler-form rules (open question 1, decided 2026-07-17; explicit over
-/// implicit, since this code is agent-written):
-/// * `random` (`with seed`): the seed is semantically i64. A seed written as
-///   an integer LITERAL must carry the `i64` suffix; an unsuffixed literal is a
-///   `TypeMismatch` naming the suffix (this is the reject-diagnostic half left
-///   to chelis#731 Phase 1 by chelis#771, unblocking the parked cross-lane RNG
-///   atom on chelis#735). Signed literals include Surf's unary-minus encoding.
-///   Other seed expressions stay the shared
-///   front-end effects gate's responsibility (`chelis-effects`
-///   `validate_handler_expr`, spec/02 §P5), so
-///   they are not re-reported here.
-/// * `resource` (`with device`): the device is a string literal, checked by the
-///   same effects gate; the device-name vocabulary is not validated here
-///   (target knowledge, chelis#735). Checking the expression bounds the handler.
+/// `resource` (`with device`) is the one handler kind: the device is a string
+/// literal, checked by the shared effects gate (`chelis-effects`
+/// `validate_handler_expr`, spec/02 §P5a); the device-name vocabulary is not
+/// validated here (target knowledge, chelis#735). Randomness has no handler:
+/// a random primitive takes an explicit key (spec/04 §7.1).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_handle_effect(
     node: &DeepNode,
@@ -654,13 +644,11 @@ pub(super) fn infer_handle_effect(
             errors,
         );
     }
-    let handler = &kids[0];
     let body = &kids[1];
 
-    // The effects gate owns literal admission, using the same typed seed
-    // evaluator as lowering. Do not infer arbitrary handler expressions here:
-    // their internal diagnostics would preempt the owning handler rejection.
-    // Preserve the suffix diagnostic and lexical builtin identity below.
+    // The effects gate owns the handler's literal admission. Do not infer
+    // arbitrary handler expressions here: their internal diagnostics would
+    // preempt the owning handler rejection.
     //
     // chelis#730 Phase 2 (section C4.4; the pinned §I1 interlock): the kind
     // is parsed once into the closed [`EffectKind`] set - the same enum the
@@ -669,42 +657,6 @@ pub(super) fn infer_handle_effect(
     // here until this checker case handles it. Decode failures preserve the
     // missing/malformed/unknown distinction from the shared Deep adapter.
     match decode_effect_kind(node.meta()) {
-        Ok(EffectKind::Random) => {
-            // Preserve the literal suffix diagnostic and its priority. The
-            // effects gate owns signed literal admission, evaluated with
-            // lowering. Only this scope-aware stage can exclude a shadowed
-            // `neg`: recognizing that callable as a primitive would substitute
-            // a guessed seed for a runtime expression.
-            if env.is_lexically_bound("neg")
-                && crate::static_seed::literal_seed(handler, true).is_some()
-                && crate::static_seed::literal_seed(handler, false).is_none()
-            {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    "`with seed(...)` requires a signed i64 literal seed; \
-                     a shadowed `neg` is a runtime callable"
-                        .to_string(),
-                    vec![],
-                ));
-            }
-            match seed_literal_form(handler) {
-                SeedLiteralForm::Unsuffixed => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        "`with seed(...)` requires an i64-suffixed integer literal seed; \
-                         an unsuffixed literal defaults to i32 (spec/02-surf-syntax.md \
-                         §P10a; spec/design/checker_totality.md §C1.5)"
-                            .to_string(),
-                        vec![
-                            "Add the `i64` suffix to the seed literal, e.g. \
-                             `with seed(42i64) { ... }`"
-                                .to_string(),
-                        ],
-                    ));
-                }
-                SeedLiteralForm::NotIntLiteral | SeedLiteralForm::ValidInt64 => {}
-            }
-        }
         Ok(EffectKind::Resource) => {
             // Device literal-ness is the effects gate's job; the device-name
             // vocabulary is not validated here (target knowledge, chelis#735).
@@ -719,8 +671,8 @@ pub(super) fn infer_handle_effect(
                 CheckErrorKind::MalformedForm,
                 format!(
                     "{error} in `handle-effect`: the checker \
-                     recognizes only `random` (with seed) and `resource` \
-                     (with device) (spec/03-deep-syntax.md; chelis#730, chelis#731)"
+                     recognizes only `resource` (with device) \
+                     (spec/03-deep-syntax.md; chelis#730, chelis#731)"
                 ),
                 vec![],
             ));
@@ -732,55 +684,6 @@ pub(super) fn infer_handle_effect(
     // the body, so an i64 body in an `-> f32` def, or a tensor body from a
     // scalar-typed fn, is a type error caught before any backend sees it.
     infer_expr(body, env, vg, subst, adt_reg, errors, product)
-}
-
-/// Classification of a `random`-effect seed handler for the checker's
-/// literal-width diagnostic (chelis#731 §C1.5).
-pub(super) enum SeedLiteralForm {
-    /// Not an integer literal (a computed expression, a string, ...). This is
-    /// the shared effects gate's territory (`chelis-effects`
-    /// `validate_handler_expr`); the checker stays silent to avoid a double
-    /// diagnostic.
-    NotIntLiteral,
-    /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
-    /// i32} N)`). The seed is semantically i64, so this is a type error.
-    Unsuffixed,
-    /// A signed i64-suffixed literal. [05-RNG-1] admits negative values.
-    ValidInt64,
-}
-
-/// Classify a `random`-effect seed handler. Only integer literals are the
-/// checker's business (the effects gate covers literal-ness); a bare atom is
-/// unsuffixed by construction, a `(lit ...)` carries its width in the `type`
-/// metadata.
-pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
-    // chelis#1125 PP7 / [04-TOT-5]: both reads below are carrier-preserving.
-    // This function had the `infer_lit` defect twice over -- an
-    // `Expr::List`-only match on the seed `lit` itself, and an
-    // `Expr::List`-only read of the `t-prim` under its `type:` metadata -- so
-    // on the stamped ingress the handler `Expr::Node` fell straight to the
-    // default arm, the seed classified as `NotIntLiteral`, and the §P10a
-    // i64-suffix rejection never fired at all.
-    let int_lit = match expr {
-        // A bare integer atom has no suffix metadata: unsuffixed by construction.
-        deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
-        _ => match stamped_parts(expr) {
-            Some((DeepTag::Lit, meta, lit_kids)) => match lit_kids.first() {
-                Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
-                    let is_int64 = meta.ty().is_some_and(|ty| matches!(stamped_parts(ty.expression()), Some((DeepTag::TPrim, _, prim_kids)) if prim_kids.first().and_then(symbol_name) == Some("i64")));
-                    Some((is_int64, *value))
-                }
-                // A `(lit ...)` wrapping a non-int value is not an int seed.
-                _ => None,
-            },
-            _ => None,
-        },
-    };
-    match int_lit {
-        None => SeedLiteralForm::NotIntLiteral,
-        Some((false, _)) => SeedLiteralForm::Unsuffixed,
-        Some((true, _)) => SeedLiteralForm::ValidInt64,
-    }
 }
 
 /// Type a bare atom in expression position.
@@ -840,6 +743,45 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
     }
 }
 
+/// [04-LIN-9] and spec/04 section 1.1: a builtin named as a value rather
+/// than called (`map(to_int, ks)`, a builtin in a tuple or an `if` arm) is
+/// judged by the key allow-list at the parameters of the function type it
+/// is instantiated at, as a call is judged operand by operand in linearity.
+/// Every type variable of a parameter the builtin does not admit a key at
+/// (`crate::key_admission::builtin_key_operand`, over all its sibling cases)
+/// is key-free, so instantiating it at a key-carrying type is refused and
+/// names the builtin. A user binding that shadows a builtin name is a
+/// generic whose variables generalization already made key-free.
+fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Subst) {
+    let Some(decl) = crate::builtins::builtin_decl(name) else {
+        return;
+    };
+    let Type::Fn(params, _) = ty else {
+        return;
+    };
+    let cases: Vec<crate::builtins::BuiltinSiblingCaseId> = decl
+        .capability
+        .sibling_cases
+        .iter()
+        .map(|case| case.case)
+        .collect();
+    for (index, param) in params.iter().enumerate() {
+        if crate::key_admission::builtin_key_operand(name, &cases, index).is_ok() {
+            continue;
+        }
+        for var in crate::env::free_tvars(param) {
+            subst.forbid_key_instantiation(
+                var,
+                crate::unify::GenericParameter {
+                    generic: Some(name.to_string()),
+                    binder: None,
+                    value: false,
+                },
+            );
+        }
+    }
+}
+
 pub(super) fn infer_var(
     node: &DeepNode,
     env: &mut Env,
@@ -849,6 +791,7 @@ pub(super) fn infer_var(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
+    let called = std::mem::take(&mut product.callee_reference);
     let kids = node.children_slice();
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
         // chelis#317: a nullary constructor at a construction site (a bare
@@ -910,6 +853,9 @@ pub(super) fn infer_var(
             } else {
                 (env.instantiate_scheme(&scheme, vg, subst), Vec::new())
             };
+            if !called {
+                forbid_keys_a_builtin_value_does_not_admit(name, &instantiated.ty, subst);
+            }
             // chelis#1801: the application rule reads these back to decide
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).

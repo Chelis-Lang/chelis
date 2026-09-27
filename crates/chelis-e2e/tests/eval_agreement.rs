@@ -341,16 +341,17 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Recip
         // [05-RNG-1] makes every random result bit-identical across lanes,
         // a draw key is a word no lane observes as a result, and [05-RNG-2]
-        // defines every key derivation bit for bit.
+        // defines every key derivation bit for bit; a branch's join selects
+        // one of two such keys.
         | RiscOp::UniformLike
         | RiscOp::Dropout
         | RiscOp::DropoutReplay
         | RiscOp::UniformBoundAdjoint { .. }
-        | RiscOp::DrawKey { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
         | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }
@@ -476,7 +477,9 @@ fn agreement_compiled_observation_reaches_comparator() {
         panic!("Phase 3 compiled-observation canary requires a host C compiler");
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::Int32, 7.0),
         vec![],
         scalar_ty(Prim::Int32),
@@ -576,19 +579,22 @@ fn agreement_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 4.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_add", "add(3,4)");
     assert_expected("add(3,4) expected", &result, "7.0");
@@ -601,19 +607,22 @@ fn agreement_mul() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 5.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 6.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_mul", "mul(5,6)");
     assert_expected("mul(5,6) expected", &result, "30.0");
@@ -626,13 +635,15 @@ fn agreement_neg() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 7.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_neg", "neg(7)");
     assert_expected("neg(7) expected", &result, "-7.0");
@@ -648,13 +659,15 @@ fn agreement_relu() {
     // Dedicated ReLU identity with negative input.
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_neg", "relu(-2)");
         assert_expected("relu(-2) expected", &result, "0.0");
@@ -663,13 +676,15 @@ fn agreement_relu() {
     // relu with positive input
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_pos", "relu(3)");
         assert_expected("relu(3) expected", &result, "3.0");
@@ -683,13 +698,15 @@ fn agreement_exp() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 0.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Exp, vec![a], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_exp", "exp(0)");
     assert_expected("exp(0) expected", &result, "1.0");
@@ -701,13 +718,15 @@ fn assert_unary_transcendental(op: RiscOp, op_name: &str, input: f64, expected: 
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let argument = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, input),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(op, vec![argument], scalar_f32(), None);
+    dag.add_node(decl, op, vec![argument], scalar_f32(), None);
     let func_name = format!("test_{op_name}");
     let label = format!("{op_name}({input})");
     let result = assert_agrees(&dag, &func_name, &label);
@@ -753,19 +772,22 @@ fn agreement_bf16_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = assert_agrees(&dag, "test_bf16_add", "bf16 add(1.5, 2.5)");
     assert_expected("bf16 add expected", &result, "4.0");
 }
@@ -777,19 +799,22 @@ fn agreement_f16_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
     let result = assert_agrees(&dag, "test_f16_add", "f16 add(1.5, 2.5)");
     assert_expected("f16 add expected", &result, "4.0");
 }
@@ -804,14 +829,16 @@ fn agreement_bf16_reduce_sum_matches_eval_exactly() {
     // self-contained (no Load to thread inputs through the runtime).
     let n = 8;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 0.25),
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let sum = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
-    dag.add_node(sum, vec![c], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum, vec![c], scalar_ty(Prim::F32), None);
     let result = assert_agrees(&dag, "test_bf16_sum_const", "bf16 reduce_sum(0.25 x 8)");
     assert_expected("bf16 reduce_sum expected", &result, "2.0");
 }

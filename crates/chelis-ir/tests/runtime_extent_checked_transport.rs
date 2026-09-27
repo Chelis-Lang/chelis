@@ -10,8 +10,9 @@ fn scalar_type() -> TensorType {
         precision: Prim::Int64,
     }
 }
-fn scalar(dag: &mut Dag, value: i64) -> NodeId {
+fn scalar(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("reshape", Prim::Int64, value).unwrap(),
         },
@@ -20,10 +21,16 @@ fn scalar(dag: &mut Dag, value: i64) -> NodeId {
         None,
     )
 }
-fn checked_extent(dag: &mut Dag, actual: i64, required: i64) -> NodeId {
-    let actual = scalar(dag, actual);
-    let required = scalar(dag, required);
+fn checked_extent(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    actual: i64,
+    required: i64,
+) -> NodeId {
+    let actual = scalar(dag, decl, actual);
+    let required = scalar(dag, decl, required);
     dag.add_node(
+        decl,
         RiscOp::CheckedReshapeExtent {
             claims: vec!["rows".into()],
             axis: RtAxis::Lit(0),
@@ -33,8 +40,9 @@ fn checked_extent(dag: &mut Dag, actual: i64, required: i64) -> NodeId {
         Some("reshape-call".into()),
     )
 }
-fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
+fn unit_axis(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, NodeId) {
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -44,6 +52,7 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
         None,
     );
     let witness = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "b".into(),
@@ -56,6 +65,7 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
         Some("expand-call".into()),
     );
     let checked = dag.add_node(
+        decl,
         RiscOp::CheckedUnitAxis {
             axis: RtAxis::Lit(0),
         },
@@ -69,9 +79,15 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
     (x, witness, checked)
 }
 
-fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
+fn declared_producer(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    parameter: &str,
+    actual: usize,
+) -> NodeId {
     use chelis_ir::dag::ExtentWitnessSite;
     let input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: parameter.into(),
         },
@@ -83,6 +99,7 @@ fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
         None,
     );
     let declared = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: parameter.into(),
@@ -95,6 +112,7 @@ fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
         None,
     );
     let required = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::ResultClaim {
                 claim: "n".into(),
@@ -110,9 +128,10 @@ fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
         None,
     );
     dag.add_shape_dep(required, declared);
-    let value = scalar(dag, 7);
-    let actual = scalar(dag, i64::try_from(actual).unwrap());
+    let value = scalar(dag, decl, 7);
+    let actual = scalar(dag, decl, i64::try_from(actual).unwrap());
     let produced = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Node(1),
@@ -133,8 +152,9 @@ fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
 fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
     for actual in [3, 4] {
         let mut dag = Dag::new();
-        declared_producer(&mut dag, "left", 2);
-        declared_producer(&mut dag, "right", actual);
+        let decl = dag.declare("test");
+        declared_producer(&mut dag, decl, "left", 2);
+        declared_producer(&mut dag, decl, "right", actual);
         let mut folded = dag.clone();
         constant_fold(&mut folded);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
@@ -220,8 +240,9 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
         [(3, 3, 3, None), (2, 3, 2, Some(3)), (2, 3, 4, Some(2))]
     {
         let mut dag = Dag::new();
-        let left = declared_producer(&mut dag, "left", first);
-        let right = declared_producer(&mut dag, "right", actual);
+        let decl = dag.declare("test");
+        let left = declared_producer(&mut dag, decl, "left", first);
+        let right = declared_producer(&mut dag, decl, "right", actual);
         let first_token = dag.get(left).unwrap().shape_deps[0];
         dag.node_mut(right)
             .unwrap()
@@ -248,7 +269,8 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
     // claim on that same axis. The named claim agrees in both executions.
     for literal in [2, 3] {
         let mut dag = Dag::new();
-        let producer = declared_producer(&mut dag, "x", 2);
+        let decl = dag.declare("test");
+        let producer = declared_producer(&mut dag, decl, "x", 2);
         dag.node_mut(producer).unwrap().output_type.dims[0] = DimInfo::Lit(literal);
         let errors = chelis_ir::verify::verify(&dag);
         assert!(errors.is_empty(), "{errors:?}");
@@ -273,7 +295,8 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
 #[test]
 fn result_claim_admission_requires_its_declaring_observation_and_producing_axis() {
     let mut dag = Dag::new();
-    let producer = declared_producer(&mut dag, "x", 2);
+    let decl = dag.declare("test");
+    let producer = declared_producer(&mut dag, decl, "x", 2);
     let token = dag.get(producer).unwrap().shape_deps[0];
     assert!(
         !chelis_ir::axis_sources::witness_is_entry_obligation(&dag, token),
@@ -309,7 +332,8 @@ fn result_claim_admission_requires_its_declaring_observation_and_producing_axis(
 fn computed_claim_checks_independent_values_before_returning_a_scalar() {
     for actual in [2, 3] {
         let mut dag = Dag::new();
-        let checked = checked_extent(&mut dag, actual, 2);
+        let decl = dag.declare("test");
+        let checked = checked_extent(&mut dag, decl, actual, 2);
         dag.add_root(checked);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
         let result = eval_tensor_with(&dag, |_| None);
@@ -337,10 +361,12 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
 fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
     for second in [2, 3] {
         let mut dag = Dag::new();
-        let actual = scalar(&mut dag, 2);
-        let inner = scalar(&mut dag, 2);
-        let outer = scalar(&mut dag, second);
+        let decl = dag.declare("test");
+        let actual = scalar(&mut dag, decl, 2);
+        let inner = scalar(&mut dag, decl, 2);
+        let outer = scalar(&mut dag, decl, second);
         let checked = dag.add_node(
+            decl,
             RiscOp::CheckedReshapeExtent {
                 claims: vec!["inner".into(), "outer".into()],
                 axis: RtAxis::Lit(0),
@@ -391,7 +417,8 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
 fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
     for actual in [1, 2] {
         let mut dag = Dag::new();
-        let (_, _, checked) = unit_axis(&mut dag);
+        let decl = dag.declare("test");
+        let (_, _, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
         let result = eval_tensor_with(&dag, |_| {
@@ -417,7 +444,8 @@ fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
 fn malformed_checked_carriers_cannot_assert_metadata_as_proof() {
     for mutation in 0..5 {
         let mut dag = Dag::new();
-        let (_, witness, checked) = unit_axis(&mut dag);
+        let decl = dag.declare("test");
+        let (_, witness, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
         match mutation {
             0 => dag
@@ -450,7 +478,8 @@ fn malformed_checked_carriers_cannot_assert_metadata_as_proof() {
     }
     for mutation in 0..3 {
         let mut dag = Dag::new();
-        let checked = checked_extent(&mut dag, 2, 2);
+        let decl = dag.declare("test");
+        let checked = checked_extent(&mut dag, decl, 2, 2);
         dag.add_root(checked);
         match mutation {
             0 => {
@@ -475,10 +504,11 @@ fn malformed_checked_carriers_cannot_assert_metadata_as_proof() {
 fn rewriting_preserves_discarded_checks_and_separate_call_provenance() {
     for actual in [2, 3] {
         let mut dag = Dag::new();
-        let first = checked_extent(&mut dag, actual, 2);
-        let second = checked_extent(&mut dag, actual, 2);
+        let decl = dag.declare("test");
+        let first = checked_extent(&mut dag, decl, actual, 2);
+        let second = checked_extent(&mut dag, decl, actual, 2);
         dag.node_mut(second).unwrap().span_id = Some("second-call".into());
-        let result = scalar(&mut dag, 9);
+        let result = scalar(&mut dag, decl, 9);
         dag.node_mut(result).unwrap().shape_deps = vec![first, second];
         dag.add_root(result);
         constant_fold(&mut dag);
@@ -498,7 +528,9 @@ fn rewriting_preserves_discarded_checks_and_separate_call_provenance() {
 fn computed_reshape() -> (Dag, NodeId, NodeId) {
     use chelis_ir::dag::RtDim;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -507,10 +539,23 @@ fn computed_reshape() -> (Dag, NodeId, NodeId) {
         },
         None,
     );
-    let shape = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], scalar_type(), None);
-    let two = scalar(&mut dag, 2);
-    let actual = dag.add_node(RiscOp::FloorDiv, vec![shape, two], scalar_type(), None);
+    let shape = dag.add_node(
+        decl,
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        scalar_type(),
+        None,
+    );
+    let two = scalar(&mut dag, decl, 2);
+    let actual = dag.add_node(
+        decl,
+        RiscOp::FloorDiv,
+        vec![shape, two],
+        scalar_type(),
+        None,
+    );
     let checked = dag.add_node(
+        decl,
         RiscOp::CheckedReshapeExtent {
             claims: vec!["2".into()],
             axis: RtAxis::Lit(0),
@@ -520,6 +565,7 @@ fn computed_reshape() -> (Dag, NodeId, NodeId) {
         Some("reshape-call".into()),
     );
     let result = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
         },
@@ -538,7 +584,8 @@ fn computed_reshape() -> (Dag, NodeId, NodeId) {
 fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
     for actual in [1, 2] {
         let mut dag = Dag::new();
-        let (_, _, checked) = unit_axis(&mut dag);
+        let decl = dag.declare("test");
+        let (_, _, checked) = unit_axis(&mut dag, decl);
         dag.add_root(checked);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_ir::verify::verify(&mapped).is_empty());
@@ -587,7 +634,8 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
 fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
     for actual in [1, 2] {
         let mut dag = Dag::new();
-        let (_, witness, checked) = unit_axis(&mut dag);
+        let decl = dag.declare("test");
+        let (_, witness, checked) = unit_axis(&mut dag, decl);
         if let RiscOp::ExtentWitness { site, .. } = &mut dag.node_mut(witness).unwrap().op {
             *site = chelis_ir::dag::ExtentWitnessSite::LocalExpand;
         }
@@ -638,15 +686,18 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
         for good in [true, false] {
             let (mut dag, input, mut output) = if unit {
                 let mut dag = Dag::new();
-                let (input, _, output) = unit_axis(&mut dag);
+                let decl = dag.declare("test");
+                let (input, _, output) = unit_axis(&mut dag, decl);
                 (dag, input, output)
             } else {
                 computed_reshape()
             };
+            let decl = dag.get(output).unwrap().owner.decl;
             while !dag.get(output).unwrap().output_type.dims.is_empty() {
                 let mut ty = dag.get(output).unwrap().output_type.clone();
                 ty.dims.remove(0);
                 output = dag.add_node(
+                    decl,
                     RiscOp::Sum {
                         axis: 0,
                         accumulator: Prim::F32,
@@ -688,9 +739,10 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
 #[test]
 fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
     let mut dag = Dag::new();
-    let a = scalar(&mut dag, -7);
-    let b = scalar(&mut dag, 2);
-    let root = dag.add_node(RiscOp::Mod, vec![a, b], scalar_type(), None);
+    let decl = dag.declare("test");
+    let a = scalar(&mut dag, decl, -7);
+    let b = scalar(&mut dag, decl, 2);
+    let root = dag.add_node(decl, RiscOp::Mod, vec![a, b], scalar_type(), None);
     dag.add_root(root);
     assert!(chelis_ir::verify::verify(&dag).is_empty());
     assert!(chelis_ir::grad::grad_dag_checked(&dag, root, &[a]).is_err());
@@ -739,10 +791,12 @@ fn an_entry_result_claim_keeps_its_later_declaring_witness() {
     use chelis_ir::axis_sources::{EntryExtentGuard, entry_extent_guards};
     use chelis_ir::dag::{ExtentClaim, ExtentWitnessSite};
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mut loads = Vec::new();
     let mut witnesses = Vec::new();
     for parameter in ["x", "y"] {
         let load = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: parameter.into(),
             },
@@ -755,6 +809,7 @@ fn an_entry_result_claim_keeps_its_later_declaring_witness() {
         );
         loads.push(load);
         witnesses.push(dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: ExtentWitnessSite::Caller,
                 parameter: parameter.into(),
@@ -777,6 +832,7 @@ fn an_entry_result_claim_keeps_its_later_declaring_witness() {
         requirement_declares: false,
     });
     let result = dag.add_node(
+        decl,
         RiscOp::Copy,
         vec![loads[0]],
         dag.get(loads[0]).unwrap().output_type.clone(),

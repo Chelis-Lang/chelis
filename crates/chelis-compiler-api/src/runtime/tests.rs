@@ -157,8 +157,6 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: None,
         failure_kind: RuntimeFailureKind::Ordinary,
     };
@@ -208,8 +206,6 @@ fn issue_1125_eval_checked_root(
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: None,
         failure_kind: RuntimeFailureKind::Ordinary,
     };
@@ -875,21 +871,6 @@ fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
         shallow_plannings, deep_plannings,
         "plannings must not grow with the number of applications"
     );
-
-    let drawing = |depth: i64| {
-        format!(
-            "def thin(x: tensor[4, f32]) -> tensor[4, f32] ! {{ Random }} = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
-             def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] ! {{ Random }} = if eq(n, 0i64) then x else walk(sub(n, 1i64), thin(x))\n\
-             result = with seed(7i64) {{ tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])), 0i32)) }}\n"
-        )
-    };
-    let (_, shallow_draws) = def_kernel_plannings(&drawing(4));
-    let (_, deep_draws) = def_kernel_plannings(&drawing(12));
-    assert_eq!(
-        shallow_draws, deep_draws,
-        "a Random-drawing kernel takes its keys from the evaluation frame, so it is \
-         planned once like any other kernel"
-    );
 }
 
 /// chelis#2393: short-name resolution through the terminal index must agree
@@ -1089,115 +1070,6 @@ fn issue_2204_closure_parameter_shadows_captured_binding() {
     );
 }
 
-#[test]
-fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
-    let checked = checked_surf(
-        "def bad(x: tensor[0, f32]) -> tensor[0, f32] = {\n dead = dropout(x, 0.0f32)\n dropout(x, 1.0f32)\n}\ndef invalid_loss(x: tensor[0, f32]) -> tensor[f32] = sum(bad(x), 0)\ndef nested(x: tensor[0, f32]) = with seed(7i64) { bad(x) }\ndef draw(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 0.0f32)\n",
-    );
-    let empty_tensors = UnordMap::new();
-    let mut definitions = UnordMap::new();
-    register_top_level_defs(
-        checked.exprs(),
-        &BTreeMap::new(),
-        None,
-        &mut definitions,
-        &mut Vec::new(),
-        false,
-    );
-    let mut signatures = UnordMap::new();
-    register_declared_signatures(checked.exprs(), &mut signatures);
-    let mut ctx = EvalContext {
-        bindings: Frame::new(),
-        result_producer: None,
-        binding_types: UnordMap::new(),
-        precision_bindings: UnordMap::new(),
-        declaration_values: UnordMap::new(),
-        named_axis_route_cache: UnordMap::new(),
-        named_axis_route_visiting: UnordSet::new(),
-        program: ProgramScope::new(
-            definitions,
-            checked
-                .type_env()
-                .iter()
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .collect(),
-        ),
-        declared_signatures: signatures,
-        adt_fields: UnordMap::new(),
-        adt_registry: checked.adt_registry().clone(),
-        tensor_bindings: &empty_tensors,
-        session: Some(chelis_ir::host::HostLoweringSession::new(&checked)),
-        active_declaration_names: Vec::new(),
-        def_kernels: UnordMap::new(),
-        transcript: Vec::new(),
-        transcript_capture: None,
-        resolving_top_levels: Vec::new(),
-        random_seed: Some(42),
-        random_counter: 5,
-        cancel: None,
-        failure_kind: RuntimeFailureKind::Ordinary,
-    };
-    let argument = RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
-        vec![0],
-        chelis_types::dtype_semantics::tensor_from_scalars(Prim::F32, &[]),
-    )));
-    let bad = ctx.resolve_top_level("bad").unwrap();
-    let error = ctx
-        .apply_resolved_callable(bad, vec![argument.clone()])
-        .unwrap_err();
-    assert_eq!(error, "numeric trap: domain in dropout at f32");
-    assert_eq!(
-        ctx.random_counter, 6,
-        "the earlier accepted dead call entered before failure"
-    );
-    let nested = ctx.resolve_top_level("nested").unwrap();
-    assert!(
-        ctx.apply_resolved_callable(nested, vec![argument.clone()])
-            .unwrap_err()
-            .contains("numeric trap: domain in dropout at f32")
-    );
-    assert_eq!(ctx.random_seed, Some(42));
-    assert_eq!(
-        ctx.random_counter, 6,
-        "nested handler unwinds even on an error"
-    );
-    let draw = ctx.resolve_top_level("draw").unwrap();
-    ctx.apply_resolved_callable(draw, vec![argument.clone()])
-        .unwrap();
-    assert_eq!(
-        ctx.random_counter, 7,
-        "parent continues at its preserved next ordinal"
-    );
-    let gradient = chelis_deep::parser::parse_str("(grad {} (var {} invalid_loss))")
-        .unwrap()
-        .pop()
-        .unwrap();
-    let error = ctx
-        .apply_transform(
-            TransformKind::Grad,
-            &gradient,
-            Frame::new(),
-            vec![argument.clone()],
-        )
-        .unwrap_err();
-    assert_eq!(error, "numeric trap: domain in dropout at f32");
-    assert_eq!(
-        ctx.random_counter, 8,
-        "transform failure commits the entered prefix, not the lowering's predicted total"
-    );
-    ctx.bindings.insert("argument".into(), argument);
-    let nested_gradient = chelis_deep::parser::parse_str("(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 7) (app {} (grad {} (var {} invalid_loss)) (var {} argument)))").unwrap().pop().unwrap();
-    assert_eq!(
-        ctx.eval_expr(&nested_gradient).unwrap_err(),
-        "numeric trap: domain in dropout at f32"
-    );
-    assert_eq!(ctx.random_seed, Some(42));
-    assert_eq!(
-        ctx.random_counter, 8,
-        "nested transform failure restores the parent state"
-    );
-}
-
 fn manifest_entry_with_path(
     name: &str,
     def_name: &str,
@@ -1246,86 +1118,26 @@ fn manifest_root_lookup_rejects_a_path_step_for_the_wrong_runtime_shape() {
 }
 
 #[test]
-fn with_seed_uniform_like_evaluates_body() {
+fn keyed_uniform_like_evaluates() {
     let checked = checked_surf(
         r#"
-x = with seed(7i64) {
-  tensor_to_scalar(
-uniform_like(
-  trace(pad_sequences_to([[0.0]], cast(1, i64), cast(0.0, f32)), cast(0, i32), cast(1, i32)),
-  0.0,
-  1.0
-)
+x = tensor_to_scalar(
+  uniform_like(
+    key_from_seed(7i64),
+    trace(pad_sequences_to([[0.0]], cast(1, i64), cast(0.0, f32)), cast(0, i32), cast(1, i32)),
+    0.0,
+    1.0
   )
-}
+)
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("seeded host program should evaluate");
+        .expect("keyed host program should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
     match value.as_f64() {
         Some(v) => assert!((0.0..=1.0).contains(&v), "got {v}"),
         None => panic!("expected float result, got {value:?}"),
     }
-}
-
-/// chelis#771: `literal_seed_i64` reads a `with seed(...)` literal at full
-/// i64 width, peeling the `(lit {type: (t-prim {} i32)} n)` wrapper the
-/// desugarer attaches (desugar.rs:1564-1569) and ignoring the i32 default
-/// meta — so the evaluator's effective u64 seed matches the C lane's
-/// `(uint64_t)n` instead of `eval_lit`'s i32-narrowed value.
-#[test]
-fn literal_seed_read_at_full_i64_width() {
-    use chelis_deep::Span;
-    let sp = Span::new(0, 0);
-    let node = |tag: &str, children: Vec<Expr>| {
-        Expr::node(
-            DeepTag::parse(tag).unwrap(),
-            Metadata::default(),
-            children,
-            sp,
-        )
-    };
-    // (lit {type: (t-prim {} i32)} 4294967295) — the exact shape desugar
-    // emits for `seed(4294967295)`.
-    let int32_seed_lit = |n: i64| {
-        let t_int32 = node(
-            "t-prim",
-            vec![Expr::Atom(Atom::Name("i32".to_string()), sp)],
-        );
-        Expr::node(
-            DeepTag::Lit,
-            Metadata::from(chelis_deep::annotations::MetadataValue::Type(
-                chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
-            )),
-            vec![Expr::Atom(Atom::Int(n), sp)],
-            sp,
-        )
-    };
-
-    // The peel reads the raw i64 atom regardless of the i32 meta.
-    let lit = int32_seed_lit(4_294_967_295);
-    assert_eq!(literal_seed_i64(&lit), Some(4_294_967_295));
-    assert_eq!(literal_seed_i64(&lit).unwrap() as u64, 4_294_967_295_u64);
-    // Guard against the pre-#771 bug: `eval_lit` would narrow
-    // `4294967295 as i32` = -1, sign-extend, and seed 0xFFFF_FFFF_FFFF_FFFF.
-    assert_ne!(
-        literal_seed_i64(&lit).unwrap() as u64,
-        0xFFFF_FFFF_FFFF_FFFF_u64,
-    );
-    // The exact 2^31 boundary and a bare (unwrapped) int atom both read full.
-    assert_eq!(
-        literal_seed_i64(&int32_seed_lit(2_147_483_648)),
-        Some(2_147_483_648),
-    );
-    assert_eq!(
-        literal_seed_i64(&Expr::Atom(Atom::Int(2_147_483_648), sp)),
-        Some(2_147_483_648),
-    );
-    // Non-literal seed expressions return None, so the caller keeps the
-    // dtype-narrowing `eval_expr` fallback for computed seeds.
-    let var_seed = node("var", vec![Expr::Atom(Atom::Name("s".to_string()), sp)]);
-    assert_eq!(literal_seed_i64(&var_seed), None);
 }
 
 #[test]
@@ -2018,8 +1830,6 @@ fn eval_deep_with_bindings(
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: None,
         failure_kind: RuntimeFailureKind::Ordinary,
     };
@@ -3782,6 +3592,27 @@ fn scalar_payload_dtype_is_the_storage_variant() {
     };
     assert_eq!(payload.dtype(), Prim::F16);
     assert_eq!(payload.as_f64_lossy(), 1.5);
+}
+
+/// chelis#2413 (B4): a key element, such as the one element of a rank-0 key
+/// tensor a staged host plan captures as a scalar, becomes the key variant,
+/// never a numeric scalar, so a draw reads it as its key and every
+/// diagnostic renders it. `split(key_from_seed(7))`'s left key is
+/// `aa3896172f9a3213` in `key_ref.py`.
+///
+/// Evidentiary status: REGRESSION TEST. At `b005bb19b` the constructor
+/// returned a `Scalar` holding the key and describing it panicked in
+/// `element_ref` ("a random key has no observation form").
+#[test]
+fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
+    let seed = chelis_types::scalar_from_i64("test", Prim::Int64, 7).expect("7 is an i64");
+    let (key, _) = chelis_types::RandomKey::from_seed(seed)
+        .expect("every i64 seeds a key")
+        .split();
+    let value = RuntimeValue::from_scalar_value(chelis_types::ScalarValue::from_key(key));
+    assert!(matches!(value, RuntimeValue::Key(inner) if inner == key));
+    assert_eq!(describe_value(&value), "key(aa3896172f9a3213)");
+    assert_eq!(describe_argument(Some(&value)), "key(aa3896172f9a3213)");
 }
 
 fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {

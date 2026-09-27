@@ -1224,6 +1224,44 @@ pub(super) fn check_expand_signature(
     subst.apply(&canonical)
 }
 
+/// [05-OP-71]: `split_keys(k, n)`'s result extent follows
+/// spec/04-type-system.md §4.7.2's rule for `expand` and `insert`. A count
+/// that folds to a literal gives that literal extent and a negative one is a
+/// type error; any other count gives a fresh runtime extent `*`, which the
+/// lowered graph checks for equality wherever a declared or shared extent
+/// meets it. The scheme's free result dimension is never the answer: it
+/// would take whatever extent the context offers, whatever the count.
+pub(super) fn check_split_keys_signature(
+    arg_exprs: &[deep::Expr],
+    result_ty: &Type,
+    env: &Env,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let rows = match arg_exprs
+        .get(1)
+        .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
+    {
+        Some(count) if count >= 0 => Dim::Lit(count),
+        Some(count) => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("split_keys requires a non-negative count, got {count} ([05-OP-71])"),
+                    vec![],
+                ),
+            );
+        }
+        None => Dim::Wildcard,
+    };
+    let canonical = Type::Tensor(vec![rows], TensorPrec::Concrete(Prim::Key));
+    if let Err(error) = unify(result_ty, &canonical, subst) {
+        return report(errors, error.into());
+    }
+    canonical
+}
+
 /// The named-axis expand arm (chelis#339, spec/04-type-system.md §4.5.3):
 /// insert a new axis named `new_name` into the operand's row form — at the
 /// trailing end (3-arg form) or immediately before the named `anchor` axis
@@ -1397,7 +1435,9 @@ pub(super) fn check_named_expand_signature(
 pub(super) enum ToTensorPeel<'a> {
     /// Successfully peeled `rank` `List` layers down to a `Prim`.
     Ok { rank: usize, precision: Prim },
-    /// The type `rank` `List` layers in is still a variable.
+    /// The type `rank` `List` layers in is still a variable. The caller
+    /// decides whether that variable's restriction already makes it a scalar
+    /// leaf dtype ([05-OP-57]); otherwise the leaf is still pending.
     Pending { rank: usize, element: TypeVar },
     /// Some inner type is an `Error` that already owns its diagnostic.
     Poisoned,

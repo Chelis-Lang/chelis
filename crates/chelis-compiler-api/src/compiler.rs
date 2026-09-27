@@ -1184,10 +1184,6 @@ fn project_host_program_to_entry(
                 collect_expr(init, bound, out);
                 collect_expr(list, bound, out);
             }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                collect_expr(seed, bound, out);
-                collect_expr(body, bound, out);
-            }
             ConcreteHostExprKind::Int(_)
             | ConcreteHostExprKind::Float(_)
             | ConcreteHostExprKind::Bool(_)
@@ -1506,9 +1502,6 @@ fn entry_lane_decision<'a>(
     host_only: bool,
     strictness: EntryStrictness,
     allow_execution: bool,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1546,12 +1539,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let Some(dag) = lower_selected_entry_dag(
-        checked,
-        entry,
-        #[cfg(feature = "compilation-trace")]
-        trace_out,
-    ) else {
+    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
         return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
         }));
@@ -1596,83 +1584,6 @@ fn entry_lane_decision<'a>(
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     compile_for_execution_impl(request, EntryStrictness::Strict)
-}
-
-/// Whether a lowered graph draws `dropout`.
-fn dag_draws_dropout(dag: &Dag) -> bool {
-    dag.nodes().iter().any(|node| {
-        matches!(
-            node.op,
-            RiscOp::DrawKey {
-                draw: chelis_ir::dag::RandomDraw::Dropout,
-                ..
-            }
-        )
-    })
-}
-
-/// The entry-scoped graph of a resolved entry. An entry whose projection of
-/// the program graph draws `dropout` is lowered again from its own checked
-/// source, as the host lane's entry decision lowers it, so the emitted graph
-/// and any trace capture come from one lowering; every other entry keeps its
-/// projection.
-fn entry_dag_from_source(
-    checked: &CheckedProgram,
-    entry: &str,
-    ordinary: Dag,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
-) -> Result<Dag> {
-    if !dag_draws_dropout(&ordinary) {
-        return Ok(ordinary);
-    }
-    let dag = lower_selected_entry_dag(
-        checked,
-        entry,
-        #[cfg(feature = "compilation-trace")]
-        trace_out,
-    )
-    .ok_or_else(|| {
-        stage_error(
-            "compile",
-            format!("tensor entry `{entry}` draws `dropout` but its own source did not lower"),
-            GeneralKind::CompileError,
-        )
-    })?;
-    Ok(chelis_ir::optimize::dead_code_eliminate(&dag))
-}
-
-/// Lower the selected tensor entry. Under `compilation-trace` the capture is
-/// the same lowering's trace, kept only for an entry that draws `dropout`, the
-/// entry whose lowering the trace contract observes; every other entry's
-/// capture stays explicitly unavailable.
-fn lower_selected_entry_dag(
-    checked: &CheckedProgram,
-    entry: &str,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
-) -> Option<Dag> {
-    #[cfg(feature = "compilation-trace")]
-    if let Some(trace_out) = trace_out {
-        let (dag, trace) =
-            chelis_ir::host::lower_named_tensor_entry_dag_with_trace(checked, entry)?;
-        let draws_dropout = dag.nodes().iter().any(|node| {
-            matches!(
-                node.op,
-                RiscOp::DrawKey {
-                    draw: chelis_ir::dag::RandomDraw::Dropout,
-                    ..
-                }
-            )
-        });
-        if draws_dropout {
-            *trace_out = Some(trace);
-        }
-        return Some(dag);
-    }
-    chelis_ir::host::lower_named_tensor_entry_dag(checked, entry)
 }
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
@@ -1903,10 +1814,7 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::project_program_roots(
-        &scoped,
-        &compiled.random_regions.entered_by([selected.as_str()]),
-    );
+    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -2013,8 +1921,6 @@ fn execution_artifact_from_compiled_observed(
     let collect_trace = observer
         .as_ref()
         .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    #[cfg(feature = "compilation-trace")]
-    let mut entry_trace = None;
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
@@ -2081,7 +1987,7 @@ fn execution_artifact_from_compiled_observed(
             // tensor program the scoped DAG equals the whole-program DAG, so
             // this is a no-op there.
             let mut entry_lane_decline = None;
-            let scoped_entry = if let Some(library) = compiled.library_runtime.as_ref() {
+            let scoped_entry = if compiled.library_runtime.is_some() {
                 // In-context (#816): a clean tensor entry lowers straight into
                 // `compiled.dag` as a DAG root — it is NOT a host-program
                 // function, so `entry_lane_decision` (which reads the host
@@ -2125,24 +2031,7 @@ fn execution_artifact_from_compiled_observed(
                             GeneralKind::CompileError,
                         ));
                     }
-                    Some((entry, ordinary)) => {
-                        let checked = CheckedProgram::compose(&library.checked, compiled.checked())
-                            .ok_or_else(|| {
-                                stage_error(
-                                    "compile",
-                                    "in-context execution program lost its checked library proof",
-                                    GeneralKind::CompileError,
-                                )
-                            })?;
-                        let dag = entry_dag_from_source(
-                            &checked,
-                            entry,
-                            ordinary,
-                            #[cfg(feature = "compilation-trace")]
-                            collect_trace.then_some(&mut entry_trace),
-                        )?;
-                        Some((entry, dag))
-                    }
+                    Some((entry, ordinary)) => Some((entry, ordinary)),
                     None => None,
                 }
             } else if let Some(host_program) = host_program {
@@ -2153,46 +2042,12 @@ fn execution_artifact_from_compiled_observed(
                     host_only,
                     strictness,
                     execution_host.is_some(),
-                    #[cfg(feature = "compilation-trace")]
-                    collect_trace.then_some(&mut entry_trace),
                 )? {
                     EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
                     EntryLaneOutcome::Decline(reason) => {
                         entry_lane_decline = Some(reason);
                         None
                     }
-                }
-            } else if !chelis_ir::host::program_has_top_level_value_bindings(compiled.checked())
-                && dag_draws_dropout(&compiled.dag)
-                && !(strictness == EntryStrictness::Legacy
-                    && (entry_name.is_some_and(|name| {
-                        !compiled
-                            .tensor_root_names
-                            .iter()
-                            .any(|root| root.as_str() == name)
-                    }) || (entry_name.is_none()
-                        && compiled.tensor_root_names.as_slice().len() > 1
-                        && !compiled
-                            .tensor_root_names
-                            .iter()
-                            .any(|root| root.as_str() == "main"))))
-            {
-                // A tensor-only def can be absent from the host program:
-                // resolve the exact source entry, then lower that entry from
-                // its own source. Keep legacy file-stem/whole-program
-                // selection out of this lane.
-                match resolve_in_context_entry(&compiled, entry_name)? {
-                    Some((entry, ordinary)) => {
-                        let dag = entry_dag_from_source(
-                            compiled.checked(),
-                            entry,
-                            ordinary,
-                            #[cfg(feature = "compilation-trace")]
-                            collect_trace.then_some(&mut entry_trace),
-                        )?;
-                        Some((entry, dag))
-                    }
-                    None => None,
                 }
             } else {
                 None
@@ -2233,10 +2088,7 @@ fn execution_artifact_from_compiled_observed(
                         selected: verified.emission(),
                     },
                     #[cfg(feature = "compilation-trace")]
-                    entry_trace.as_ref().map_or(
-                        crate::compilation_trace::SelectedLowering::Unavailable,
-                        crate::compilation_trace::SelectedLowering::Dag,
-                    ),
+                    crate::compilation_trace::SelectedLowering::Unavailable,
                 );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
@@ -2871,7 +2723,6 @@ fn compile_rewritten_decls_in_context(
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
-        random_regions: lowered_parts.random_regions,
         library_runtime: Some(library_runtime),
     })
 }
@@ -3103,13 +2954,42 @@ fn eval_compiled(
         })
         .collect::<Result<Vec<_>>>()?;
     let active_dag = &compiled.dag;
+    // The evaluator admits exactly the graphs the compiled lanes admit
+    // (spec/10 section 3.2): a lowered program whose keys break the key
+    // rules, or that shares a node that can trap across declarations, is
+    // rejected here as ownership lowering for C rejects it, rather than
+    // evaluated. The wire codec runs the key rules too.
+    let mut key_rule_errors = Vec::new();
+    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
+    if key_rule_errors.is_empty() {
+        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
+    }
+    if !key_rule_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program breaks the key rules: {}",
+                key_rule_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
+    let mut sharing_errors = Vec::new();
+    chelis_ir::verify::verify_declaration_sharing(active_dag, &mut sharing_errors);
+    if !sharing_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program shares a node that can trap: {}",
+                sharing_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
-        let entered = compiled
-            .random_regions
-            .entered_by(tensor_entries.iter().map(|entry| entry.def_name.as_str()));
-        eval::eval_program_roots_with_strict(&compiled.dag, &roots, &entered, |name| {
+        eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
         })
         .map_err(|message| eval_stage_error(message, true))?
@@ -3534,10 +3414,6 @@ struct CompiledSource {
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
-    /// The `with seed` regions each definition's activation enters. `dag`
-    /// holds every definition's activation, so evaluating or projecting
-    /// selected roots keeps exactly the regions their activations enter.
-    random_regions: chelis_ir::lower::RandomRegionOwners,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -3902,22 +3778,11 @@ fn route_tensor_inputs_from_dag(
 }
 
 fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
-    let mut stack = vec![root];
-    let mut seen = UnordSet::new();
-    let mut required = BTreeSet::new();
-    while let Some(node_id) = stack.pop() {
-        if !seen.insert(node_id) {
-            continue;
-        }
-        let Some(node) = dag.get(node_id) else {
-            continue;
-        };
-        if let RiscOp::Load { name } = &node.op {
-            required.insert(name.as_str().to_string());
-        }
-        stack.extend(node.inputs.iter().copied());
-    }
-    required
+    // The evaluator's own live set (spec/06 §5.2), not the root's data
+    // closure: a discarded trapping node of the root's declaration demands
+    // its parameter, so routing by data dependencies alone would drop a
+    // binding the evaluator then reports missing.
+    chelis_ir::eval::required_load_names(dag, &[root])
 }
 
 /// The library payload threaded through `eval_compiled` so the host
@@ -4071,7 +3936,6 @@ fn compile_source_scoped_mode(
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
-        random_regions: lowered_parts.random_regions,
         library_runtime: None,
     })
 }
@@ -5007,10 +4871,6 @@ pub fn reject_host_only_builtins(
                 scan_expr(init, found);
                 scan_expr(list, found);
             }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                scan_expr(seed, found);
-                scan_expr(body, found);
-            }
             ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
             ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
             _ => {}
@@ -5341,13 +5201,16 @@ mod metal_runtime_dim_reject_tests {
 
     fn dag_with_scalar() -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let m = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             ty(&[], Prim::Int64),
@@ -5359,7 +5222,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_shrink_bound() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
             },
@@ -5377,7 +5242,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -5395,13 +5262,16 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_literal_movement_and_reshape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
             },
@@ -5410,6 +5280,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },
@@ -5423,7 +5294,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -5432,6 +5305,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -5440,6 +5314,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -5459,7 +5334,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
         let (mut dag, x, size) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -5482,13 +5359,16 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[2, 3], Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             ty(&[2], Prim::Int64),
@@ -5501,19 +5381,23 @@ mod metal_runtime_dim_reject_tests {
 
     fn direct_arithmetic_dag(op: RiscOp) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -5527,7 +5411,7 @@ mod metal_runtime_dim_reject_tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag.add_node(decl, op, inputs, ty(&[4], Prim::F32), None);
         dag
     }
 
@@ -5952,22 +5836,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         })
         .collect();
 
-    // A draw key has no device storage. The emitter computes a `DrawKey`'s
-    // key at emission time and passes it to the draw that consumes it, so
-    // only that node carries the `key` precision here.
-    let key_admissible: UnordSet<NodeId> = dag
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
-        .filter(|node| {
-            dag.nodes().iter().any(|consumer| {
-                matches!(consumer.op, RiscOp::Dropout | RiscOp::UniformLike)
-                    && consumer.inputs.contains(&node.id)
-            })
-        })
-        .map(|node| node.id)
-        .collect();
-
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32
@@ -5977,7 +5845,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
             | chelis_types::types::Prim::Int64 => {}
-            chelis_types::types::Prim::Key if key_admissible.contains(&node.id) => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
                     return Err(unsupported_gate_error(
@@ -6193,6 +6060,7 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
         | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::RetiredRandomness { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
@@ -6599,11 +6467,6 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
-        Expr::WithSeed(seed, body, s) => WireSurfExpr::WithSeed {
-            seed: Box::new(wire_expr(seed)?),
-            body: Box::new(wire_expr(body)?),
-            span: span(*s),
-        },
         Expr::WithDevice(device, body, s) => WireSurfExpr::WithDevice {
             device: Box::new(wire_expr(device)?),
             body: Box::new(wire_expr(body)?),
@@ -6806,12 +6669,32 @@ fn wire_axis(value: usize) -> WireResult<i32> {
 }
 
 fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
+    // One row per declaration a node belongs to, in declaration order: a
+    // declaration whose nodes are all gone has no row, so a graph has one
+    // table whatever its passes removed.
+    let mut used = vec![false; dag.declarations().len()];
+    for node in dag.nodes() {
+        used[node.owner.decl.0 as usize] = true;
+    }
+    let mut declarations = Vec::new();
+    let mut rows = vec![None; used.len()];
+    for (index, declaration) in dag.declarations().iter().enumerate() {
+        if used[index] {
+            rows[index] = Some(crate::schema::host_index(declarations.len()));
+            declarations.push(declaration.name.clone());
+        }
+    }
     let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
+        declarations,
         nodes: dag
             .nodes()
             .iter()
-            .map(wire_dag_node)
+            .map(|node| {
+                let row =
+                    rows[node.owner.decl.0 as usize].expect("every node's declaration has a row");
+                wire_dag_node(node, row)
+            })
             .collect::<WireResult<_>>()?,
         roots: dag
             .roots()
@@ -6824,8 +6707,15 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     Ok(wire)
 }
 
-fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
+/// `node` on the wire, whose declaration is row `declaration` of the
+/// graph's declaration table.
+fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
+        declaration,
+        activation: node
+            .owner
+            .activation
+            .map(|id| crate::schema::host_index(id.0)),
         shape_deps: node
             .shape_deps
             .iter()
@@ -6982,31 +6872,9 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
+        RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
             count: wire_bound(count)?,
-        },
-        RiscOp::DrawKey {
-            handler,
-            draw,
-            dtype,
-        } => WireRiscOp::DrawKey {
-            handler: match handler {
-                chelis_ir::dag::RandomHandler::Inherited => {
-                    crate::schema::WireRandomHandler::Inherited
-                }
-                chelis_ir::dag::RandomHandler::Scoped { instance } => {
-                    crate::schema::WireRandomHandler::Scoped {
-                        instance: *instance,
-                    }
-                }
-            },
-            draw: match draw {
-                chelis_ir::dag::RandomDraw::Dropout => crate::schema::WireRandomDraw::Dropout,
-                chelis_ir::dag::RandomDraw::UniformLike => {
-                    crate::schema::WireRandomDraw::UniformLike
-                }
-            },
-            dtype: dtype.interchange_name().to_string(),
         },
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
             axis: wire_axis(*axis)?,
@@ -7285,6 +7153,73 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    /// chelis#2413: the wire decoder's key rules read each input slot as the
+    /// IR's do. For every operation that reads an extent through a slot,
+    /// with its bounds read by value and by axis, the encoded operation
+    /// declares the same read at every slot, and every kind of extent slot
+    /// is reached.
+    ///
+    /// Evidentiary status: LOCK. Both tables are new in this change.
+    #[test]
+    fn the_wire_and_the_ir_declare_the_same_extent_slots() {
+        use chelis_ir::dag::{ExtentWitnessSite, RtAxis};
+        use chelis_ir::verify::{ExtentSlot, SlotRead, slot_read};
+        let axis = |tensor| RtDim::InputAxis {
+            tensor,
+            axis: RtAxis::Lit(0),
+        };
+        let ops = [
+            RiscOp::Shape { axis: 0 },
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "ks".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![],
+                claims: vec![],
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: axis(1),
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            RiscOp::Reshape {
+                new_shape: vec![axis(1), RtDim::Node(2), axis(3)],
+            },
+            RiscOp::zero_pad(Prim::F32, vec![(axis(1), RtDim::Node(2))]),
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), axis(2))],
+            },
+            RiscOp::Stride {
+                strides: vec![axis(1)],
+            },
+            RiscOp::SplitN { count: axis(1) },
+            RiscOp::SplitN {
+                count: RtDim::Node(1),
+            },
+            RiscOp::Add,
+            RiscOp::Copy,
+        ];
+        let mut reached = std::collections::BTreeSet::new();
+        for op in &ops {
+            let wire = wire_op(op).unwrap();
+            for slot in 0..4 {
+                let read = slot_read(op, slot);
+                assert_eq!(
+                    crate::schema::wire_slot_read(&wire, slot),
+                    read,
+                    "{op:?} slot {slot}"
+                );
+                if let SlotRead::Extent(kind) = read {
+                    reached.insert(kind);
+                }
+            }
+        }
+        assert_eq!(reached, std::collections::BTreeSet::from(ExtentSlot::ALL));
+    }
+
     #[test]
     fn ordinary_lowering_prose_cannot_create_unsupported_identity() {
         for message in [
@@ -7401,7 +7336,9 @@ mod tests {
     fn native_wire_witness_fixture() -> Dag {
         use chelis_ir::dag::RtAxis;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -7415,6 +7352,7 @@ mod tests {
             .map(|value| chelis_types::scalar_from_i64("load", Prim::Int64, value).unwrap())
             .collect();
         let witness = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: chelis_ir::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
@@ -7431,6 +7369,7 @@ mod tests {
         );
         dag.node_mut(witness).unwrap().merged_spans = vec!["result-span".into()];
         let root = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("load", Prim::Int64, 9).unwrap(),
             },
@@ -7458,7 +7397,9 @@ mod tests {
             precision,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", chelis_types::types::Prim::Int64, -3)
                     .unwrap(),
@@ -7468,12 +7409,14 @@ mod tests {
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::KeyFromSeed,
             vec![seed],
             ty(&[], chelis_types::types::Prim::Key),
             None,
         );
         let left = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Left,
             },
@@ -7482,6 +7425,7 @@ mod tests {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Right,
             },
@@ -7490,12 +7434,14 @@ mod tests {
             None,
         );
         let folded = dag.add_node(
+            decl,
             RiscOp::FoldIn,
             vec![left, seed],
             ty(&[], chelis_types::types::Prim::Key),
             None,
         );
         let rows = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: chelis_ir::dag::RtDim::Lit(3),
             },
@@ -7507,7 +7453,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 18);
+        assert_eq!(json["schema_version"], 19);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -7528,6 +7474,59 @@ mod tests {
             kinds[5],
             &serde_json::json!({"kind":"split_n","count":{"bound":"lit","value":3}})
         );
+        let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    /// Rule I on the wire (spec/10 §3.2, §3.4): a key parameter is its
+    /// declaration and its name. New code that redefines a library's `keep`
+    /// replaces it in a composed lowering, and the composed graph holds both
+    /// declarations called `keep`, each consuming its own parameter `k`. The
+    /// wire keeps them apart: each node names its declaration by its row in
+    /// the graph's declaration table, and the two rows share a name.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 441e5c8b2 a node carried its
+    /// declaration's name, so the two parameters merged and `wire_dag`
+    /// rejected the graph because one key was consumed twice.
+    #[test]
+    fn a_replaced_definitions_key_parameter_stays_its_own_on_the_wire() {
+        let source =
+            "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
+        let exprs =
+            chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
+                .unwrap();
+        let (type_env, library) = chelis_types::build_compiled_library_context(&exprs).unwrap();
+        let library = chelis_effects::check_program(&library).unwrap();
+        let library = chelis_types::check_linearity(&library).unwrap();
+        let lowered = chelis_ir::lower::lower_program_to_library(&library);
+        let new = chelis_types::check_ir_with_context(&type_env, &exprs).unwrap();
+        let new = chelis_effects::check_effects_with_context(&library, &new).unwrap();
+        let new = chelis_types::check_linearity_with_context(&library, &new).unwrap();
+        let dag = chelis_ir::lower::try_lower_program_with_context(&lowered, &new)
+            .unwrap()
+            .dag;
+        let keeps = dag
+            .declarations()
+            .iter()
+            .filter(|declaration| declaration.name == "keep")
+            .count();
+        assert_eq!(keeps, 2, "{:?}", dag.declarations());
+        let wire = wire_dag(&dag).unwrap_or_else(|error| panic!("{error}"));
+        let key_loads = wire
+            .nodes
+            .iter()
+            .filter(
+                |node| matches!(&node.op, crate::schema::WireRiscOp::Load { name } if name == "k"),
+            )
+            .map(|node| node.declaration)
+            .collect::<Vec<_>>();
+        assert_eq!(key_loads.len(), 2, "{wire:?}");
+        assert_ne!(key_loads[0], key_loads[1]);
+        for row in key_loads {
+            let row = usize::try_from(row).unwrap();
+            assert_eq!(wire.declarations[row], "keep");
+        }
+        let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
@@ -7563,7 +7562,9 @@ mod tests {
     #[test]
     fn native_wire_projection_preserves_anonymous_where_shape_producers() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let condition = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "condition".into(),
             },
@@ -7575,6 +7576,7 @@ mod tests {
             None,
         );
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -7586,6 +7588,7 @@ mod tests {
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             TensorType {
@@ -7595,6 +7598,7 @@ mod tests {
             None,
         );
         let selected = dag.add_node(
+            decl,
             RiscOp::Where,
             vec![condition, values, zero],
             TensorType {
@@ -7678,21 +7682,15 @@ mod tests {
             .iter()
             .find(|node| node.shape_deps.contains(&claim.id))
             .expect("the initializer owns the projected claim");
-        let activations = owner
-            .shape_deps
-            .iter()
-            .filter_map(|dependency| {
-                projected
-                    .nodes
-                    .get(usize::try_from(*dependency).ok()?)
-                    .filter(|node| {
-                        node.output_type.dims.is_empty() && node.output_type.precision == "bool"
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            activations.len(),
-            1,
+        // The claim's activation is its carrier's owner activation (spec/10
+        // section 3.2), so it crosses the boundary as that node's
+        // `activation`, one exact scalar Bool.
+        let activation = owner
+            .activation
+            .and_then(|activation| projected.nodes.get(usize::try_from(activation).ok()?))
+            .expect("the claim's carrier crosses the boundary under the arm's activation");
+        assert!(
+            activation.output_type.dims.is_empty() && activation.output_type.precision == "bool",
             "one exact scalar Bool activation crosses the artifact boundary"
         );
         let json = serde_json::to_value(&projected).unwrap();
@@ -7989,19 +7987,23 @@ mod tests {
 
     fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -8015,7 +8017,7 @@ mod tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        let result = dag.add_node(decl, op, inputs, tensor_type(vec![4], precision), None);
         dag.add_root(result);
         dag
     }
@@ -8135,7 +8137,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_is_supported_with_integer_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -8144,6 +8148,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -8152,6 +8157,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -8165,13 +8171,16 @@ mod tests {
     #[test]
     fn hip_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             tensor_type(vec![2], chelis_types::types::Prim::Int64),
@@ -8185,7 +8194,9 @@ mod tests {
     #[test]
     fn hip_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -8194,6 +8205,7 @@ mod tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -8202,6 +8214,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -8221,7 +8234,9 @@ mod tests {
     #[test]
     fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -8230,6 +8245,7 @@ mod tests {
             None,
         );
         let size = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "size".into(),
             },
@@ -8238,6 +8254,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -8260,7 +8277,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_float_indices_with_deciding_atom() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -8269,6 +8288,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -8277,6 +8297,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -8292,7 +8313,9 @@ mod tests {
     #[test]
     fn hip_internal_one_hot_rejection_names_specialization_invariant() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 4 },
             vec![],
             tensor_type(vec![2, 4], chelis_types::types::Prim::F32),
@@ -8308,13 +8331,16 @@ mod tests {
     #[test]
     fn hip_shape_rejection_names_the_target_authority() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let shape = dag.add_node(
+            decl,
             RiscOp::Shape { axis: 0 },
             vec![input],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
@@ -8330,7 +8356,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -8339,6 +8367,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int64).precision,
                 0.0,
@@ -8348,6 +8377,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -8366,7 +8396,9 @@ mod tests {
     #[test]
     fn hip_sparse_scatter_add_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -8375,6 +8407,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int32).precision,
                 0.0,
@@ -8384,6 +8417,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -8392,6 +8426,7 @@ mod tests {
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
@@ -8418,13 +8453,16 @@ mod tests {
     fn reduce_window_node_dag(out_dims: Vec<DimInfo>, window: Vec<usize>) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 8], chelis_types::types::Prim::F32),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: window,
@@ -8526,13 +8564,16 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     fn reduce_window_dag_with_precision(prec: chelis_types::types::Prim) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![1, 1, 4, 4], prec),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2, 2],
@@ -8603,19 +8644,23 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         use chelis_ir::dag::ReduceWindowKind;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             tensor_type(vec![3], chelis_types::types::Prim::F32),
             None,
         );
         let grad = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2],
@@ -8640,7 +8685,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_rejects_node_valued_reshape_target_with_clean_message() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
@@ -8649,12 +8696,14 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         // A rank-0 integer Load, not a `Shape` read: the seam blanket-rejects
         // `RiscOp::Shape` first, and this test must exercise the reshape arm.
         let extent = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -8679,7 +8728,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_sparse_scatter_f64_rejection_names_atomic_blocker() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -8688,6 +8739,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -8696,6 +8748,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -8704,6 +8757,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
@@ -10086,6 +10140,7 @@ bad = shape(scalar_to_tensor(cast(3, i64)), axis)
     fn wire_dag_at_version(version: u32) -> WireDag {
         WireDag {
             schema_version: version,
+            declarations: Vec::new(),
             nodes: Vec::new(),
             roots: Vec::new(),
         }

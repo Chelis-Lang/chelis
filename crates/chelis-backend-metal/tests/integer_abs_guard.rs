@@ -15,15 +15,30 @@ fn integer_abs_is_rejected_before_the_float_unary_template() {
     let ty = vec_i64(1);
 
     let mut direct = Dag::new();
-    let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+    let direct_decl = direct.declare("test");
+    let x = direct.add_node(
+        direct_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
     direct.set_roots(vec![out]);
     let error = try_codegen_metal(&direct, "integer_abs").unwrap_err();
     assert!(error.to_string().contains("unsupported: op `Abs`"));
 
     let mut fused = Dag::new();
-    let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let fused_decl = fused.declare("test");
+    let x = fused.add_node(
+        fused_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
     let out = fused.add_node(
+        fused_decl,
         RiscOp::FusedElem {
             ops: vec![FusedStep {
                 op: FusedStepOp::Abs,

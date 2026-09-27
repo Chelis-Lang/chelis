@@ -6,7 +6,7 @@
 //! `spec/design/randomness_explicit_keys.md` (never of Rust or Lean). The
 //! `reference` module below is a second transcription, of the spec/05 text,
 //! compared with the kernels over a sweep of keys and indices. Changing a
-//! rotation (29, 41, 17) or a derive index (0, 1, 2) in the kernels fails
+//! rotation (29, 41) or a derive index (0, 1, 2) in the kernels fails
 //! both.
 
 use chelis_types::dtype_semantics::{
@@ -46,10 +46,6 @@ mod reference {
 
     pub fn fold_in(k: u64, n: i64) -> u64 {
         derive(derive(k, 2), n as u64)
-    }
-
-    pub fn of_draw_key(seed: i64, ordinal: u64) -> u64 {
-        (seed as u64) ^ rotl64(splitmix64(ordinal), 17)
     }
 }
 
@@ -114,8 +110,6 @@ fn key_ref_worked_values_are_the_kernels_values() {
     );
     assert_eq!(k7.derive(2).bits(), 0x4ed9_4e35_099b_b63d);
     assert_eq!(units(k7, 1), [0.12654528231070938]);
-    assert_eq!(RandomKey::from_counter(7, 0).bits(), 0x5072_f63b_9b5f_c446);
-    assert_eq!(RandomKey::from_counter(7, 1).bits(), 0x5bd9_1204_b983_2213);
 }
 
 #[test]
@@ -176,12 +170,6 @@ fn kernels_agree_with_the_transcription_over_a_sweep() {
                 reference::unit(left.bits(), i as u64).to_bits()
             );
         }
-        for ordinal in [0, 1, 2, 1_000_000] {
-            assert_eq!(
-                RandomKey::from_counter(seed as u64, ordinal).bits(),
-                reference::of_draw_key(seed, ordinal)
-            );
-        }
     }
 }
 
@@ -203,28 +191,6 @@ fn derivations_are_finalized_mixes_not_symmetric_xors() {
     let (left, right) = root.split();
     assert_ne!(left, right);
     assert_ne!(key(7).split().0, key(8).split().0);
-}
-
-#[test]
-fn every_counter_word_is_the_word_of_its_bridge_key() {
-    // [05-RNG-2]: the draw of seed bits s and ordinal c is the draw keyed by
-    // s XOR rotl64(splitmix64(c), 17). Transcribed from [05-RNG-1] directly.
-    let rng1_unit = |seed: i64, c: u64, i: u64| {
-        let w = reference::splitmix64(
-            (seed as u64)
-                ^ reference::rotl64(reference::splitmix64(c), 17)
-                ^ reference::rotl64(reference::splitmix64(i), 41),
-        );
-        (w >> 11) as f64 / (1u64 << 53) as f64
-    };
-    for seed in [0, 7, -1, i64::MAX, i64::MIN] {
-        for c in 0..5 {
-            let drawn = units(RandomKey::from_counter(seed as u64, c), 5);
-            for (i, unit) in drawn.iter().enumerate() {
-                assert_eq!(unit.to_bits(), rng1_unit(seed, c, i as u64).to_bits());
-            }
-        }
-    }
 }
 
 #[test]

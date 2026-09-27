@@ -189,13 +189,21 @@ fn extract_kernel_string(c_source: &str, kernel_name: &str) -> Option<String> {
 #[test]
 fn s4_hip_canonical_span_id_emitted_host_side() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
+    dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(chelis_ir::dag::NodeId(1));
 
     let result = codegen_hip(&dag, "s4_hip_canonical").unwrap();
@@ -232,8 +240,15 @@ fn s4_hip_canonical_span_id_emitted_host_side() {
 #[test]
 fn s4_hip_merged_spans_emitted_lex_sorted_after_canonical() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
@@ -278,8 +293,15 @@ fn s4_hip_merged_spans_emitted_lex_sorted_after_canonical() {
 #[test]
 fn s4_hip_no_spans_emits_no_comment_block() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(neg);
 
     let result = codegen_hip(&dag, "s4_hip_nospan").unwrap();
@@ -300,14 +322,28 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     // string carries the originating node's spans embedded inside the
     // string literal so they survive into the runtime-compiled HIP.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), Some("op.exp".into()));
-    let n = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), Some("op.neg".into()));
+    let e = dag.add_node(
+        decl,
+        RiscOp::Exp,
+        vec![a],
+        vec_f32(4),
+        Some("op.exp".into()),
+    );
+    let n = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![e],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(n);
     let fused = fuse(&dag);
 
@@ -361,14 +397,17 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
     // merged_spans only, both, neither) combinations. Asserts host-side
     // grep count >= sum and compile-success.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
 
     let n1 = dag.add_node(
+        decl,
         RiscOp::Load { name: "in".into() },
         vec![],
         vec_f32(4),
         Some("n1.canonical".into()),
     );
     let n2 = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![n1],
         vec_f32(4),
@@ -378,13 +417,14 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
         let node = dag.node_mut(n2).unwrap();
         node.merged_spans = vec!["n2.m1".into(), "n2.m2".into()];
     }
-    let n3 = dag.add_node(RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
-    let n4 = dag.add_node(RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
     let n5 = dag.add_node(
+        decl,
         RiscOp::Sin,
         vec![n4],
         vec_f32(4),
@@ -437,13 +477,15 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
 #[test]
 fn s4_hip_forbidden_newline_in_span_is_escaped_at_emit() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op\nint INJECTED_HIP_CODE = 42;".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "s4_hip_forbidden_newline").unwrap();
@@ -469,19 +511,28 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     // both for host-side correctness and so the runtime-compiled HIP
     // kernel sees a comment-safe identifier.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Exp,
         vec![a],
         vec_f32(4),
         Some("op.exp\nINJECTED_HIP_KERNEL".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), Some("op.neg".into()));
+    let n = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![e],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(n);
     let fused = fuse(&dag);
 
@@ -533,13 +584,16 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
 #[test]
 fn s4_hip_clean_span_emitted_verbatim_audit_invariant() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("eq1.σ_body".into()),
     );
     let n = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![a],
         vec_f32(4),

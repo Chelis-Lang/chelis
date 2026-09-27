@@ -397,7 +397,7 @@ fn cast_accepts_uniform_like_result_inferred_from_template() {
     let errors = typecheck(
         r#"
 t = expand(to_tensor([0.0f32]), 0, 8i64)
-u = with seed(1i64) { uniform_like(t, 0.0, 1.0) }
+u = uniform_like(key_from_seed(1i64), t, 0.0, 1.0)
 c = cast(u, f64)
 "#,
     );

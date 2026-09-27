@@ -16,19 +16,21 @@
 //!   checker must reject it (Phase 1 narrowed the arm to `lit`-tagged lists).
 //! * `double_neg_bound_parity`: nested-wrapper control; both accept-set
 //!   definitions fold neg(neg(3.0)) to 3.0, so it stays accepted.
-//! * `boundary_seed_cross_function_parity`: chelis#771 seed width through the
-//!   handler-scope threading path (seed cannot be baked at the op site), at
+//! * `boundary_seed_cross_function_parity`: chelis#771 seed width through a
+//!   helper's key parameter (the key cannot be baked at the op site), at
 //!   i32::MAX + 1.
-//! * `negative_dp_seed_parity`: a `.dp`-only reachable negative i64 seed;
-//!   the checker now rejects it (Phase 1 F2) rather than letting both lanes
-//!   silently fall back to seed 0.
+//! * `negative_dp_seed_parity`: a `.dp` negative i64 seed reaches its key in
+//!   both lanes rather than silently falling back to seed 0.
 //! * `handle_effect_extra_child`: spec/03 gives `handle-effect` the shape
 //!   `(handle-effect {effect: name} arg body)` — exactly two children. A third
 //!   child is structurally malformed ([04-TOT-3]); Phase 1 rejects `!= 2`.
-//! * `baked_seed_deterministic`: PR #793 moved the cli.rs expectation to a
-//!   baked `CHELIS_EFFECTIVE_UNIFORM_KEY(...)` operand (a seed before
-//!   chelis#2408, the [05-RNG-1] draw key since); the generated C and its
-//!   runtime output must be run-to-run deterministic and eval-bit-identical.
+//! * `baked_seed_deterministic`: a draw keyed by a literal seed; the generated
+//!   C and its runtime output must be run-to-run deterministic and
+//!   eval-bit-identical.
+//!
+//! chelis#2413 retired the `random` handler: every draw here takes its key
+//! from `key_from_seed`, the extra-child probe uses the `resource` handler,
+//! and the seed rows compare their draws with `common::key_ref`.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -45,48 +47,54 @@ use common::{
 
 const PAR_BOUND_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
-  (handle-effect {effect: random}
-    (lit {type: (t-prim {} i64)} 42)
-    (app {} (var {} uniform_like)
-      (copy {} (var {} template))
-      (par {} 2.0 3.0)
-      (lit {type: (t-prim {} f32)} 5.0))))
+  (app {} (var {} uniform_like)
+    (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 42))
+    (copy {} (var {} template))
+    (par {} 2.0 3.0)
+    (lit {type: (t-prim {} f32)} 5.0)))
 "#;
 
 const DOUBLE_NEG_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
-  (handle-effect {effect: random}
-    (lit {type: (t-prim {} i64)} 42)
-    (app {} (var {} uniform_like)
-      (copy {} (var {} template))
-      (app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 3.0)))
-      (lit {type: (t-prim {} f32)} 5.0))))
+  (app {} (var {} uniform_like)
+    (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 42))
+    (copy {} (var {} template))
+    (app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 3.0)))
+    (lit {type: (t-prim {} f32)} 5.0)))
 "#;
 
 const NEGATIVE_SEED_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
-  (handle-effect {effect: random}
-    (lit {type: (t-prim {} i64)} -1)
-    (app {} (var {} uniform_like)
-      (copy {} (var {} template))
-      (lit {type: (t-prim {} f32)} 0.0)
-      (lit {type: (t-prim {} f32)} 1.0))))
+  (app {} (var {} uniform_like)
+    (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} -1))
+    (copy {} (var {} template))
+    (lit {type: (t-prim {} f32)} 0.0)
+    (lit {type: (t-prim {} f32)} 1.0)))
 "#;
 
 const EXTRA_CHILD_DP: &str = r#"(def {} out
-  (handle-effect {effect: random}
-    (lit {type: (t-prim {} i64)} 42)
+  (handle-effect {effect: resource}
+    (lit {type: (t-prim {} string)} "gpu:0")
     (lit {type: (t-prim {} f32)} 2.5)
     (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} i64)} 2))))
 "#;
 
 const BOUNDARY_CROSS_FN_CH: &str = "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =\n\
-  uniform_like(copy(t), 0.0, 1.0)\n\
-sampled = with seed(2147483648i64) { sample(copy(template)) }\n";
+def sample(k: key, t: tensor[4, f32]) -> tensor[4, f32] =\n\
+  uniform_like(k, copy(t), 0.0, 1.0)\n\
+sampled = sample(key_from_seed(2147483648i64), copy(template))\n";
 
 const BAKED_SEED_CH: &str = "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-sampled = with seed(7i64) { uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }\n";
+sampled = uniform_like(key_from_seed(7i64), copy(template), cast(0.0, f32), cast(1.0, f32))\n";
+
+/// The `[0, 1)` f32 draw of `key_from_seed(seed)` over `count` elements, from
+/// `common::key_ref`'s [05-OP-8] transcription.
+fn reference_unit(seed: i64, count: usize) -> Vec<f64> {
+    common::key_ref::uniform_f32(common::key_ref::key_from_seed(seed), count, 0.0, 1.0)
+        .into_iter()
+        .map(f64::from)
+        .collect()
+}
 
 /// `chelis check` JSON score for a source file.
 fn check_score(source: &str, ext: &str) -> f64 {
@@ -231,9 +239,9 @@ fn redteam_double_neg_bound_parity() {
     assert_f32_bit_equal("double-neg bound eval-vs-C", &eval, &c);
 }
 
-/// chelis#771 boundary seed through the handler-scope threading path: the
-/// cross-function form cannot bake the seed at the random-op site, so the
-/// runtime `chelis_rng_current` scope must carry the full-width value.
+/// chelis#771 boundary seed through a helper's key parameter: the
+/// cross-function form cannot bake the key at the random-op site, so the key
+/// argument must carry the full-width value.
 #[test]
 fn redteam_boundary_seed_cross_function_parity() {
     if !c_toolchain_available() {
@@ -244,52 +252,43 @@ fn redteam_boundary_seed_cross_function_parity() {
     let c2 = c_sampled(BOUNDARY_CROSS_FN_CH, ".ch", "bigseed2");
     assert_f32_bit_equal("boundary cross-fn eval-vs-C", &eval, &c1);
     assert_f32_bit_equal("boundary cross-fn run-to-run", &c1, &c2);
+    assert_f32_bit_equal(
+        "boundary cross-fn reference-vs-C",
+        &reference_unit(2_147_483_648, 4),
+        &c1,
+    );
 }
 
-/// A `.dp`-only reachable negative i64 seed: the checker's suffix rule used to
-/// accept `(lit {type: i64} -1)` (score 1) while the DAG lowering's
-/// `extract_usize_value` rejected negatives and silently fell back, so both
-/// lanes ran the DEFAULT stream: seed -1 and seed 0 produced identical output
-/// ("distinct seeds yield distinct streams" [05-RNG-1] fails). chelis#794
-/// replaced that fold with `extract_u64_value`, which honors [05-RNG-1]'s
-/// two's-complement reinterpretation. chelis#1803 admits that signed literal
-/// through the checker; rejection must no longer silently skip this oracle.
+/// A `.dp` negative i64 seed: the checker's suffix rule once accepted
+/// `(lit {type: i64} -1)` (score 1) while the DAG lowering rejected negatives
+/// and silently fell back, so both lanes ran the DEFAULT stream: seed -1 and
+/// seed 0 produced identical output. The key of seed -1 is its
+/// two's-complement bits ([05-OP-69]); both lanes must draw from it, never
+/// from the key of 0.
 #[test]
 fn redteam_negative_dp_seed_not_silently_dropped() {
     let score = check_score(NEGATIVE_SEED_DP, ".dp");
     assert_eq!(score, 1.0, "signed i64 literal must be admitted");
-    let dir = tempdir().expect("tempdir");
-    let out_dir = dir.path().join("negseed-out");
-    let c_src = build_c(NEGATIVE_SEED_DP, ".dp", "negseed", &out_dir);
-    // Ordinal 0's [05-RNG-1] draw key under seed bits 0, the default stream:
-    // `0 ^ rotl64(splitmix64(0), 17)`, where `splitmix64(0)` is the standard
-    // SplitMix64 constant 0xe220a8397b1dcdaf.
-    let default_key = 0xe220_a839_7b1d_cdaf_u64.rotate_left(17);
-    assert!(
-        !c_src.contains(&format!("CHELIS_EFFECTIVE_UNIFORM_KEY({default_key}ULL")),
-        "checker-accepted seed -1 must not silently bake the seed-0/default \
-         stream into C; generated:\n{}",
-        c_src
-            .lines()
-            .filter(|l| l.contains("EFFECTIVE_UNIFORM_KEY"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    let c = c_sampled(NEGATIVE_SEED_DP, ".dp", "negseed");
+    assert_f32_bit_equal("negative seed reference-vs-C", &reference_unit(-1, 8), &c);
+    assert_ne!(reference_unit(-1, 8), reference_unit(0, 8));
     let eval_neg = parse_tensor_data(&eval_stdout(NEGATIVE_SEED_DP, ".dp"), "sampled");
     let zero_src = NEGATIVE_SEED_DP.replace("} -1)", "} 0)");
     let eval_zero = parse_tensor_data(&eval_stdout(&zero_src, ".dp"), "sampled");
     assert_ne!(
         eval_neg, eval_zero,
-        "[05-RNG-1] distinct seeds must yield distinct streams: eval(seed -1) \
+        "distinct seeds must yield distinct keys: eval(seed -1) \
          equals eval(seed 0), so the negative seed was silently dropped"
     );
+    assert_f32_bit_equal("negative seed eval-vs-C", &eval_neg, &c);
 }
 
 /// spec/03: `(handle-effect {effect: name} arg body)` — exactly two children.
 /// [04-TOT-3]: a structurally malformed form SHALL be rejected. The third
 /// child here is an ill-typed subtree (`add(f32, i64)`) that
 /// `infer_handle_effect` never visits; Phase 1 rejects `handle-effect` with
-/// `!= 2` children, so this must score below 1.0.
+/// `!= 2` children, so this must score below 1.0, and for that reason: the
+/// two-child `resource` handler is admitted.
 #[test]
 fn redteam_handle_effect_extra_child_is_rejected() {
     let score = check_score(EXTRA_CHILD_DP, ".dp");
@@ -298,6 +297,26 @@ fn redteam_handle_effect_extra_child_is_rejected() {
         "[04-TOT-3] / fitness honesty: a handle-effect with a third (ill-typed!) \
          child must not score 1.0, got {score}"
     );
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("extra.dp");
+    write_file(&path, EXTRA_CHILD_DP);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check should run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("wrong child count for `handle-effect`"),
+        "the rejection must be the child count, not the effect kind: {stdout}"
+    );
+    let two_children = EXTRA_CHILD_DP.replace("    (lit {type: (t-prim {} f32)} 2.5)\n", "");
+    let two_children = two_children.replace(
+        "(lit {type: (t-prim {} i64)} 2)",
+        "(lit {type: (t-prim {} f32)} 2.0)",
+    );
+    assert_eq!(check_score(&two_children, ".dp"), 1.0, "{two_children}");
 }
 
 /// The direct suffixed seed must produce identical generated C
@@ -314,11 +333,10 @@ fn redteam_baked_seed_deterministic_and_cross_lane() {
     let src_a = build_c(BAKED_SEED_CH, ".ch", "seeded", &out_a);
     let src_b = build_c(BAKED_SEED_CH, ".ch", "seeded", &out_b);
     assert_eq!(src_a, src_b, "generated C must be build-to-build identical");
-    // The handler transports seed 7 through the invocation-local RNG state
-    // (chelis#1799); a former macro spelling is not the execution contract.
     let eval = parse_tensor_data(&eval_stdout(BAKED_SEED_CH, ".ch"), "sampled");
     let c1 = c_sampled(BAKED_SEED_CH, ".ch", "seeded1");
     let c2 = c_sampled(BAKED_SEED_CH, ".ch", "seeded2");
     assert_f32_bit_equal("baked seed eval-vs-C", &eval, &c1);
     assert_f32_bit_equal("baked seed run-to-run", &c1, &c2);
+    assert_f32_bit_equal("baked seed reference-vs-C", &reference_unit(7, 4), &c1);
 }

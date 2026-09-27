@@ -48,7 +48,9 @@ fn named(name: &str) -> DimInfo {
 #[test]
 fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![named("n")]),
@@ -57,15 +59,17 @@ fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
     // A rank-0 scalar this function COMPUTES, so the reshape target's
     // `ScalarInput` does not resolve through a `Load` and the class is Local.
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         i64_scalar(),
         None,
     );
-    let size = dag.add_node(RiscOp::Mul, vec![a, a], i64_scalar(), None);
+    let size = dag.add_node(decl, RiscOp::Mul, vec![a, a], i64_scalar(), None);
     // Claimed `n` by its output type, and sized from the computed scalar: an
     // equality-class member on axis 0, keyed (reshape, 0).
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1)],
         },
@@ -76,6 +80,7 @@ fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
     // The same-rank broadcast, whose unit-extent claim is about the OPERAND's
     // axis 0: the same key.
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -126,22 +131,26 @@ fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
 #[test]
 fn two_equal_claims_on_one_axis_emit_one_guard() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![named("n")]),
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         i64_scalar(),
         None,
     );
-    let size = dag.add_node(RiscOp::Mul, vec![a, a], i64_scalar(), None);
+    let size = dag.add_node(decl, RiscOp::Mul, vec![a, a], i64_scalar(), None);
     // `m`, not `n`: a claim with a single witness is not a class (C2.4), so the
     // reshape's axis owes no class guard and the key carries unit claims only.
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1)],
         },
@@ -153,6 +162,7 @@ fn two_equal_claims_on_one_axis_emit_one_guard() {
     // claim twice on one key.
     for extent in [3usize, 4usize] {
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(extent),

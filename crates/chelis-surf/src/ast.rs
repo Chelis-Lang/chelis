@@ -237,7 +237,6 @@ pub enum Expr {
     Realize(Box<Expr>, Span),
     Copy(Box<Expr>, Span),
     Borrow(Box<Expr>, Span),
-    WithSeed(Box<Expr>, Box<Expr>, Span),
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
     Do(Vec<Expr>, Span),                     // do { e1; e2; ... }
@@ -457,7 +456,6 @@ pub enum TypeExpr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectExpr {
     Diff(Span),
-    Random(Span),
     Accum(Span),
     Io(Span),
     Test(Span),
@@ -468,7 +466,6 @@ impl EffectExpr {
     pub fn span(&self) -> Span {
         match self {
             Self::Diff(span)
-            | Self::Random(span)
             | Self::Accum(span)
             | Self::Io(span)
             | Self::Test(span)

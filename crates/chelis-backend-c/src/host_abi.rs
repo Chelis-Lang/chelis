@@ -44,6 +44,11 @@ pub(crate) enum HostAbiType {
     Float64,
     Bool,
     String,
+    /// A scalar random key ([05-OP-69]..[05-OP-72]): the C value
+    /// `chelis_key`, `typedef struct { uint64_t bits; } chelis_key;`, whose
+    /// `bits` are the key's 64 bits. It is never an integer: it has no
+    /// arithmetic, cast or comparison (spec/04 section 1.1).
+    Key,
     /// A typed C function-pointer parameter or direct callback argument.
     ///
     /// This is deliberately not a general value representation.  The only
@@ -94,11 +99,6 @@ pub(crate) struct ProjectedHostSite<'a> {
 }
 
 impl<'a> ProjectedHostProgram<'a> {
-    #[cfg(feature = "native-random-observer")]
-    pub(crate) fn source_emission(&self) -> VerifiedHostEmission<'a> {
-        self.emission
-    }
-
     pub(crate) fn program(&self) -> &HostAbiProgram {
         &self.program
     }
@@ -172,15 +172,7 @@ impl HostAbiType {
                     ),
                 ));
             }
-            ConcreteHostType::Scalar(Prim::Key) => {
-                return Err(rejected_dtype(
-                    Prim::Key,
-                    chelis_types::deliberate_rejection!(
-                        "[05-RNG-1]",
-                        "a random key has no host ABI carrier; it exists only inside a graph"
-                    ),
-                ));
-            }
+            ConcreteHostType::Scalar(Prim::Key) => Self::Key,
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
@@ -237,6 +229,7 @@ impl HostAbiType {
             Self::Float64 => Some("double"),
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
+            Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
@@ -266,6 +259,8 @@ impl HostAbiType {
             | Self::Float32
             | Self::Float64
             | Self::Bool
+            // A `chelis_key` is its 64 bits by value and owns no heap handle.
+            | Self::Key
             | Self::Unit
             | Self::Callback(_, _) => None,
             Self::String => Some("(chelis_string){ NULL }"),
@@ -437,7 +432,11 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
         && node.output_type == *helper.output()
         && helper.inputs().iter().any(|input| input.name == *name)
     {
+        // The metadata graph restates the helper's identity Load, so it
+        // belongs to a declaration of the helper's name.
+        let decl = dag.declare(verified.declaration(node.owner.decl).name.clone());
         let root = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::Load { name: name.clone() },
             Vec::new(),
             node.output_type.clone(),
@@ -782,11 +781,6 @@ fn project_expr(
         ConcreteHostExprKind::FlatMap { callback, list, ty } => HostAbiExprKind::FlatMap {
             callback: project_callback(callback, allowed_callbacks)?,
             list: Box::new(project_expr(*list, allowed_callbacks)?),
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
-        ConcreteHostExprKind::WithSeed { seed, body, ty } => HostAbiExprKind::WithSeed {
-            seed: Box::new(project_expr(*seed, allowed_callbacks)?),
-            body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::TensorCall { helper, args, ty } => HostAbiExprKind::TensorCall {

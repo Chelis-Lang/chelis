@@ -93,6 +93,34 @@ pub struct AdtRegistry {
     pub(crate) resolution_env: TypeResolutionEnv,
 }
 
+/// Spec/04 section 8.4.1: whether `ty` carries a key, given the data types
+/// already known to carry one. A type variable carries none here: it is a
+/// field of a generic data type, and what it is instantiated at decides.
+fn type_carries_key(ty: &Type, carriers: &UnordSet<String>) -> bool {
+    match ty {
+        Type::Prim(prim) => *prim == Prim::Key,
+        Type::Tensor(_, precision) => precision.as_concrete() == Some(Prim::Key),
+        Type::Ref(inner) => type_carries_key(inner, carriers),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(|element| type_carries_key(element, carriers)),
+        Type::Adt(name, arguments) => {
+            carriers.contains(name)
+                || arguments
+                    .iter()
+                    .any(|argument| type_carries_key(argument, carriers))
+        }
+        Type::KindedAdt(name, arguments) => {
+            carriers.contains(name)
+                || arguments.iter().any(|argument| match argument {
+                    NominalArg::Type(argument) => type_carries_key(argument, carriers),
+                    NominalArg::Dimension(_) => false,
+                })
+        }
+        Type::Fn(_, _) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
 impl Default for AdtRegistry {
     fn default() -> Self {
         Self::new()
@@ -111,6 +139,35 @@ impl AdtRegistry {
 
     pub(crate) fn resolution_env(&self) -> &TypeResolutionEnv {
         &self.resolution_env
+    }
+
+    /// Spec/04 section 8.4.1: the registered data types one of whose variant
+    /// fields carries a key, as the least fixed point over every registered
+    /// definition, so a data type that holds another key-carrying data type
+    /// is found whatever order they were declared in.
+    pub(crate) fn key_carrying_adts(&self) -> UnordSet<String> {
+        let mut carriers = UnordSet::new();
+        loop {
+            let mut grew = false;
+            for (name, def) in &self.defs {
+                if carriers.contains(name) {
+                    continue;
+                }
+                let carries = def.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, field)| type_carries_key(field, &carriers))
+                });
+                if carries {
+                    carriers.insert(name.clone());
+                    grew = true;
+                }
+            }
+            if !grew {
+                return carriers;
+            }
+        }
     }
 
     pub(crate) fn install_resolution_env(&mut self, resolution_env: TypeResolutionEnv) {

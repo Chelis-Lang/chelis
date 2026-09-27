@@ -107,20 +107,22 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         // transformed `fail(...)` branch from becoming a placeholder value.
         "guarded_fail",
         // Version 17 (chelis#2413): key-operand random nodes, their adjoint
-        // replays, and the counter-stream draw key.
+        // replays, and the counter-stream draw key; version 19 deletes the
+        // draw key.
         "dropout_replay",
         "uniform_bound_adjoint",
-        "draw_key",
         // Version 18 (chelis#2413): the explicit key operations.
         "key_from_seed",
         "split",
         "fold_in",
         "split_n",
+        // Version 19 (chelis#2413): the key join of a where-lowered branch.
+        "key_select",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 18,
+        WIRE_DAG_SCHEMA_VERSION, 19,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 73);
@@ -158,8 +160,7 @@ fn cast_trunc_rejects_unknown_spelling_and_missing_target() {
 
 #[test]
 fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions() {
-    let mut encoded =
-        serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": [], "roots": []});
+    let mut encoded = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations": [], "nodes": [], "roots": []});
     assert!(WireDag::from_validated_json(&encoded.to_string()).is_ok());
     for version in [WIRE_DAG_SCHEMA_VERSION - 1, WIRE_DAG_SCHEMA_VERSION + 1] {
         encoded["schema_version"] = version.into();
@@ -173,7 +174,10 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 fn wire_dag_integer_dtype_vocabulary_stays_ecosystem_spelled() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
+            declaration: 0,
+            activation: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],

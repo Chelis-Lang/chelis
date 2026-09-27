@@ -17,9 +17,12 @@ fn boolean(value: bool) -> chelis_types::ScalarValue {
 fn fixture() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         roots: vec![2],
         nodes: vec![
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -35,6 +38,8 @@ fn fixture() -> WireDag {
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::Caller,
@@ -53,6 +58,8 @@ fn fixture() -> WireDag {
                 merged_spans: vec!["inlined-g".into()],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Const { value: integer(9) },
                 inputs: vec![],
@@ -71,9 +78,12 @@ fn fixture() -> WireDag {
 fn local_ascription_with_activation_fixture() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         roots: vec![3],
         nodes: vec![
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -89,6 +99,8 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::LocalAscriptionClaim {
@@ -112,6 +124,8 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Const {
                     value: boolean(true),
@@ -126,6 +140,8 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: Some(2),
                 id: 3,
                 op: WireRiscOp::Pad {
                     padding: vec![(
@@ -142,7 +158,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                     }],
                     precision: "f32".into(),
                 },
-                shape_deps: vec![1, 2],
+                shape_deps: vec![1],
                 span_id: None,
                 merged_spans: vec![],
             },
@@ -170,6 +186,8 @@ fn result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_tra
     requirements.clear();
     dag.nodes.push(token);
     dag.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::Const { value: integer(7) },
         inputs: vec![],
@@ -182,6 +200,8 @@ fn result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_tra
         merged_spans: vec![],
     });
     dag.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
         id: 4,
         op: WireRiscOp::Expand {
             axis: 0,
@@ -371,31 +391,25 @@ fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknow
     assert!(WireDag::from_validated_json(&unknown.to_string()).is_err());
 }
 
+/// A local ascription's claims are checked under the owner activation of the
+/// node carrying them, which the wire carries as that node's `activation`;
+/// there is no second, dependency-shaped activation to disagree with it
+/// (spec/10 section 3.2, #2413). A carrier's activation is validated like
+/// any node's: it must name an earlier bool node.
 #[test]
-fn local_ascription_owner_rejects_multiple_runtime_branch_activations() {
+fn a_local_ascriptions_activation_travels_as_its_carriers_owner_activation() {
     let dag = local_ascription_with_activation_fixture();
     let json = serde_json::to_value(&dag).unwrap();
     let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), json);
 
     let mut malformed = json;
-    let nodes = malformed["nodes"].as_array_mut().unwrap();
-    let mut second_activation = nodes[2].clone();
-    second_activation["id"] = 3.into();
-    second_activation["op"]["value"] =
-        serde_json::to_value(boolean(false)).expect("Bool scalar encodes");
-    let mut owner = nodes.pop().unwrap();
-    owner["id"] = 4.into();
-    owner["shape_deps"] = serde_json::json!([1, 2, 3]);
-    nodes.push(second_activation);
-    nodes.push(owner);
-    malformed["roots"] = serde_json::json!([4]);
-
+    malformed["nodes"][3]["activation"] = 1.into();
     let error = WireDag::from_validated_json(&malformed.to_string())
-        .expect_err("multiple path activations are ambiguous");
+        .expect_err("the claim token is not a bool activation");
     assert!(
         format!("{error:#}")
-            .contains("local ascription owner has multiple runtime branch activations"),
+            .contains("a node's activation must be an earlier bool node of the owning DAG"),
         "{error:#}"
     );
 }
@@ -439,6 +453,8 @@ fn named_local_ascription_site_requires_its_exact_declaring_witness_and_owner() 
     claims.clear();
     dag.nodes.push(token);
     dag.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::Copy,
         inputs: vec![0],
@@ -589,6 +605,8 @@ fn checked_fixture() -> WireDag {
     };
     for id in [3, 4] {
         dag.nodes.push(WireDagNode {
+            declaration: 0,
+            activation: None,
             id,
             op: WireRiscOp::Const { value: integer(2) },
             inputs: vec![],
@@ -602,6 +620,8 @@ fn checked_fixture() -> WireDag {
         });
     }
     dag.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
         id: 5,
         op: WireRiscOp::CheckedReshapeExtent {
             claims: vec!["rows".into()],
@@ -766,6 +786,8 @@ fn named_claim_fixture() -> WireDag {
     let node =
         |id: u64, op: WireRiscOp, inputs: Vec<u64>, dims, precision: &str, shape_deps: Vec<u64>| {
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id,
                 op,
                 inputs,
@@ -793,6 +815,7 @@ fn named_claim_fixture() -> WireDag {
     };
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         roots: vec![4],
         nodes: vec![
             node(
@@ -913,9 +936,12 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
     };
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         roots: vec![2],
         nodes: vec![
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::LiteralResultClaim,
@@ -934,6 +960,8 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -943,6 +971,8 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
                 merged_spans: vec![],
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Add,
                 inputs: vec![1, 1],
@@ -978,6 +1008,8 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
     unsupported.nodes.truncate(2);
     unsupported.nodes.push(rhs);
     unsupported.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::BlasMatmul {
             batch_dims: vec![],

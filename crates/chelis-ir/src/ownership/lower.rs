@@ -12,7 +12,7 @@ use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
 use chelis_types::types::{Lane, Prim};
 
-use crate::dag::{DimInfo, RiscOp, TensorType};
+use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
@@ -1312,22 +1312,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             ConcreteHostExprKind::FlatMap { callback, list, ty } => {
                 self.lower_flat_map(callback, list, ty)
             }
-            ConcreteHostExprKind::WithSeed { seed, body, ty } => {
-                let seed = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(seed, None)
-                })?;
-                let seed = self.consume(seed, None)?;
-                let body = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(body, tail)
-                })?;
-                let body = self.consume(body, tail)?;
-                self.apply(
-                    ty,
-                    "with_seed".to_string(),
-                    vec![super::ir::OwnershipUse::Move; 2],
-                    vec![seed, body],
-                )
-            }
         }
     }
 
@@ -2546,7 +2530,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let Some(helper_ref) = self.helpers.get(helper) else {
             return Err(self.invariant(format!("tensor helper {helper} does not exist")));
         };
-        if is_identity_helper(helper_ref) && args.len() == 1 {
+        if helper_ref.identity_input().is_some() && args.len() == 1 {
             return self.lower_expr(&args[0], tail);
         }
         let mut operands = Vec::with_capacity(args.len());
@@ -2562,21 +2546,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             vec![super::ir::OwnershipUse::Borrow; operands.len()],
             operands,
         )
-    }
-}
-
-fn is_identity_helper(helper: &HostTensorHelper) -> bool {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return false;
-    }
-    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
-        return false;
-    };
-    match &node.op {
-        RiscOp::Load { name } => {
-            node.output_type == helper.output && helper.inputs[0].name == *name
-        }
-        _ => false,
     }
 }
 
@@ -2607,7 +2576,6 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::Scan { ty, .. }
         | ConcreteHostExprKind::Partition { ty, .. }
         | ConcreteHostExprKind::FlatMap { ty, .. }
-        | ConcreteHostExprKind::WithSeed { ty, .. }
         | ConcreteHostExprKind::TensorCall { ty, .. }
         | ConcreteHostExprKind::ResultClaimScope { ty, .. }
         | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),

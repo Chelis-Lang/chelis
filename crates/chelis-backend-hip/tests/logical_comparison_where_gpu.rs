@@ -277,19 +277,23 @@ fn compile_and_run_shaped(
 
 fn direct_numeric_dag(precision: Prim) -> (Dag, Vec<Prim>) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let lhs = dag.add_node(
+        decl,
         RiscOp::Load { name: "lhs".into() },
         vec![],
         ty(precision),
         None,
     );
     let rhs = dag.add_node(
+        decl,
         RiscOp::Load { name: "rhs".into() },
         vec![],
         ty(precision),
         None,
     );
     let cond = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "cond".into(),
         },
@@ -307,11 +311,23 @@ fn direct_numeric_dag(precision: Prim) -> (Dag, Vec<Prim>) {
         ComparisonKind::Gte,
         ComparisonKind::Lte,
     ] {
-        let node = dag.add_node(RiscOp::Compare(kind), vec![lhs, rhs], ty(Prim::Bool), None);
+        let node = dag.add_node(
+            decl,
+            RiscOp::Compare(kind),
+            vec![lhs, rhs],
+            ty(Prim::Bool),
+            None,
+        );
         dag.add_root(node);
         outputs.push(Prim::Bool);
     }
-    let selected = dag.add_node(RiscOp::Where, vec![cond, lhs, rhs], ty(precision), None);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![cond, lhs, rhs],
+        ty(precision),
+        None,
+    );
     dag.add_root(selected);
     outputs.push(precision);
     (dag, outputs)
@@ -538,19 +554,23 @@ fn real_hip_direct_nonnumeric_matrix_is_bit_exact() {
 #[ignore = "requires a real HIP GPU; run through scripts/hip_test.py"]
 fn real_hip_bool_logic_equality_and_where_matrix_is_exact() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let lhs = dag.add_node(
+        decl,
         RiscOp::Load { name: "lhs".into() },
         vec![],
         ty(Prim::Bool),
         None,
     );
     let rhs = dag.add_node(
+        decl,
         RiscOp::Load { name: "rhs".into() },
         vec![],
         ty(Prim::Bool),
         None,
     );
     let cond = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "cond".into(),
         },
@@ -564,17 +584,24 @@ fn real_hip_bool_logic_equality_and_where_matrix_is_exact() {
         RiscOp::Logical(LogicalKind::And),
         RiscOp::Logical(LogicalKind::Or),
     ] {
-        let out = dag.add_node(op, vec![lhs, rhs], ty(Prim::Bool), None);
+        let out = dag.add_node(decl, op, vec![lhs, rhs], ty(Prim::Bool), None);
         dag.add_root(out);
     }
     let not = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![lhs],
         ty(Prim::Bool),
         None,
     );
     dag.add_root(not);
-    let selected = dag.add_node(RiscOp::Where, vec![cond, lhs, rhs], ty(Prim::Bool), None);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![cond, lhs, rhs],
+        ty(Prim::Bool),
+        None,
+    );
     dag.add_root(selected);
     let lhs_bits = vec![0, 0, 1, 1, 0, 1, 0, 1];
     let rhs_bits = vec![0, 1, 0, 1, 1, 0, 1, 0];
@@ -669,24 +696,28 @@ fn real_hip_permuted_stepped_nonnumeric_views_are_exact() {
     let stepped_f32 = matrix(2, 2, Prim::F32);
     let stepped_bool = matrix(2, 2, Prim::Bool);
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let view = |dag: &mut Dag,
                 name: &str,
                 input: &TensorType,
                 permuted: &TensorType,
                 stepped: &TensorType| {
         let load = dag.add_node(
+            decl,
             RiscOp::Load { name: name.into() },
             vec![],
             input.clone(),
             None,
         );
         let permute = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![load],
             permuted.clone(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },
@@ -725,6 +756,7 @@ fn real_hip_permuted_stepped_nonnumeric_views_are_exact() {
         ComparisonKind::Lte,
     ] {
         let output = dag.add_node(
+            decl,
             RiscOp::Compare(kind),
             vec![lhs, rhs],
             stepped_bool.clone(),
@@ -734,6 +766,7 @@ fn real_hip_permuted_stepped_nonnumeric_views_are_exact() {
     }
     for kind in [LogicalKind::And, LogicalKind::Or] {
         let output = dag.add_node(
+            decl,
             RiscOp::Logical(kind),
             vec![logical_lhs, logical_rhs],
             stepped_bool.clone(),
@@ -742,13 +775,20 @@ fn real_hip_permuted_stepped_nonnumeric_views_are_exact() {
         dag.add_root(output);
     }
     let not = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![logical_lhs],
         stepped_bool,
         None,
     );
     dag.add_root(not);
-    let selected = dag.add_node(RiscOp::Where, vec![condition, lhs, rhs], stepped_f32, None);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![condition, lhs, rhs],
+        stepped_f32,
+        None,
+    );
     dag.add_root(selected);
 
     let lhs_bits = vec![

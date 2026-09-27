@@ -1,7 +1,7 @@
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
@@ -1427,13 +1427,22 @@ pub(super) fn tensor_matmul_host(
         }
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("matmul");
     let lhs_ty = tensor_type_for(lhs);
     let rhs_ty = tensor_type_for(rhs);
     let lhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
-    let lhs_id = add_load(&mut dag, lhs_name.clone(), lhs_ty.clone());
-    let rhs_id = add_load(&mut dag, rhs_name.clone(), rhs_ty.clone());
-    let root = tier2::lower_matmul(&mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
+    let lhs_id = add_load(&mut dag, decl, lhs_name.clone(), lhs_ty.clone());
+    let rhs_id = add_load(&mut dag, decl, rhs_name.clone(), rhs_ty.clone());
+    let root = tier2::lower_matmul(
+        decl.into(),
+        &mut dag,
+        lhs_id,
+        rhs_id,
+        &lhs_ty,
+        &rhs_ty,
+        None,
+    );
     let mut inputs = UnordMap::new();
     inputs.insert(lhs_name, lhs.value.clone());
     inputs.insert(rhs_name, rhs.value.clone());
@@ -2013,8 +2022,14 @@ fn tensor_type_for(tensor: &RuntimeTensorValue) -> TensorType {
     }
 }
 
-fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, Vec::new(), ty, None)
+fn add_load(dag: &mut Dag, decl: DeclId, name: String, ty: TensorType) -> NodeId {
+    dag.add_node(
+        decl,
+        RiscOp::Load { name: name.into() },
+        Vec::new(),
+        ty,
+        None,
+    )
 }
 
 fn extract_root(
@@ -2056,13 +2071,14 @@ pub(super) fn eval_composed_unary<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, &TensorType) -> NodeId,
+    F: FnOnce(&mut Dag, DeclId, NodeId, &TensorType) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed unary");
     let ty = tensor_type_for(x);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
-    let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
-    let root = build(&mut dag, x_id, &ty);
+    let x_id = add_load(&mut dag, decl, x_name.clone(), ty.clone());
+    let root = build(&mut dag, decl, x_id, &ty);
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     extract_root(&dag, &inputs, root, "composed unary tier2")
@@ -2078,19 +2094,27 @@ pub(super) fn eval_composed_triop<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, NodeId, NodeId, (&TensorType, &TensorType, &TensorType)) -> NodeId,
+    F: FnOnce(
+        &mut Dag,
+        DeclId,
+        NodeId,
+        NodeId,
+        NodeId,
+        (&TensorType, &TensorType, &TensorType),
+    ) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed triop");
     let x_ty = tensor_type_for(x);
     let g_ty = tensor_type_for(gamma);
     let b_ty = tensor_type_for(beta);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let g_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let b_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}2");
-    let x_id = add_load(&mut dag, x_name.clone(), x_ty.clone());
-    let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
-    let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
-    let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
+    let x_id = add_load(&mut dag, decl, x_name.clone(), x_ty.clone());
+    let g_id = add_load(&mut dag, decl, g_name.clone(), g_ty.clone());
+    let b_id = add_load(&mut dag, decl, b_name.clone(), b_ty.clone());
+    let root = build(&mut dag, decl, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     inputs.insert(g_name, gamma.value.clone());
@@ -2149,12 +2173,22 @@ pub(super) fn conv_host(
     let input_ty = tensor_type_for(input);
     let kernel_ty = tensor_type_for(kernel);
     let mut dag = Dag::new();
+    let decl = dag.declare("conv");
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
-    let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
-    let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
+    let x_id = add_load(&mut dag, decl, x_name.clone(), input_ty.clone());
+    let k_id = add_load(&mut dag, decl, k_name.clone(), kernel_ty.clone());
     let root = tier2::lower_conv(
-        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
+        decl.into(),
+        &mut dag,
+        x_id,
+        k_id,
+        &input_ty,
+        &kernel_ty,
+        &output_ty,
+        strides,
+        padding,
+        None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
@@ -2506,24 +2540,41 @@ pub(super) fn tensor_where_value(
     if cond.precision != Prim::Bool {
         return Err("where expects bool tensor condition".to_string());
     }
-    if cond.value.shape != then_tensor.value.shape
-        || then_tensor.value.shape != else_tensor.value.shape
-    {
-        return Err(
-            "where expects condition and both branches to have identical shape".to_string(),
-        );
-    }
     if then_tensor.precision != else_tensor.precision {
         return Err("where expects matching branch precision".to_string());
     }
-    // reuse_* contract: `where` selects existing elements from the two
-    // branches (section C3, element-preserving). Start from the then
-    // branch and overwrite else-selected slots.
     let cond_mask = cond
         .value
         .storage()
         .to_i64_exact_vec()
         .expect("bool tensor storage reads exactly");
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked.
+    let then_selected = cond_mask.iter().any(|flag| *flag != 0);
+    let else_selected = cond_mask.contains(&0);
+    let shape_error =
+        || "where expects condition and both branches to have identical shape".to_string();
+    match (then_selected, else_selected) {
+        (true, false) if cond.value.shape != then_tensor.value.shape => return Err(shape_error()),
+        (true, false) => return Ok(then_tensor.clone()),
+        (false, true) if cond.value.shape != else_tensor.value.shape => return Err(shape_error()),
+        (false, true) => return Ok(else_tensor.clone()),
+        (false, false) => {
+            return Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                cond.value.shape.clone(),
+                tensor_from_scalars(then_tensor.precision, &[]),
+            )));
+        }
+        (true, true) => {}
+    }
+    if cond.value.shape != then_tensor.value.shape
+        || then_tensor.value.shape != else_tensor.value.shape
+    {
+        return Err(shape_error());
+    }
+    // reuse_* contract: `where` selects existing elements from the two
+    // branches (section C3, element-preserving). Start from the then
+    // branch and overwrite else-selected slots.
     let writes = cond_mask
         .iter()
         .enumerate()
@@ -3016,26 +3067,26 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     // width), so the former f64-image bridge `render_tensor_element` and
     // its tag-vs-bits disagreement arm are structurally unreachable: the
     // storage variant IS the tag.
+    // A key has no numeric element; it renders as its 64 bits (spec/10
+    // section 3.1's key storage carrier spells the same 16 digits).
+    let keys = tensor.value.storage().keys();
+    let element = |index: usize| match keys {
+        Some(keys) => render_key(keys[index]),
+        None => chelis_types::format_element(
+            tensor.precision,
+            tensor.value.storage().element_ref(index),
+        ),
+    };
     if tensor.value.shape.is_empty() {
         assert!(
             !tensor.value.is_empty(),
             "render_tensor: rank-0 tensor with no element (IrTensorValue \
              guarantees numel(shape=[]) == 1 at construction)"
         );
-        return chelis_types::format_element(
-            tensor.precision,
-            tensor.value.storage().element_ref(0),
-        );
+        return element(0);
     }
     let visible = tensor.value.len().min(TENSOR_RENDER_LIMIT);
-    let mut elements: Vec<String> = (0..visible)
-        .map(|index| {
-            chelis_types::format_element(
-                tensor.precision,
-                tensor.value.storage().element_ref(index),
-            )
-        })
-        .collect();
+    let mut elements: Vec<String> = (0..visible).map(element).collect();
     if tensor.value.len() > visible {
         elements.push("...".to_string());
     }
@@ -3073,6 +3124,10 @@ fn schedule_render<'a>(
 // pub(crate): compiler.rs pre-renders each evaluated root's display text
 // through this exact function (the [05-OBS-1] single renderer) while the
 // dtype tags still exist; see `EvaluatedRoot::display`.
+fn render_key(key: RandomKey) -> String {
+    chelis_types::format_key(key)
+}
+
 pub(crate) fn render_value(value: &RuntimeValue) -> String {
     use chelis_types::{ElementRef, format_element};
     // A worklist rather than recursion, and one output buffer rather than a
@@ -3090,6 +3145,7 @@ pub(crate) fn render_value(value: &RuntimeValue) -> String {
         };
         match value {
             RuntimeValue::Tensor(tensor) => out.push_str(&render_tensor(tensor)),
+            RuntimeValue::Key(key) => out.push_str(&render_key(*key)),
             RuntimeValue::Scalar(payload) => {
                 // Scalars carry their dtype in the sealed storage variant
                 // (the dtype/bits invariant holds by construction), so every
@@ -3308,15 +3364,15 @@ pub(super) fn uniform_like_value(
 #[cfg(test)]
 mod uniform_like_affine_tests {
     //! chelis#770/#937: `uniform_like_value` routes through the shared
-    //! per-dtype sampler used by the IR evaluator. These pin the draw for seed
-    //! 42 and ordinal 0 over shape [8], at elements where the single-rounding
-    //! f32 FMA differs from the old f64 affine and from a two-rounding f32
-    //! affine, plus a negative range. The pinned bits are exact-rational
-    //! evaluations of [05-RNG-1] and [05-OP-8] from the spec text
-    //! (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
+    //! per-dtype sampler used by the IR evaluator. These pin the draw keyed by
+    //! `key_from_seed(42)` over shape [12], at elements where the
+    //! single-rounding f32 FMA differs from the old f64 affine and from a
+    //! two-rounding f32 affine, plus a negative range. The pinned bits are
+    //! exact-rational evaluations of [05-RNG-2]'s word (`key_ref.py`) and
+    //! [05-OP-8] (`keys-b-h9-probes/port_ref.py`).
     use super::*;
 
-    // [05-RNG-1] transcribed from the spec text, never the kernel.
+    // [05-RNG-1]'s splitmix64 transcribed from the spec text, never the kernel.
     fn splitmix64(x: u64) -> u64 {
         let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -3324,18 +3380,19 @@ mod uniform_like_affine_tests {
         z ^ (z >> 31)
     }
 
-    fn key(seed: u64, ordinal: u64) -> u64 {
-        seed ^ splitmix64(ordinal).rotate_left(17)
-    }
+    /// `[05-OP-69]`: `key_from_seed(42)`, whose bits are the seed's bits.
+    const KEY_BITS: u64 = 42;
 
     fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
         let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
         let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
-        uniform_like_value(template, &prepared, RandomKey::from_counter(42, 0)).unwrap()
+        let key = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 42).unwrap()).unwrap();
+        uniform_like_value(template, &prepared, key).unwrap()
     }
 
-    fn unit(seed: u64, ordinal: u64, index: u64) -> f64 {
-        let word = splitmix64(key(seed, ordinal) ^ splitmix64(index).rotate_left(41));
+    /// [05-RNG-2]'s `word(k, i)` and [05-RNG-1]'s unit at `KEY_BITS`.
+    fn unit(index: u64) -> f64 {
+        let word = splitmix64(KEY_BITS ^ splitmix64(index).rotate_left(41));
         (word >> 11) as f64 / (1_u64 << 53) as f64
     }
 
@@ -3355,33 +3412,33 @@ mod uniform_like_affine_tests {
 
     #[test]
     fn affine_mirrors_c_f32_sampler_positive_range() {
-        let out = draw(&template_f32(8), 2.0, 5.0);
-        // elem[6]: the single-rounding FMA gives 0x40683468 where the old f64
+        let out = draw(&template_f32(12), 2.0, 5.0);
+        // elem[11]: the single-rounding FMA gives 0x406d6dc6 where the old f64
         // affine rounded to the adjacent f32.
-        assert_eq!(f32_bits(&out, 6), 0x4068_3468);
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(42, 0, 6);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x4068_3467);
-        // elem[2]: a plain two-rounding `low + span * unit` differs by 1 ULP,
+        assert_eq!(f32_bits(&out, 11), 0x406d_6dc6);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(11);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x406d_6dc5);
+        // elem[10]: a plain two-rounding `low + span * unit` differs by 1 ULP,
         // the bit the compiled C lane would flip between `-ffp-contract=fast`
         // and `=off` without its explicit `fmaf`.
-        assert_eq!(f32_bits(&out, 2), 0x401c_b39d);
-        let two_rounding_2 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(42, 0, 2) as f32);
-        assert_eq!(two_rounding_2.to_bits(), 0x401c_b39c);
-        assert_eq!(f32_bits(&out, 7), 0x401b_f5fc);
+        assert_eq!(f32_bits(&out, 10), 0x4034_fb45);
+        let two_rounding_10 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(10) as f32);
+        assert_eq!(two_rounding_10.to_bits(), 0x4034_fb44);
+        assert_eq!(f32_bits(&out, 7), 0x408f_92d9);
     }
 
     #[test]
     fn affine_is_f32_for_negative_range() {
         let out = draw(&template_f32(8), -3.0, -1.0);
-        assert_eq!(f32_bits(&out, 3), 0xc03b_a886);
+        assert_eq!(f32_bits(&out, 3), 0xc027_e1a4);
     }
 
     #[test]
     fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
         let out = draw(&template_f64(8), 2.0, 5.0);
         assert_eq!(out.precision, Prim::F64);
-        let expected = (5.0f64 - 2.0).mul_add(unit(42, 0, 4), 2.0);
-        assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
+        let expected = (5.0f64 - 2.0).mul_add(unit(4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4005_8b85_e511_043a);
         assert_eq!(out.value.element_f64_lossy(4).to_bits(), expected.to_bits());
         assert_ne!(
             out.value.element_f64_lossy(4).to_bits(),
@@ -3455,12 +3512,13 @@ mod numeric_trap_forwarding_tests {
             vec![i64::from(i32::MAX), 1],
         )
         .expect("input is representable at i32");
-        let err = eval_composed_unary(&input, |dag, x, ty| {
+        let err = eval_composed_unary(&input, |dag, decl, x, ty| {
             let output_ty = TensorType {
                 dims: Vec::new(),
                 precision: ty.precision,
             };
             dag.add_node(
+                decl,
                 RiscOp::sum_default(0, ty.precision).expect("i8 sum is admitted"),
                 vec![x],
                 output_ty,

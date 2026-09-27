@@ -846,6 +846,37 @@ mod tests {
         );
     }
 
+    /// chelis#2413: the `with seed(..)` handler and the `Random` effect name
+    /// are retired spellings the compiler parser refuses, so the grammar
+    /// refuses them too, and the validator reports no grammar/parser split.
+    /// `with device(..)` and `! {Diff}` stay admitted.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At `096daea8c` the grammar
+    /// admitted all three retired rows.
+    #[test]
+    fn surf_grammar_refuses_the_retired_randomness_spellings() {
+        use pest::Parser as _;
+        let grammar =
+            |source: &str| super::surf::Grammar::parse(super::surf::Rule::program, source).is_ok();
+        for source in [
+            "def f() = with seed(1) { 1.0 }\n",
+            "def f(x: f32) -> f32 ! {Random} = x\n",
+            "def f(x: f32) -> f32 ! {random} = x\n",
+        ] {
+            assert!(!grammar(source), "the grammar admits {source:?}");
+            let message = validate_surf(source)
+                .expect_err("the compiler parser refuses it")
+                .to_string();
+            assert!(!message.contains("too lenient"), "{message}");
+        }
+        for source in [
+            "def f() = with device(\"cpu\") { 1.0 }\n",
+            "def f(x: f32) -> f32 ! {Diff} = x\n",
+        ] {
+            assert!(grammar(source), "the grammar refuses {source:?}");
+        }
+    }
+
     #[test]
     fn surf_par_bare_items_are_rejected_like_the_parser() {
         // The par{} companion: newline-separated items the parser rejects.

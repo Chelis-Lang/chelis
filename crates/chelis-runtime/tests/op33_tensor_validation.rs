@@ -7,17 +7,16 @@
 
 use chelis_runtime::{
     chelis_alloc, chelis_contiguous, chelis_dict_from_pairs, chelis_dict_get_scalar, chelis_list,
-    chelis_list_from_values, chelis_metadata_plan_new, chelis_print_list, chelis_scalar,
-    chelis_scalar_from_bits, chelis_string_from_cstr, chelis_tensor, chelis_tensor_alloc_like,
-    chelis_tensor_begin_write, chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_concat,
-    chelis_tensor_cumsum, chelis_tensor_diagonal, chelis_tensor_einsum, chelis_tensor_elements,
-    chelis_tensor_end_write, chelis_tensor_from_values, chelis_tensor_gather,
-    chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_reshape,
-    chelis_tensor_scatter_add, chelis_tensor_scatter_replace, chelis_tensor_sort,
-    chelis_tensor_split, chelis_tensor_trace, chelis_tensor_where, chelis_tensor_write_literal,
-    chelis_tensor_write_view, chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_BOOL,
-    CHELIS_DTYPE_F32, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
-    CHELIS_DTYPE_KEY,
+    chelis_list_from_values, chelis_metadata_plan_new, chelis_scalar, chelis_scalar_from_bits,
+    chelis_string_from_cstr, chelis_tensor, chelis_tensor_alloc_like, chelis_tensor_begin_write,
+    chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_concat, chelis_tensor_cumsum,
+    chelis_tensor_diagonal, chelis_tensor_einsum, chelis_tensor_elements, chelis_tensor_end_write,
+    chelis_tensor_from_values, chelis_tensor_gather, chelis_tensor_read_view,
+    chelis_tensor_release, chelis_tensor_reshape, chelis_tensor_scatter_add,
+    chelis_tensor_scatter_replace, chelis_tensor_sort, chelis_tensor_split, chelis_tensor_trace,
+    chelis_tensor_where, chelis_tensor_write_literal, chelis_tensor_write_view,
+    chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32,
+    CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8, CHELIS_DTYPE_KEY,
 };
 use std::env;
 use std::ffi::CString;
@@ -326,10 +325,6 @@ fn run_key_case(case: &str) -> ! {
             "elements-empty" => {
                 chelis_tensor_elements(tensor(CHELIS_DTYPE_KEY, &[0]));
             }
-            "format-empty" => {
-                let parts = [chelis_value_take_tensor(tensor(CHELIS_DTYPE_KEY, &[0]))];
-                chelis_print_list(chelis_list_from_values(parts.as_ptr(), 1));
-            }
             "write-literal-empty" => {
                 let guard = chelis_tensor_begin_write(tensor(CHELIS_DTYPE_KEY, &[0]));
                 chelis_tensor_write_literal(
@@ -370,7 +365,6 @@ fn key_tensors_are_forbidden_carriers_of_every_data_operation() {
         "metadata-plan-exemplar",
         "dict-scalar-dtype",
         "elements-empty",
-        "format-empty",
         "write-literal-empty",
     ] {
         let output = Command::new(&test_binary)
@@ -419,5 +413,81 @@ fn key_tensors_keep_their_storage_callables() {
         assert_eq!(chelis_tensor_read_view(copied).dtype, CHELIS_DTYPE_KEY);
         chelis_tensor_release(copied);
         chelis_tensor_release(source);
+    }
+}
+
+const WHERE_CHILD_ENV: &str = "CHELIS_OP53_WHERE_CHILD";
+
+/// A bool condition of `flags`, and f32 branches of `then_len` and
+/// `else_len` elements numbered from 1 and from 11.
+unsafe fn uniform_where_operands(
+    flags: &[u8],
+    then_len: usize,
+    else_len: usize,
+) -> [*mut chelis_tensor; 3] {
+    let condition = tensor(CHELIS_DTYPE_BOOL, &[flags.len() as i64]);
+    write(condition, flags);
+    let then_tensor = tensor(CHELIS_DTYPE_F32, &[then_len as i64]);
+    write(
+        then_tensor,
+        &(1..=then_len).map(|v| v as f32).collect::<Vec<_>>(),
+    );
+    let else_tensor = tensor(CHELIS_DTYPE_F32, &[else_len as i64]);
+    write(
+        else_tensor,
+        &(11..11 + else_len).map(|v| v as f32).collect::<Vec<_>>(),
+    );
+    [condition, then_tensor, else_tensor]
+}
+
+/// [05-OP-53]: the condition's shape equals the shape of every branch it
+/// selects, and a branch it selects nowhere is neither read nor
+/// shape-checked. A uniform condition shaped like its selected branch yields
+/// that branch whatever the other branch's extent; one shaped unlike it is
+/// refused with the runtime's shape trap.
+///
+/// Evidentiary status: REGRESSION TEST for the refused rows (at 1a026f823
+/// each returns its selected branch); DISPOSITION LOCK for the accepted rows.
+#[test]
+fn where_refuses_a_uniform_condition_shaped_unlike_its_selected_branch() {
+    if let Ok(case) = env::var(WHERE_CHILD_ENV) {
+        unsafe {
+            let [condition, then_tensor, else_tensor] = match case.as_str() {
+                "uniform-true" => uniform_where_operands(&[1, 1, 1], 2, 3),
+                "uniform-false" => uniform_where_operands(&[0, 0, 0], 3, 2),
+                other => panic!("unknown where case: {other}"),
+            };
+            chelis_tensor_where(condition, then_tensor, else_tensor);
+        }
+        panic!("where case `{case}` returned instead of terminating");
+    }
+    unsafe {
+        for (flags, then_len, else_len, expected) in [
+            (&[1_u8, 1][..], 2, 3, vec![1.0_f32, 2.0]),
+            (&[0_u8, 0, 0][..], 2, 3, vec![11.0_f32, 12.0, 13.0]),
+        ] {
+            let operands = uniform_where_operands(flags, then_len, else_len);
+            let selected = chelis_tensor_where(operands[0], operands[1], operands[2]);
+            assert_eq!(read::<f32>(selected), expected, "{flags:?}");
+            chelis_tensor_release(selected);
+            for operand in operands {
+                chelis_tensor_release(operand);
+            }
+        }
+    }
+    let test_binary = env::current_exe().expect("current test binary");
+    for case in ["uniform-true", "uniform-false"] {
+        let output = Command::new(&test_binary)
+            .env(WHERE_CHILD_ENV, case)
+            .arg("--exact")
+            .arg("where_refuses_a_uniform_condition_shaped_unlike_its_selected_branch")
+            .arg("--nocapture")
+            .output()
+            .expect("run where child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("where expects matching tensor shape"),
+            "where case `{case}` was not refused with the shape trap:\n{stderr}"
+        );
     }
 }

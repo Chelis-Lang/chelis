@@ -91,7 +91,7 @@ const CASES: &[(&str, &str)] = &[
     ("doc", "(var {doc: \"documentation\"} x)"),
     (
         "effect",
-        "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
+        "(handle-effect {effect: resource} (lit {} 1) (lit {} 2))",
     ),
     ("literal_source", "(lit {literal_source: integer} 1)"),
     ("destructure", "(bind {destructure: true} x (lit {} 1))"),

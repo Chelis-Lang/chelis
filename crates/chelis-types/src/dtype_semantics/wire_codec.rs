@@ -4,7 +4,7 @@
 //! uses an external discriminant because bincode cannot decode internally tagged
 //! maps. Both forms preserve bits and use the same strict payload admission.
 
-use super::{Bits, Buf, ScalarValue, TensorStorage};
+use super::{Bits, Buf, RandomKey, ScalarValue, TensorStorage};
 use serde::{Deserialize, Serialize};
 
 const KEY_HAS_NO_LITERAL_CARRIER: &str =
@@ -75,6 +75,106 @@ impl<const DIGITS: usize> schemars::JsonSchema for HexBits<DIGITS> {
     }
 }
 
+/// A key's 64 bits as spec/10 section 3.2's `h`: exactly 16 lowercase
+/// hexadecimal digits, most significant first. Its own type, not
+/// `HexBits<16>`, so a key never reads as IEEE bits.
+#[derive(Clone, Serialize)]
+#[serde(transparent)]
+struct KeyHex(String);
+
+impl KeyHex {
+    fn from_key(key: RandomKey) -> Self {
+        Self(format!("{:016x}", key.bits))
+    }
+
+    fn key(&self) -> RandomKey {
+        // Deserialize admits exactly the lowercase 16-digit grammar.
+        let bits = self.0.bytes().fold(0_u64, |bits, digit| {
+            (bits << 4)
+                | u64::from(if digit <= b'9' {
+                    digit - b'0'
+                } else {
+                    digit - b'a' + 10
+                })
+        });
+        RandomKey { bits }
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyHex {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.len() != 16
+            || !text
+                .bytes()
+                .all(|digit| digit.is_ascii_digit() || (b'a'..=b'f').contains(&digit))
+        {
+            return Err(serde::de::Error::custom(
+                "a key's bits require exactly 16 lowercase hexadecimal digits",
+            ));
+        }
+        Ok(Self(text))
+    }
+}
+
+impl schemars::JsonSchema for KeyHex {
+    fn schema_name() -> String {
+        "KeyBits".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, SchemaObject, StringValidation};
+        SchemaObject {
+            instance_type: Some(InstanceType::String.into()),
+            string: Some(Box::new(StringValidation {
+                min_length: Some(16),
+                max_length: Some(16),
+                pattern: Some("^[0-9a-f]{16}$".to_string()),
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
+/// spec/10 section 3.2's scalar key carrier, the `h` of the execution value
+/// `{"type":"key","bits":h}`. A key is not a number, so this is not a
+/// [`ScalarValue`] payload and has no scalar object of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBits(RandomKey);
+
+impl KeyBits {
+    pub fn new(key: RandomKey) -> Self {
+        Self(key)
+    }
+
+    pub fn key(self) -> RandomKey {
+        self.0
+    }
+}
+
+impl Serialize for KeyBits {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        KeyHex::from_key(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyBits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self(KeyHex::deserialize(deserializer)?.key()))
+    }
+}
+
+impl schemars::JsonSchema for KeyBits {
+    fn schema_name() -> String {
+        KeyHex::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        KeyHex::json_schema(generator)
+    }
+}
+
 // Author each dtype/payload relationship once. The cache mirror changes only
 // the enclosing discriminant representation; it has no alternate numeric path.
 macro_rules! wire_enum {
@@ -138,6 +238,9 @@ wire_enum!(StorageWire, BinaryStorageWire {
     I16("int16") { values: Vec<i16> },
     I8("int8") { values: Vec<i8> },
     Bool("bool") { values: Vec<bool> },
+    // Execution values only: a graph holds no key literal, so
+    // `TensorStorage`'s own codec refuses this variant.
+    Key("key") { bits: Vec<KeyHex> },
 });
 
 impl schemars::JsonSchema for ScalarValue {
@@ -154,8 +257,33 @@ impl schemars::JsonSchema for TensorStorage {
         "TensorStorage".to_string()
     }
     fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        StorageWire::json_schema(generator)
+        let mut schema = StorageWire::json_schema(generator).into_object();
+        if let Some(variants) = schema
+            .subschemas
+            .as_mut()
+            .and_then(|subschemas| subschemas.one_of.as_mut())
+        {
+            variants.retain(|variant| !is_key_variant(variant));
+        }
+        schema.into()
     }
+}
+
+fn is_key_variant(variant: &schemars::schema::Schema) -> bool {
+    let schemars::schema::Schema::Object(variant) = variant else {
+        return false;
+    };
+    variant
+        .object
+        .as_ref()
+        .and_then(|object| object.properties.get("dtype"))
+        .is_some_and(|dtype| match dtype {
+            schemars::schema::Schema::Object(dtype) => dtype
+                .enum_values
+                .as_deref()
+                .is_some_and(|values| matches!(values, [value] if value.as_str() == Some("key"))),
+            schemars::schema::Schema::Bool(_) => false,
+        })
 }
 
 impl Serialize for ScalarValue {
@@ -205,7 +333,16 @@ impl<'de> Deserialize<'de> for ScalarValue {
 
 impl Serialize for TensorStorage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match &self.buf {
+        if matches!(self.buf, Buf::Key(_)) {
+            return Err(serde::ser::Error::custom(KEY_HAS_NO_LITERAL_CARRIER));
+        }
+        storage_wire(self).encode(serializer)
+    }
+}
+
+fn storage_wire(storage: &TensorStorage) -> StorageWire {
+    {
+        match &storage.buf {
             Buf::F64(v) => StorageWire::F64 {
                 bits: v.iter().map(|v| HexBits::from_bits(v.to_bits())).collect(),
             },
@@ -234,15 +371,26 @@ impl Serialize for TensorStorage {
             Buf::Bool(v) => StorageWire::Bool {
                 values: v.iter().map(|v| *v != 0).collect(),
             },
-            Buf::Key(_) => return Err(serde::ser::Error::custom(KEY_HAS_NO_LITERAL_CARRIER)),
+            Buf::Key(v) => StorageWire::Key {
+                bits: v.iter().map(|key| KeyHex::from_key(*key)).collect(),
+            },
         }
-        .encode(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for TensorStorage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let buf = match StorageWire::decode(deserializer)? {
+        let wire = StorageWire::decode(deserializer)?;
+        if matches!(wire, StorageWire::Key { .. }) {
+            return Err(serde::de::Error::custom(KEY_HAS_NO_LITERAL_CARRIER));
+        }
+        Ok(storage_from_wire(wire))
+    }
+}
+
+fn storage_from_wire(wire: StorageWire) -> TensorStorage {
+    {
+        let buf = match wire {
             StorageWire::F64 { bits } => {
                 Buf::F64(bits.into_iter().map(|b| f64::from_bits(b.bits())).collect())
             }
@@ -266,7 +414,36 @@ impl<'de> Deserialize<'de> for TensorStorage {
             StorageWire::I16 { values } => Buf::I16(values),
             StorageWire::I8 { values } => Buf::I8(values),
             StorageWire::Bool { values } => Buf::Bool(values.into_iter().map(u8::from).collect()),
+            StorageWire::Key { bits } => Buf::Key(bits.iter().map(KeyHex::key).collect()),
         };
-        Ok(Self { buf })
+        TensorStorage { buf }
+    }
+}
+
+/// spec/10 section 3.2's storage object inside a tensor execution value:
+/// the graph storage grammar plus a key tensor's
+/// `{"dtype":"key","bits":[h,...]}`. Use with `#[serde(with = ...)]` on an
+/// execution carrier's storage field; a graph field keeps
+/// [`TensorStorage`]'s own codec, which refuses a key.
+pub mod execution_storage {
+    use super::{StorageWire, TensorStorage, storage_from_wire, storage_wire};
+
+    pub fn serialize<S: serde::Serializer>(
+        storage: &TensorStorage,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        storage_wire(storage).encode(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<TensorStorage, D::Error> {
+        Ok(storage_from_wire(StorageWire::decode(deserializer)?))
+    }
+
+    pub fn json_schema(
+        generator: &mut schemars::r#gen::SchemaGenerator,
+    ) -> schemars::schema::Schema {
+        <StorageWire as schemars::JsonSchema>::json_schema(generator)
     }
 }

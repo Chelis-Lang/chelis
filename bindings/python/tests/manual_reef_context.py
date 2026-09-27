@@ -9,8 +9,8 @@ This test builds its own temp reef project depending on the bundled `chelis-std`
 package plus a sibling library module, so it is dev-compiler-clean and needs no
 network. See the module docstring in `crates/chelis-python/tests/manual_reef_context.rs`
 for the environment prerequisites and the Shoals-specific note (the published
-Shoals 0.23.1 artifact fails HEAD's `with seed(...)` i64 rule — tracked as
-chelis#825).
+Shoals 0.23.1 artifact uses the `with seed(...)` surface, which the explicit-key
+switch retired, chelis#2413 — tracked as chelis#825).
 
 Run (from the repo root, with the bindings installed into `py/.venv` -- the
 same venv the cargo driver in crates/chelis-python/tests/manual_reef_context.rs

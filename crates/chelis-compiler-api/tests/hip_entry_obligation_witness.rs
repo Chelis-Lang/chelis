@@ -20,8 +20,9 @@ fn tensor(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }
 }
 
-fn load(dag: &mut Dag, name: &str) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32),
@@ -29,8 +30,15 @@ fn load(dag: &mut Dag, name: &str) -> NodeId {
     )
 }
 
-fn witness(dag: &mut Dag, parameter: &str, input: NodeId, claims: Vec<ExtentClaim>) -> NodeId {
+fn witness(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    parameter: &str,
+    input: NodeId,
+    claims: Vec<ExtentClaim>,
+) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: parameter.into(),
@@ -54,11 +62,13 @@ fn witness(dag: &mut Dag, parameter: &str, input: NodeId, claims: Vec<ExtentClai
 #[test]
 fn an_entry_obligation_witness_passes_the_hip_gate() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x");
-    let p = load(&mut dag, "p");
-    let declaring = witness(&mut dag, "x", x, Vec::new());
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x");
+    let p = load(&mut dag, decl, "p");
+    let declaring = witness(&mut dag, decl, "x", x, Vec::new());
     let owed = witness(
         &mut dag,
+        decl,
         "p",
         p,
         vec![ExtentClaim {
@@ -68,6 +78,7 @@ fn an_entry_obligation_witness_passes_the_hip_gate() {
     );
     dag.node_mut(owed).expect("witness").inputs.push(declaring);
     let result = dag.add_node(
+        decl,
         RiscOp::Copy,
         vec![x],
         tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32),
@@ -89,11 +100,13 @@ fn an_entry_obligation_witness_passes_the_hip_gate() {
 #[test]
 fn a_witness_a_device_node_reads_still_draws_the_shape_refusal() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x");
-    let p = load(&mut dag, "p");
-    let declaring = witness(&mut dag, "x", x, Vec::new());
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x");
+    let p = load(&mut dag, decl, "p");
+    let declaring = witness(&mut dag, decl, "x", x, Vec::new());
     let owed = witness(
         &mut dag,
+        decl,
         "p",
         p,
         vec![ExtentClaim {
@@ -103,6 +116,7 @@ fn a_witness_a_device_node_reads_still_draws_the_shape_refusal() {
     );
     dag.node_mut(owed).expect("witness").inputs.push(declaring);
     let read = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },

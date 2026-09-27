@@ -328,11 +328,11 @@ fn no_legacy_tags() {
 
 #[test]
 fn effect_annotations_desugar_into_t_fn_metadata() {
-    let decls = surf_parse("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}").unwrap();
+    let decls = surf_parse("sig f: f32 -> f32 ! {Diff, Accum, Resource(\"gpu:0\")}").unwrap();
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let text = print_canonical(&deep);
     assert!(
-        text.contains("{eff: (effects {} diff random (resource {} \"gpu:0\"))}"),
+        text.contains("{eff: (effects {} diff accum (resource {} \"gpu:0\"))}"),
         "Expected effect metadata on t-fn, got:\n{text}"
     );
 }
@@ -635,14 +635,23 @@ fn parsed_surf_expression_spans_enter_deep_metadata() {
 }
 
 #[test]
-fn with_seed_desugars_to_handle_effect() {
-    let decls = surf_parse("def f() = with seed(42) { dropout(x, 0.5) }").unwrap();
-    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
-    let text = print_canonical(&deep);
-    assert!(
-        text.contains("(handle-effect {effect: random"),
-        "Expected random handler node, got:\n{text}"
-    );
+fn retired_seed_handler_and_random_effect_are_typed_parse_errors() {
+    // The counter stream's `with seed` handler and `Random` effect were
+    // retired with the explicit key switch (#2413); both are typed parse
+    // errors that point at explicit keys.
+    for source in [
+        "def f() = with seed(42i64) { x }",
+        "sig f: f32 -> f32 ! {Random}",
+    ] {
+        let error = surf_parse(source).expect_err(source);
+        assert!(
+            matches!(
+                error,
+                chelis_surf::parser::ParseError::RetiredRandomness { .. }
+            ),
+            "{source}: {error:?}"
+        );
+    }
 }
 
 #[test]

@@ -14,7 +14,7 @@ def fixture(contracts):
             (),
             (),
             (),
-            (Edge(c.field, c.type, ()),),
+            (Edge(c.field, c.type, c.serde),),
             "serde-derived",
         )
         for c in contracts

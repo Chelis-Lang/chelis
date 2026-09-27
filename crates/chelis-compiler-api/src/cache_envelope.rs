@@ -84,7 +84,9 @@ impl CachePayload for crate::LibraryContext {
     // V19 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
     // variants, so bincode variant indices shifted, and checked type
     // annotations are node-spelled on every ingress.
-    const FORMAT_VERSION: u32 = 19;
+    // V20 (chelis#2413): `Effect::Random` is gone, so every effect's bincode
+    // variant index shifted, and Deep lost the `random` handler kind.
+    const FORMAT_VERSION: u32 = 20;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -98,12 +100,34 @@ impl CachePayload for crate::StdLibContext {
     // V24 retains TypeEnv callable provenance for contextual grad selectors.
     // V25: the V19 single-node-spelling reason above, for the standard library.
     // V27 (chelis#2413): the lowered library's random draws are key-operand
-    // nodes fed by `DrawKey` and the baked random variants are gone, so
+    // nodes fed by a counter-stream bridge operation and the baked random
+    // variants are gone, so
     // bincode variant indices shift. V26 was an intermediate state of the same
     // change and never shipped.
     // V28 (chelis#2413): the explicit key operations join `RiscOp` and `key`
     // becomes a storage dtype, so bincode variant indices shift again.
-    const FORMAT_VERSION: u32 = 28;
+    // V31 (chelis#2413): the counter-stream bridge `RiscOp` variant, the
+    // `Random` effect and the `random` handler kind are deleted with the
+    // counter stream, so bincode variant indices shift again, and every DAG
+    // node carries its declaration as a required field (chelis#2476). V29
+    // and V30 were intermediate states of the same change and never shipped.
+    // V33 (chelis#2413): every DAG node's required declaration widens into an
+    // owner, its declaration and its activation, and a declaration no longer
+    // records the value declarations it references. V32 was an intermediate
+    // state of the same change and never shipped.
+    // V34 (chelis#2413): a draw's and a key operation's activation is its
+    // node's owner's and no longer a trailing input, so a cached lowered
+    // library's draw and key-operation inputs change meaning while their
+    // bincode shape does not. V33 was an intermediate state of the same
+    // change and never shipped.
+    // V35 (chelis#2413): a local ascription's claims are carried on a node
+    // owned by the ascription's position and checked under that owner's
+    // activation, where the activation had been a Bool shape dependency, and
+    // a potentially trapping integer reduction, empty reduced axis, runtime
+    // movement bound or extent claim is a trap seed, so a cached lowered
+    // library's claim carriers and retained dead nodes change meaning while
+    // their bincode shape does not.
+    const FORMAT_VERSION: u32 = 35;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

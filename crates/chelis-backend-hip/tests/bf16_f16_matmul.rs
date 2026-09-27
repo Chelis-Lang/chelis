@@ -101,13 +101,16 @@ fn f16_matmul_with_explicit_f16_accumulator_is_rejected_by_ir() {
 #[test]
 fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F32),
@@ -115,7 +118,13 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     );
     // Output dtype is intentionally one of the operand dtypes; the
     // validator's job is to spot the input mismatch regardless.
-    let _add = dag.add_node(RiscOp::Add, vec![a, b], matrix(2, 3, Prim::Bf16), None);
+    let _add = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![a, b],
+        matrix(2, 3, Prim::Bf16),
+        None,
+    );
 
     let errors = chelis_ir::verify::verify(&dag);
     assert!(
@@ -139,13 +148,16 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
 #[should_panic(expected = "operand promotion to `f64`")]
 fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -160,7 +172,7 @@ fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
         Prim::F64,
     )
     .expect("bf16+f64 accumulator constructs (wider than default = §5.7.1 admissible)");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     // Should panic inside emit_blas_matmul with the WS-A2-routing
@@ -175,13 +187,16 @@ fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
 #[test]
 fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -195,7 +210,7 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs with default accumulator");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_bf16_default").unwrap();
@@ -219,13 +234,16 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
 #[test]
 fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F16),
@@ -239,7 +257,7 @@ fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
         Prim::F16,
     )
     .expect("f16 matmul constructs with default accumulator");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_f16_default").unwrap();
@@ -265,13 +283,16 @@ fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
 #[test]
 fn f32_matmul_does_not_emit_bf16_or_f16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F32),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F32),
@@ -285,7 +306,7 @@ fn f32_matmul_does_not_emit_bf16_or_f16_gemm_wrapper() {
         Prim::F32,
     )
     .expect("f32 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F32), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F32), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_f32_baseline").unwrap();
@@ -731,13 +752,16 @@ fn assert_within_relative_tolerance(actual: &[f32], expected: &[f32], rel_tol: f
             as of 2026-05-11)"]
 fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -751,7 +775,7 @@ fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -780,13 +804,16 @@ fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
             as of 2026-05-11)"]
 fn f16_matmul_with_default_f32_accumulator_within_tolerance() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F16),
@@ -800,7 +827,7 @@ fn f16_matmul_with_default_f32_accumulator_within_tolerance() {
         Prim::F16,
     )
     .expect("f16 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
     dag.add_root(out);
 
     let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];

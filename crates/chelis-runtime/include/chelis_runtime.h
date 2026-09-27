@@ -25,6 +25,7 @@ typedef struct chelis_option chelis_option;
 typedef struct chelis_mapped_file chelis_mapped_file;
 
 typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;
+typedef struct { uint64_t bits; } chelis_key;
 typedef uint8_t chelis_value_tag;
 enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };
 typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;
@@ -323,12 +324,19 @@ static inline int64_t chelis_int_shr(int64_t value, int64_t amount, int bits) {
     return chelis_int_from_twos(shifted, bits);
 }
 chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits);
+/* [05-OP-69]: the key of a seed, whose bits are the seed's two's-complement
+ * bits with no mixing. A key is never a bare integer at the boundary: a public
+ * entry takes and returns it as this carrier (spec/08 section 2). */
+chelis_key chelis_key_from_seed(int64_t seed);
 chelis_value chelis_value_box_scalar(chelis_scalar value);
 chelis_scalar chelis_value_unbox_scalar(chelis_value value);
 chelis_tensor *chelis_scalar_tensor(chelis_scalar value);
 chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor);
 void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);
 chelis_string chelis_string_from_scalar(chelis_scalar value);
+/* [05-OBS-2]: a key's printed form, `key(` then its 64 bits as 16 lowercase
+ * hex digits, then `)` (spec/08 section 2). */
+chelis_string chelis_string_from_key(chelis_key key);
 chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
 chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);

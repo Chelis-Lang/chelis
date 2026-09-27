@@ -18,6 +18,9 @@ class StructuralFieldContract:
     primitive: str
     role: str
     owner_field: str
+    # The field's exact serde options: none, except a node activation that
+    # must be present on the wire, explicitly null when absent.
+    serde: tuple = ()
 
 
 def structural_contracts():
@@ -32,10 +35,10 @@ def structural_contracts():
     )
     contracts = []
 
-    def add(field, role, ty=u64, owner=None, primitive="u64"):
+    def add(field, role, ty=u64, owner=None, primitive="u64", serde=()):
         contracts.append(
             StructuralFieldContract(
-                schema + field, ty, primitive, role, schema + (owner or field)
+                schema + field, ty, primitive, role, schema + (owner or field), serde
             )
         )
 
@@ -49,19 +52,18 @@ def structural_contracts():
         add(field, "source-byte-coordinate")
     add("EvaluatedRoot.node_id", "opaque-evaluated-node")
     add("WireDagNode.id", "dag-position")
+    add("WireDagNode.declaration", "declaration-row")
+    add(
+        "WireDagNode.activation",
+        "earlier-activation",
+        ("container", "core::option::Option", (u64,)),
+        serde=(("deserialize_with", "require_explicit_activation"),),
+    )
     add("WireDagNode.inputs", "earlier-dag-node", vector)
     add("WireDagNode.shape_deps", "earlier-shape-dependency", vector)
     add(
         "WireExtentWitnessSite::LocalAscriptionClaim.ascription_id",
         "local-ascription-identity",
-    )
-    # Wire v17 (chelis#2413): an opaque `with seed` region identity, not a
-    # count or numeric value; the seed itself is an earlier int64 node.
-    add(
-        "WireRandomHandler::Scoped.instance",
-        "random-handler-instance",
-        u32,
-        primitive="u32",
     )
     for owner in ("WireDag", "WireDagFields", "WireDagFieldsRef"):
         ty = (
@@ -137,7 +139,7 @@ def validate_structural_fields(graph):
         raise GraphError("duplicate structural field contract")
     for contract in contracts:
         edge = fields.get(contract.field)
-        if edge is None or edge.type != contract.type or edge.serde:
+        if edge is None or edge.type != contract.type or edge.serde != contract.serde:
             raise GraphError(f"structural field shape changed: {contract.field}")
     return contracts
 
@@ -225,8 +227,30 @@ def structural_evidence():
             "EvaluatedRoot", "opaque-18446744073709551615", ("opaque--1",), ("json",)
         ),
         "dag-position": pairs("WireDag", "owned-reference", ("id-position",)),
+        "declaration-row": pairs(
+            "WireDag",
+            "shared-declaration-name",
+            (
+                "declaration-row-outside",
+                "declaration-row-unused",
+                "declaration-row-large",
+                "declaration-row-negative",
+                "declaration-row-float",
+            ),
+        ),
         "earlier-dag-node": pairs(
             "WireDag", "owned-reference", ("self-input", "large-input")
+        ),
+        "earlier-activation": pairs(
+            "WireDag",
+            "activated-reference",
+            (
+                "activation-self",
+                "activation-large",
+                "activation-negative",
+                "activation-float",
+                "activation-not-bool",
+            ),
         ),
         "dag-root": pairs("WireDag", "owned-reference", ("root-owner",)),
         "dag-version": pairs(
@@ -242,7 +266,8 @@ def structural_evidence():
                 "version-15",
                 "version-16",
                 "version-17",
-                "version-19",
+                "version-18",
+                "version-20",
             ),
         ),
         "earlier-shape-dependency": pairs(
@@ -259,15 +284,6 @@ def structural_evidence():
             "WireDag",
             "local-ascription-owned",
             ("local-ascription-id-negative", "local-ascription-id-float"),
-        ),
-        "random-handler-instance": pairs(
-            "WireDag",
-            "random-scoped-owned",
-            (
-                "random-instance-negative",
-                "random-instance-4294967296",
-                "random-instance-float",
-            ),
         ),
         "lower-result-node": pairs("LowerResult", "owned", ("named_roots-1",)),
         "grad-result-node": pairs(
@@ -300,13 +316,13 @@ def structural_evidence():
             *pairs(
                 "EvalResult",
                 "empty",
-                ("version-first-None", "version-first-2", "version-first-4"),
+                ("version-first-None", "version-first-3", "version-first-5"),
                 ("json",),
             ),
             *pairs(
                 "EvalResult",
-                "producer-version-3",
-                ("producer-version-2", "producer-version-4"),
+                "producer-version-4",
+                ("producer-version-3", "producer-version-5"),
                 ("construct",),
             ),
         ),
@@ -315,8 +331,8 @@ def structural_evidence():
             "reordered",
             (
                 "version-last-None",
-                "version-last-2",
-                "version-last-4",
+                "version-last-3",
+                "version-last-5",
                 "duplicate-version",
             ),
             ("json",),

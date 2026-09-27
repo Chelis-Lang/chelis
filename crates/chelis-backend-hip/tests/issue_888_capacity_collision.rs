@@ -91,14 +91,16 @@ fn chain_plan(
     c_type: TensorType,
 ) -> (MemoryPlan, NodeId, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(a_type.precision, 1.0),
         vec![],
         a_type,
         None,
     );
-    let b = dag.add_node(RiscOp::Neg, vec![a], b_type, None);
-    let c = dag.add_node(RiscOp::Neg, vec![b], c_type, None);
+    let b = dag.add_node(decl, RiscOp::Neg, vec![a], b_type, None);
+    let c = dag.add_node(decl, RiscOp::Neg, vec![b], c_type, None);
     dag.add_root(c);
     let verified = support::verified_dag(&dag);
     let shared = plan_hip_storage(verified).expect("exact HIP storage plan");

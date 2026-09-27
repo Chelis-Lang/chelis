@@ -119,7 +119,7 @@ rules! {
     "surf_binding_type" => S::Choices(&["inferred", "explicit"]), P::BindingValue, "\"inferred\" or \"explicit\" on a bind value";
     "lin" => S::Names(&["once", "borrow", "unrestricted"]), P::Any, "once, borrow, or unrestricted";
     "doc" => S::String, P::Any, "a string";
-    "effect" => S::Names(&["random", "resource"]), P::Tag(T::HandleEffect), "random or resource on handle-effect";
+    "effect" => S::Names(&["resource"]), P::Tag(T::HandleEffect), "resource on handle-effect";
     "literal_source" => S::Names(&["integer"]), P::Tag(T::Lit), "integer on lit";
     "destructure" => S::True, P::Tag(T::Bind), "true on bind";
 }

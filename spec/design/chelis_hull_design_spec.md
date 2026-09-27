@@ -59,14 +59,14 @@ type Expr =
   | ESort(Expr, i64)
   | EGrad(Expr)
   | EVmap(Expr, i64)
-  -- Effect-handling forms. The shipped Deep grammar has NO `with-seed` /
-  -- `with-handler` tags; the real form is `(handle-effect {effect: name} arg body)`
-  -- (spec/03-deep-syntax.md §2.3, "Phase 2a effect handler block"). EWithSeed is
-  -- retained as the calculus name for the Random-discharging special case.
-  -- BOTH are OUTSIDE the v0.1.0 supported fragment: the parser may build them, but
-  -- `type_check` returns `None` for them in v0.1.0 (effect handling lands in a later
+  -- Effect-handling form. The shipped Deep grammar has NO `with-handler` tag; the
+  -- real form is `(handle-effect {effect: name} arg body)` (spec/03-deep-syntax.md
+  -- §2.3), whose one effect kind is `resource`. Random draws take an explicit `key`
+  -- argument as ordinary builtin applications, so there is no seed handler form
+  -- (spec/design/randomness_explicit_keys.md).
+  -- It is OUTSIDE the v0.1.0 supported fragment: the parser may build it, but
+  -- `type_check` returns `None` for it in v0.1.0 (effect handling lands in a later
   -- phase). See §3 "v0.1.0 supported fragment".
-  | EWithSeed(i64, Expr)              -- discharges Random; v0.1.0: parsed, not checked
   | EHandleEffect(Effect, Expr, Expr)   -- `(handle-effect {effect: name} arg body)`; v0.1.0: parsed, not checked
   | EMatch(Expr, List[MatchArm])
   | ETuple(List[Expr])
@@ -105,10 +105,9 @@ type Dim =
   | DVar(String)            -- dimension variable (for polymorphism)
 
 -- Effects -- mirror the shipped `Effect` enum at
--- crates/chelis-types/src/types.rs (Random, Accum, Io, Test, Resource(String)).
+-- crates/chelis-types/src/types.rs (Accum, Io, Test, Resource(String)).
 -- The stub must track the real taxonomy, not an invented one.
 type Effect =
-  | Random
   | Accum
   | Io
   | Test
@@ -357,15 +356,6 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
       }
     }
 
-    -- T-WithSeed (LaCaDiLE Section 3) -- discharges Random from e's effects.
-    -- OUT of the v0.1.0 supported fragment (§3.1): in v0.1.0 this arm is `EWithSeed(_, _)
-    -- -> None`. The rule below is the calculus-level semantics that lands once effect
-    -- handling is frozen (a later version). Same for the EHandleEffect arm.
-    EWithSeed(seed, body) -> {
-      (t_body, effs) = type_check(ctx, body)?
-      Some((t_body, remove_effect(effs, Random)))
-    }
-
     -- T-Tuple
     ETuple(exprs) -> {
       results = map_option(exprs, fn(ei) -> type_check(ctx, ei))
@@ -476,7 +466,7 @@ duplicate indices). Hull v0.1.0 tracks exactly this differentiable set as the AD
 core.
 
 Out of the v0.1.0 fragment (parsed by the Deep parser, but `type_check` returns `None`):
-`EWithSeed` and `EHandleEffect` (effect handling is a later phase); the zero-adjoint /
+`EHandleEffect` (effect handling is a later phase); the zero-adjoint /
 fail-closed ops `EConcat`, `EWhere`, `ECumsum`, `ESort`, `EScatter`, and `EVmap`
 (enumerated with their structural reasons above); `EConstruct` / `PConstruct` (no
 declaration layer, deferred to v0.2.0, above); and any construct whose checking depends on
@@ -584,11 +574,6 @@ def step(e: Expr) -> Option[Expr] =
     -- nested lists of scalars, and operations compute element-by-element.
     -- This is intentionally slow - correctness, not performance.
 
-    -- with-seed: when the body is a value, strip the handler
-    EWithSeed(_, v) -> if is_value(v) then Some(v) else {
-      step(v) |> map(fn(vp) -> EWithSeed(_, vp))
-    }
-
     -- Tuple: step the first non-value element
     ETuple(es) -> step_in_list(es) |> map(fn(esp) -> ETuple(esp))
 
@@ -662,7 +647,8 @@ integration obligations, not completed or silently skipped by this first kernel.
 Extend the separate directional reference, not the ordinary checker or evaluator,
 with a bounded interpreter of Hull's named `Expr` source. Reuse the existing
 validated f32 buffer operations. Admit the pure directional fragment above,
-strict named lets, literal seed handlers, fixed literal f32 dropout rates and
+strict named lets, keys derived from literal seeds (`key_from_seed`, `split_key`,
+`split_keys`, `fold_in`), fixed literal f32 dropout rates and
 literal Resource handlers. The initial environment contains named complete
 primal/direction pairs; reject duplicate names and validate even unused pairs.
 Ordinary lexical shadowing of tensor variables is supported. Builtin shadowing,
@@ -672,8 +658,8 @@ compiler rejections. The calling harness must retain and validate source dtype
 and syntax information before any lossy ordinary `Expr` parsing; an `LFloat`
 alone cannot establish that the original source declared f32.
 
-The reference derives Random state and masks independently from source order.
-Implement [05-RNG-1]'s exact modulo-2^64 word operations without invoking a compiler
+The reference derives each draw's key and mask itself, from the source.
+Implement [05-RNG-1]'s and [05-RNG-2]'s exact modulo-2^64 word operations without invoking a compiler
 random primitive, consulting a candidate trace or transporting words through
 floating values. A signed i64 may carry the exact word bits; checked arithmetic
 must not accidentally replace modular arithmetic. Convert the high 53 bits to
@@ -684,18 +670,15 @@ directional propagation through the selected mask, not differentiation of the
 rounded machine function or of the sampling distribution.
 
 Evaluate operands and strict lets in source order, including unused results.
-Check each dropout's shape and finite rate in [0,1) before Random entry. Every
-successful forward call, including empty tensors and zero rates, consumes exactly
-one ordinal. Advance the word counter modulo 2^64 and record the actual seed/key,
-rate and ordered shape. Nested seed entry saves the parent and resets the child;
-successful exit restores the exact parent. Record entry/exit even around no draws.
+Check each dropout's shape and finite rate in [0,1) before its draw. Every
+successful forward call, including empty tensors and zero rates, consumes its key.
+Record the actual key, rate and ordered shape.
 Resource checks use the language's device/target compatibility rule, not a model
 of physical allocation. Record successful checks in order, before their bodies.
 The reference differentiates the source forward and has no replay opcode; a native
-backward pass must preserve the same final ambient state and saved forward mask.
+backward pass must reproduce the saved forward mask from the forward key.
 
-Return the ordered executed event prefix and current/saved random state with
-both success and failure. Distinguish malformed input, unsupported syntax,
+Return the ordered executed event prefix with both success and failure. Distinguish malformed input, unsupported syntax,
 nonfinite numerical results, traversal exhaustion and semantic guard failure.
 A failed guard does not manufacture a successful event or run the continuation.
 A failure inside a handler exposes the state at that instruction, before pending
@@ -703,7 +686,7 @@ normal exits; this is a prefix observation, not a claim about recovery, exceptio
 unwinding or C's abort cleanup. The caller bounds total work and memory separately.
 
 The owning acceptance suite combines independent full-word RNG vectors and
-f32 threshold controls with nested seeds, a subsequent real draw, dead/empty/
+f32 threshold controls with derived keys, a subsequent real draw, dead/empty/
 zero-rate draws, nonunit directions and multiple input ports. Require positive
 and negative Resource targets, invalid rate before entry and failure after a
 prior draw, malformed unused inputs, shadowing, nonfinite results and exhaustion.
@@ -904,7 +887,7 @@ structural mapping — just one with three more moving parts than the sketch adm
 invariant **on the well-typed in-fragment domain** — i.e. on the *parser image* of the
 v0.1.0 supported fragment (§3.1), the `Expr` values that `parse` actually produces from
 in-fragment Deep and that `type_check` accepts. It is not claimed over arbitrary `Expr`
-values: out-of-fragment forms (`EWithSeed`, `EHandleEffect`, `EConcat`, `EWhere`,
+values: out-of-fragment forms (`EHandleEffect`, `EConcat`, `EWhere`,
 `ECumsum`, `ESort`, `EScatter`, `EVmap`, `EConstruct`) are not in the round-trip domain
 because the generator does not emit them and `type_check` rejects them. `unparse` is what
 the generator (§7) uses to emit `.dp` corpus files for differential testing.

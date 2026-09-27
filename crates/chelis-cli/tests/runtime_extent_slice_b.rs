@@ -3171,30 +3171,34 @@ fn a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent() {
 
 /// The issue's program in current Surf.
 const UNIFORM_OVER_INLINED_PARAMETER: &str = "module Repro.UniformInline\n\
-     def noise[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
-     def main() = with seed(42i64) { add(noise(insert(scalar_to_tensor(1.0f32), 0i32, 3i64)), \
-     noise(insert(scalar_to_tensor(2.0f32), 0i32, 3i64))) }\n";
+     def noise[n](k: key, x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(k, x, 0.0f32, 1.0f32))\n\
+     def main() = {\n\
+     \x20 (a, b) = split_key(key_from_seed(42i64))\n\
+     \x20 add(noise(a, insert(scalar_to_tensor(1.0f32), 0i32, 3i64)), \
+     noise(b, insert(scalar_to_tensor(2.0f32), 0i32, 3i64)))\n\
+     }\n";
 
 /// The same inlined parameter over an operand whose extent an OPERATION
 /// computes rather than a literal, still in a nullary kernel.
 const UNIFORM_OVER_INLINED_STRIDE: &str = "module Repro.UniformInlineStride\n\
-     def noise[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
-     def main() = with seed(42i64) { noise(stride(insert(scalar_to_tensor(1.0f32), 0i32, 6i64), \
-     2i64)) }\n";
+     def noise[n](k: key, x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(k, x, 0.0f32, 1.0f32))\n\
+     def main() = noise(key_from_seed(42i64), stride(insert(scalar_to_tensor(1.0f32), 0i32, 6i64), \
+     2i64))\n";
 
 /// The same shape reached through an exported def and a value binding, so the
 /// kernel has a `Load` while the inlined parameter's dim still does not.
 const UNIFORM_OVER_EXPORTED_STRIDE: &str = "module Repro.UniformExportedStride\n\
      sig g[n, m]: tensor[n, f32] -> tensor[m, f32]\n\
      def g(x) = stride(x, 2i64)\n\
-     def noise[k](x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
-     out = with seed(42i64) { noise(g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))) }\n";
+     def noise[k](key: key, x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(key, x, 0.0f32, 1.0f32))\n\
+     out = noise(key_from_seed(42i64), g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])))\n";
 
 /// Build, link, run and evaluate one nullary-kernel program, and assert that
 /// both lanes print `expected` and that no synthesized `d<N>` name survives
-/// into the emitted C. The expected data are the [05-RNG-1]/[05-OP-8] draws
-/// for seed 42 (ordinal 0, and ordinal 1 for the second `noise`) through the
-/// programs' f32 additions, evaluated with exact rationals (chelis#2408).
+/// into the emitted C. The expected data are the [05-RNG-2]/[05-OP-8] draws
+/// keyed by `key_from_seed(42)` (by the two halves of its `split_key` for the
+/// two `noise` calls) through the programs' f32 additions, from `key_ref.py`
+/// and `slice2_ref.py` with exact rationals (chelis#2413).
 fn assert_nullary_kernel_lanes_agree(stem: &str, source: &str, expected: &str) {
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = eval_result(&dir, &format!("{stem}_eval.ch"), source);
@@ -3230,7 +3234,7 @@ fn issue_1556_uniform_over_an_inlined_parameter_builds_and_runs() {
     assert_nullary_kernel_lanes_agree(
         "uniform_inline",
         UNIFORM_OVER_INLINED_PARAMETER,
-        "data=[4.0660806, 3.811798, 3.626719]",
+        "data=[4.7375064, 3.8520901, 3.7466035]",
     );
 }
 
@@ -3240,7 +3244,7 @@ fn a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs
     assert_nullary_kernel_lanes_agree(
         "uniform_inline_stride",
         UNIFORM_OVER_INLINED_STRIDE,
-        "data=[1.1529957, 1.5721796, 1.1494875]",
+        "data=[1.4883347, 1.2404081, 1.1643169]",
     );
 }
 
@@ -3250,7 +3254,7 @@ fn an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs() {
     assert_nullary_kernel_lanes_agree(
         "uniform_exported_stride",
         UNIFORM_OVER_EXPORTED_STRIDE,
-        "data=[1.1529957, 3.5721796, 5.1494875]",
+        "data=[1.4883347, 3.240408, 5.1643167]",
     );
 }
 
@@ -3406,8 +3410,11 @@ fn a_shape_derived_bound_keeps_its_declared_result_dimension_on_c() {
     let check_at = emitted
         .find("chelis_movement_check_target")
         .expect("the emitted legacy target check");
+    // The declared-extent result allocation, spelled with its extent: the
+    // emitted prelude's key helpers (chelis#2413) also call `chelis_alloc(1,`
+    // before any program code.
     let alloc_at = emitted
-        .find("chelis_alloc(1,")
+        .find("chelis_alloc(1, (int64_t[]){ 2 }")
         .expect("the emitted result allocation");
     assert!(
         guard_at < check_at && guard_at < alloc_at,

@@ -18,7 +18,9 @@ fn scalar(precision: Prim) -> TensorType {
 #[test]
 fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -27,6 +29,7 @@ fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
         None,
     );
     let source = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "source".into(),
         },
@@ -35,6 +38,7 @@ fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::InputAxis {
@@ -62,7 +66,9 @@ fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
 #[test]
 fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -71,6 +77,7 @@ fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
         None,
     );
     let extent = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "extent".into(),
         },
@@ -79,6 +86,7 @@ fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Node(1),
@@ -103,7 +111,9 @@ fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
 #[test]
 fn zero_literal_expand_is_valid_and_empty() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -112,6 +122,7 @@ fn zero_literal_expand_is_valid_and_empty() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(0),
@@ -134,13 +145,16 @@ fn zero_literal_expand_is_valid_and_empty() {
 #[test]
 fn input_axis_owner_and_slot_validation_fail_closed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(
@@ -167,7 +181,9 @@ fn input_axis_owner_and_slot_validation_fail_closed() {
 #[test]
 fn movement_ops_reject_unowned_runtime_extent_inputs() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -176,6 +192,7 @@ fn movement_ops_reject_unowned_runtime_extent_inputs() {
         None,
     );
     let extent = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "extent".into(),
         },
@@ -184,6 +201,7 @@ fn movement_ops_reject_unowned_runtime_extent_inputs() {
         None,
     );
     let unowned = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "unowned".into(),
         },
@@ -192,6 +210,7 @@ fn movement_ops_reject_unowned_runtime_extent_inputs() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
         },
@@ -212,19 +231,23 @@ fn movement_ops_reject_unowned_runtime_extent_inputs() {
 #[test]
 fn vmap_keeps_shape_bound_shared_and_shifts_its_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
     let end = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         scalar(Prim::Int64),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(
                 chelis_ir::dag::RtDim::Lit(1),
@@ -258,19 +281,23 @@ fn vmap_keeps_shape_bound_shared_and_shifts_its_axis() {
 #[test]
 fn vmap_shares_shape_extent_across_bound_and_ordinary_uses() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
     let extent = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         scalar(Prim::Int64),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(
                 chelis_ir::dag::RtDim::Lit(0),
@@ -281,7 +308,7 @@ fn vmap_shares_shape_extent_across_bound_and_ordinary_uses() {
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
-    let ordinary_extent = dag.add_node(RiscOp::Copy, vec![extent], scalar(Prim::Int64), None);
+    let ordinary_extent = dag.add_node(decl, RiscOp::Copy, vec![extent], scalar(Prim::Int64), None);
     dag.add_root(y);
     dag.add_root(ordinary_extent);
 
@@ -311,13 +338,16 @@ fn vmap_shares_shape_extent_across_bound_and_ordinary_uses() {
 #[test]
 fn vmap_rejects_element_derived_extent() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
     );
     let extent = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -327,6 +357,7 @@ fn vmap_rejects_element_derived_extent() {
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(
                 chelis_ir::dag::RtDim::Lit(0),
@@ -349,7 +380,9 @@ fn vmap_rejects_element_derived_extent() {
 #[test]
 fn input_axis_vmap_shifts_literal_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -358,6 +391,7 @@ fn input_axis_vmap_shifts_literal_axis() {
         None,
     );
     let source = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "source".into(),
         },
@@ -366,6 +400,7 @@ fn input_axis_vmap_shifts_literal_axis() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::InputAxis {

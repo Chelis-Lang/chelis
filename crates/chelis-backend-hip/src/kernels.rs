@@ -534,48 +534,140 @@ extern "C" __global__ void {name}(
     )
 }
 
+/// The activation gate of a checking kernel (spec/10 section 3.2): a node
+/// whose activation is false computes a value but checks nothing, so where
+/// an output element's row is inactive, each operand read takes the value
+/// `inactive` names for its slot, one every check of the operation accepts
+/// (`chelis_ir::dag::DagNode::inactive_operand`, the values the evaluator
+/// and the C lane substitute). The check and the computation stay as they
+/// are; only what they read changes. A kernel built without a gate is
+/// byte-identical to its ungated form.
+///
+/// The gated kernel takes trailing parameters after the output's: the
+/// activation's bool bytes with their shape, strides and rank (it may be a
+/// view, such as a call site's activation expanded to every row), its
+/// element count, and the output elements per activation row. Each thread
+/// computes one output element `i` and reads the activation once, before
+/// any operand: a rank-0 activation is its one element, a per-row one
+/// (under `vmap`) is the element of `i`'s row, `i / row`, and a `row` of
+/// zero (an activation of higher rank than the node) is "some row is
+/// active".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperandGate {
+    /// The value each operand slot reads where the element is inactive.
+    pub inactive: Vec<i64>,
+}
+
+/// The device helper a gated kernel reads its activation through; see
+/// [`OperandGate`].
+pub const ACTIVATION_GATE_HELPER: &str = "\
+__device__ bool chelis_activation_at(const unsigned char *act, const chelis_device_metadata *shape, const chelis_device_metadata *strides, chelis_device_metadata ndim, chelis_device_metadata count, chelis_device_metadata row, chelis_device_metadata i) {
+    if (row > 0) return act[chelis_logical_offset(i / row, shape, strides, ndim)] != 0;
+    for (chelis_device_metadata r = 0; r < count; ++r) {
+        if (act[chelis_logical_offset(r, shape, strides, ndim)] != 0) return true;
+    }
+    return false;
+}
+";
+
+impl OperandGate {
+    /// The device helper a gated kernel declares after [`DEVICE_HELPERS`].
+    fn helper(gate: Option<&Self>) -> &'static str {
+        if gate.is_some() {
+            ACTIVATION_GATE_HELPER
+        } else {
+            ""
+        }
+    }
+
+    /// The trailing parameters, after the output's `out_size`, for a
+    /// kernel specialized to `rank`.
+    fn params(gate: Option<&Self>, rank: usize) -> String {
+        match gate {
+            None => String::new(),
+            Some(_) => format!(
+                ",\n    const unsigned char *chelis_act, {}, {}, chelis_device_metadata chelis_act_ndim, chelis_device_metadata chelis_act_count, chelis_device_metadata chelis_act_row",
+                shape_params(rank, "chelis_act"),
+                stride_params(rank, "chelis_act"),
+            ),
+        }
+    }
+
+    /// The thread's one activation read, placed after its bounds check.
+    fn prologue(gate: Option<&Self>, rank: usize) -> String {
+        match gate {
+            None => String::new(),
+            Some(_) => format!(
+                "{}\n{}\n  const bool chelis_active = chelis_activation_at(chelis_act, chelis_act_sh, chelis_act_s, chelis_act_ndim, chelis_act_count, chelis_act_row, i);\n",
+                build_array(rank, "chelis_act_sh", "chelis_act", "sh"),
+                build_array(rank, "chelis_act_s", "chelis_act", "s"),
+            ),
+        }
+    }
+
+    /// Operand `slot`'s read `read` of a `c_ty` element, as the gate
+    /// leaves it.
+    fn read(gate: Option<&Self>, slot: usize, read: &str, c_ty: &str) -> String {
+        match gate {
+            None => read.to_string(),
+            Some(gate) => {
+                let inactive = match gate.inactive[slot] {
+                    i64::MIN => "(-9223372036854775807LL - 1)".to_string(),
+                    value => format!("{value}LL"),
+                };
+                format!("(chelis_active ? {read} : ({c_ty})({inactive}))")
+            }
+        }
+    }
+}
+
 /// WS-A2 + WS-A4: dtype-parameterized binary elementwise op (add, mul).
 /// `elem_c_ty` is the C++ type spelling (e.g. `float`, `double`,
 /// `int8_t`, `int16_t`) used for both operand pointers and the result
 /// pointer. Same-precision arithmetic per spec/04-type-system.md §5.4
 /// (no implicit promotion); both inputs and the output share
 /// `elem_c_ty`. The accompanying kernel name should already encode the
-/// dtype suffix (e.g. `kernel_add_f64`, `kernel_add_i8`).
+/// dtype suffix (e.g. `kernel_add_f64`, `kernel_add_i8`). A `gate` reads
+/// the operands through an activation ([`OperandGate`]).
 pub fn binary_elementwise_typed(
     rank: usize,
     kernel_name: &str,
     op: &str,
     elem_c_ty: &str,
+    gate: Option<&OperandGate>,
 ) -> String {
+    let a = OperandGate::read(gate, 0, "a[idx_a]", elem_c_ty);
+    let b = OperandGate::read(gate, 1, "b[idx_b]", elem_c_ty);
     let expression = match (op, elem_c_ty) {
         ("-", "float") => {
-            "isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b]"
-                .to_string()
+            format!("isnan({a} - {b}) ? __int_as_float(0x7fc00000) : {a} - {b}")
         }
         ("-", "double") => {
-            "isnan(a[idx_a] - b[idx_b]) ? __longlong_as_double(0x7ff8000000000000LL) : a[idx_a] - b[idx_b]"
-                .to_string()
+            format!("isnan({a} - {b}) ? __longlong_as_double(0x7ff8000000000000LL) : {a} - {b}")
         }
-        _ => format!("a[idx_a] {op} b[idx_b]"),
+        _ => format!("{a} {op} {b}"),
     };
     format!(
-        "{DEVICE_HELPERS}\
+        "{DEVICE_HELPERS}{helper}\
 extern \"C\" __global__ void {kernel_name}(
     const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
     const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
-    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  chelis_device_metadata indices[{rank}];
+{active}  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = {expression};
 }}
 ",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
         a_strides = stride_params(rank, "a"),
         b_strides = stride_params(rank, "b"),
         out_shape = shape_params(rank, "out"),
@@ -588,40 +680,42 @@ extern \"C\" __global__ void {kernel_name}(
 /// WS-A2 thin wrapper for the legacy `ElemKind`-based call sites and
 /// for callers that already have an `ElemKind` in hand. Forwards to the
 /// dtype-parameterized [`binary_elementwise_typed`] using the
-/// `ElemKind`'s C-type spelling (`float` or `double`).
+/// `ElemKind`'s C-type spelling (`float` or `double`), without a gate.
 pub fn binary_elementwise(rank: usize, kernel_name: &str, op: &str, kind: ElemKind) -> String {
-    binary_elementwise_typed(rank, kernel_name, op, kind.c_type())
+    binary_elementwise_typed(rank, kernel_name, op, kind.c_type(), None)
 }
 
 /// Direct checked signed-integer subtraction. The bounds test avoids
 /// evaluating an overflowing signed expression, and every failing lane
 /// contributes its row-major flat index to the module-local numeric trap
 /// record. The host reads that record after dispatch and raises [04-NUM-9]'s
-/// exact branded trap.
+/// exact branded trap. A `gate` reads the operands through an activation
+/// ([`OperandGate`]): an inactive element subtracts zero from zero.
 pub fn binary_checked_sub_integer(
     rank: usize,
     kernel_name: &str,
     elem_c_ty: &str,
     minimum: &str,
     maximum: &str,
+    gate: Option<&OperandGate>,
 ) -> String {
     format!(
-        "{DEVICE_HELPERS}\
+        "{DEVICE_HELPERS}{helper}\
 extern \"C\" __global__ void {kernel_name}(
     const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
     const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
-    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  chelis_device_metadata indices[{rank}];
+{active}  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  {elem_c_ty} av = a[idx_a];
-  {elem_c_ty} bv = b[idx_b];
+  {elem_c_ty} av = {a};
+  {elem_c_ty} bv = {b};
   bool overflow =
       (bv > ({elem_c_ty})0 && av < ({elem_c_ty})({minimum} + bv))
       || (bv < ({elem_c_ty})0 && av > ({elem_c_ty})({maximum} + bv));
@@ -633,6 +727,11 @@ extern \"C\" __global__ void {kernel_name}(
   out[i] = ({elem_c_ty})(av - bv);
 }}
 ",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
+        a = OperandGate::read(gate, 0, "a[idx_a]", elem_c_ty),
+        b = OperandGate::read(gate, 1, "b[idx_b]", elem_c_ty),
         a_strides = stride_params(rank, "a"),
         b_strides = stride_params(rank, "b"),
         out_shape = shape_params(rank, "out"),
@@ -680,42 +779,51 @@ extern \"C\" __global__ void {kernel_name}(
 ///   correction, matching the C backend and evaluator.
 /// - `is_int == false` (float dtype): `floorf(a / b)` (the device `floorf`
 ///   handles the f32/f64 promotion through the C type).
+///
+/// A `gate` reads the operands through an activation ([`OperandGate`]):
+/// an inactive element divides zero by one.
 pub fn binary_floor_div_typed(
     rank: usize,
     kernel_name: &str,
     elem_c_ty: &str,
     is_int: bool,
+    gate: Option<&OperandGate>,
 ) -> String {
+    let a = OperandGate::read(gate, 0, "a[idx_a]", elem_c_ty);
+    let b = OperandGate::read(gate, 1, "b[idx_b]", elem_c_ty);
     let compute = if is_int {
         format!(
-            "  {elem_c_ty} an = a[idx_a];\n  \
-             {elem_c_ty} bn = b[idx_b];\n  \
+            "  {elem_c_ty} an = {a};\n  \
+             {elem_c_ty} bn = {b};\n  \
              {elem_c_ty} q = an / bn;\n  \
              {elem_c_ty} r = an % bn;\n  \
              if (r != 0 && ((r < 0) != (bn < 0))) q -= 1;\n  \
              out[i] = q;"
         )
     } else {
-        "  out[i] = floorf(a[idx_a] / b[idx_b]);".to_string()
+        format!("  out[i] = floorf({a} / {b});")
     };
     format!(
-        "{DEVICE_HELPERS}\
+        "{DEVICE_HELPERS}{helper}\
 extern \"C\" __global__ void {kernel_name}(
     const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
     const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
-    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  chelis_device_metadata indices[{rank}];
+{active}  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
 {compute}
 }}
 ",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
         a_strides = stride_params(rank, "a"),
         b_strides = stride_params(rank, "b"),
         out_shape = shape_params(rank, "out"),
@@ -1153,6 +1261,7 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Eager conditional selection over raw stored values. Float branch values
 /// use integer carriers so NaN payloads and signed zero survive bit-for-bit.
+/// Each element indexes only the branch its condition selects ([05-OP-53]).
 pub fn where_stored(rank: usize, kernel_name: &str, branch_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -1170,8 +1279,8 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_cond = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, cond_s, cond_ndim), cond_size, 1);
-  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = cond[idx_cond] != 0 ? CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1) : 0;
+  chelis_device_metadata idx_b = cond[idx_cond] != 0 ? 0 : CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = cond[idx_cond] != 0 ? a[idx_a] : b[idx_b];
 }}
 ",
@@ -2173,24 +2282,29 @@ extern \"C\" __global__ void {kernel_name}({ty} *data, {ty} value, chelis_device
 
 /// Generate kernel source for cast / Realize / Copy (in-precision identity).
 /// Mixed-precision casts (e.g. f32→f64) emit the dedicated
-/// [`cast_convert`] kernel.
-pub fn cast(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
+/// [`cast_convert`] kernel. A `gate` reads the source through an
+/// activation ([`OperandGate`]).
+pub fn cast(rank: usize, kernel_name: &str, kind: ElemKind, gate: Option<&OperandGate>) -> String {
     let ty = kind.c_type();
     format!(
-        "{DEVICE_HELPERS}\
+        "{DEVICE_HELPERS}{helper}\
 extern \"C\" __global__ void {kernel_name}(
     const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
-    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
 {build_a_s}
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  chelis_device_metadata indices[{rank}];
+{active}  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  out[i] = a[idx];
+  out[i] = {a};
 }}
 ",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
+        a = OperandGate::read(gate, 0, "a[idx]", ty),
         a_strides = stride_params(rank, "a"),
         out_shape = shape_params(rank, "out"),
         build_a_s = build_array(rank, "a_s", "a", "s"),
@@ -2200,25 +2314,36 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Generate kernel source for a true cross-precision cast (e.g.
 /// `f32 → f64`). Differs from [`cast`] only in that the source and
-/// destination types may disagree.
-pub fn cast_convert(rank: usize, kernel_name: &str, src: ElemKind, dst: ElemKind) -> String {
+/// destination types may disagree. A `gate` reads the source through an
+/// activation ([`OperandGate`]).
+pub fn cast_convert(
+    rank: usize,
+    kernel_name: &str,
+    src: ElemKind,
+    dst: ElemKind,
+    gate: Option<&OperandGate>,
+) -> String {
     let src_ty = src.c_type();
     let dst_ty = dst.c_type();
     format!(
-        "{DEVICE_HELPERS}\
+        "{DEVICE_HELPERS}{helper}\
 extern \"C\" __global__ void {kernel_name}(
     const {src_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
-    {dst_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
+    {dst_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
 {build_a_s}
 {build_out_sh}
   chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  chelis_device_metadata indices[{rank}];
+{active}  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  out[i] = ({dst_ty})a[idx];
+  out[i] = ({dst_ty}){a};
 }}
 ",
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active = OperandGate::prologue(gate, rank),
+        a = OperandGate::read(gate, 0, "a[idx]", src_ty),
         a_strides = stride_params(rank, "a"),
         out_shape = shape_params(rank, "out"),
         build_a_s = build_array(rank, "a_s", "a", "s"),
@@ -2471,11 +2596,13 @@ mod tests {
     #[test]
     fn random_device_helpers_are_the_c_backend_port() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "template".into(),
             },
@@ -2488,34 +2615,35 @@ mod tests {
             precision,
         };
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high],
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
             rank0(Prim::Key),
             None,
         );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,
@@ -2760,7 +2888,13 @@ mod tests {
 
     #[test]
     fn cast_convert_widens_f32_to_f64() {
-        let src = cast_convert(8, "kernel_cast_f32_to_f64", ElemKind::F32, ElemKind::F64);
+        let src = cast_convert(
+            8,
+            "kernel_cast_f32_to_f64",
+            ElemKind::F32,
+            ElemKind::F64,
+            None,
+        );
         assert!(src.contains("const float *a"));
         assert!(src.contains("double *out"));
         assert!(src.contains("out[i] = (double)a[idx];"));

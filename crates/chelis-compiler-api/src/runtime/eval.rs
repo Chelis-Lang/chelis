@@ -4,7 +4,7 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::{RandomFrame, TensorValue as IrTensorValue};
+use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
@@ -677,25 +677,6 @@ impl<'a> EvalNode<'a> {
 }
 
 impl<'a> EvalContext<'a> {
-    /// The Random frame a graph evaluation takes its draw keys from: the
-    /// interpreter's handler at its next ordinal, or no inherited handler
-    /// (`spec/design/randomness_counter_stream.md` §2). An inherited draw
-    /// under no handler is an evaluation error, never a seed-zero draw.
-    pub(super) fn random_frame(&self) -> RandomFrame {
-        match self.random_seed {
-            Some(seed) => RandomFrame::inherited(seed, self.random_counter),
-            None => RandomFrame::unhandled(),
-        }
-    }
-
-    /// Publish the ordinals a graph evaluation took from
-    /// [`Self::random_frame`], including those taken before an error.
-    pub(super) fn commit_random_frame(&mut self, frame: &RandomFrame) {
-        if let Some(counter) = frame.inherited_counter() {
-            self.random_counter = counter;
-        }
-    }
-
     /// Resolve a builtin only when ordinary lexical lookup did not select a
     /// runtime binding of the same name (spec/04-type-system.md §8.6,
     /// chelis#1076). Every evaluator builtin fast path goes through this
@@ -777,6 +758,23 @@ impl<'a> EvalContext<'a> {
         Ok(kernel)
     }
 
+    /// spec/03 §4.4: a binding's initializer is evaluated whether or not the
+    /// binding is read. When the host hands a body to a tensor DAG (a kernel,
+    /// a transform target, a routed named-axis call) the DAG demands only the
+    /// values it reads, so the value declarations the body reaches
+    /// ([`super::program_scope::ProgramScope::reached_by_applying`]) are
+    /// initialized here, in the order it reaches them, where the caller's
+    /// sequential order reaches the body and a live capture's initializer
+    /// would run. A value the DAG already produced is not run again.
+    pub(super) fn initialize_reached_values(&mut self, reached: &[String]) -> Result<(), String> {
+        for key in reached {
+            if !self.tensor_bindings.contains_key(key) {
+                self.resolve_top_level(key)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Apply def `name` through its kernel: the evaluated arguments become the
     /// kernel's `Load`s by declared parameter name (an unreferenced parameter
     /// is dropped, as the C wrapper drops it), a captured top-level tensor is
@@ -792,6 +790,7 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
         inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        self.initialize_reached_values(&self.program.reached_by_call(name))?;
         if let Some(plan) = &kernel.staged {
             return self.apply_staged_host_plan(name, plan, params, args);
         }
@@ -878,11 +877,9 @@ impl<'a> EvalContext<'a> {
             .collect::<Result<Vec<_>, String>>()?;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.declaration_values;
-        let mut frame = self.random_frame();
-        let result = chelis_ir::eval::eval_tensor_roots_with_frame_and_result_claims(
+        let result = chelis_ir::eval::eval_tensor_roots_exact_with_result_claims(
             &kernel.dag,
             &roots,
-            &mut frame,
             &result_claims,
             |load| {
                 staged
@@ -895,7 +892,6 @@ impl<'a> EvalContext<'a> {
                     })
             },
         );
-        self.commit_random_frame(&frame);
         let values = self.mark_numeric_trap_from_trusted_result(result)?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
         self.result_producer = result_producer;
@@ -992,16 +988,10 @@ impl<'a> EvalContext<'a> {
                             );
                         }
                     }
-                    // Resolving a captured top-level input can itself advance
-                    // the host stream, so the frame is taken after it.
-                    let mut frame = self.random_frame();
-                    let computed = chelis_ir::eval::eval_tensor_roots_with_frame(
-                        dag,
-                        dag.roots(),
-                        &mut frame,
-                        |input| inputs.get(input).cloned(),
-                    );
-                    self.commit_random_frame(&frame);
+                    let computed =
+                        chelis_ir::eval::eval_tensor_roots_exact(dag, dag.roots(), |input| {
+                            inputs.get(input).cloned()
+                        });
                     let computed = self.mark_numeric_trap_from_trusted_result(computed)?;
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
@@ -1226,57 +1216,6 @@ impl<'a> EvalContext<'a> {
                 match decode_effect_kind(node.metadata)
                     .map_err(|error| format!("{error} in `handle-effect` evaluation"))?
                 {
-                    EffectKind::Random => {
-                        let seed_expr = kids
-                            .first()
-                            .ok_or_else(|| "handle-effect missing seed".to_string())?;
-                        // chelis#771: read a *literal* seed at full i64 width so
-                        // the evaluator derives the same u64 seed as the compiled
-                        // C lane. `literal_seed_i64` peels `(lit …)` to the raw
-                        // `Atom::Int`, mirroring host lowering (host.rs reads the
-                        // raw atom and ignores the i32 default meta). Routing the
-                        // literal through `eval_expr` -> `eval_lit` instead narrows
-                        // it to i32 (spec/04-type-system.md §5.3 default),
-                        // truncating then sign-extending any seed >= 2^31 into an
-                        // unrelated stream. The seed is designed i64
-                        // (spec/design/checker_totality.md §C1.5 item 5).
-                        //
-                        // The `eval_expr` fallback below is defensive/forward-looking,
-                        // not a live narrowing path: computed (non-literal) seeds are
-                        // currently gate-REJECTED in both lanes by chelis-effects'
-                        // `validate_handler_expr` (a `random` handler whose seed is
-                        // not an int literal errors "with seed(...) currently requires
-                        // an int literal seed" in check, eval, AND build). That gate's
-                        // accept set is exactly this peel's accept set, so every seed
-                        // that reaches here is a literal read at full width and the
-                        // fallback never runs on a checked path. It would only narrow
-                        // if #731 Phase 1 relaxes the gate to admit computed seeds.
-                        let seed = match literal_seed_i64(seed_expr) {
-                            Some(value) => value as u64,
-                            None => {
-                                let seed = self.eval_expr(seed_expr)?;
-                                match seed.as_i64() {
-                                    Some(value) => value as u64,
-                                    None => {
-                                        return Err(format!(
-                                            "with seed expects int seed, got {seed:?}"
-                                        ));
-                                    }
-                                }
-                            }
-                        };
-                        let saved_seed = self.random_seed;
-                        let saved_counter = self.random_counter;
-                        self.random_seed = Some(seed);
-                        self.random_counter = 0;
-                        let value = self.eval_expr(
-                            kids.get(1)
-                                .ok_or_else(|| "handle-effect missing body".to_string())?,
-                        );
-                        self.random_seed = saved_seed;
-                        self.random_counter = saved_counter;
-                        value
-                    }
                     EffectKind::Resource => self.eval_expr(
                         kids.get(1)
                             .ok_or_else(|| "handle-effect missing body".to_string())?,
@@ -2412,12 +2351,9 @@ impl<'a> EvalContext<'a> {
             &roots,
             |name, demand| self.prepare_named_axis_input(name, demand, &staged_inputs),
         )?;
-        let mut frame = self.random_frame();
-        let values =
-            chelis_ir::eval::eval_tensor_roots_with_frame(dag, &roots, &mut frame, |name| {
-                prepared.get(name).cloned()
-            });
-        self.commit_random_frame(&frame);
+        let values = chelis_ir::eval::eval_tensor_roots_exact(dag, &roots, |name| {
+            prepared.get(name).cloned()
+        });
         let values = self.mark_numeric_trap_from_trusted_result(values)?;
         let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
         for claim in inherited_result_claims {
@@ -3015,26 +2951,15 @@ impl<'a> EvalContext<'a> {
         result
     }
 
-    /// The active handler's next [05-RNG-1] key, advancing its ordinal. A
-    /// draw outside every handler is an internal error: the checker rejects
-    /// an unhandled Random effect, and no draw falls back to seed 0.
-    fn next_random_key(&mut self, op: &str) -> Result<chelis_types::RandomKey, String> {
-        let seed = self
-            .random_seed
-            .ok_or_else(|| format!("internal: {op} was evaluated outside every Random handler"))?;
-        let counter = self.random_counter;
-        self.random_counter = self.random_counter.saturating_add(1);
-        Ok(chelis_types::RandomKey::from_counter(seed, counter))
-    }
-
-    /// [05-OP-37] in the host walk: the rate is the input dtype's tagged
-    /// scalar, validated before the draw consumes its ordinal.
+    /// [05-OP-37] in the host walk: `dropout(k, x, rate)`. The rate is the
+    /// input dtype's tagged scalar, validated before any element is drawn
+    /// from the key.
     fn eval_dropout_builtin(&mut self, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-        let input = expect_tensor_arg(args, 0)?;
-        let rate = expect_float_control(args, 1, "dropout")?;
+        let key = expect_key_arg(args, 0, "dropout")?;
+        let input = expect_tensor_arg(args, 1)?;
+        let rate = expect_float_control(args, 2, "dropout")?;
         let prepared = chelis_types::PreparedDropout::new(input.value.storage(), rate)
             .map_err(|error| error.to_string())?;
-        let key = self.next_random_key("dropout")?;
         let storage = prepared.apply(key).map_err(|error| error.to_string())?;
         Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
             IrTensorValue::from_storage(input.value.shape.clone(), storage),
@@ -3049,6 +2974,50 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match name {
+            // [05-OP-69]..[05-OP-72]: the key operations over the scalar key
+            // value, with the kernels every lane shares.
+            "key_from_seed" => {
+                let seed = expect_i64_key_operand(args, 0, "key_from_seed")?;
+                chelis_types::RandomKey::from_seed(seed)
+                    .map(RuntimeValue::Key)
+                    .map_err(|error| error.to_string())
+            }
+            "split_key" => {
+                let (left, right) = expect_key_arg(args, 0, "split_key")?.split();
+                Ok(RuntimeValue::Tuple(vec![
+                    RuntimeValue::Key(left),
+                    RuntimeValue::Key(right),
+                ]))
+            }
+            "fold_in" => {
+                let key = expect_key_arg(args, 0, "fold_in")?;
+                let n = expect_i64_key_operand(args, 1, "fold_in")?;
+                key.fold_in(n)
+                    .map(RuntimeValue::Key)
+                    .map_err(|error| error.to_string())
+            }
+            "split_keys" => {
+                let key = expect_key_arg(args, 0, "split_keys")?;
+                let count = expect_i64_key_operand(args, 1, "split_keys")?
+                    .as_i64_exact()
+                    .ok_or_else(|| "split_keys expects an i64 count".to_string())?;
+                // [05-OP-71]: a negative count traps before allocation, as
+                // the DAG evaluator and the C lane trap.
+                let count = usize::try_from(count).map_err(|_| {
+                    chelis_types::NumericTrap::Domain {
+                        op: "split_keys",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?;
+                check_split_keys_declared_extent(result_type_expr, count)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(
+                        vec![count],
+                        chelis_types::TensorStorage::from_keys(key.split_n(count)),
+                    ),
+                )))
+            }
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
             "mul" => numeric_binop(args, Some(IntBinOp::Mul), Some(FloatBinOp::Mul)),
@@ -3106,13 +3075,13 @@ impl<'a> EvalContext<'a> {
             "gte" => ordered_compare(args, CompareOp::Gte),
             "lte" => ordered_compare(args, CompareOp::Lte),
             "uniform_like" => {
-                let template = expect_tensor_arg(args, 0)?;
-                let low = expect_float_control(args, 1, "uniform_like")?;
-                let high = expect_float_control(args, 2, "uniform_like")?;
-                // [05-OP-8]: the bounds validate before the draw consumes
-                // its ordinal.
+                let key = expect_key_arg(args, 0, "uniform_like")?;
+                let template = expect_tensor_arg(args, 1)?;
+                let low = expect_float_control(args, 2, "uniform_like")?;
+                let high = expect_float_control(args, 3, "uniform_like")?;
+                // [05-OP-8]: the bounds validate before any element is drawn
+                // from the key.
                 let prepared = prepare_uniform_like(&template, low, high)?;
-                let key = self.next_random_key("uniform_like")?;
                 Ok(RuntimeValue::Tensor(uniform_like_value(
                     &template, &prepared, key,
                 )?))
@@ -4571,8 +4540,8 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
-                eval_composed_unary(&tensor, |dag, x, ty| {
-                    tier2::lower_mean(dag, x, axis, ty, None)
+                eval_composed_unary(&tensor, |dag, decl, x, ty| {
+                    tier2::lower_mean(decl.into(), dag, x, axis, ty, None)
                 })
                 .map(RuntimeValue::Tensor)
             }
@@ -4595,20 +4564,35 @@ impl<'a> EvalContext<'a> {
                         );
                     }
                 };
-                eval_composed_triop(&x, &gamma, &beta, |dag, x_id, gamma_id, beta_id, tys| {
-                    let epsilon_id = dag.add_node(
-                        RiscOp::Const { value: epsilon },
-                        vec![],
-                        TensorType {
-                            dims: vec![],
-                            precision: epsilon.prim(),
-                        },
-                        None,
-                    );
-                    tier2::lower_layer_norm(
-                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id, None,
-                    )
-                })
+                eval_composed_triop(
+                    &x,
+                    &gamma,
+                    &beta,
+                    |dag, decl, x_id, gamma_id, beta_id, tys| {
+                        let epsilon_id = dag.add_node(
+                            decl,
+                            RiscOp::Const { value: epsilon },
+                            vec![],
+                            TensorType {
+                                dims: vec![],
+                                precision: epsilon.prim(),
+                            },
+                            None,
+                        );
+                        tier2::lower_layer_norm(
+                            decl.into(),
+                            dag,
+                            x_id,
+                            gamma_id,
+                            beta_id,
+                            tys.0,
+                            tys.1,
+                            tys.2,
+                            epsilon_id,
+                            None,
+                        )
+                    },
+                )
                 .map(RuntimeValue::Tensor)
             }
             "conv" => {
@@ -4835,6 +4819,80 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
 /// interpreter applies to its own frame (chelis#729); a scalar becomes an
 /// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
 /// one and the way the C wrapper boxes a scalar parameter.
+/// The scalar key operand of a key operation or draw: a key value, or the
+/// rank-0 key tensor a kernel returns for one.
+fn expect_key_arg(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<chelis_types::RandomKey, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Key(key)) => Ok(*key),
+        Some(RuntimeValue::Tensor(tensor)) if tensor.value.shape.is_empty() => tensor
+            .value
+            .storage()
+            .keys()
+            .and_then(|keys| keys.first().copied())
+            .ok_or_else(|| format!("{op} expects a key at index {index}")),
+        other => Err(format!(
+            "{op} expects a key at index {index}, got {}",
+            describe_argument(other)
+        )),
+    }
+}
+
+/// The i64 seed or index operand of a key operation ([05-OP-69],
+/// [05-OP-71], [05-OP-72]).
+fn expect_i64_key_operand(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<chelis_types::ScalarValue, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
+            Ok(payload.value())
+        }
+        Some(RuntimeValue::Tensor(tensor))
+            if tensor.value.shape.is_empty() && tensor.value.prim() == Prim::Int64 =>
+        {
+            Ok(tensor.value.storage().scalar_at(0))
+        }
+        other => Err(format!(
+            "{op} expects an i64 at index {index}, got {}",
+            describe_argument(other)
+        )),
+    }
+}
+
+/// [05-OP-71]: a literal extent the checked result type declares for the
+/// count axis is a claim about the runtime count, checked before any key
+/// exists, as the DAG evaluator and the C lane check it.
+fn check_split_keys_declared_extent(
+    result_type_expr: Option<&Expr>,
+    count: usize,
+) -> Result<(), String> {
+    let literal_extent = |dim: &Expr| match dim.carrier() {
+        ExprCarrier::Atom(Atom::Int(extent)) => Some(*extent),
+        ExprCarrier::DecodedNode(DeepTag::Lit, _, [Expr::Atom(Atom::Int(extent), _), ..]) => {
+            Some(*extent)
+        }
+        _ => None,
+    };
+    let Some(declared) = result_type_expr.and_then(|ty| match ty.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, [dim, _precision]) => literal_extent(dim),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    if usize::try_from(declared).ok() == Some(count) {
+        Ok(())
+    } else {
+        Err(format!(
+            "split_keys: the count {count} does not equal the extent {declared} its type declares"
+        ))
+    }
+}
+
 fn stage_kernel_argument(
     def: &str,
     param: &str,
@@ -4842,7 +4900,17 @@ fn stage_kernel_argument(
     prim: Prim,
 ) -> Result<IrTensorValue, String> {
     match value {
+        // A key tensor enters a kernel as it is: a key has no conversion.
+        RuntimeValue::Tensor(tensor) if tensor.value.prim() == Prim::Key && prim == Prim::Key => {
+            Ok(tensor.value.clone())
+        }
         RuntimeValue::Tensor(tensor) => Ok(ingress_tensor_to_declared(tensor.clone(), prim)?.value),
+        // A scalar key enters a kernel as the rank-0 key tensor its key
+        // `Load` reads (spec/10 section 3.2).
+        RuntimeValue::Key(key) if prim == Prim::Key => Ok(IrTensorValue::from_storage(
+            vec![],
+            chelis_types::TensorStorage::from_keys(vec![*key]),
+        )),
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             Ok(RuntimeTensorValue::from_wide_int(
                 "kernel argument",
@@ -4950,12 +5018,27 @@ mod tensor_entry_actualization_tests {
     }
 }
 
+/// Capture-initialization order in the host interpreter: a captured library
+/// declaration initializes lazily, at most once per context, only when an
+/// activation that runs reads it, and a failed initialization binds nothing
+/// and retries. Before chelis#2413 these cases read the interpreter's random
+/// counter to prove which initializers ran. Draws now take explicit keys and
+/// leave no counter, so the witness is the ordered transcript: every
+/// initializer prints, and the transcript records whether, how often and in
+/// which order each ran. Each draw is keyed by `key_from_seed`, and its
+/// expected bits are [05-RNG-2]'s reference, transcribed below.
 #[cfg(test)]
 mod legacy_capture_order_tests {
     use super::*;
 
-    const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
-    const LIVE: &str = "add(x, uniform_like(weights, 0.0f32, 1.0f32))";
+    /// The initializer's own draw, keyed by `key_from_seed(17i64)`.
+    const DRAW: &str =
+        "uniform_like(key_from_seed(17i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
+    const LIVE: &str = "add(x, uniform_like(k, weights, 0.0f32, 1.0f32))";
+    /// The seeds of the keys the test driver passes to `sample` and to
+    /// `next_draw`.
+    const SAMPLE_SEED: i64 = 42;
+    const NEXT_SEED: i64 = 43;
 
     fn checked_library(source: &str) -> crate::pipeline::CheckedLibrary {
         let prepared =
@@ -4965,11 +5048,16 @@ mod legacy_capture_order_tests {
             .expect("real library fixture passes type, effect and linearity checks")
     }
 
+    /// The captured `weights` initializer is an ascribed block. Unascribed,
+    /// a block-bodied declaration that binds `_ = print(...)` is typed rank
+    /// zero inside a capturing definition (a defect that predates the key
+    /// switch; the retired `with seed` wrapper hid it), and the kernel's
+    /// capture rank check then refuses the rank-one value.
     fn library(initializer: &str, params: &str, body: &str) -> crate::pipeline::CheckedLibrary {
         let source = format!(
-            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
+            "weights: tensor[2, f32] = {{ _ = print(\"initialize\")\n {initializer} }}\n\
              def sample({params}) -> tensor[2, f32] = {body}\n\
-             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+             def next_draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n"
         );
         checked_library(&source)
     }
@@ -5019,8 +5107,6 @@ mod legacy_capture_order_tests {
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
-            random_seed: Some(42),
-            random_counter: 5,
             cancel: None,
             failure_kind: RuntimeFailureKind::Ordinary,
         }
@@ -5042,23 +5128,63 @@ mod legacy_capture_order_tests {
         serde_json::to_value(runtime_value_to_schema(value).unwrap()).unwrap()
     }
 
-    fn expected_draw(seed: u64, counter: u64) -> RuntimeValue {
-        let RuntimeValue::Tensor(template) = zeros() else {
-            unreachable!()
-        };
-        let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
-        let prepared = prepare_uniform_like(&template, bound(0.0), bound(1.0)).unwrap();
-        RuntimeValue::Tensor(
-            uniform_like_value(
-                &template,
-                &prepared,
-                chelis_types::RandomKey::from_counter(seed, counter),
+    /// `key_from_seed(seed)` as the interpreter's key value.
+    fn key(seed: i64) -> RuntimeValue {
+        RuntimeValue::Key(
+            chelis_types::RandomKey::from_seed(
+                chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
             )
             .unwrap(),
         )
     }
 
-    fn admitted_call(ctx: &mut EvalContext<'_>, name: &str) -> Result<RuntimeValue, String> {
+    /// [05-RNG-2]'s unit value of `word(key_from_seed(seed), index)`,
+    /// transcribed from `key_ref.py`; never the evaluator's kernel.
+    fn reference_unit(seed: i64, index: u64) -> f64 {
+        fn splitmix64(x: u64) -> u64 {
+            let x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            let x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            x ^ (x >> 31)
+        }
+        let word = splitmix64(seed as u64 ^ splitmix64(index).rotate_left(41));
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
+
+    /// `uniform_like(key_from_seed(seed), zeros, 0.0f32, 1.0f32)` over two
+    /// elements: [05-OP-8] at f32 is the unit rounded to f32.
+    fn expected_draw(seed: i64) -> RuntimeValue {
+        let values = (0..2)
+            .map(|index| f64::from(reference_unit(seed, index) as f32))
+            .collect();
+        RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], values).unwrap(),
+        )
+    }
+
+    /// The reference agrees with `key_ref.py`'s `unit` rounded to f32.
+    #[test]
+    fn capture_order_reference_draws_match_key_ref_py() {
+        for (seed, words) in [
+            (17, ["3f250d3b", "3f7aee67"]),
+            (42, ["3efa06fe", "3e762d86"]),
+            (43, ["3f208606", "3f514c88"]),
+        ] {
+            assert_eq!(
+                bits(&expected_draw(seed)),
+                serde_json::json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":words}}})
+            );
+        }
+    }
+
+    /// Call the checked named helper `name`, a kernel with the parameters
+    /// `(k: key, x: tensor[2, f32])` whose one draw is keyed by `k`, with
+    /// `key_from_seed(seed)` and zeros.
+    fn admitted_call(
+        ctx: &mut EvalContext<'_>,
+        name: &str,
+        seed: i64,
+    ) -> Result<RuntimeValue, String> {
         let closure = ctx.resolve_top_level(name)?;
         let RuntimeValue::Closure {
             def_name, params, ..
@@ -5067,8 +5193,8 @@ mod legacy_capture_order_tests {
             panic!("checked named helper is a closure")
         };
         assert_eq!(def_name.as_deref(), Some(name));
-        assert_eq!(params.len(), 1);
-        let before = (ctx.random_counter, ctx.transcript.clone());
+        assert_eq!(params.len(), 2);
+        let before = ctx.transcript.clone();
         let kernel = ctx
             .def_kernel(name)?
             .expect("baseline admits real helper kernel");
@@ -5086,39 +5212,34 @@ mod legacy_capture_order_tests {
             4,
             "key-operand UniformLike with no path activation"
         );
+        let key_node = graph.dag.get(draws[0].inputs[3]).expect("key operand");
         assert!(
-            matches!(
-                graph.dag.get(draws[0].inputs[3]).map(|key| &key.op),
-                Some(RiscOp::DrawKey {
-                    handler: chelis_ir::dag::RandomHandler::Inherited,
-                    ..
-                })
-            ),
-            "the helper draws the caller's inherited stream"
+            matches!(&key_node.op, RiscOp::Load { name } if name == "k")
+                && key_node.output_type.precision == Prim::Key,
+            "the helper draws with the key its caller passes"
         );
         assert_eq!(
-            (ctx.random_counter, ctx.transcript.clone()),
-            before,
+            ctx.transcript, before,
             "lowering does not initialize captures"
         );
         // This named closure dispatches through def_kernel then apply_def_kernel.
-        ctx.apply_resolved_callable(closure, vec![zeros()])
+        ctx.apply_resolved_callable(closure, vec![key(seed), zeros()])
     }
 
     #[test]
     fn legacy_capture_order_preinitialized_admission_control() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         assert!(!ctx.bindings.contains_key("weights"));
         let initialized = ctx.resolve_top_level("weights").unwrap();
-        assert_eq!(bits(&initialized), bits(&expected_draw(17, 0)));
-        assert_eq!(ctx.random_counter, 5);
-        let actual = admitted_call(&mut ctx, "sample").unwrap();
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
-        assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
-        assert_eq!(ctx.random_counter, 7);
+        assert_eq!(bits(&initialized), bits(&expected_draw(17)));
+        assert_eq!(ctx.transcript, ["initialize"]);
+        let actual = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap();
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&actual), bits(&expected_draw(SAMPLE_SEED)));
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
+        // The preinitialized capture is served, never initialized again.
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 
@@ -5126,9 +5247,15 @@ mod legacy_capture_order_tests {
     // standalone def kernel. The ordinary checked call must enter site B.
     #[test]
     fn declaration_spread_formal_uses_actual_named_axis_route() {
-        let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+        let draws = (0..5)
+            .map(|j| {
+                format!(
+                    "_ = uniform_like(fold_in(key_from_seed(41i64), {j}i64), copy(x), 0.0f32, 1.0f32)\n"
+                )
+            })
+            .collect::<String>();
         let library = checked_library(&format!(
-            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }}\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\ndef main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+            "weights: tensor[2, f32] = {{ _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }}\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\ndef main(x: tensor[seq, f32]) = {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(key_from_seed(42i64), x, 0.0f32, 1.0f32)) }}\ndef next_draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n"
         ));
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
@@ -5148,28 +5275,36 @@ mod legacy_capture_order_tests {
             bits(&values[0]),
             serde_json::json!({"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41900000"]}}})
         );
-        assert_eq!(bits(&values[1]), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 5);
+        assert_eq!(bits(&values[1]), bits(&expected_draw(42)));
         assert_eq!(
-            bits(&admitted_call(&mut ctx, "next_draw").unwrap()),
-            bits(&expected_draw(42, 5))
+            bits(&admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap()),
+            bits(&expected_draw(NEXT_SEED))
         );
-        assert_eq!(ctx.random_counter, 6);
+        // The formal shadows the declaration, which never initializes.
         assert_eq!(ctx.transcript, ["entry"]);
     }
 
+    /// The named-axis route reads a block-bodied declaration as rank zero even
+    /// when it is ascribed (the defect `library` describes), so these cases
+    /// initialize `weights` through a printing nullary helper instead.
     fn named_axis_capture_case(
         initializer: &str,
         body: &str,
         expected: Result<&str, &str>,
         transcript: &[&str],
     ) {
-        let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+        let draws = (0..5)
+            .map(|j| {
+                format!(
+                    "_ = uniform_like(fold_in(key_from_seed(41i64), {j}i64), copy(x), 0.0f32, 1.0f32)\n"
+                )
+            })
+            .collect::<String>();
         let library = checked_library(&format!(
-            "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
+            "baseline = to_tensor([7.0f32, 11.0f32])\ndef initialize() -> tensor[2, f32] = {{ _ = print(\"initialize\")\n {initializer} }}\nweights = initialize()\n\
              def total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n\
-             def main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\n\
-             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+             def main(x: tensor[seq, f32]) = {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(key_from_seed(42i64), x, 0.0f32, 1.0f32)) }}\n\
+             def next_draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n"
         ));
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
@@ -5182,10 +5317,8 @@ mod legacy_capture_order_tests {
         );
         let result = ctx.apply_resolved_callable(main, vec![input]);
         assert_eq!(ctx.named_axis_route_cache.get("total"), Some(&true));
-        assert_eq!(ctx.random_counter, 5);
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
         match expected {
             Ok(expected_bits) => {
                 let RuntimeValue::Tuple(values) = result.unwrap() else {
@@ -5202,13 +5335,14 @@ mod legacy_capture_order_tests {
                     bits(&captures[1]),
                     serde_json::json!({"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":[expected_bits]}}})
                 );
-                assert_eq!(bits(&values[1]), bits(&expected_draw(42, 5)));
+                assert_eq!(bits(&values[1]), bits(&expected_draw(42)));
             }
             Err(error) => {
                 assert_eq!(result.unwrap_err(), error);
                 assert!(!ctx.bindings.contains_key("weights"));
             }
         }
+        // The later helper call never initializes the capture again.
         assert_eq!(ctx.transcript, transcript);
     }
 
@@ -5225,7 +5359,7 @@ mod legacy_capture_order_tests {
     #[test]
     fn named_axis_caller_shadow_does_not_replace_a_declaration_capture() {
         let library = checked_library(
-            "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = (sum(x, seq), sum(weights, 0i32))\ndef main(weights: tensor[seq, f32]) = total(weights)\n",
+            "def initialize() -> tensor[2, f32] = { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\nweights = initialize()\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = (sum(x, seq), sum(weights, 0i32))\ndef main(weights: tensor[seq, f32]) = total(weights)\n",
         );
         let tensors = UnordMap::new();
         for warm in [false, true] {
@@ -5269,7 +5403,7 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
-    fn named_axis_capture_error_preserves_original_trap_and_parent() {
+    fn named_axis_capture_error_preserves_original_trap() {
         named_axis_capture_case(
             &format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])"),
             "(sum(x, seq), sum(weights, 0i32))",
@@ -5283,7 +5417,7 @@ mod legacy_capture_order_tests {
         use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
         let initializer =
             format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
-        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let library = library(&initializer, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let staged = UnordMap::new();
         for required in [RequiredShape, Selected] {
@@ -5295,7 +5429,6 @@ mod legacy_capture_order_tests {
             );
             assert!(ctx.transcript.is_empty());
             assert!(!ctx.bindings.contains_key("weights"));
-            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
             assert_eq!(
                 ctx.prepare_named_axis_input("weights", required, &staged)
                     .unwrap_err(),
@@ -5303,17 +5436,15 @@ mod legacy_capture_order_tests {
             );
             assert_eq!(ctx.transcript, ["initialize"]);
             assert!(!ctx.bindings.contains_key("weights"));
-            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
             assert!(
                 ctx.prepare_named_axis_input("weights", AvailableShape, &staged)
                     .unwrap()
                     .is_none()
             );
             assert_eq!(
-                bits(&admitted_call(&mut ctx, "next_draw").unwrap()),
-                bits(&expected_draw(42, 5))
+                bits(&admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap()),
+                bits(&expected_draw(NEXT_SEED))
             );
-            assert_eq!(ctx.random_counter, 6);
             assert_eq!(ctx.transcript, ["initialize"]);
         }
     }
@@ -5321,9 +5452,10 @@ mod legacy_capture_order_tests {
     #[test]
     fn named_axis_input_roles_preserve_available_tensor_precedence() {
         use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
-        let tensor = |ordinal| {
-            let RuntimeValue::Tensor(value) = expected_draw(42, ordinal) else {
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
+        // Three distinct tensors, one per source the roles choose between.
+        let tensor = |level: usize| {
+            let RuntimeValue::Tensor(value) = expected_draw(level as i64) else {
                 panic!("draw is a tensor")
             };
             value
@@ -5347,9 +5479,9 @@ mod legacy_capture_order_tests {
                     .unwrap();
                 assert_eq!(
                     bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
-                    bits(&expected_draw(42, level))
+                    bits(&expected_draw(level as i64))
                 );
-                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+                // A supplied value serves the role; the initializer never runs.
                 assert!(ctx.transcript.is_empty());
             }
         }
@@ -5359,7 +5491,7 @@ mod legacy_capture_order_tests {
     fn named_axis_input_roles_do_not_observe_callables_or_unknown_names() {
         use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
         let library = checked_library(&format!(
-            "def sample() -> tensor[2, f32] = with seed(17i64) {{ _ = print(\"observe\")\n {DRAW} }}\nalias = sample\n"
+            "def sample() -> tensor[2, f32] = {{ _ = print(\"observe\")\n {DRAW} }}\nalias = sample\n"
         ));
         let tensors = UnordMap::new();
         let staged = UnordMap::new();
@@ -5374,14 +5506,13 @@ mod legacy_capture_order_tests {
                 assert!(!ctx.bindings.contains_key(name));
             }
         }
-        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
         assert!(ctx.transcript.is_empty());
     }
 
     #[test]
     fn named_axis_required_shape_initializes_once_then_available_can_serve() {
         use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape};
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let staged = UnordMap::new();
         let mut ctx = context(&library, &tensors);
@@ -5392,9 +5523,8 @@ mod legacy_capture_order_tests {
                 .unwrap();
             assert_eq!(
                 bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
-                bits(&expected_draw(17, 0))
+                bits(&expected_draw(17))
             );
-            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
             assert_eq!(ctx.transcript, ["initialize"]);
         }
     }
@@ -5430,15 +5560,16 @@ mod legacy_capture_order_tests {
         // Reuse #1764's admitted generic/static-rate and local-shadow shapes.
         // Evaluating the checked value body directly reaches eval_app rather
         // than lowering a whole main wrapper. Warming resolves the same keep.
+        // The local shadow takes the key too, so both rows spell one call.
         let tensors = UnordMap::new();
         for local in [false, true] {
             let shadow = if local {
-                "keep = fn (v: tensor[4, f32]) -> v\n"
+                "keep = fn (j: key, v: tensor[4, f32]) -> v\n"
             } else {
                 ""
             };
             let library = checked_library(&format!(
-                "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\nout = with seed(42i64) {{ {shadow}x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n first = keep(copy(x))\n next = dropout(x, 0.5f32)\n (first, next) }}\n"
+                "def keep[p: Float](k: key, x: tensor[4, p]) -> tensor[4, p] = dropout(k, x, cast(0.5, p))\nout = {{ {shadow}x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n (k1, k2) = split_key(key_from_seed(42i64))\n first = keep(k1, copy(x))\n next = dropout(k2, x, 0.5f32)\n (first, next) }}\n"
             ));
             for warm in [false, true] {
                 let mut ctx = context(&library, &tensors);
@@ -5453,16 +5584,17 @@ mod legacy_capture_order_tests {
                     panic!("checked output is a pair")
                 };
                 assert_eq!(values.len(), 2);
-                // Independent fixed-stream ordinals 0=[0,2,0,0], 1=[2,0,0,0].
+                // `key_ref.py`'s rate-0.5 masks over ones for the halves of
+                // `split_key(key_from_seed(42i64))`: [2,0,0,2] and [2,2,0,0].
                 let expected = if local {
                     [
                         ["3f800000"; 4],
-                        ["00000000", "40000000", "00000000", "00000000"],
+                        ["40000000", "40000000", "00000000", "00000000"],
                     ]
                 } else {
                     [
-                        ["00000000", "40000000", "00000000", "00000000"],
-                        ["40000000", "00000000", "00000000", "00000000"],
+                        ["40000000", "00000000", "00000000", "40000000"],
+                        ["40000000", "40000000", "00000000", "00000000"],
                     ]
                 };
                 for (value, expected_bits) in values.iter().zip(expected) {
@@ -5471,7 +5603,6 @@ mod legacy_capture_order_tests {
                         serde_json::json!({"type":"tensor", "value":{"shape":[4], "data":{"dtype":"f32", "bits":expected_bits}}})
                     );
                 }
-                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
                 assert!(ctx.transcript.is_empty());
             }
         }
@@ -5512,26 +5643,25 @@ mod legacy_capture_order_tests {
 
     #[test]
     fn declaration_success_restores_all_three_caller_maps_without_losing_the_value() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         let ty = declaration_caller_frame(&mut ctx);
         let first = ctx.resolve_top_level("weights").unwrap();
         let second = ctx.resolve_top_level("weights").unwrap();
-        assert_eq!(bits(&first), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&first), bits(&expected_draw(17)));
         assert_eq!(bits(&second), bits(&first));
         assert_eq!(ctx.transcript, ["initialize"]);
-        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
         assert!(ctx.resolving_top_levels.is_empty());
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
+        assert_eq!(ctx.transcript, ["initialize"]);
         assert_declaration_caller_frame(&ctx, &ty);
     }
 
     #[test]
     fn declaration_closure_does_not_capture_caller_values_or_precision_parameters() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         let ty = declaration_caller_frame(&mut ctx);
@@ -5556,10 +5686,10 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
-    fn declaration_failure_retries_and_restores_three_maps_and_parent_stream() {
+    fn declaration_failure_retries_and_restores_three_maps() {
         let initializer =
             format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
-        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let library = library(&initializer, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         let ty = declaration_caller_frame(&mut ctx);
@@ -5568,18 +5698,18 @@ mod legacy_capture_order_tests {
             assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
             assert_declaration_caller_frame(&ctx, &ty);
             assert!(ctx.resolving_top_levels.is_empty());
-            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
         }
+        // A failed initialization caches nothing, so each resolution runs it.
         assert_eq!(ctx.transcript, ["initialize", "initialize"]);
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
+        assert_eq!(ctx.transcript, ["initialize", "initialize"]);
     }
 
     #[test]
     fn declaration_inner_success_survives_outer_failure_and_retry() {
         let source = format!(
-            "inner = {{ _ = print(\"inner\")\n 9 }}\nouter = with seed(17i64) {{ _ = print(\"outer\")\n saved = inner\n _ = {DRAW}\n add(saved, floor_div(1i32, 0i32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+            "inner = {{ _ = print(\"inner\")\n 9 }}\nouter = {{ _ = print(\"outer\")\n saved = inner\n _ = {DRAW}\n add(saved, floor_div(1i32, 0i32)) }}\ndef next_draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n"
         );
         let library = checked_library(&source);
         let tensors = UnordMap::new();
@@ -5592,24 +5722,24 @@ mod legacy_capture_order_tests {
             );
             assert_declaration_caller_frame(&ctx, &ty);
             assert!(ctx.resolving_top_levels.is_empty());
-            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
         }
         let inner = ctx.resolve_top_level("inner").unwrap();
         assert_eq!(bits(&inner), bits(&RuntimeValue::int_lit(9)));
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
+        // `inner` initialized once, inside the first `outer` attempt, and
+        // survived both failures; the retry reran only `outer`.
         assert_eq!(ctx.transcript, ["outer", "inner", "outer"]);
     }
 
     #[test]
     fn declaration_canonical_resolution_ignores_same_named_caller_value() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         ctx.bindings.insert("weights".into(), zeros());
         let declared = ctx.resolve_top_level("weights").unwrap();
-        assert_eq!(bits(&declared), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&declared), bits(&expected_draw(17)));
         assert_eq!(
             bits(ctx.bindings.get("weights").expect("weights bound")),
             bits(&zeros())
@@ -5646,21 +5776,20 @@ mod legacy_capture_order_tests {
 
     #[test]
     fn declaration_named_kernel_route_and_draws_are_independent_of_warm_cache() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         for warm in [false, true] {
             let mut ctx = context(&library, &tensors);
             if warm {
                 ctx.resolve_top_level("sample").unwrap();
             }
-            // admitted_call separately proves Planned/Legacy/NoDropout,
-            // no staged plan, and exactly one baked UniformLike in the kernel.
-            let actual = admitted_call(&mut ctx, "sample").unwrap();
-            let next = admitted_call(&mut ctx, "next_draw").unwrap();
-            assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
-            assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
+            // admitted_call separately proves the kernel route, no staged
+            // plan, and exactly one UniformLike keyed by the caller's key.
+            let actual = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap();
+            let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+            assert_eq!(bits(&actual), bits(&expected_draw(SAMPLE_SEED)));
+            assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
             assert_eq!(ctx.transcript, ["initialize"]);
-            assert_eq!(ctx.random_counter, 7);
         }
     }
 
@@ -5747,33 +5876,29 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
-    fn legacy_capture_order_valid_lazy_handler_does_not_advance_parent() {
-        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+    fn legacy_capture_order_valid_lazy_initializer_runs_once_in_the_first_call() {
+        let library = library(DRAW, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
         assert!(!ctx.declaration_values.contains_key("weights"));
-        let actual = admitted_call(&mut ctx, "sample").unwrap();
-        let after_helper = ctx.random_counter;
+        assert!(ctx.transcript.is_empty());
+        let actual = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap();
+        // The first call initialized the capture, with its own key.
+        assert_eq!(ctx.transcript, ["initialize"]);
         let initialized = ctx
             .declaration_values
             .get("weights")
             .expect("capture initialized lazily");
-        assert_eq!(bits(initialized), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(initialized), bits(&expected_draw(17)));
         assert!(!ctx.bindings.contains_key("weights"));
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        let again = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap();
         assert_eq!(
+            (bits(&actual), bits(&next), bits(&again), &ctx.transcript),
             (
-                bits(&actual),
-                bits(&next),
-                after_helper,
-                ctx.random_counter,
-                &ctx.transcript
-            ),
-            (
-                bits(&expected_draw(42, 5)),
-                bits(&expected_draw(42, 6)),
-                6,
-                7,
+                bits(&expected_draw(SAMPLE_SEED)),
+                bits(&expected_draw(NEXT_SEED)),
+                bits(&expected_draw(SAMPLE_SEED)),
                 &vec!["initialize".to_owned()]
             )
         );
@@ -5783,17 +5908,17 @@ mod legacy_capture_order_tests {
     fn legacy_capture_order_initializer_failure_retains_only_entered_prefix() {
         let initializer =
             format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
-        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let library = library(&initializer, "k: key, x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
-        let error = admitted_call(&mut ctx, "sample").unwrap_err();
-        let after_failure = ctx.random_counter;
-        assert!(!ctx.bindings.contains_key("weights"));
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        let error = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap_err();
         assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
-        assert_eq!(after_failure, 5);
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
+        // The entered prefix is the initializer's print; nothing is bound.
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert!(!ctx.bindings.contains_key("weights"));
+        assert!(!ctx.declaration_values.contains_key("weights"));
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 
@@ -5801,31 +5926,39 @@ mod legacy_capture_order_tests {
     fn legacy_capture_order_dead_and_formal_shadow_do_not_initialize_library_value() {
         for (params, body) in [
             (
-                "x: tensor[2, f32]",
-                "if true then uniform_like(x, 0.0f32, 1.0f32) else uniform_like(weights, 0.0f32, 1.0f32)",
+                "k: key, x: tensor[2, f32]",
+                "if true then uniform_like(k, x, 0.0f32, 1.0f32) else uniform_like(k, weights, 0.0f32, 1.0f32)",
             ),
             (
-                "weights: tensor[2, f32]",
-                "uniform_like(weights, 0.0f32, 1.0f32)",
+                "k: key, weights: tensor[2, f32]",
+                "uniform_like(k, weights, 0.0f32, 1.0f32)",
             ),
         ] {
             let library = library(DRAW, params, body);
             let tensors = UnordMap::new();
             let mut ctx = context(&library, &tensors);
-            let actual = admitted_call(&mut ctx, "sample").unwrap();
-            let next = admitted_call(&mut ctx, "next_draw").unwrap();
-            assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
-            assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
-            assert_eq!(ctx.random_counter, 7);
+            let actual = admitted_call(&mut ctx, "sample", SAMPLE_SEED).unwrap();
+            let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+            assert_eq!(bits(&actual), bits(&expected_draw(SAMPLE_SEED)));
+            assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
             assert!(ctx.transcript.is_empty() && !ctx.bindings.contains_key("weights"));
         }
+    }
+
+    /// The checker's messages, for an assertion's failure text.
+    fn messages(errors: &[chelis_types::errors::CheckError]) -> String {
+        errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     #[test]
     fn legacy_capture_order_nullary_tensor_observation_boundary() {
         let source = format!(
             "def weights() -> tensor[2, f32] = {{ _ = print(\"initialize\")\n {DRAW} }}\n\
-             def sample(x: tensor[2, f32]) -> tensor[2, f32] = {LIVE}\n"
+             def sample(k: key, x: tensor[2, f32]) -> tensor[2, f32] = {LIVE}\n"
         );
         let prepared =
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
@@ -5834,13 +5967,17 @@ mod legacy_capture_order_tests {
         let crate::pipeline::LibraryRejection::Type { report } = error else {
             panic!("a nullary callable template must fail type checking");
         };
-        assert!(report.errors.iter().any(|error| {
-            matches!(
-                error.kind,
-                chelis_types::errors::CheckErrorKind::TypeMismatch
-            ) && error.message
-                == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
-        }));
+        assert!(
+            report.errors.iter().any(|error| {
+                matches!(
+                    error.kind,
+                    chelis_types::errors::CheckErrorKind::TypeMismatch
+                ) && error.message
+                    == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
+            }),
+            "{}",
+            messages(&report.errors)
+        );
         let declaration = source.split("def sample").next().unwrap();
         let prepared =
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, declaration, None)
@@ -5852,17 +5989,17 @@ mod legacy_capture_order_tests {
         assert!(matches!(closure, RuntimeValue::Closure { .. }));
         let error = stage_kernel_argument("sample", "weights", &closure, Prim::F32).unwrap_err();
         assert!(error.contains("expects a tensor or scalar argument"));
-        assert_eq!(ctx.random_counter, 5);
+        // Neither resolving nor staging the callable ran its body.
         assert!(ctx.transcript.is_empty());
     }
 
     #[test]
-    fn legacy_capture_order_transform_failure_does_not_charge_unentered_draw() {
+    fn legacy_capture_order_transform_failure_stops_at_the_initializer() {
         let source = format!(
-            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n _ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32]) }}\n\
-             def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, uniform_like(weights, 0.0f32, 1.0f32)), 0)\n\
-             def derivative() = grad(loss)\n\
-             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+            "weights: tensor[2, f32] = {{ _ = print(\"initialize\")\n _ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32]) }}\n\
+             def loss(k: key, x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, uniform_like(k, weights, 0.0f32, 1.0f32)), 0)\n\
+             def derivative() = grad(loss, wrt=x)\n\
+             def next_draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)\n"
         );
         let prepared =
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
@@ -5874,19 +6011,17 @@ mod legacy_capture_order_tests {
         let factory = ctx.resolve_top_level("derivative").unwrap();
         let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
         assert!(matches!(callable, RuntimeValue::Transform { .. }));
-        assert_eq!(ctx.random_counter, 5);
+        // Building the transform initializes nothing.
         assert!(ctx.transcript.is_empty() && !ctx.bindings.contains_key("weights"));
         let error = ctx
-            .apply_resolved_callable(callable, vec![zeros()])
+            .apply_resolved_callable(callable, vec![key(SAMPLE_SEED), zeros()])
             .unwrap_err();
-        let after_failure = ctx.random_counter;
-        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
         assert_eq!(ctx.transcript, ["initialize"]);
         assert!(!ctx.bindings.contains_key("weights"));
-        assert_eq!(after_failure, 5, "callee draw was not entered");
-        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
-        assert_eq!(ctx.random_counter, 6);
-        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
+        let next = admitted_call(&mut ctx, "next_draw", NEXT_SEED).unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(NEXT_SEED)));
+        assert_eq!(ctx.transcript, ["initialize"]);
     }
 
     #[test]
@@ -5900,6 +6035,7 @@ mod legacy_capture_order_tests {
         let mut ctx = context(&library, &tensors);
         let factory = ctx.resolve_top_level("mapped").unwrap();
         let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        assert!(ctx.transcript.is_empty());
         let input = RuntimeValue::Tensor(
             RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![2.0, 4.0]).unwrap(),
         );
@@ -5908,8 +6044,8 @@ mod legacy_capture_order_tests {
             RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![6.0, 12.0]).unwrap(),
         );
         assert_eq!(bits(&actual), bits(&expected));
+        // One initialization serves every mapped row.
         assert_eq!(ctx.transcript, ["initialize"]);
-        assert_eq!(ctx.random_counter, 5);
     }
 
     #[test]
@@ -5928,30 +6064,36 @@ mod legacy_capture_order_tests {
             .unwrap_err();
         assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
         assert_eq!(ctx.transcript, ["initialize"]);
-        assert_eq!(ctx.random_counter, 5);
         assert!(!ctx.bindings.contains_key("weights"));
         assert!(!ctx.declaration_values.contains_key("weights"));
     }
 
+    /// The key-form analogue of the retired unhandled-`Random` rejection: a
+    /// library initializer whose draw omits its key, directly or through a
+    /// helper, is rejected before any initializer can run.
     #[test]
-    fn legacy_capture_order_unhandled_library_initializer_is_not_admitted() {
+    fn legacy_capture_order_keyless_library_initializer_is_not_admitted() {
+        let keyless = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
         for source in [
-            format!("weights = {{ _ = print(\"initialize\")\n {DRAW} }}"),
+            format!("weights = {{ _ = print(\"initialize\")\n {keyless} }}"),
             "def draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\nweights = draw(to_tensor([0.0f32, 0.0f32]))".to_owned(),
-            format!("def draw() -> tensor[2, f32] = {DRAW}\nweights = draw()"),
-            format!("weights = with seed(numel({DRAW})) {{ {DRAW} }}"),
+            format!("def draw() -> tensor[2, f32] = {keyless}\nweights = draw()"),
         ] {
-        let prepared =
-            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
-                .unwrap();
-        let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
-        let crate::pipeline::LibraryRejection::Effects { errors } = error else {
-            panic!("an unhandled Random initializer must fail effect checking");
-        };
-        assert!(errors.iter().any(|error| {
-            error.kind == chelis_effects::EffectErrorKind::UnhandledEffect
-                && error.message.starts_with("Function `weights` has unhandled effect `Random`")
-        }));
+            let prepared =
+                crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
+                    .unwrap();
+            let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
+            let crate::pipeline::LibraryRejection::Type { report } = error else {
+                panic!("a keyless draw must fail type checking: {source}");
+            };
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.message.contains("is the retired counter-stream spelling")),
+                "{source}: {}",
+                messages(&report.errors)
+            );
         }
     }
 }

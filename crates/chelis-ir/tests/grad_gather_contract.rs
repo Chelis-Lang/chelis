@@ -51,9 +51,11 @@ fn t_i32(dims: Vec<usize>) -> TensorType {
 #[test]
 fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
 
     // table: [vocab=2, dim=2] — the input we differentiate against.
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -65,6 +67,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     // one_hot encoding of indices=[0, 0, 0]: build via Const+Pad.
     //   start: [n=3, 1] of 1.0
     let oh_col = dag.add_node(
+        decl,
         RiscOp::synth_const(t(vec![3, 1]).precision, 1.0),
         vec![],
         t(vec![3, 1]),
@@ -72,6 +75,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     );
     //   pad axis=1 by (0, 1) with fill 0 → [n=3, vocab=2] = [[1,0],[1,0],[1,0]]
     let one_hot = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![
@@ -86,6 +90,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // Insert new axis at position 2 with size dim=2 → [n=3, vocab=2, dim=2].
     let oh_exp = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -97,6 +102,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // Insert new axis at position 0 with size n=3 → [n=3, vocab=2, dim=2].
     let table_exp = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -107,8 +113,15 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     );
 
     // Mul + sum-over-vocab → [n=3, dim=2] (this IS the gather output).
-    let product = dag.add_node(RiscOp::Mul, vec![oh_exp, table_exp], t(vec![3, 2, 2]), None);
+    let product = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![oh_exp, table_exp],
+        t(vec![3, 2, 2]),
+        None,
+    );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -120,6 +133,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // Collapse to scalar via two sum reductions to drive a scalar output.
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -129,6 +143,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         None,
     );
     let s2 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -185,7 +200,9 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 #[test]
 fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -194,18 +211,21 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
         vec![],
         t_i32(vec![3]),
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         t(vec![3, 2]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -215,6 +235,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         None,
     );
     let s2 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -254,7 +275,9 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
 #[test]
 fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -263,18 +286,21 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![4]).precision, 0.0),
         vec![],
         t_i32(vec![4]),
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 1 },
         vec![table, indices],
         t(vec![2, 4]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -284,6 +310,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         None,
     );
     let s2 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,

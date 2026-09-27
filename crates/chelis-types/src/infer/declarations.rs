@@ -315,9 +315,12 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
                     continue;
                 };
                 let written = all_written_by_defsig || *param_written;
+                // [04-LIN-9]: a key holder is never borrowed, so a parameter
+                // that carries a key is never inferred read-only.
                 let can_infer = !recursive_cycle
                     && !written
                     && type_contains_tensor(&checked_type)
+                    && !type_mentions_key(&checked_type)
                     && !matches!(checked_type, Type::Ref(_));
                 let inferred_read_only = can_infer
                     && !param_has_consuming_use_with_headers(
@@ -2122,6 +2125,21 @@ pub(super) fn type_contains_tensor(ty: &Type) -> bool {
             .iter()
             .any(|argument| argument.as_type().is_some_and(type_contains_tensor)),
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
+/// [04-LIN-9]: does `ty` mention the `key` dtype, as a scalar, a tensor
+/// element, or inside a tuple, reference, or data type argument?
+pub(super) fn type_mentions_key(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => *prim == Prim::Key,
+        Type::Tensor(_, precision) => matches!(precision, TensorPrec::Concrete(Prim::Key)),
+        Type::Ref(inner) => type_mentions_key(inner),
+        Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_mentions_key),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(type_mentions_key)),
+        Type::Fn(_, _) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 

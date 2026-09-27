@@ -174,15 +174,15 @@ fn rejected(source: String, expected: &str) {
 }
 
 #[test]
-fn host_admission_preserves_random_draw_order() {
-    let source = "def probabilities[s](x: tensor[s, *, f32]) -> tensor[s, *, f32] ! { Random } = {\n _ = uniform_like(x, 0.0f32, 1.0f32)\n softmax(concat([x, x], 1i32), -1)\n}\ndef run() = with seed(42i64) {\n x = to_tensor([[0.0, 1.0], [2.0, 0.0]])\n first = probabilities(copy(x))\n next = uniform_like(x, 0.0f32, 1.0f32)\n (first, next)\n}\noutput = run()\n";
+fn host_admission_preserves_keyed_draws() {
+    let source = "def probabilities[s](k: key, x: tensor[s, *, f32]) -> tensor[s, *, f32] = {\n _ = uniform_like(k, x, 0.0f32, 1.0f32)\n softmax(concat([x, x], 1i32), -1)\n}\ndef run() = {\n x = to_tensor([[0.0, 1.0], [2.0, 0.0]])\n (a, b) = split_key(key_from_seed(42i64))\n first = probabilities(a, copy(x))\n next = uniform_like(b, x, 0.0f32, 1.0f32)\n (first, next)\n}\noutput = run()\n";
     let execute = |source: String| {
         eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source,
             bindings: BTreeMap::new(),
         })
-        .expect("seeded execution")
+        .expect("keyed execution")
     };
     let annotated = execute(source.to_string());
     let inferred = execute(source.replace(" -> tensor[s, *, f32]", ""));
@@ -190,11 +190,14 @@ fn host_admission_preserves_random_draw_order() {
         serde_json::to_value(&annotated.roots).unwrap(),
         serde_json::to_value(&inferred.roots).unwrap()
     );
+    // Under explicit keys a discarded draw consumes only its own key, so
+    // removing it leaves every other draw unchanged (under the retired counter
+    // stream it shifted the next draw's ordinal).
     let omitted_draw =
-        execute(source.replace(" _ = uniform_like(x, 0.0f32, 1.0f32)\n", " _ = ()\n"));
-    assert_ne!(
+        execute(source.replace(" _ = uniform_like(k, x, 0.0f32, 1.0f32)\n", " _ = ()\n"));
+    assert_eq!(
         serde_json::to_value(&annotated.roots).unwrap(),
         serde_json::to_value(&omitted_draw.roots).unwrap(),
-        "the discarded draw must consume its ordinal"
+        "a discarded keyed draw must not move any other draw"
     );
 }

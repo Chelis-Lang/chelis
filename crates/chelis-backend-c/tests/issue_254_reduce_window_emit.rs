@@ -23,13 +23,16 @@ fn tensor_4d(shape: [usize; 4]) -> TensorType {
 
 fn build_dag(reducer: ReduceWindowKind) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_4d([1, 1, 4, 4]),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape: vec![2, 2],
@@ -117,13 +120,16 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
 #[test]
 fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_4d([1, 1, 4, 4]),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2, 2],
@@ -145,12 +151,20 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
 #[test]
 fn reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::F16,
     };
-    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+    let load = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input_ty,
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Sum,
             window_shape: vec![2],
@@ -177,7 +191,9 @@ fn reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage() {
 #[test]
 fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -192,6 +208,7 @@ fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2, 2],

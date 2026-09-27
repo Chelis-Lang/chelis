@@ -168,7 +168,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         && fname == "uniform_like"
     {
         *checked_route_observed = true;
-        if let Some(first_arg) = arg_tys.first() {
+        // [05-OP-8]: operand 0 is the key; the template is operand 1.
+        if let Some(first_arg) = arg_tys.get(1) {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
                 Type::Tensor(_, prim)
@@ -220,7 +221,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
-        for arg_ty in arg_tys.iter().skip(1).take(2) {
+        for arg_ty in arg_tys.iter().skip(2).take(2) {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
                 Type::Prim(Prim::F32) => {}
@@ -239,7 +240,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                             with_node_provenance(
                                 node,
                                 format!(
-                                    "uniform_like expects f32 bounds for args 2-3, got {}",
+                                    "uniform_like expects f32 bounds for args 3-4, got {}",
                                     resolved
                                 ),
                             ),
@@ -255,13 +256,15 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         && fname == "dropout"
     {
         *checked_route_observed = true;
+        // [05-OP-37]: operand 0 is the key; the input is operand 1 and the
+        // rate operand 2.
         let tensor_prim = arg_tys
-            .first()
+            .get(1)
             .and_then(|ty| match type_for_readonly_check(ty, subst) {
                 Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
                 _ => None,
             });
-        if let Some(first_arg) = arg_tys.first() {
+        if let Some(first_arg) = arg_tys.get(1) {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
                 Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => {}
@@ -296,7 +299,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
-        if let Some(rate_arg) = arg_tys.get(1) {
+        if let Some(rate_arg) = arg_tys.get(2) {
             let resolved = subst.apply(rate_arg);
             match &resolved {
                 Type::Prim(prim)

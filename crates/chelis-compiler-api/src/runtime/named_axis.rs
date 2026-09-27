@@ -248,6 +248,11 @@ impl<'a> EvalContext<'a> {
             staged.insert(placeholder, tensor_value);
         }
         let app_expr = Expr::node(DeepTag::App, Metadata::default(), app_children, span);
+        // spec/03 §4.4: the routed body runs here, after its actuals, so the
+        // value declarations it reaches initialize here even when the lowered
+        // DAG never demands them.
+        let reached = self.program.reached_by_call(resolved_name);
+        self.initialize_reached_values(&reached)?;
         // Source actuals and their checked types were prepared in the caller
         // above. Free loads in the named body belong to declaration scope.
         let saved = std::mem::take(&mut self.bindings);
@@ -337,9 +342,7 @@ impl<'a> EvalContext<'a> {
         let load = |name: &str| prepared.get(name).cloned();
         // Preparation may enter a fallible initializer that draws, so the
         // frame is taken from the host state after it.
-        let mut frame = self.random_frame();
-        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
-        self.commit_random_frame(&frame);
+        let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
@@ -490,7 +493,20 @@ pub(super) fn pack_dag_roots(
             precision,
             "the DAG evaluator finalizes at the root's declared dtype"
         );
-        packed.push(RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)));
+        // A rank-0 key root is a scalar key value; the interpreter has no
+        // rank-0 key tensor of its own (spec/10 section 3.2).
+        let scalar_key = (precision == Prim::Key && tensor.shape.is_empty())
+            .then(|| {
+                tensor
+                    .storage()
+                    .keys()
+                    .and_then(|keys| keys.first().copied())
+            })
+            .flatten();
+        packed.push(match scalar_key {
+            Some(key) => RuntimeValue::Key(key),
+            None => RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)),
+        });
     }
     if packed.len() == 1 {
         Ok(packed.pop().expect("checked length"))

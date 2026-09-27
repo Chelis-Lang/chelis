@@ -603,8 +603,6 @@ struct ExpectedHostSite<'a> {
     kind: super::ir::HostSiteKind,
     #[cfg(feature = "lowering-trace")]
     expression: Option<&'a ConcreteHostExpr>,
-    #[cfg(feature = "lowering-trace")]
-    seed_parent: Option<usize>,
     #[cfg(not(feature = "lowering-trace"))]
     source_lifetime: std::marker::PhantomData<&'a ()>,
 }
@@ -615,8 +613,6 @@ fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite
         kind,
         #[cfg(feature = "lowering-trace")]
         expression: None,
-        #[cfg(feature = "lowering-trace")]
-        seed_parent: None,
         #[cfg(not(feature = "lowering-trace"))]
         source_lifetime: std::marker::PhantomData,
     }
@@ -694,8 +690,6 @@ fn census_host_expr<'a>(
 ) -> Result<(), OwnershipError> {
     use super::ir::HostSiteKind;
 
-    #[cfg(feature = "lowering-trace")]
-    let start = sites.len();
     let expression_site = expected_site(unit, HostSiteKind::Expression);
     #[cfg(feature = "lowering-trace")]
     let expression_site = ExpectedHostSite {
@@ -824,19 +818,13 @@ fn census_host_expr<'a>(
             sites.push(expected_site(unit, HostSiteKind::Binding));
             census_host_callback(callback, helpers, unit, sites)?;
         }
-        ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-            sites.push(expected_site(unit, HostSiteKind::Argument));
-            census_host_expr(seed, helpers, unit, sites)?;
-            sites.push(expected_site(unit, HostSiteKind::Argument));
-            census_host_expr(body, helpers, unit, sites)?;
-        }
         ConcreteHostExprKind::TensorCall { helper, args, .. } => {
             let Some(helper) = helpers.get(*helper) else {
                 return Err(OwnershipError::HostSiteMap {
                     detail: format!("payload names missing tensor helper {helper}"),
                 });
             };
-            if independent_identity_helper(helper) && args.len() == 1 {
+            if helper.identity_input().is_some() && args.len() == 1 {
                 census_host_expr(&args[0], helpers, unit, sites)?;
             } else {
                 for arg in args {
@@ -844,12 +832,6 @@ fn census_host_expr<'a>(
                     census_host_expr(arg, helpers, unit, sites)?;
                 }
             }
-        }
-    }
-    #[cfg(feature = "lowering-trace")]
-    if matches!(expr.kind, ConcreteHostExprKind::WithSeed { .. }) {
-        for child in &mut sites[start + 1..] {
-            child.seed_parent.get_or_insert(start);
         }
     }
     Ok(())
@@ -869,13 +851,7 @@ pub(super) fn source_expressions(
         .filter_map(|(expected, site)| {
             expected
                 .expression
-                .map(|expression| super::VerifiedHostSourceSite {
-                    site,
-                    expression,
-                    seed_parent: expected
-                        .seed_parent
-                        .map(|index| emission.sites.records[index].id),
-                })
+                .map(|expression| super::VerifiedHostSourceSite { site, expression })
         })
         .collect()
 }
@@ -892,20 +868,6 @@ fn census_host_callback<'a>(
             census_host_expr(body, helpers, unit, sites)
         }
     }
-}
-
-fn independent_identity_helper(helper: &HostTensorHelper) -> bool {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return false;
-    }
-    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
-        return false;
-    };
-    matches!(
-        &node.op,
-        crate::dag::RiscOp::Load { name }
-            if node.output_type == helper.output && helper.inputs[0].name == *name
-    )
 }
 
 fn verify_materialized_roots(

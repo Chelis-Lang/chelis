@@ -45,9 +45,11 @@ fn vec_f32(n: usize) -> TensorType {
 /// surface across repeated emissions if it were still present.
 fn build_multi_input_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mut loads = Vec::with_capacity(INPUT_NAMES.len());
     for name in &INPUT_NAMES {
         let id = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: (*name).into(),
             },
@@ -61,7 +63,7 @@ fn build_multi_input_dag() -> Dag {
     // optimized away or pruned in some future pass).
     let mut acc = loads[0];
     for next in loads.iter().skip(1) {
-        acc = dag.add_node(RiscOp::Add, vec![acc, *next], vec_f32(4), None);
+        acc = dag.add_node(decl, RiscOp::Add, vec![acc, *next], vec_f32(4), None);
     }
     dag
 }
