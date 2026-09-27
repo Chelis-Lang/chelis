@@ -232,6 +232,64 @@ fn a_variable_inside_a_list_operand_is_decided_at_the_boundary() {
     );
 }
 
+/// REGRESSION TEST (#2584 round 4). `dict_of` admitted only `i64` and `string`
+/// keys, narrower than [05-OP-56], so deciding it at every instantiation of an
+/// `Int`-bounded binder rejected `k := i8`, which `main` checked and both lanes
+/// run. The key domain is the atom's: string, bool, and every active
+/// signed-integer dtype. No unsigned type reaches `dict_of`: the `uint*` names
+/// are reserved and rejected where they are written ([04-DTYPE-1]).
+#[test]
+fn dictionary_keys_are_the_atom_domain_at_every_binder_instantiation() {
+    for (key, literal) in [
+        ("string", "\"k\""),
+        ("bool", "true"),
+        ("i8", "1i8"),
+        ("i16", "1i16"),
+        ("i32", "1i32"),
+        ("i64", "1i64"),
+    ] {
+        accepts(&format!(
+            "def ok() -> Dict[{key}, i32] = dict_of([({literal}, 1i32)])"
+        ));
+    }
+
+    // The two round-4 witnesses, over a binder bounded by `Int`, and each
+    // called at every member.
+    for (declaration, call) in [
+        (
+            "def mk[k: Int, v](pairs: List[(k, v)]) -> Dict[k, v] = dict_of(pairs)",
+            "mk([(1KEY, 1i32)])",
+        ),
+        (
+            "def keyed[k: Int](x: k) -> Dict[k, i32] = dict_insert(dict_of([]), x, 1i32)",
+            "keyed(1KEY)",
+        ),
+    ] {
+        accepts(declaration);
+        for key in ["i8", "i16", "i32", "i64"] {
+            accepts(&format!(
+                "{declaration}\ndef main() -> Dict[{key}, i32] = {}\n",
+                call.replace("KEY", key)
+            ));
+        }
+    }
+
+    const KEY_RULE: &str =
+        "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56])";
+    rejects_with(
+        "def bad() -> Dict[f32, i32] = dict_of([(1.0f32, 1i32)])",
+        &[KEY_RULE, "got f32"],
+    );
+    rejects_with(
+        "def bad() -> Dict[(i32, i32), i32] = dict_of([((1i32, 2i32), 1i32)])",
+        &[KEY_RULE, "got (i32, i32)"],
+    );
+    rejects_with(
+        "def mk[k: Float, v](pairs: List[(k, v)]) -> Dict[k, v] = dict_of(pairs)",
+        &[KEY_RULE, "declared `k: Float`", "`k := f32`"],
+    );
+}
+
 /// REGRESSION TEST (chelis#2523). A tuple projection or field read on a binder
 /// kept no obligation at the boundary.
 #[test]

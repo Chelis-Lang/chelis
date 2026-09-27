@@ -46,6 +46,14 @@ these checked with score 1:
   tensor result is rejected with `grad`'s own diagnostic, and
   `def h(g) = grad(g)` is rejected at the declaration boundary.
 
+Now accepted: dictionary keys of every [05-OP-56] dtype, which are string,
+bool and every active signed-integer dtype. `dict_of` admitted only `i64` and
+`string` keys, so deciding it at every instantiation of a binder bounded by
+`Int`, as in `def mk[k: Int, v](pairs: List[(k, v)]) -> Dict[k, v] = dict_of(pairs)`,
+rejected it at `k := i8`, although `main` checked it and both lanes ran it.
+`chelis eval` now also runs `bool` keys, which it refused at run time although
+`main` checked them through an unbounded generic `dict_of`.
+
 A recursive group whose members omit types is typed by [04-INF-2] and
 [04-INF-5] together ([#2590](https://github.com/Chelis-Lang/chelis/issues/2590)).
 Inside its group, a member whose declared header omits a type, such as its

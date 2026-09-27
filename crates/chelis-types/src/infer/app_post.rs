@@ -5,6 +5,15 @@
 
 use super::*;
 
+/// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
+/// Float, aggregate, tensor and random-key types are not dictionary keys.
+fn is_dict_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
+        _ => false,
+    }
+}
+
 /// The declared extent at one axis of an application's result, read from the
 /// two ingresses a declaration can reach a builtin call through.
 ///
@@ -2138,7 +2147,7 @@ pub(super) fn finish_unified_app(
                                         vec![items[0].clone(), items[1].clone()],
                                     );
                                     match &items[0] {
-                                        Type::Prim(Prim::Int64) | Type::Prim(Prim::String) => {}
+                                        key if is_dict_key_type(key) => {}
                                         Type::Error(_) => return result_ty,
                                         Type::Var(_) => {
                                             return site.defer(&arg_tys, &result_ty, product, dict);
@@ -2151,7 +2160,7 @@ pub(super) fn finish_unified_app(
                                                     with_node_provenance(
                                                         node,
                                                         format!(
-                                                            "dict_of keys must be i64 or string, got {other}"
+                                                            "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56]), got {other}"
                                                         ),
                                                     ),
                                                     vec![],
