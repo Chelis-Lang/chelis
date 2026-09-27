@@ -20517,8 +20517,11 @@ impl<'program> LowerCtx<'program> {
                     DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
                         (RtDim::Lit(*value), vec![expanded])
                     }
-                    DimInfo::Named(_, None) => match extents.get(&axis) {
-                        Some(&JoinExtent::Origin { node, axis: read }) => (
+                    DimInfo::Named(_, None) => {
+                        let (node, read) = extents
+                            .get(&axis)
+                            .map_or((else_node, axis), |extent| (extent.node, extent.axis));
+                        (
                             RtDim::InputAxis {
                                 tensor: 1,
                                 axis: RtAxis::Lit(
@@ -20526,20 +20529,8 @@ impl<'program> LowerCtx<'program> {
                                 ),
                             },
                             vec![expanded, node],
-                        ),
-                        Some(&JoinExtent::Larger(extent)) => {
-                            (RtDim::Node(1), vec![expanded, extent])
-                        }
-                        None => (
-                            RtDim::InputAxis {
-                                tensor: 1,
-                                axis: RtAxis::Lit(
-                                    i32::try_from(axis).expect("tensor rank fits i32"),
-                                ),
-                            },
-                            vec![expanded, else_node],
-                        ),
-                    },
+                        )
+                    }
                 };
                 expanded = self.dag.add_node(
                     self.owner(),
@@ -20558,25 +20549,22 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// Where the join condition takes its extent on each runtime axis of
-    /// `out_ty`, when not from the `else` arm. An arm's extent is not read:
-    /// where both arms' extents resolve to one origin that runs whenever the
-    /// join does, the condition reads that origin. Where the arms carry one
-    /// anonymous-extent identity, the one the C lane names them by
+    /// `out_ty`, when not from the `else` arm. An arm's extent is read only
+    /// where the arms' extents are proven one extent: where both resolve to
+    /// one origin that runs whenever the join does, the condition reads that
+    /// origin. Where the arms carry one anonymous-extent identity, the one
+    /// the C lane names them by
     /// ([`crate::anonymous_dims::anonymous_axis_identity`]), the condition
     /// reads the axis where that identity is decided, when it runs whenever
-    /// the join does, so it carries the arms' identity in C too. Where the
-    /// arms' extents are not one extent in either sense (the operand
-    /// agreement `where` verifies,
-    /// [`crate::verify::axis_extents_semantically_equivalent`]), it is the
-    /// larger of the arms' extents, raised to one where the arms' shapes
-    /// differ on any such axis. The condition is then never empty when the
-    /// arms differ, so, being uniform, the `Where` yields the selected arm at
-    /// its own shape ([05-OP-53]); where the arms agree it is their shape,
-    /// which a condition mixed across `vmap` rows requires. Every input is an
-    /// extent read, so `vmap` shares them. An axis whose extents are one
-    /// otherwise (one bound name, a checked named claim, one static extent,
-    /// or one identity decided where the join does not run) keeps the `else`
-    /// arm's extent.
+    /// the join does, so it carries the arms' identity in C too. An axis
+    /// whose extents are one otherwise (the operand agreement `where`
+    /// verifies, [`crate::verify::axis_extents_semantically_equivalent`]:
+    /// one bound name, a checked named claim, one static extent; or one
+    /// identity decided where the join does not run) keeps the `else` arm's
+    /// extent. Where none of these proves the arms' extents equal, the join
+    /// is refused (chelis#2583): an untaken arm may be zeros at an unchecked
+    /// claim's extent, so no single arm, and no extent computed from both,
+    /// sizes a selection every lane agrees on.
     fn join_condition_extents(
         &mut self,
         out_ty: &TensorType,
@@ -20601,7 +20589,6 @@ impl<'program> LowerCtx<'program> {
                 .is_some_and(|node| enclosing.contains(&node.owner.activation))
         };
         let mut sources = BTreeMap::new();
-        let mut axes = Vec::new();
         for (axis, dim) in out_ty.dims.iter().enumerate() {
             if !matches!(dim, DimInfo::Named(_, None)) {
                 continue;
@@ -20617,7 +20604,7 @@ impl<'program> LowerCtx<'program> {
                         axis: read,
                     },
                 ) if runs_with_join(&self.dag, node) => {
-                    sources.insert(axis, JoinExtent::Origin { node, axis: read });
+                    sources.insert(axis, JoinExtent { node, axis: read });
                 }
                 _ if crate::verify::axis_extents_semantically_equivalent(
                     &self.dag, then_node, else_node, axis, &arms,
@@ -20635,74 +20622,56 @@ impl<'program> LowerCtx<'program> {
                                 .into_iter()
                                 .find(|(node, _)| runs_with_join(&self.dag, *node))
                             {
-                                sources.insert(axis, JoinExtent::Origin { node, axis: read });
+                                sources.insert(axis, JoinExtent { node, axis: read });
                             }
                         }
-                        _ => axes.push(axis),
+                        _ => self.reject_unproven_join(axis),
                     }
                 }
             }
         }
-        let extent_ty = TensorType {
-            dims: Vec::new(),
-            precision: Prim::Int64,
-        };
-        let add = |this: &mut Self, op: RiscOp, inputs: Vec<NodeId>| {
-            this.dag.add_node(
-                this.owner(),
-                op,
-                inputs,
-                extent_ty.clone(),
-                this.current_span_id.clone(),
-            )
-        };
-        let mut larger = Vec::with_capacity(axes.len());
-        let mut difference = None;
-        for &axis in &axes {
-            let then_extent = add(self, RiscOp::Shape { axis }, vec![then_node]);
-            let else_extent = add(self, RiscOp::Shape { axis }, vec![else_node]);
-            larger.push(add(self, RiscOp::MaxElem, vec![then_extent, else_extent]));
-            if axes.len() > 1 {
-                let gap = add(self, RiscOp::Sub, vec![then_extent, else_extent]);
-                let gap = add(self, RiscOp::Abs, vec![gap]);
-                difference = Some(match difference {
-                    Some(total) => add(self, RiscOp::Add, vec![total, gap]),
-                    None => gap,
-                });
-            }
-        }
-        // With one such axis, both arms empty on it means equal shapes, and
-        // the empty condition is their shape.
-        if let Some(difference) = difference {
-            let one = add(
-                self,
-                RiscOp::Const {
-                    value: scalar_from_i64("if join", Prim::Int64, 1).expect("unit extent"),
-                },
-                Vec::new(),
-            );
-            let differs = add(self, RiscOp::MinElem, vec![difference, one]);
-            for extent in &mut larger {
-                *extent = add(self, RiscOp::MaxElem, vec![*extent, differs]);
-            }
-        }
-        sources.extend(
-            axes.into_iter()
-                .zip(larger)
-                .map(|(axis, extent)| (axis, JoinExtent::Larger(extent))),
-        );
         sources
+    }
+
+    /// The typed refusal of a runtime `if` join whose arms' extents on
+    /// `axis` are not proven equal ([`Self::join_condition_extents`]), on
+    /// the raise ladder of [`Self::reject_lowering_at`]: fatal inside an AD
+    /// transform body, recoverable elsewhere. A recoverable refusal is the
+    /// error of the evaluator's kernel for the body; C's whole-program build
+    /// emits a body its kernel lowering refuses as host code (chelis#1515).
+    fn reject_unproven_join(&self, axis: usize) -> ! {
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        let unsupported = Unsupported::new(
+            UnsupportedKind::Construct(format!(
+                "a runtime `if` whose arms' extents on axis {axis} are not proven equal"
+            )),
+            "the `if` join in IR lowering",
+            Stage::Lowering,
+            chelis_types::unimplemented_rejection!(
+                2583,
+                "an `if` whose arms' extents are not proven equal cannot be joined as a \
+                 selection yet: an untaken arm may be sized by its unchecked claim"
+            ),
+        );
+        let diagnostic =
+            LowerDiagnostic::from_unsupported(unsupported, None, self.current_span_id.clone());
+        raise_lowering_diagnostic(if self.allow_host_list_ad_rewrites {
+            diagnostic.fatal()
+        } else {
+            diagnostic
+        })
     }
 }
 
 /// Where a runtime `if`'s join condition reads its extent on one axis
-/// (`join_condition_extents`).
+/// (`join_condition_extents`): the axis of the node both arms' extents
+/// resolve to.
 #[derive(Clone, Copy)]
-enum JoinExtent {
-    /// The axis of the node both arms' extents resolve to.
-    Origin { node: NodeId, axis: usize },
-    /// A rank-0 `i64` node: the larger of the arms' extents.
-    Larger(NodeId),
+struct JoinExtent {
+    node: NodeId,
+    axis: usize,
 }
 
 #[cfg(test)]

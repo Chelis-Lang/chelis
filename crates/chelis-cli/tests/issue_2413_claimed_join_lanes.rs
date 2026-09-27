@@ -2,7 +2,9 @@
 //! `if` join every lane returns what the taken arm computes when that value
 //! satisfies the join's declared type, or traps with the typed extent message
 //! when the taken arm's claim is false. An untaken arm's claim never sizes
-//! the join.
+//! the join. A join whose arms' extents lowering does not prove equal (one
+//! origin, or one C identity) is refused with the typed chelis#2583 refusal
+//! instead of being sized from either arm; it is never a silent value.
 //!
 //! The matrix is generated, not sampled: the claimed arm in the `then` or
 //! `else` position; its claim from a callee's result type, a local ascription,
@@ -13,22 +15,29 @@
 //! or computed from the same value outside the join, so that the two arms'
 //! extents have one origin (for a result claim and an ascription). Each
 //! cell's expectation is computed from its parameters, never read from a
-//! lane.
+//! lane: an independent other arm's extent is not proven equal to the
+//! claimed arm's, so those cells expect the typed refusal in every lane
+//! (the host interpreter included: it runs `selected` as the kernel C
+//! emits, and a kernel's lowering failure is its error, never a
+//! fall-through to the interpreter).
 //!
 //! Lanes: the host interpreter (`chelis eval --file` on `main`), the DAG
 //! evaluator (`selected` lowered as a tensor entry, as `exec_compile` runs
-//! it), and the whole program's C (`chelis build`, linked and run). A C
-//! build refusal is loud and accepted, except for a cell C built at
-//! 096daea8c (the 40 shared-origin cells), which must still build; a C run
-//! must agree. Every cell is collected before the assertion, so one red cell
-//! never hides a sibling.
+//! it; where it declines to lower, the same body's kernel lowering states
+//! why), and the whole program's C (`chelis build`, linked and run). A cell
+//! C built at 096daea8c (the 40 shared-origin cells) must still build; a C
+//! run must agree. Every cell is collected before the assertion, so one red
+//! cell never hides a sibling.
 //!
-//! Evidentiary status: REGRESSION TEST for the nine untaken `else` cells
-//! whose claim is 0 (six with an independent other arm, three with a shared
-//! origin), which returned an empty tensor in the host interpreter and the
-//! DAG evaluator at 44c9b23e7 (18 of 300 cell lanes); DISPOSITION LOCK for
-//! every other cell, and for the C build rule (C built the same 40 cells at
-//! 096daea8c and 592dc55ce).
+//! Evidentiary status: REGRESSION TEST for the three silent values the
+//! round-2b reviewer found at dfaefd9a2 ([`the_reviewers_unproven_joins_are_the_taken_arm_or_refused`]:
+//! a nested join returned an empty tensor in the host interpreter and the
+//! DAG evaluator, a `vmap` row join `[0, 0, 0]` in the DAG evaluator), and
+//! for the three shared-origin untaken `else` cells whose claim is 0, which
+//! returned an empty tensor at 44c9b23e7; DISPOSITION LOCK for every other
+//! cell, for the typed refusal of the 60 independent-arm cells, and for the
+//! C build rule (C built the same 40 cells at 096daea8c, 592dc55ce and
+//! dfaefd9a2).
 use assert_cmd::Command;
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_types::types::Prim;
@@ -81,10 +90,17 @@ struct Cell {
     /// The DAG evaluator's inputs to `selected`.
     bindings: UnordMap<String, TensorValue>,
     expected: Expected,
-    /// C builds this cell: its arms are computed from one value outside the
-    /// join, which C names as one extent. At 096daea8c C built exactly these
-    /// cells, so a refusal of one is a regression, not a loud answer.
-    c_builds: bool,
+    /// The arms' extents are proven one extent: they are computed from one
+    /// value outside the join, which C names as one extent. At 096daea8c C
+    /// built exactly these cells, so a refusal of one is a regression, not a
+    /// loud answer.
+    proven: bool,
+    /// The lanes that must refuse a join lowering does not prove: in the
+    /// generated matrix the host interpreter and the DAG evaluator, which
+    /// run `selected` as a kernel. C's whole-program build interprets a body
+    /// its kernel lowering refuses (chelis#1515), so it may return the
+    /// expected value.
+    refused_in: &'static [&'static str],
 }
 
 #[derive(Debug)]
@@ -268,7 +284,8 @@ fn cell(then_claimed: bool, claim: Claim, taken: bool, source: Source, shared: b
         source: source_text,
         bindings,
         expected,
-        c_builds: shared,
+        proven: shared,
+        refused_in: if shared { &[] } else { &["H", "E"] },
     }
 }
 
@@ -303,13 +320,21 @@ fn text(output: &std::process::Output) -> String {
     )
 }
 
-/// What a lane did: a value (shape and elements), a trap or error text, or,
-/// for C only, a build refusal.
+/// What a lane did: a value (shape and elements), a trap or error text, or
+/// a refusal to lower or build it, with its text.
 #[derive(Debug)]
 enum Outcome {
     Value(Vec<f32>),
     Trapped(String),
-    Refused,
+    Refused(String),
+}
+
+/// The typed refusal of a join whose arms' extents are not proven equal
+/// (`join_condition_extents` in `chelis-ir`'s lowering).
+fn is_unproven_join_refusal(message: &str) -> bool {
+    message.contains("whose arms' extents on axis ")
+        && message.contains("are not proven equal")
+        && message.contains("unimplemented chelis#2583: ")
 }
 
 /// `main = tensor(shape=[k], data=[..])` as printed by eval and the C main.
@@ -350,6 +375,7 @@ fn host(directory: &Path, stem: &str, source: &str) -> Outcome {
     let stdout = String::from_utf8_lossy(&output.stdout);
     match parse_printed(&stdout) {
         Some(values) if output.status.success() => Outcome::Value(values),
+        _ if is_unproven_join_refusal(&text(&output)) => Outcome::Refused(text(&output)),
         _ => Outcome::Trapped(text(&output)),
     }
 }
@@ -366,7 +392,7 @@ fn compiled(directory: &Path, stem: &str, source: &str) -> Outcome {
         .output()
         .unwrap();
     if !built.status.success() {
-        return Outcome::Refused;
+        return Outcome::Refused(text(&built));
     }
     let linked = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
     assert!(linked.success(), "{stem}: link failed: {linked}");
@@ -386,8 +412,27 @@ fn dag(cell: &Cell) -> Outcome {
         &chelis_surf::desugar::desugar_program(&declarations).expect("Surf desugar"),
     )
     .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
-    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "selected") else {
-        return Outcome::Trapped("`selected` does not lower as a tensor entry".to_owned());
+    // A fatal lowering diagnostic (one raised inside a transform body)
+    // unwinds with the diagnostic as its payload.
+    let lowered = std::panic::catch_unwind(|| {
+        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "selected")
+    });
+    let dag = match lowered {
+        Ok(Some(dag)) => dag,
+        Ok(None) => {
+            let kernel = chelis_ir::host::host_def_kernel(
+                &chelis_ir::host::HostLoweringSession::new(&checked),
+                "selected",
+            );
+            return Outcome::Refused(match kernel {
+                Err(diagnostic) => diagnostic.to_string(),
+                Ok(_) => "`selected` does not lower as a tensor entry".to_owned(),
+            });
+        }
+        Err(payload) => match payload.downcast::<chelis_ir::lower::LowerDiagnostic>() {
+            Ok(diagnostic) => return Outcome::Refused(diagnostic.to_string()),
+            Err(payload) => std::panic::resume_unwind(payload),
+        },
     };
     let root = *dag.roots().last().expect("a root");
     match eval_tensor(&dag, &cell.bindings) {
@@ -407,9 +452,17 @@ fn dag(cell: &Cell) -> Outcome {
 /// trap stating the claimed and the computed extent (`extent `0`: claimed =
 /// 0, shrink axis 0 = 3`; a runtime claim that the callee's operand also
 /// sizes is checked at the call, `extent `n`: like axis 0 = 0, y axis 0 =
-/// 3`). `refusal_is_loud` admits a build refusal.
-fn agrees(expected: &Expected, outcome: &Outcome, refusal_is_loud: bool) -> bool {
-    match (expected, outcome) {
+/// 3`). A proven join admits no refusal. One lowering does not prove admits
+/// the typed refusal, or in C any build refusal, and in the cell's
+/// `refused_in` lanes only that.
+fn agrees(cell: &Cell, lane: &str, outcome: &Outcome) -> bool {
+    if let Outcome::Refused(message) = outcome {
+        return !cell.proven && (lane == "C" || is_unproven_join_refusal(message));
+    }
+    if cell.refused_in.contains(&lane) {
+        return false;
+    }
+    match (&cell.expected, outcome) {
         (Expected::Value(values), Outcome::Value(got)) => values == got,
         (Expected::Trap { claimed, actual }, Outcome::Trapped(message)) => {
             message.contains("numeric trap: domain in ")
@@ -417,7 +470,6 @@ fn agrees(expected: &Expected, outcome: &Outcome, refusal_is_loud: bool) -> bool
                 && message.contains(&format!(" = {claimed},"))
                 && message.contains(&format!("axis 0 = {actual}"))
         }
-        (_, Outcome::Refused) => refusal_is_loud,
         _ => false,
     }
 }
@@ -429,16 +481,12 @@ fn disagreements(cells: &[Cell]) -> Vec<String> {
     for (index, cell) in cells.iter().enumerate() {
         let stem = format!("cell_{index}");
         let lanes = [
-            ("H", host(directory.path(), &stem, &cell.source), false),
-            ("E", dag(cell), false),
-            (
-                "C",
-                compiled(directory.path(), &stem, &cell.source),
-                !cell.c_builds,
-            ),
+            ("H", host(directory.path(), &stem, &cell.source)),
+            ("E", dag(cell)),
+            ("C", compiled(directory.path(), &stem, &cell.source)),
         ];
-        for (lane, outcome, refusal_is_loud) in lanes {
-            if !agrees(&cell.expected, &outcome, refusal_is_loud) {
+        for (lane, outcome) in lanes {
+            if !agrees(cell, lane, &outcome) {
                 failures.push(format!(
                     "{} [{lane}]: expected {:?}, got {outcome:?}",
                     cell.name, cell.expected
@@ -467,8 +515,9 @@ fn every_lane_returns_the_taken_arm_or_its_claims_trap_at_a_claimed_join() {
 
 /// A declared extent on the join itself, by a local ascription or by the
 /// result type, is a claim on an active node: the taken arm's three elements
-/// violate the declared 0, so every lane traps with the typed extent message
-/// (C's build refusal is loud), whatever the untaken arm claims.
+/// violate the declared 0, so every lane traps with the typed extent message,
+/// whatever the untaken arm claims, or refuses the join: these arms' extents
+/// (a runtime `shrink` against a claimed 0) are not proven equal.
 ///
 /// Evidentiary status: REGRESSION TEST: at 44c9b23e7 the host interpreter
 /// returned `0.0` and an empty tensor, the join's extent read from the
@@ -519,7 +568,113 @@ fn a_declared_join_extent_is_checked_against_the_taken_arm() {
                 claimed: 0,
                 actual: 3,
             },
-            c_builds: false,
+            proven: false,
+            refused_in: &[],
+        }
+    });
+    let failures = disagreements(&cells);
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The round-2b reviewer's joins whose arms' extents are not proven equal:
+/// a nested `if` whose inner `then` arm claims 0 (the taken inner `else`
+/// holds `x[0..3]`), and a `vmap` row function whose arms hold 5 and 3
+/// elements, the `else` arm unclaimed or claimed 3 by a callee's result
+/// type. Every lane returns the taken arm's value or refuses the join.
+///
+/// Evidentiary status: REGRESSION TEST: at dfaefd9a2 the nested join
+/// returned an empty tensor in the host interpreter and the DAG evaluator,
+/// and each `vmap` join `[0, 0, 0]` in the DAG evaluator, the condition
+/// sized as the larger arm.
+#[test]
+fn the_reviewers_unproven_joins_are_the_taken_arm_or_refused() {
+    let x = x32();
+    let elements = x
+        .iter()
+        .map(|value| format!("{value:?}f32"))
+        .collect::<Vec<_>>();
+    let literal = format!("to_tensor([{}])", elements.join(", "));
+    let rows = [
+        [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0],
+        [9.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    ];
+    let matrix = format!(
+        "to_tensor([{}])",
+        rows.iter()
+            .map(|row| {
+                let row = row
+                    .iter()
+                    .map(|value| format!("{value:?}f32"))
+                    .collect::<Vec<_>>();
+                format!("[{}]", row.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // Each row's sum decides its arm: the first five elements where it is
+    // positive, else the first three.
+    let row_sums = rows
+        .iter()
+        .map(|row| {
+            let kept = if row.iter().sum::<f32>() > 0.0 { 5 } else { 3 };
+            row[..kept].iter().sum::<f32>()
+        })
+        .collect::<Vec<_>>();
+    let vmap_join = |else_arm: &str, helper: &str| {
+        format!(
+            "{helper}def rowf(r: tensor[8, f32]) -> tensor[f32] = {{\n  s = tensor_to_scalar(sum(copy(r), 0i32))\n  sum(if lt(0.0f32, s) then shrink(copy(r), [[0i64, sub(shape(&r, 0i32), 3i64)]]) else {else_arm}, 0i32)\n}}\ndef selected(xs: tensor[3, 8, f32]) -> tensor[3, f32] = vmap(rowf)(xs)\ndef main() -> tensor[3, f32] = selected({matrix})\n"
+        )
+    };
+    let cells = [
+        (
+            "nested join, inner then arm claimed 0",
+            format!(
+                "def zero(y: tensor[*, f32]) -> tensor[0, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 31i64)]])\ndef selected(x: tensor[32, f32]) -> tensor[*, f32] = {{\n  s = tensor_to_scalar(sum(copy(x), 0i32))\n  if lt(0.0f32, s) then (if lt(s, 0.0f32) then zero(copy(x)) else {OTHER}) else zero(x)\n}}\ndef main() -> tensor[*, f32] = selected({literal})\n"
+            ),
+            ("x", vec![32], x.clone()),
+            x[0..3].to_vec(),
+        ),
+        (
+            "vmap row join, arms of 5 and 3",
+            vmap_join(
+                "shrink(copy(r), [[0i64, sub(shape(&r, 0i32), 5i64)]])",
+                "",
+            ),
+            ("xs", vec![3, 8], rows.concat()),
+            row_sums.clone(),
+        ),
+        (
+            "vmap row join, else arm claimed 3",
+            vmap_join(
+                "three(r)",
+                "def three(y: tensor[*, f32]) -> tensor[3, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 5i64)]])\n",
+            ),
+            ("xs", vec![3, 8], rows.concat()),
+            row_sums,
+        ),
+    ]
+    .map(|(name, source, (input, shape, values), expected)| {
+        let mut bindings = UnordMap::new();
+        bindings.insert(
+            input.to_owned(),
+            TensorValue::from_storage(
+                shape,
+                finalize_tensor(
+                    "input",
+                    Prim::F32,
+                    RawTensor::Float(values.iter().map(|&v| f64::from(v)).collect()),
+                )
+                .unwrap(),
+            ),
+        );
+        Cell {
+            name: name.to_owned(),
+            source,
+            bindings,
+            expected: Expected::Value(expected),
+            proven: false,
+            refused_in: &[],
         }
     });
     let failures = disagreements(&cells);

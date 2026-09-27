@@ -37,7 +37,13 @@ holds, in the DAG evaluator, the host interpreter and compiled C, for an
 untaken arm holding a callee's result claim, a local tensor ascription, or
 a broadcast `expand` of a local or a parameter whose axis the arm claims is
 1: the claim is not checked, a node sized by it yields zeros, and the `if`
-returns the other branch. `where` no longer reads or shape-checks a branch
+returns the other branch when lowering proves the two arms' extents equal
+(one origin outside the `if`, one declared extent, or one extent C names
+both arms by). Where it does not, the DAG evaluator and the host interpreter
+refuse the `if` with a typed error
+([#2583](https://github.com/Chelis-Lang/chelis/issues/2583)), and compiled C
+runs it as host control flow or refuses to build it.
+`where` no longer reads or shape-checks a branch
 its condition selects in no element, so a condition that selects one branch
 everywhere returns that branch at its own shape. Under `grad`
 such an arm also contributes exactly nothing to the gradient, even where the
