@@ -10,38 +10,73 @@ fn fixture() -> &'static Fixture {
     static FIXTURE: OnceLock<Fixture> = OnceLock::new();
     FIXTURE.get_or_init(|| {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let runtime = env::var_os("CHELIS_RUNTIME_LIB").map(PathBuf::from)
-            .expect("prerequisite: CHELIS_RUNTIME_LIB must name the exact-head runtime archive in the owned target; this test never starts a nested Cargo build");
-        assert!(runtime.is_absolute() && runtime.is_file(), "missing exact-head runtime archive: {}", runtime.display());
         let directory = tempfile::tempdir().unwrap();
+        let staged = chelis_runtime_bundle::stage(directory.path())
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
         let binary = directory.path().join("device-owner-contract");
         let object = directory.path().join("device-owner.o");
         let compiled = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()))
-            .args(["-std=c++17", "-O1", "-g", "-Dchelis_metadata_plan_release=fixture_metadata_plan_release", "-I"])
+            .args([
+                "-std=c++17",
+                "-O1",
+                "-g",
+                "-Dchelis_metadata_plan_release=fixture_metadata_plan_release",
+                "-I",
+            ])
             .arg(root.join("tests/fixtures/device_owner_sdk"))
-            .arg("-I").arg(root.join("runtime"))
-            .arg("-I").arg(root.join("../chelis-runtime/include"))
-            .arg("-c").arg(root.join("runtime/chelis_device_owner.cpp"))
-            .arg("-o").arg(&object).output().expect("start companion compiler");
-        assert!(compiled.status.success(), "companion compile failed: {}", String::from_utf8_lossy(&compiled.stderr));
+            .arg("-I")
+            .arg(root.join("runtime"))
+            .arg("-I")
+            .arg(directory.path())
+            .arg("-c")
+            .arg(root.join("runtime/chelis_device_owner.cpp"))
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .expect("start companion compiler");
+        assert!(
+            compiled.status.success(),
+            "companion compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
         let mut command = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()));
-        command.args(["-std=c++17", "-O1", "-g"])
-            .arg("-I").arg(root.join("tests/fixtures/device_owner_sdk"))
-            .arg("-I").arg(root.join("runtime"))
-            .arg("-I").arg(root.join("../chelis-runtime/include"))
+        command
+            .args(["-std=c++17", "-O1", "-g"])
+            .arg("-I")
+            .arg(root.join("tests/fixtures/device_owner_sdk"))
+            .arg("-I")
+            .arg(root.join("runtime"))
+            .arg("-I")
+            .arg(directory.path())
             .arg(&object)
             .arg(root.join("tests/fixtures/device_owner_contract.cpp"))
-            .arg(runtime).args(["-lpthread", "-lm"]);
-        if cfg!(target_os = "linux") { command.arg("-ldl"); }
-        if cfg!(target_os = "macos") { command.arg("-liconv"); }
-        let output = command.arg("-o").arg(&binary).output().expect("start C++ fixture compiler");
-        assert!(output.status.success(), "device owner fixture compile/link failed:\n{}", String::from_utf8_lossy(&output.stderr));
-        Fixture { _directory: directory, binary }
+            .arg(&staged.archive)
+            .args(["-lpthread", "-lm"]);
+        if cfg!(target_os = "linux") {
+            command.arg("-ldl");
+        }
+        if cfg!(target_os = "macos") {
+            command.arg("-liconv");
+        }
+        let output = command
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("start C++ fixture compiler");
+        assert!(
+            output.status.success(),
+            "device owner fixture compile/link failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Fixture {
+            _directory: directory,
+            binary,
+        }
     })
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage() {
     for case in [
         "logical-order",
@@ -59,7 +94,7 @@ fn checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage
 }
 
 #[test]
-#[ignore = "requires CHELIS_RUNTIME_LIB pinned by runtime representation Phase 2"]
+#[ignore = "runtime representation Phase 2 CPU-fixture row"]
 fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
     for case in [
         "reserved",
@@ -105,6 +140,9 @@ fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
 fn published_owner_is_opaque_and_packet_observation_cannot_be_mutated() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let directory = tempfile::tempdir().unwrap();
+    for (header, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(directory.path().join(header), contents).unwrap();
+    }
     for (name, body, success) in [
         (
             "opaque-use",
@@ -142,7 +180,7 @@ fn published_owner_is_opaque_and_packet_observation_cannot_be_mutated() {
             .args(["-std=c++17", "-fsyntax-only", "-I"])
             .arg(root.join("runtime"))
             .arg("-I")
-            .arg(root.join("../chelis-runtime/include"))
+            .arg(directory.path())
             .arg(source)
             .output()
             .unwrap();

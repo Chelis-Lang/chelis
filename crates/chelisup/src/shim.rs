@@ -103,9 +103,8 @@ fn installed_listing(store: &Store) -> String {
     }
 }
 
-/// Replace this process with the toolchain binary. argv[0] is set to the
-/// versioned binary path so the toolchain can locate its bundled runtime
-/// relative to its own location.
+/// Replace this process with the toolchain binary, with argv[0] set to the
+/// versioned binary path.
 #[cfg(unix)]
 fn exec_toolchain(binary: &Path, args: &[OsString]) -> i32 {
     use std::os::unix::process::CommandExt;

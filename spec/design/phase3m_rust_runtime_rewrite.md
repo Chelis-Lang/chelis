@@ -167,6 +167,15 @@ target directory are never read.
   the message tells the user to unset it.
 - `chelis runtime export <dir>` writes the carried runtime for packaging; release
   tarballs ship its output and build with `sealed-runtime`.
+- In-repository C, HIP, Metal and end-to-end harnesses stage the runtime their
+  test build carries with `chelis_runtime_bundle::stage` into the directory they
+  build in, and link the staged archive by exact path. chelis-cli tests link the
+  archive `chelis build` staged. No harness reads a runtime from a target
+  directory or the environment, and the `CHELIS_RUNTIME_LIB` pin no longer
+  exists. Staging copies the embedded bytes rather than naming the build-tree
+  archive, because a compilation cache can replay a bundle compiled for one
+  target directory into another, and an embedded path would then name the other
+  directory's archive.
 - A test or oracle that needs an instrumented runtime builds its consumer with
   that runtime feature, or links an exact instrumented Cargo artifact itself.
 - The Python extension stages its carried runtime into the artifact directory

@@ -22,7 +22,6 @@
 mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -343,65 +342,6 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-hip manual tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
-}
-
 fn require_hipcc() {
     let output = Command::new("hipcc")
         .arg("--version")
@@ -640,7 +580,8 @@ fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -659,8 +600,7 @@ fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);

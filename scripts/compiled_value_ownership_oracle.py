@@ -2136,15 +2136,16 @@ def _sha256(path: Path) -> str:
         raise OracleFailure(f"hash {path}: {error}") from error
 
 
-def instrumented_build_artifacts(cargo_stdout: str, target: Path) -> tuple[Path, Path]:
-    """Select the CLI and the ledger runtime archive from one Cargo build's messages.
+def instrumented_build_artifacts(cargo_stdout: str, target: Path) -> Path:
+    """Select the CLI one Cargo build produced and require its runtime to carry the ledger.
 
     The `chelis` executable carries the `chelis-runtime` archive compiled by the
-    same invocation. That archive is named only by Cargo's own compiler-artifact
-    message, never by a directory search, and must carry the ledger feature.
+    same invocation, whose compiler-artifact message must carry the ledger
+    feature. The archive's bytes are read from the CLI's own export
+    (`exported_runtime_sha256`), never from a Cargo filename.
     """
     executables: list[Path] = []
-    archives: list[Path] = []
+    runtimes = 0
     for line in cargo_stdout.splitlines():
         if not line.strip():
             continue
@@ -2169,19 +2170,48 @@ def instrumented_build_artifacts(cargo_stdout: str, target: Path) -> tuple[Path,
                     f"the chelis build compiled chelis-runtime without its static archive "
                     f"or without {LEDGER_FEATURE}: kinds={kinds}, features={message.get('features')}"
                 )
-            archives.extend(
-                Path(name) for name in message.get("filenames") or () if name.endswith(".a")
-            )
-    if len(executables) != 1 or len(archives) != 1:
+            runtimes += 1
+    if len(executables) != 1 or runtimes != 1:
         raise OracleFailure(
             "the chelis build must report exactly one chelis executable and one "
-            f"instrumented runtime archive; got executables={executables}, archives={archives}"
+            f"instrumented runtime; got executables={executables}, runtimes={runtimes}"
         )
     root = target.resolve()
-    for path in (executables[0], archives[0]):
-        if not path.resolve().is_relative_to(root) or not path.is_file():
-            raise OracleFailure(f"Cargo artifact {path} is missing or outside {root}")
-    return executables[0], archives[0]
+    if not executables[0].resolve().is_relative_to(root) or not executables[0].is_file():
+        raise OracleFailure(f"Cargo artifact {executables[0]} is missing or outside {root}")
+    return executables[0]
+
+
+def exported_runtime_sha256(export: subprocess.CompletedProcess[str], directory: Path) -> str:
+    """Return the digest of the runtime `chelis runtime export <directory>` wrote.
+
+    The export stages the bytes the CLI carries and reports them; the reported
+    digest must name the archive in `directory` and match its bytes.
+    """
+    if export.returncode != 0:
+        raise OracleFailure(
+            f"the instrumented CLI could not export its runtime (exit {export.returncode}):\n"
+            f"{export.stdout}\n{export.stderr}"
+        )
+    archive = directory / RUNTIME_ARCHIVE_NAME
+    receipts = [
+        match
+        for line in export.stdout.splitlines()
+        if (match := STAGED_RUNTIME_LINE.fullmatch(line)) is not None
+    ]
+    if len(receipts) != 1 or Path(receipts[0]["path"]) != archive:
+        raise OracleFailure(
+            f"the runtime export must report exactly {archive}: "
+            f"{[match.group(0) for match in receipts]}"
+        )
+    reported = receipts[0]["sha256"]
+    observed = _sha256(archive)
+    if observed != reported:
+        raise OracleFailure(
+            f"the exported runtime {archive} has SHA-256 {observed}, "
+            f"but the export reported {reported}"
+        )
+    return reported
 
 
 def require_instrumented_runtime(
@@ -2274,11 +2304,18 @@ class PhaseContext:
             raise OracleFailure(
                 f"Phase 0 preparation failed: {_command_text(argv)}\n{result.stdout}\n{result.stderr}"
             )
-        executable, archive = instrumented_build_artifacts(result.stdout, self.target)
+        executable = instrumented_build_artifacts(result.stdout, self.target)
         # A later Cargo invocation may replace the uplifted CLI; run a private copy.
         self.chelis.parent.mkdir()
         shutil.copy2(executable, self.chelis)
-        self.runtime_sha256 = _sha256(archive)
+        exported = self.root / "instrumented-runtime"
+        self.runtime_sha256 = exported_runtime_sha256(
+            _run(
+                (str(self.chelis), "runtime", "export", str(exported)),
+                environment=self.chelis_environment,
+            ),
+            exported,
+        )
         self._prepared = True
 
     def source_copy(self, fixture: Fixture) -> Path:

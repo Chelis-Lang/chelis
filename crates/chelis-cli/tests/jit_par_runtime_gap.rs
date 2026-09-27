@@ -223,7 +223,7 @@ fn build_c_and_run(out_dir: &Path, src_path: &Path) -> String {
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(&c_source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", stem]);
     let status = cmd.status().expect("gcc should run");

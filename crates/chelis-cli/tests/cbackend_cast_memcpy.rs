@@ -40,79 +40,13 @@
 //! running in the fix commit on this branch.
 
 mod common;
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod runtime_archive;
 
 use assert_cmd::Command;
 use common::authored_c_symbol;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-/// Locate `target/debug/` from the test binary's path. The test binary
-/// lives at `<target>/debug/deps/<binary>`, so `..` twice yields the
-/// debug dir.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Mirror of `exec_compile.rs::ensure_runtime_static_lib`. When
-/// `chelis-runtime` is built as a dev-dependency, cargo only emits the
-/// hashed staticlib in `target/debug/deps/`; the test gcc invocation
-/// links against the conventional `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    // PID-suffixed tmp so concurrent test binaries (nextest runs sister
-    // exec-style tests in parallel; they all materialize the same
-    // canonical path) do not race on a shared tmp filename and trip
-    // ENOENT on rename when a peer renames it away first.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
 
 /// Run `chelis build --target c` on the source program. Returns the
 /// build output directory (which contains the emitted C, header,
@@ -143,11 +77,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
 /// Compile `kernel.c + main.c + libchelis_runtime.a` and run the
 /// binary, returning stdout on success.
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> String {
-    let canonical = runtime_archive::explicit().unwrap_or_else(|| {
-        let archive = target_debug_dir().join("libchelis_runtime.a");
-        ensure_runtime_static_lib(&archive).expect("materialize libchelis_runtime.a");
-        archive
-    });
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join("test_bin");
     let compile = StdCommand::new("gcc")
@@ -160,7 +90,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> Stri
             main_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",

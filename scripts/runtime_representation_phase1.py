@@ -9,12 +9,10 @@ phases and are not claimed by this host/C vocabulary receipt.
 from __future__ import annotations
 
 import hashlib
-from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import subprocess
-import shutil
 import sys
 import unittest
 import uuid
@@ -27,7 +25,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = 'f64711e551cb5390bfa3077ec3542e84a584fd5bf5a1bbe7a6227c8e481a8bd1'
+MANIFEST_SHA256 = '18fc629ee10308f58f7984900c4fb227f580f99768339bd5ecb5faf1b6962636'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -150,61 +148,6 @@ def require_frozen_selection(selected, required):
         )
     required_set = set(required)
     return [identity for identity in selected if identity not in required_set]
-
-
-def runtime_artifact(output):
-    """Select the current build's artifact, never a directory/mtime candidate."""
-    target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target')).resolve()
-    artifacts = []
-    for line in output.splitlines():
-        row = load_json(line)
-        if row.get('reason') != 'compiler-artifact' or row.get('target', {}).get('name') != 'chelis_runtime':
-            continue
-        if (Path(row['manifest_path']).resolve() != (ROOT / 'crates/chelis-runtime/Cargo.toml').resolve()
-                or Path(row['target']['src_path']).resolve() != (ROOT / 'crates/chelis-runtime/src/lib.rs').resolve()
-                or 'staticlib' not in row['target']['kind']
-                or 'ownership-ledger' not in row['features']):
-            raise OracleFailure('runtime artifact has different source, crate kind or features')
-        artifacts.extend(Path(name).resolve() for name in row['filenames'] if name.endswith('.a'))
-    if len(artifacts) != 1 or not artifacts[0].is_relative_to(target) or not artifacts[0].is_file():
-        raise OracleFailure('missing, ambiguous or foreign current runtime artifact')
-    return artifacts[0]
-
-
-@contextmanager
-def runtime_pin(directory):
-    """Name one current instrumented archive for harnesses that link it themselves.
-
-    Only `CHELIS_RUNTIME_LIB`, an exact regular file, carries the pin. `chelis
-    build` stages the runtime carried by its own Cargo build and rejects
-    `CHELIS_RUNTIME_DIR`, so no process started under the pin may inherit it.
-    """
-    if 'CHELIS_RUNTIME_DIR' in os.environ:
-        raise OracleFailure('CHELIS_RUNTIME_DIR is set, but chelis build rejects it and this oracle never '
-                            'takes a runtime from a directory. Unset CHELIS_RUNTIME_DIR')
-    output = command(['cargo', 'build', '--locked', '-p', 'chelis-runtime', '--lib',
-                      '--features', 'ownership-ledger', '--message-format=json'],
-                     ROOT, directory, 'build-runtime')
-    archive = runtime_artifact(output)
-    original = artifact_hashes([archive])
-    pinned = directory / 'runtime'
-    pinned.mkdir()
-    copied = pinned / 'libchelis_runtime.a'
-    shutil.copyfile(archive, copied)
-    hashes = artifact_hashes([copied])
-    if next(iter(original.values())) != next(iter(hashes.values())):
-        raise OracleFailure('runtime artifact changed during pinning')
-    old_library = os.environ.get('CHELIS_RUNTIME_LIB')
-    os.environ['CHELIS_RUNTIME_LIB'] = str(copied)
-    try:
-        yield {'cargo_artifact': original, 'pinned_artifact': hashes,
-               'features': ['ownership-ledger']}
-        verify_artifacts(hashes)
-    finally:
-        if old_library is None:
-            os.environ.pop('CHELIS_RUNTIME_LIB', None)
-        else:
-            os.environ['CHELIS_RUNTIME_LIB'] = old_library
 
 
 def selection(packet, root: Path, expected=None, *, include_ignored=False):
@@ -377,11 +320,10 @@ def managed_python_environment(root: Path):
     return {'PYO3_PYTHON': str(candidate), 'VIRTUAL_ENV': prefix}
 
 
-def command(argv, root, directory: Path, label: str, *, expected_exit=0, scoped_environment=None):
-    """Run one evidence process; `scoped_environment` reaches only this child."""
+def command(argv, root, directory: Path, label: str, *, expected_exit=0):
+    """Run one evidence process and record its argv, cwd and managed Python."""
     directory.mkdir(parents=True, exist_ok=True)
-    scoped = dict(scoped_environment or {})
-    environment = {**os.environ, **managed_python_environment(Path(root)), **scoped}
+    environment = {**os.environ, **managed_python_environment(Path(root))}
     with (directory / f'{label}.stdout').open('w') as stdout, (directory / f'{label}.stderr').open('w') as stderr:
         result = subprocess.run(argv, cwd=root, env=environment, stdout=stdout, stderr=stderr, check=False)
     (directory / f'{label}.process.json').write_text(json.dumps({
@@ -390,7 +332,6 @@ def command(argv, root, directory: Path, label: str, *, expected_exit=0, scoped_
         'returncode': result.returncode,
         'PYO3_PYTHON': environment['PYO3_PYTHON'],
         'VIRTUAL_ENV': environment['VIRTUAL_ENV'],
-        'scoped_environment': scoped,
     }, indent=2) + '\n')
     if result.returncode != expected_exit:
         raise OracleFailure(f'{label} failed ({result.returncode}); see {directory}')
@@ -440,23 +381,13 @@ def execute_leg(name, args, required, directory):
 
 
 def native_controls():
-    # One real native compile/run witness per independent archive consumer.
-    # A harness that links the pinned archive itself must reach the linker and
-    # fail when `CHELIS_RUNTIME_LIB` names an empty valid archive, even with a
-    # warm target containing older complete libraries. `chelis build` stages
-    # the runtime its own Cargo build carries, so no archive can be substituted
-    # for its consumer; that consumer instead proves a runtime directory is
-    # rejected before staging, neither honored (a linker failure) nor ignored
-    # (a pass). JSON's ownership-ledger witness independently selects its
-    # instrumented current Cargo artifact.
+    # One real native compile/run witness per independent runtime consumer.
+    # Harnesses and `chelis build` link the runtime their own Cargo build
+    # carries, so no archive can be substituted for either; staging, freshness
+    # and admission negatives live with chelis-runtime-bundle and chelis-python.
+    # The CLI consumer instead proves a runtime directory is rejected before
+    # staging, neither honored (a linker failure) nor ignored (a pass).
     consumers = [
-        ('empty-runtime-archive', 'chelis-backend-c', None, 'tests::checked_c_metadata_dag_reshape_executes_under_ubsan'),
-        ('empty-runtime-archive', 'chelis-backend-c', 'exec_compile', 'checked_literals_preserve_every_storage_width_and_reject_count_mismatch'),
-        ('empty-runtime-archive', 'chelis-backend-c', 'dtype_matrix_bf16_f16', 'bf16_add_agrees_with_evaluator'),
-        ('empty-runtime-archive', 'chelis-backend-c', 'fused_in_place_exec', 'fused_in_place_compile_run_reuses_program_owned_storage'),
-        ('empty-runtime-archive', 'chelis-cli', 'cbackend_cast_memcpy', 'cbackend_cast_tensor_f32_to_f64'),
-        ('empty-runtime-archive', 'chelis-cli', 'cbackend_cast_arithmetic_composition', 'cbackend_add_of_two_casts_f64_from_f32'),
-        ('empty-runtime-archive', 'chelis-cli', 'cbackend_reshape_memcpy', 'cbackend_reshape_tensor_f64'),
         ('runtime-directory-rejected', 'chelis-cli', 'issue_616_runtime_movement_c_parity', 'issue_616_multi_axis_runtime_pad_matches_c'),
     ]
     controls = []
@@ -481,7 +412,6 @@ def execute_native_controls(directory):
     empty = bad / 'libchelis_runtime.a'
     empty.write_bytes(b'!<arch>\n')
     perturbations = {
-        'empty-runtime-archive': ('CHELIS_RUNTIME_LIB', empty),
         'runtime-directory-rejected': ('CHELIS_RUNTIME_DIR', bad),
         'missing-c-compiler': ('CHELIS_TEST_CC', directory / 'missing-compiler'),
     }
@@ -504,11 +434,7 @@ def execute_native_controls(directory):
         xml = junit.read_text()
         (evidence / 'execution.xml').write_text(xml)
         linked = 'undefined reference' in xml.lower() or 'undefined symbols' in xml.lower()
-        if control['kind'] == 'empty-runtime-archive':
-            execution(xml, selected, failure_text='chelis_')
-            if not linked:
-                raise OracleFailure('empty runtime did not fail at the native linker')
-        elif control['kind'] == 'runtime-directory-rejected':
+        if control['kind'] == 'runtime-directory-rejected':
             execution(xml, selected, failure_text=f'CHELIS_RUNTIME_DIR is set ({bad})')
             if linked:
                 raise OracleFailure('runtime directory reached the native linker instead of being rejected')
@@ -587,15 +513,14 @@ def run() -> Path:
     python_receipt = python_execution(python_suite(), packet['python_required'])
     phase0.validate_phase0_inventory()
     phase0.run_phase0_mutations()
-    with runtime_pin(directory / 'runtime-build') as runtime_receipt:
-        native_receipts = execute_native_controls(directory / 'native-controls')
-        executions = []
-        for index, (row, (name, args)) in enumerate(zip(packet['legs'], legs, strict=True)):
-            executions.append(execute_leg(name, args, row['required'], directory / str(index)))
-        planner_receipts = execute_planner_mutations(directory / 'planner-mutations')
-        for leg in phase0.phase0_legs():
-            if '--doc' in leg.argv:
-                command(list(leg.argv), ROOT, directory / 'supporting-doc-privacy', 'run')
+    native_receipts = execute_native_controls(directory / 'native-controls')
+    executions = []
+    for index, (row, (name, args)) in enumerate(zip(packet['legs'], legs, strict=True)):
+        executions.append(execute_leg(name, args, row['required'], directory / str(index)))
+    planner_receipts = execute_planner_mutations(directory / 'planner-mutations')
+    for leg in phase0.phase0_legs():
+        if '--doc' in leg.argv:
+            command(list(leg.argv), ROOT, directory / 'supporting-doc-privacy', 'run')
     if source_identity(ROOT) != identity:
         raise OracleFailure('source changed during execution')
     receipt = {'schema': 2, 'head': identity[0], 'source_digest': identity[1], 'run_id': run_id,
@@ -612,7 +537,7 @@ def run() -> Path:
                                    for probe in phase0.phase0_mutation_probes()],
                'manual_exclusions': [{'test': MANUAL_TEST, 'issue': 1112,
                                       'reason': 'allocates more than 8 GiB; not an executed receipt'}],
-               'runtime': runtime_receipt, 'native_controls': native_receipts,
+               'native_controls': native_receipts,
                'planner_mutations': planner_receipts,
                'legs': executions}
     receipt_path = directory / 'receipt.json'

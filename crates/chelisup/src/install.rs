@@ -2,9 +2,11 @@
 //!
 //! `chelisup install <ver>` downloads the host's release tarball
 //! (`chelis-vX.Y.Z-<build>.tar.gz`, see [`release_build`]) from
-//! `Chelis-Lang/chelis` release `v<ver>`, unpacks it to
-//! `<home>/toolchains/<ver>/`, installs/refreshes the `chelis` shim, and
-//! seeds the default on the first install. It is idempotent: an
+//! `Chelis-Lang/chelis` release `v<ver>`, unpacks it, checks its runtime files
+//! against the unpacked compiler's `chelis runtime export` (see
+//! [`crate::runtime_check`]), moves it to `<home>/toolchains/<ver>/`,
+//! installs/refreshes the `chelis` shim, and seeds the default on the first
+//! install. A failed check leaves the store untouched. It is idempotent: an
 //! already-installed version refreshes the shim only.
 //!
 //! # Fetch seams
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::paths::Store;
+use crate::runtime_check::{self, RuntimeCheck};
 use crate::version::{release_triple, validate_install_version};
 
 const DEFAULT_REPO: &str = "Chelis-Lang/chelis";
@@ -37,9 +40,14 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// What an install did. The CLI prints a different line for each.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// The toolchain was downloaded and unpacked from release build `build`
-    /// (see [`release_build`]).
-    Installed { version: String, build: String },
+    /// The toolchain was downloaded from release build `build` (see
+    /// [`release_build`]), its runtime files checked, and unpacked into the
+    /// store.
+    Installed {
+        version: String,
+        build: String,
+        runtime: RuntimeCheck,
+    },
     /// The toolchain was already present; the shim was refreshed.
     AlreadyInstalled { version: String },
 }
@@ -120,6 +128,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     let tarball = scratch.path().join(&asset);
     fetch_asset(version, &asset, &tarball)?;
     let unpacked = extract_tarball(&tarball, scratch.path())?;
+    let runtime = runtime_check::check(version, &unpacked, scratch.path())?;
     install_into_store(store, version, &unpacked)?;
 
     ensure_shim_installed(store)?;
@@ -128,6 +137,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     Ok(InstallOutcome::Installed {
         version: version.to_string(),
         build,
+        runtime,
     })
 }
 
@@ -385,7 +395,8 @@ fn github_repo() -> String {
 }
 
 /// Unpack `tarball` (gzip) into `dest` and return the single
-/// top-level `chelis-v*` directory, verified to contain `bin/chelis`.
+/// top-level `chelis-v*` directory, a real directory rather than a link,
+/// verified to contain `bin/chelis`.
 fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let file = fs::File::open(tarball)
         .map_err(|e| format!("could not open {}: {e}", tarball.display()))?;
@@ -398,13 +409,16 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|e| format!("could not read {}: {e}", dest.display()))?
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
+        // `DirEntry::file_type` does not follow links. Through a linked root,
+        // the runtime check and the store entry would reach outside the
+        // release.
+        .filter(|e| {
+            e.file_type().is_ok_and(|kind| kind.is_dir())
+                && e.file_name()
+                    .to_str()
                     .is_some_and(|n| n.starts_with("chelis-v"))
         })
+        .map(|e| e.path())
         .collect();
     if candidates.len() != 1 {
         let names: Vec<String> = candidates
@@ -417,7 +431,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
             })
             .collect();
         return Err(format!(
-            "expected exactly one chelis-v* directory in the tarball, found {names:?}"
+            "expected exactly one chelis-v* directory (not a link) in the tarball, found {names:?}"
         ));
     }
     let unpacked = candidates.remove(0);

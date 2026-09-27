@@ -159,7 +159,7 @@ fn c_ubsan_run(program: &str, name: &str) -> std::process::Output {
         ])
         .args(&toolchain.compile_flags)
         .arg(format!("{name}.c"))
-        .args(["-L.", "-lchelis_runtime"])
+        .arg("libchelis_runtime.a")
         .args(&toolchain.link_flags)
         .args(["-fsanitize=undefined", "-o", name]);
     let linked = compiler.output().expect("invoke UBSan C compiler");

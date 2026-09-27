@@ -6,9 +6,11 @@
 
 use clap::{Parser, Subcommand};
 
+use crate::UPGRADE_ADVICE;
 use crate::install;
 use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
+use crate::runtime_check::RuntimeCheck;
 use crate::version::{is_safe_path_component, validate_install_version};
 
 #[derive(Parser)]
@@ -90,11 +92,25 @@ pub fn run_cli() -> i32 {
 
 fn cmd_install(store: &Store, version: &str) -> i32 {
     match install::install(store, version) {
-        Ok(install::InstallOutcome::Installed { version, build }) => {
+        Ok(install::InstallOutcome::Installed {
+            version,
+            build,
+            runtime,
+        }) => {
             println!(
                 "installed chelis {version} ({build}) into {}",
                 store.toolchain_dir(&version).display()
             );
+            match runtime {
+                RuntimeCheck::Verified { archive_sha256 } => println!(
+                    "its lib/ and include/ runtime files match `chelis runtime export` \
+                     (libchelis_runtime.a sha256 {archive_sha256})"
+                ),
+                RuntimeCheck::Unchecked => eprintln!(
+                    "chelisup: warning: chelis {version} predates `chelis runtime export`, so \
+                     its lib/ and include/ runtime files were installed unchecked"
+                ),
+            }
             println!(
                 "the chelis shim is at {} (add {} to your PATH)",
                 store.shim_path().display(),
@@ -254,9 +270,8 @@ fn cmd_update() -> i32 {
     // Documented stub. Self-update is not implemented yet; re-running the
     // bootstrap is the supported upgrade path until it is.
     eprintln!(
-        "chelisup: self-update is not implemented yet. To upgrade, re-run the bootstrap \
-         installer (the published `chelisup` one-liner), which drops the latest binary at \
-         ~/.chelis/bin/chelisup."
+        "chelisup: self-update is not implemented yet. To upgrade, {UPGRADE_ADVICE}, which \
+         drops the latest binary at ~/.chelis/bin/chelisup."
     );
     0
 }

@@ -13,7 +13,9 @@ chelis-vocab.workspace = true
 half = { workspace = true }
 
 [dev-dependencies]
-chelis-runtime = { path = "../chelis-runtime" }
+# Tests that link Metal hosts stage the runtime the bundle carries
+# (spec/08-backends.md §2.1) and link that exact archive.
+chelis-runtime-bundle.workspace = true
 # The host-program Count tests lower real Surf source through the front
 # end so the wrapper's helper manifest and verified ownership come from
 # the same pipeline the CLI and compiler API use.

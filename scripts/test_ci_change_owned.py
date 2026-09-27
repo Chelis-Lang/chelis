@@ -28,17 +28,6 @@ OWNER = {
 }
 
 
-def successful_product_build(command, kwargs):
-    """Mirror the runtime archive produced by a successful workspace build."""
-    cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
-    if not cargo_target.is_absolute():
-        cargo_target = Path(kwargs["cwd"]) / cargo_target
-    runtime = cargo_target / "debug/libchelis_runtime.a"
-    runtime.parent.mkdir(parents=True, exist_ok=True)
-    runtime.write_bytes(b"exact-head-runtime")
-    return subprocess.CompletedProcess(command, 0, "", "")
-
-
 def package(
     name: str,
     targets: list[tuple[str, str, list[str]]],
@@ -3246,7 +3235,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                             output=b"partial stdout", stderr=b"partial stderr",
                         )
                     if command[1] == "build":
-                        return successful_product_build(command, kwargs)
+                        return subprocess.CompletedProcess(command, 0, "", "")
                     package = command[command.index("-p") + 1]
                     name = command[command.index("--test") + 1]
                     if command[2] == "list":
@@ -3315,8 +3304,6 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
-            if command[1] == "build":
-                successful_product_build(command, kwargs)
             return subprocess.CompletedProcess(command, 0, "", "")
 
         with tempfile.TemporaryDirectory() as tmp, (
@@ -3348,7 +3335,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return successful_product_build(command, kwargs)
+                return subprocess.CompletedProcess(command, 0, "", "")
             current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
             payload = {"rust-suites": {"p::smoke": {"testcases": {
                 "fast_case": {"ignored": False, "filter-match": {"status": "matches"}},
@@ -3717,7 +3704,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append(command)
             if command[1] == "build":
-                return successful_product_build(command, kwargs)
+                return subprocess.CompletedProcess(command, 0, "", "")
             target = command[command.index("--test") + 1]
             if command[2] == "list":
                 payload = {
@@ -3807,7 +3794,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 def run(command, **kwargs):
                     calls.append(command)
                     if command[1] == "build":
-                        return successful_product_build(command, kwargs)
+                        return subprocess.CompletedProcess(command, 0, "", "")
                     names = [
                         command[index + 1]
                         for index, value in enumerate(command)
@@ -4039,13 +4026,6 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 self.assertNotIn("timeout", kwargs)
                 calls.append(command)
-                if command[1] == "build":
-                    successful_product_build(command, kwargs)
-                else:
-                    self.assertEqual(
-                        kwargs["env"]["CHELIS_RUNTIME_LIB"],
-                        str(target / "debug/libchelis_runtime.a"),
-                    )
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -4115,7 +4095,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return successful_product_build(command, kwargs)
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
                         "rust-suites": {
@@ -4184,7 +4164,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return successful_product_build(command, kwargs)
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 self.assertEqual(command[1:3], ["nextest", "list"])
                 payload = {
                     "rust-suites": {
@@ -4274,7 +4254,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return successful_product_build(command, kwargs)
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 self.assertEqual(command[1:3], ["nextest", "list"])
                 return subprocess.CompletedProcess(
                     command,
@@ -4343,7 +4323,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 if command[1] == "build":
-                    return successful_product_build(command, kwargs)
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 if command[2] == "list":
                     return subprocess.CompletedProcess(
                         command,
@@ -4659,11 +4639,6 @@ class BoundedCommandTests(unittest.TestCase):
                     f"if {stage!r} in sys.argv[1:3]:\n"
                     " print('deadline output', flush=True)\n"
                     " time.sleep(30)\n"
-                    "if 'build' in sys.argv[1:3]:\n"
-                    " runtime = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / "
-                    "'debug/libchelis_runtime.a'\n"
-                    " runtime.parent.mkdir(parents=True, exist_ok=True)\n"
-                    " runtime.write_bytes(b'exact-head-runtime')\n"
                     "if 'list' in sys.argv[1:3]:\n"
                     " print(json.dumps({'rust-suites': {'p::smoke': {'testcases': {"
                     "'fast_case': {'ignored': False, 'filter-match': {'status': 'matches'}},"

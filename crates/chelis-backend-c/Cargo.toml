@@ -28,7 +28,9 @@ pkg-config = "0.3"
 [dev-dependencies]
 chelis-deep.workspace = true
 chelis-effects.workspace = true
-chelis-runtime.workspace = true
+# Tests that link generated C stage the runtime the bundle carries
+# (spec/08-backends.md §2.1) and link that exact archive.
+chelis-runtime-bundle.workspace = true
 chelis-surf.workspace = true
 serde_json = "1"
 tempfile = "3"

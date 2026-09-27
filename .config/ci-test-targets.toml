@@ -1526,11 +1526,6 @@ disposition = "packages"
 packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
 
 [[path_rule]]
-prefix = "tests/support/runtime_archive.rs"
-disposition = "packages"
-packages = ["chelis-backend-c", "chelis-cli"]
-
-[[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2116,6 +2111,15 @@ reason = "both SMT lanes execute the release verifier: the native lane proves di
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = ".github/scripts/smoke_macos_metal.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard's Metal smoke builds a Metal host with chelis build and links the archive it staged"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
 prefix = "scripts/test_glibc231_workflows.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2256,7 +2260,7 @@ disposition = "owner"
 workflow = "release.yml"
 job = "installed-artifact-canary"
 cadence = "tag push and workflow_dispatch"
-reason = "the release canary installs the shipped toolchain and requires the staged runtime to match the shipped lib archive byte for byte"
+reason = "the release canary installs the shipped toolchain and requires the staged runtime to match the shipped lib archive byte for byte and to come from a sealed build"
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
@@ -2265,8 +2269,8 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit runs the canary's transport and process controls and ties each canary leg to the build chelisup installs"
-tracking_issue = "chelis#2686"
+reason = "script-unit runs the canary's transport, process and staged-runtime receipt controls and ties each canary leg to the build chelisup installs (chelis#2686)"
+tracking_issue = "chelis#1354"
 
 [[path_rule]]
 prefix = "scripts/test_devenv_composition.py"
