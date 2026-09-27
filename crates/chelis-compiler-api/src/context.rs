@@ -22,7 +22,8 @@
 //! `CompiledContext` contains only checker-success artifacts. Construction
 //! rejects diagnostics before it creates a library proof. Decode verifies the
 //! cache identity and payload integrity. It also checks the type-environment
-//! relationship. It reruns the remaining semantic checks and the lower phase.
+//! relationship, re-runs the lower phase and compares it against the stored
+//! lowering, and adopts the stored effect and linearity results (chelis#2558).
 //! Then, it restores that proof. The provisional `TypeResolutionEnv` is serde-skipped.
 //! A later stacked check reconstructs it from validated ADT and alias definitions.
 //! Rejected declaration headers cannot persist in either compiler cache.
@@ -205,18 +206,17 @@ impl CompiledContextWire {
     ///
     /// The precondition is [`CompiledContext::decode_authenticated`]'s: the
     /// bytes were compared against a digest that did not travel with them. Under
-    /// it, this reconstructs the producer's exact value. The transmitted
-    /// `CheckedProgram` is already the output of the effect and linearity
-    /// checkers, and rerunning them over it reproduces it byte for byte, so the
-    /// reruns `Deserialize` performs would establish nothing here. The lowered
-    /// library is re-derived rather than adopted, which keeps
-    /// `chelis_pipeline_core::LoweredLibrary`'s rule that only `lower_library`
-    /// can construct one, and leaves this route trusting a single transmitted
-    /// artifact instead of two.
+    /// it, this reconstructs the producer's exact value. The library is bound
+    /// exactly as `Deserialize` binds it; the lowered library is re-derived
+    /// rather than adopted, which keeps `chelis_pipeline_core::LoweredLibrary`'s
+    /// rule that only `lower_library` can construct one. The comparison of that
+    /// re-derivation against the transmitted lowering, which `Deserialize`
+    /// performs, is omitted: the out-of-band digest already rejects every payload
+    /// but the producer's.
     fn into_authenticated_context(self) -> Result<CompiledContext, String> {
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::adopt_authenticated_library(self.type_env, self.library_checked)
+            chelis_pipeline_core::bind_cached_library(self.type_env, self.library_checked)
                 .map_err(|rejection| rejection.to_string())?;
         if self.library_dag.library_proof_id() != library.program().library_proof_id() {
             return Err("the lowered library does not match the checked library".to_string());
@@ -240,7 +240,7 @@ impl<'de> Deserialize<'de> for CompiledContext {
         let wire = CompiledContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
                 .map_err(serde::de::Error::custom)?;
         if wire.library_dag.library_proof_id() != library.program().library_proof_id() {
             return Err(serde::de::Error::custom(
@@ -307,11 +307,14 @@ impl CompiledContext {
     /// Reconstruct from bytes of unknown provenance.
     ///
     /// Every integrity claim available here comes out of the same bytes, so this
-    /// route re-derives the library from the decoded `CheckedProgram` and
-    /// compares the result against the transmitted lowered payload. That detects
-    /// a payload whose parts no longer agree with each other. It cannot detect a
-    /// payload that is internally consistent but was never produced from the
-    /// sources it claims; nothing carried inside the bytes can.
+    /// route re-lowers the decoded `CheckedProgram` and compares the result
+    /// against the transmitted lowered payload. That detects a payload whose
+    /// parts no longer agree with each other. It cannot detect a payload that is
+    /// internally consistent but was never produced from the sources it claims;
+    /// nothing carried inside the bytes can. The effect and linearity results
+    /// the program carries are adopted, not recomputed (chelis#2558): the build
+    /// identity pins them to a producer running this compiler, which ran both
+    /// checkers before writing.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
             .and_then(CacheEnvelope::into_context)
@@ -329,9 +332,9 @@ impl CompiledContext {
     /// compilation by the same build produced, because that one is internally
     /// consistent (chelis#2257). This route rejects both.
     ///
-    /// Given that, the effect and linearity reruns and the lowered-payload
-    /// comparison have nothing left to establish here: they recompute a value
-    /// equal to the transmitted one, as
+    /// Given that, the lowered-payload comparison has nothing left to establish
+    /// here, and it is the only step this route omits: both routes bind the
+    /// transmitted checked program the same way, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
         CacheEnvelope::from_bytes(bytes)
@@ -1006,6 +1009,7 @@ impl CacheEnvelope {
 
     fn into_context(self) -> Result<CompiledContext, CacheError> {
         self.check_build_and_embedded_digest()?;
+        poll_cancellation_before_payload_decode()?;
         let context: CompiledContext =
             bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
         self.check_envelope_agreement(&context)?;
@@ -1019,9 +1023,8 @@ impl CacheEnvelope {
     /// says the bytes are self-consistent; this one says they are the bytes the
     /// producer wrote, because a rewriter who recomputed the embedded digest
     /// cannot also reach into the channel `expected` arrived on. Given that, the
-    /// wire is deserialized straight into its context: the effect and linearity
-    /// reruns `into_context` performs would recompute a value equal to the one
-    /// transmitted, which is what
+    /// wire is deserialized straight into its context without the
+    /// lowered-payload comparison `into_context` performs, which is what
     /// `both_decode_routes_reconstruct_identical_contexts` locks.
     fn into_authenticated_context(
         self,
@@ -1034,6 +1037,7 @@ impl CacheEnvelope {
                 actual: hex_prefix(&actual_payload_sha, 32),
             });
         }
+        poll_cancellation_before_payload_decode()?;
         let wire: CompiledContextWire =
             bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
         let context = wire.into_authenticated_context().map_err(|e| {
@@ -1048,9 +1052,23 @@ impl CacheEnvelope {
     }
 }
 
-/// Classify a payload decode failure. Reconstruction polls the cancel token,
-/// so once cancellation is requested a failed decode is the abandonment, not
-/// evidence about the bytes (chelis#2617).
+/// Observe a tripped cancel token before paying for a payload decode.
+///
+/// Reconstruction binds the cached library without rerunning the checkers
+/// (chelis#2558), which were the decode's main polling site, so a load
+/// abandoned before it starts is reported here, as a cancellation rather than
+/// as a result about the bytes (chelis#2617). The re-lowering inside the
+/// decode can still observe the token; `payload_decode_error` classifies that.
+fn poll_cancellation_before_payload_decode() -> Result<(), CacheError> {
+    if chelis_types::cancellation_requested() {
+        return Err(CacheError::Cancelled);
+    }
+    Ok(())
+}
+
+/// Classify a payload decode failure. The re-lowering inside the decode polls
+/// the cancel token, so once cancellation is requested a failed decode is the
+/// abandonment, not evidence about the bytes (chelis#2617).
 fn payload_decode_error(error: &bincode::Error) -> CacheError {
     if chelis_types::cancellation_requested() {
         CacheError::Cancelled
@@ -1170,9 +1188,8 @@ pub enum CacheError {
     /// recomputing the live source hash for invalidation. The string
     /// is whatever `chelis_reef` returned.
     Reef(String),
-    /// Cancellation was requested while the payload was being decoded
-    /// (chelis#2617). Decoding reruns effect and linearity checking, which
-    /// polls the cancel token, so an abandoned decode says nothing about the
+    /// Cancellation was requested before or during the payload decode
+    /// (chelis#2617), so the load was abandoned and says nothing about the
     /// file. Callers propagate the cancellation and leave the file in place;
     /// this is never reported as an unusable cache.
     Cancelled,

@@ -573,3 +573,106 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
             .expect("the producer's own bytes must authenticate");
     }
 }
+
+/// The byte range a positional payload's `CheckedProgram` occupies, given the
+/// encoded length of the fields before it.
+fn checked_program_range(payload: &[u8], prefix_len: usize) -> std::ops::Range<usize> {
+    let program: chelis_types::CheckedProgram =
+        bincode::deserialize(&payload[prefix_len..]).expect("the checked program decodes");
+    let program_len = bincode::serialized_size(&program).expect("size the checked program");
+    prefix_len..prefix_len + usize::try_from(program_len).expect("the program fits in memory")
+}
+
+/// Rewrite the fixture's `1.0000000000000002f64` literal to `1.0f64` inside
+/// `range` only. The needle is the literal's Deep atom encoding. The lowered
+/// library carries Deep definitions too, so the edit is confined to the
+/// checked program by the range, not by the needle.
+fn change_program_literal_within(payload: &mut [u8], range: std::ops::Range<usize>) {
+    let old = bincode::serialize(&chelis_deep::Atom::Float(1.000_000_000_000_000_2)).unwrap();
+    let new = bincode::serialize(&chelis_deep::Atom::Float(1.0)).unwrap();
+    assert_eq!(old.len(), new.len());
+    let start = range.start
+        + payload[range]
+            .windows(old.len())
+            .position(|window| window == old)
+            .expect("the checked program carries the fixture literal");
+    payload[start..start + new.len()].copy_from_slice(&new);
+}
+
+/// chelis#2558: the cache decoders adopt the producer's effect and linearity
+/// results rather than rerunning those checkers, so what rejects an edit to a
+/// cached library body is the comparison between the checked program and its
+/// transmitted lowering. The numeric-bits control above edits constants in the
+/// lowered DAG; this one confines the edit to the `CheckedProgram` half of the
+/// payload, so the lowering is left exactly as the producer wrote it, the
+/// envelope digest is recomputed, and the re-lowered program must disagree
+/// with it on every disk route.
+#[test]
+fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recomputed() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = migrated_v018(&format!(
+        "{}{}",
+        historical_producer::NUMERIC_SOURCE,
+        historical_producer::WITNESS_SOURCE
+    ));
+    let decls = chelis_surf::parser::parse_str(&source).unwrap();
+    let context = build_stdlib_context(&decls).unwrap();
+    let key = stdlib_cache_key(&decls, [0x5a; 32]);
+    let std_path = directory.path().join("numeric.tc");
+    cache_envelope::save(&std_path, key, &context).unwrap();
+    let std_bytes = fs::read(&std_path).unwrap();
+    let package = directory.path().join("package");
+    historical_producer::package_fixture(&package);
+    migrate_historical_package_for_current_compiler(&package);
+    let reef_home = directory.path().join("reef-home");
+    let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
+    let compiled_bytes = compiled.encode().unwrap();
+    let compiled_path = directory.path().join("numeric.ctx");
+    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
+    let magic_len = compiled_bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap()
+        + 1;
+    {
+        let mut envelope: SharedFixtureEnvelope =
+            bincode::deserialize(std_bytes.strip_prefix(std_magic).unwrap()).unwrap();
+        let type_env: chelis_types::TypeEnv = bincode::deserialize(&envelope.payload).unwrap();
+        let prefix_len = usize::try_from(bincode::serialized_size(&type_env).unwrap()).unwrap();
+        let range = checked_program_range(&envelope.payload, prefix_len);
+        change_program_literal_within(&mut envelope.payload, range);
+        envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+        let mut changed = std_magic.to_vec();
+        changed.extend(bincode::serialize(&envelope).unwrap());
+        fs::write(&std_path, changed).unwrap();
+        let error = cache_envelope::load::<StdLibContext>(&std_path, key).unwrap_err();
+        assert!(
+            matches!(error, cache_envelope::CacheError::Decode(ref message) if message.contains("lowered library payload")),
+            "{error}"
+        );
+
+        let mut envelope: ContextFixtureEnvelope =
+            bincode::deserialize(&compiled_bytes[magic_len..]).unwrap();
+        let prefix: (
+            chelis_compiler_api::ContextHash,
+            chelis_compiler_api::CacheIdentity,
+            chelis_reef::PreparedReefGraph,
+            chelis_types::TypeEnv,
+        ) = bincode::deserialize(&envelope.payload).unwrap();
+        let prefix_len = usize::try_from(bincode::serialized_size(&prefix).unwrap()).unwrap();
+        let range = checked_program_range(&envelope.payload, prefix_len);
+        change_program_literal_within(&mut envelope.payload, range);
+        envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+        let mut changed = compiled_bytes[..magic_len].to_vec();
+        changed.extend(bincode::serialize(&envelope).unwrap());
+        fs::write(&compiled_path, &changed).unwrap();
+        let error = CompiledContext::decode(&changed).unwrap_err();
+        assert!(error.contains("lowered library payload"), "{error}");
+        let error =
+            CompiledContext::load_if_fresh(&compiled_path, &reef_home, &package).unwrap_err();
+        assert!(
+            matches!(error, CacheError::Decode(ref message) if message.contains("lowered library payload")),
+            "{error}"
+        );
+    }
+}

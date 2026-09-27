@@ -54,75 +54,44 @@ pub fn check_prepared_library(
     complete_library_checks(analyze_prepared_library(prepared)?)
 }
 
-/// Parse cached library products into a checked library proof.
+/// Bind cached library products into a checked library.
 ///
-/// The stored `LibraryProofId` is checked for self-consistency: the cached
-/// `TypeEnv` and `CheckedProgram` must agree on it, their declared-type maps
-/// must match, and the `TypeEnv`'s exact callable-selector provenance must
-/// retain the digest bound into the identity. It is NOT recomputed from the
-/// decoded source. The identity is bound before the effect and linearity
-/// passes, and a layered build's cached library is a composed program whose id
-/// is the extension's id over the base context while its `exprs()` are the
-/// base++extension concatenation, so the id cannot be reproduced from the
-/// decoded program's own source. Cache trust therefore rests on this agreement,
-/// the rerun of effect and linearity checks below, the re-lowered payload
-/// comparison at the decode boundary, and the envelope's source and build
-/// identity. Turning the id into a source-recompute needs a canonical
-/// post-effects derivation; that is tracked by the
-/// `canonicalize-library-proof-identity` OpenSpec change.
-pub fn validate_cached_library(
+/// The pair is accepted because its halves carry the same library proof
+/// identity: the cached `TypeEnv` and `CheckedProgram` must agree on the
+/// stored `LibraryProofId`, their declared-type maps must match, and the
+/// `TypeEnv`'s exact callable-selector provenance must retain the digest bound
+/// into the identity. That agreement is what rejects a forged pairing of two
+/// individually well-formed halves.
+///
+/// The effect and linearity results the program carries are the producer's,
+/// adopted rather than recomputed. Every caller establishes the rest before or
+/// after this call: the envelope's payload digest, format version and build
+/// identity pin the bytes to a producer running this compiler build, the live
+/// source hash and cache identity pin them to the sources being compiled, and
+/// the disk decoders re-lower the program and compare the result against the
+/// transmitted lowered payload, so an edit to either half alone is rejected.
+/// The producer ran both checkers before writing, and they are deterministic,
+/// so the adopted program is the one rerunning them would produce;
+/// `chelis-compiler-api`'s `cached_program_is_a_checker_fixed_point` locks that
+/// equality instead of every load paying for it (chelis#2558).
+///
+/// The stored identity is not recomputed from the decoded source. It is bound
+/// before the effect and linearity passes, and a layered build's cached library
+/// is a composed program whose id is the extension's id over the base context
+/// while its `exprs()` are the base++extension concatenation, so the id cannot
+/// be reproduced from the decoded program's own source. Turning the id into a
+/// source-recompute needs a canonical post-effects derivation; that is tracked
+/// by the `canonicalize-library-proof-identity` OpenSpec change.
+pub fn bind_cached_library(
     cached_type_env: TypeEnv,
     cached_program: CheckedProgram,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     if !cached_type_env.matches_checked_program(&cached_program) {
         return Err(LibraryRejection::ContextMismatch);
     }
-    let effected = chelis_effects::check_program(&cached_program)
-        .map_err(|errors| LibraryRejection::Effects { errors })?;
-    let program = chelis_types::check_linearity(&effected)
-        .map_err(|errors| LibraryRejection::Linearity { errors })?;
-    if !cached_type_env.matches_checked_program(&program) {
-        return Err(LibraryRejection::ContextMismatch);
-    }
     Ok(CheckedLibrary {
         type_env: cached_type_env,
-        program,
-    })
-}
-
-/// Adopt cached library products whose bytes the caller already authenticated.
-///
-/// This is the counterpart of [`validate_cached_library`] for a payload whose
-/// integrity was established outside the payload itself. The caller MUST have
-/// compared the payload against a digest delivered over a channel the payload's
-/// writer does not control. A digest carried inside the same bytes does not
-/// satisfy that precondition: whoever rewrote the payload rewrote the digest
-/// with it, which is exactly what
-/// `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
-/// demonstrates.
-///
-/// Under that precondition the effect and linearity reruns in
-/// [`validate_cached_library`] recompute a value equal to the one they were
-/// handed, so adopting the cached `CheckedProgram` reconstructs the producer's
-/// exact library rather than an approximation of it. That equality is enforced,
-/// not assumed: `chelis-compiler-api`'s route-equivalence test reconstructs one
-/// real payload through both functions and requires byte-identical results, so a
-/// future normalizing pass in either checker fails there instead of diverging
-/// silently here.
-///
-/// The cheap structural agreement between the type environment and the program
-/// still runs. It is a fraction of a percent of the work the reruns cost, and it
-/// is what rejects a forged pairing of two individually well-formed halves.
-pub fn adopt_authenticated_library(
-    authenticated_type_env: TypeEnv,
-    authenticated_program: CheckedProgram,
-) -> Result<CheckedLibrary, LibraryRejection> {
-    if !authenticated_type_env.matches_checked_program(&authenticated_program) {
-        return Err(LibraryRejection::ContextMismatch);
-    }
-    Ok(CheckedLibrary {
-        type_env: authenticated_type_env,
-        program: authenticated_program,
+        program: cached_program,
     })
 }
 

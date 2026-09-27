@@ -1,18 +1,21 @@
-//! chelis#2211: the authenticated handoff route, and the property it rests on.
+//! chelis#2211: the authenticated handoff route, and the property every cache
+//! route rests on.
 //!
 //! `CompiledContext` has two reconstruction routes with different trust
 //! assumptions. [`CompiledContext::decode`] reads bytes of unknown provenance:
-//! every claim available to it comes out of the same bytes, so it re-derives
-//! the library from the decoded program and compares the result against the
-//! transmitted lowered payload. [`CompiledContext::decode_authenticated`] reads
-//! bytes accompanied by a digest that did not travel with them, which settles
-//! provenance directly and leaves the re-derivation nothing to establish.
+//! every claim available to it comes out of the same bytes, so it re-lowers
+//! the decoded program and compares the result against the transmitted
+//! lowered payload. [`CompiledContext::decode_authenticated`] reads bytes
+//! accompanied by a digest that did not travel with them, which settles
+//! provenance directly and leaves the comparison nothing to establish.
 //!
-//! That second sentence is only true while re-deriving reproduces exactly what
-//! it was handed. `both_decode_routes_reconstruct_identical_contexts` is the
-//! test that says so, and it is the reason the fast route is allowed to exist:
-//! a normalizing pass added to the effect or linearity checker would make the
-//! two routes disagree, and it would fail here rather than diverge in a worker.
+//! Both routes, and the stdlib and dependency cache decoders, adopt the effect
+//! and linearity results the transmitted program carries instead of rerunning
+//! those checkers (chelis#2558). That is only sound while rerunning them
+//! reproduces exactly what they were handed.
+//! `cached_program_is_a_checker_fixed_point` is the test that says so: a
+//! normalizing pass added to the effect or linearity checker fails here rather
+//! than silently serving a library that differs from a fresh check.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -138,17 +141,14 @@ fn encoded_fixture() -> (TempDir, Vec<u8>, HandoffDigest) {
     fixture
 }
 
-/// The property the authenticated route depends on.
+/// One payload, reconstructed both ways, must produce the same value.
 ///
-/// One payload, reconstructed both ways, must produce the same value. The
-/// untrusted route reruns the effect and linearity checkers over the
-/// transmitted program and re-lowers; the authenticated route adopts the
-/// transmitted program and re-lowers. They agree only because rerunning those
-/// checkers over their own output reproduces it, and nothing else in the design
-/// enforces that. If a future change makes either checker normalize, sort,
-/// dedup, or intern anything, this test fails and the fast route must be
-/// reconsidered rather than silently returning a different library than the
-/// producer had.
+/// Both routes bind the transmitted program and re-lower it; the untrusted
+/// route also compares the re-lowering against the transmitted one. Before
+/// chelis#2558 the untrusted route reran the effect and linearity checkers, and
+/// this test was the guard that doing so reproduced the transmitted program;
+/// `cached_program_is_a_checker_fixed_point` now carries that guard directly,
+/// and this test keeps the two routes from drifting apart in what they bind.
 ///
 /// The comparison is over serialized bytes. `CompiledContext`'s encoding is
 /// already required to be byte-stable across processes with different hash
@@ -192,6 +192,58 @@ fn both_decode_routes_reconstruct_identical_contexts() {
         "the authenticated route did not reproduce the producer's own bytes"
     );
     assert_eq!(re_encoded_digest, digest);
+}
+
+/// Adopting the transmitted checker results equals re-deriving them.
+///
+/// Every cache and handoff decoder binds the transmitted `CheckedProgram` as
+/// it stands, trusting the effect rows and linearity facts the producer wrote
+/// (chelis#2558). That trust is the claim that the producer's program is a
+/// fixed point of both checkers: running `chelis_effects::check_program` and
+/// `chelis_types::check_linearity` over it returns it unchanged. The payload
+/// is a real package context, so the program is the composed standard library,
+/// dependency and package, each layer produced by the checker entry points
+/// its own build path uses.
+///
+/// The decode routes no longer run either checker, so this is the only place a
+/// checker that starts to normalize, sort, dedup or intern would be noticed.
+/// The target is a standing target in `.config/ci-test-targets.toml`, so it
+/// runs on every candidate. The comparison is over serialized bytes, which
+/// `hash_order_cache_bytes.rs` already requires to be stable across hash
+/// states, so a byte difference is a value difference.
+#[test]
+fn cached_program_is_a_checker_fixed_point() {
+    let (_dir, bytes, _digest) = encoded_fixture();
+
+    // Take the program the disk route adopts: decode through it, then read the
+    // bound program back out of its re-encoding.
+    let decoded = CompiledContext::decode(&bytes).expect("the disk route must accept");
+    let adopted =
+        wire_of(&decoded.encode().expect("a decoded context must re-encode")).library_checked;
+    let adopted_bytes = bincode::serialize(&adopted).expect("encode the adopted program");
+
+    let _linked = chelis_types::install_linked_program_guard();
+    let effected = chelis_effects::check_program(&adopted)
+        .expect("the adopted program must pass the effect checker");
+    let rederived = chelis_types::check_linearity(&effected)
+        .expect("the adopted program must pass the linearity checker");
+    let rederived_bytes = bincode::serialize(&rederived).expect("encode the re-derived program");
+
+    assert_eq!(
+        adopted_bytes.len(),
+        rederived_bytes.len(),
+        "rerunning the effect and linearity checkers changed the size of the adopted program; \
+         it is no longer a fixed point of those checkers, so every cache decoder that adopts \
+         the producer's results (chelis#2558) now serves a library that differs from a fresh \
+         check"
+    );
+    assert!(
+        adopted_bytes == rederived_bytes,
+        "rerunning the effect and linearity checkers changed the adopted program without \
+         changing its size; it is no longer a fixed point of those checkers, so every cache \
+         decoder that adopts the producer's results (chelis#2558) now serves a library that \
+         differs from a fresh check"
+    );
 }
 
 /// The negative control for the authentication itself.
@@ -298,7 +350,7 @@ fn handoff_digest_rejects_every_spelling_but_the_canonical_one() {
 
 /// The fast route's one remaining semantic check, locked.
 ///
-/// chelis#2258 review, P2-3: `adopt_authenticated_library`'s
+/// chelis#2258 review, P2-3: `bind_cached_library`'s
 /// `matches_checked_program` is the only semantic check
 /// `decode_authenticated` still runs, and
 /// `every_cached_library_decoder_rejects_forged_selector_callable_metadata`

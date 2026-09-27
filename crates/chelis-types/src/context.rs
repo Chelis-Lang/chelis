@@ -65,7 +65,7 @@
 //! errors and the totality invariant forbids error types in emitted snapshots.
 //! Compiler API cache decoding verifies the envelope and build identity.
 //! It requires one opaque identity on both type products.
-//! It reruns effect and linearity checks before it creates a library proof.
+//! It adopts the producer's effect and linearity results (chelis#2558).
 
 use chelis_unord::UnordSet;
 use std::collections::BTreeMap;

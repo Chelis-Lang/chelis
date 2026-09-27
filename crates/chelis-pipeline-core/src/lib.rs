@@ -106,10 +106,9 @@ pub use lower::{
     lower_library,
 };
 pub use semantic::{
-    adopt_authenticated_library, analyze_prepared, analyze_prepared_library,
-    analyze_prepared_library_with_base, analyze_prepared_with_library, check_prepared_library,
-    complete_checks, complete_context_checks, complete_context_library_checks,
-    complete_library_checks, validate_cached_library,
+    analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,
+    analyze_prepared_with_library, bind_cached_library, check_prepared_library, complete_checks,
+    complete_context_checks, complete_context_library_checks, complete_library_checks,
 };
 
 #[cfg(test)]
@@ -225,9 +224,8 @@ mod tests {
                 .matches_checked_program(exported.program())
         );
 
-        let rejection =
-            validate_cached_library(private.type_env().clone(), exported.program().clone())
-                .expect_err("a same-shape foreign context must fail at the cache boundary");
+        let rejection = bind_cached_library(private.type_env().clone(), exported.program().clone())
+            .expect_err("a same-shape foreign context must fail at the cache boundary");
 
         assert!(matches!(rejection, LibraryRejection::ContextMismatch));
     }
@@ -239,7 +237,7 @@ mod tests {
                 .expect("the library must pass all checks");
 
         let rejection =
-            validate_cached_library(chelis_types::TypeEnv::empty(), library.program().clone())
+            bind_cached_library(chelis_types::TypeEnv::empty(), library.program().clone())
                 .expect_err("a foreign type environment must fail at the cache boundary");
 
         assert!(matches!(rejection, LibraryRejection::ContextMismatch));

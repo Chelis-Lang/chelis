@@ -154,6 +154,9 @@ pub enum CacheError {
     /// Envelope decoded but the on-disk format version is not the one the
     /// running binary supports.
     UnsupportedVersion { stored: u32, expected: u32 },
+    /// Cancellation was requested before the payload decode (chelis#2617).
+    /// The load was abandoned and says nothing about the file.
+    Cancelled,
 }
 
 impl std::fmt::Display for CacheError {
@@ -174,6 +177,7 @@ impl std::fmt::Display for CacheError {
                 "cache file format version {stored} not supported by this binary \
                  (expects {expected})"
             ),
+            CacheError::Cancelled => f.write_str(chelis_types::EVAL_CANCELLED_MSG),
         }
     }
 }
@@ -434,6 +438,13 @@ pub(crate) fn load<T: CachePayload>(
         return Err(CacheError::Corrupt(
             "payload sha256 does not match envelope".to_string(),
         ));
+    }
+
+    // Binding the payload reruns no checker (chelis#2558), and a
+    // `LibraryContext` decode has no other step that polls the cancel token,
+    // so a cancelled caller is observed here, before the decode.
+    if chelis_types::cancellation_requested() {
+        return Err(CacheError::Cancelled);
     }
 
     match bincode::deserialize(&envelope.payload) {

@@ -190,7 +190,7 @@ impl<'de> Deserialize<'de> for StdLibContext {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
                 .map_err(serde::de::Error::custom)?;
         let library_dag = match wire.library_dag {
             Some(cached) => {
@@ -427,9 +427,10 @@ pub(crate) enum TypecheckCacheLoad<T> {
     /// No file, or a valid file under a different key.
     Miss,
     /// Cancellation was requested and the payload decode did not complete.
-    /// Decoding revalidates the cached proof, and that revalidation polls the
-    /// cancel token, so an abandoned decode says nothing about the file. The
-    /// caller propagates the cancellation and leaves the file in place.
+    /// `cache_envelope::load` polls the cancel token before the payload decode,
+    /// and a stdlib decode's re-lowering polls it again, so an abandoned load
+    /// says nothing about the file. The caller propagates the cancellation and
+    /// leaves the file in place.
     Cancelled,
     /// The bytes are present but cannot be used; the caller warns, rebuilds
     /// and overwrites.
@@ -449,6 +450,7 @@ pub(crate) fn classify_typecheck_cache_load<T>(
     match loaded {
         Ok(Some(payload)) => TypecheckCacheLoad::Hit(payload),
         Ok(None) => TypecheckCacheLoad::Miss,
+        Err(cache_envelope::CacheError::Cancelled) => TypecheckCacheLoad::Cancelled,
         Err(cache_envelope::CacheError::Decode(_)) if chelis_types::cancellation_requested() => {
             TypecheckCacheLoad::Cancelled
         }
