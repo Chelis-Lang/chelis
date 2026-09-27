@@ -1654,16 +1654,17 @@ class RuntimeLinkContractTests(unittest.TestCase):
             carried = b"carried instrumented runtime"
             carried_sha256 = oracle.hashlib.sha256(carried).hexdigest()
 
-            def messages(features: list[str]) -> str:
+            def messages(features: list[str], runtimes: int = 1) -> str:
+                runtime = {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "chelis_runtime", "kind": ["staticlib", "rlib"]},
+                    "features": features,
+                    "filenames": [str(archive), str(archive.with_suffix(".rlib"))],
+                    "executable": None,
+                }
                 rows = (
                     {"reason": "build-script-executed"},
-                    {
-                        "reason": "compiler-artifact",
-                        "target": {"name": "chelis_runtime", "kind": ["staticlib", "rlib"]},
-                        "features": features,
-                        "filenames": [str(archive), str(archive.with_suffix(".rlib"))],
-                        "executable": None,
-                    },
+                    *(runtime for _ in range(runtimes)),
                     {
                         "reason": "compiler-artifact",
                         "target": {"name": "chelis", "kind": ["bin"]},
@@ -1678,7 +1679,7 @@ class RuntimeLinkContractTests(unittest.TestCase):
             def staged(path: Path, digest: str = carried_sha256) -> str:
                 return f"Staged runtime {path} (sha256 {digest})\n"
 
-            def prepare(features: list[str], report=staged, returncode: int = 0):
+            def prepare(features: list[str], report=staged, returncode: int = 0, runtimes: int = 1):
                 context = self.context(
                     CARGO_TARGET_DIR=str(target),
                     CHELIS_OWNERSHIP_LEDGER_PATH="/foreign/ledger.jsonl",
@@ -1687,7 +1688,9 @@ class RuntimeLinkContractTests(unittest.TestCase):
 
                 def run(argv, *, environment, **_):
                     if argv[0] == "cargo":
-                        return oracle.subprocess.CompletedProcess(argv, 0, messages(features), "")
+                        return oracle.subprocess.CompletedProcess(
+                            argv, 0, messages(features, runtimes), ""
+                        )
                     exports.append((tuple(argv), environment))
                     exported = Path(argv[-1])
                     exported.mkdir()
@@ -1709,6 +1712,12 @@ class RuntimeLinkContractTests(unittest.TestCase):
 
             with self.assertRaisesRegex(oracle.OracleFailure, "without ownership-ledger"):
                 prepare([])
+            for runtimes in (0, 2):
+                with self.subTest(runtimes=runtimes):
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure, "one chelis executable and one instrumented runtime"
+                    ):
+                        prepare(["ownership-ledger"], runtimes=runtimes)
 
             failures = (
                 ("failed export", dict(returncode=1), "could not export its runtime"),
