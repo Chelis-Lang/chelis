@@ -570,6 +570,21 @@
     },
     {
       "phase": "b",
+      "id": "cli_issue_2608_result_claims",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2608_declared_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_combinator_result_is_produced_by_its_combinator",
+        "declared_result_claims_are_checked_on_both_lanes"
+      ],
+      "note": "#2608/#1900/#2598 Eval and generated-C compile-link-run receipts: named host result claims resolved from the first tensor-parameter witness with binder and source in context (including into a tensor-kernel call), literal claims on an unwitnessed wildcard pass-through, builtin producer attribution under spec/04 section 4.7, untaken arms, and agreeing controls."
+    },
+    {
+      "phase": "b",
       "id": "surf_issue_2110_local_ascription_provenance",
       "package": "chelis-surf",
       "kind": "test",
@@ -775,6 +790,9 @@
         "issue_1767_symbolic_actual_axes_are_read_for_each_execution",
         "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
+        "issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        "issue_2512_an_agreeing_restamped_axis_runs",
+        "issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard",
         "local_reshape_guards_follow_declaration_order",
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
@@ -881,6 +899,7 @@
       "expected": [
         "c_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
         "c_aggregate_origin_arena_is_fresh_for_repeated_public_calls",
+        "c_append_projection_is_attributed_to_append_not_index",
         "c_combined_precision_rank_callback_claims_actualize_each_callsite",
         "c_delayed_selection_guards_only_the_selected_value",
         "c_direct_list_skip_retains_selected_tail_producer",
@@ -896,7 +915,6 @@
         "c_polymorphic_identity_inherited_claim_prepares_all_actuals",
         "c_polymorphic_identity_own_claim_preserves_formal_boundary",
         "c_precision_only_callback_claims_are_callsite_local",
-        "c_projection_without_origin_fails_instead_of_guessing_index",
         "c_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
         "c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
         "c_scalar_only_precision_evidence_specializes_each_callsite",
@@ -904,6 +922,7 @@
         "c_shared_callback_claims_are_invocation_local",
         "c_tuple_projection_retains_only_the_selected_producer",
         "eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        "eval_append_projection_is_attributed_to_append_not_index",
         "eval_combined_precision_rank_callback_claims_actualize_each_callsite",
         "eval_delayed_selection_guards_only_the_selected_value",
         "eval_direct_list_skip_retains_selected_tail_producer",
@@ -919,7 +938,6 @@
         "eval_polymorphic_identity_inherited_claim_prepares_all_actuals",
         "eval_polymorphic_identity_own_claim_preserves_formal_boundary",
         "eval_precision_only_callback_claims_are_callsite_local",
-        "eval_projection_without_origin_fails_instead_of_guessing_index",
         "eval_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
         "eval_scalar_only_precision_evidence_specializes_each_callsite",
         "eval_selection_before_production_forwards_only_to_the_selected_arm",

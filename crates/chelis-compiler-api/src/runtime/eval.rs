@@ -184,8 +184,37 @@ struct DeclaredResultClaim {
     /// checker owns rank, and reporting it here would duplicate a verdict with
     /// a worse message.
     rank: usize,
-    /// `(axis, required)` for every literal declared dimension.
-    axes: Vec<(usize, i64)>,
+    /// Every declared dimension this invocation can resolve: a literal, or
+    /// a binder a tensor parameter witnesses.
+    axes: Vec<ResultAxisClaim>,
+}
+
+/// One declared result axis and the value it requires.
+#[derive(Clone)]
+struct ResultAxisClaim {
+    axis: usize,
+    required: i64,
+    /// `None` for a literal. A named claim keeps its authored binder and the
+    /// declaring parameter axis whose observed extent supplied `required`, so
+    /// its trap context names both disagreeing sources (spec/04 section 4.7).
+    source: Option<NamedResultSource>,
+}
+
+#[derive(Clone)]
+struct NamedResultSource {
+    claim: String,
+    parameter: String,
+    axis: usize,
+}
+
+impl ResultAxisClaim {
+    fn literal(axis: usize, required: i64) -> Self {
+        Self {
+            axis,
+            required,
+            source: None,
+        }
+    }
 }
 
 impl DeclaredResultClaim {
@@ -200,11 +229,19 @@ impl DeclaredResultClaim {
         if shape.len() != self.rank {
             return Ok(());
         }
-        for &(axis, required) in &self.axes {
+        for claim in &self.axes {
+            let (axis, required) = (claim.axis, claim.required);
             let observed = shape[axis];
             if required < 0 || required as usize != observed {
+                let context = match &claim.source {
+                    None => format!("extent `{required}`: claimed = {required}"),
+                    Some(source) => format!(
+                        "extent `{}`: {} axis {} = {required}",
+                        source.claim, source.parameter, source.axis
+                    ),
+                };
                 return Err(format!(
-                    "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
+                    "{context}, {op} axis {axis} = {observed}\n\
                      numeric trap: domain in {op} at i64"
                 ));
             }
@@ -813,20 +850,28 @@ impl<'a> EvalContext<'a> {
         let result_claims = inherited_claims
             .iter()
             .map(|claim| {
-                let mut dims = vec![DimInfo::Named("*".to_string(), None); claim.rank];
-                for (axis, required) in &claim.axes {
-                    dims[*axis] = DimInfo::Lit(usize::try_from(*required).map_err(|_| {
-                        "declared result extent is outside the admitted range".to_string()
-                    })?);
-                }
-                Ok(TensorType {
-                    dims,
-                    precision: kernel
-                        .dag
-                        .get(roots[0])
-                        .expect("result")
-                        .output_type
-                        .precision,
+                let axes = claim
+                    .axes
+                    .iter()
+                    .map(|axis| {
+                        Ok(chelis_ir::eval::InheritedResultAxis {
+                            axis: axis.axis,
+                            required: usize::try_from(axis.required).map_err(|_| {
+                                "declared result extent is outside the admitted range".to_string()
+                            })?,
+                            source: axis.source.as_ref().map(|source| {
+                                chelis_ir::axis_sources::ClaimSource {
+                                    claim: source.claim.clone(),
+                                    parameter: source.parameter.clone(),
+                                    axis: source.axis,
+                                }
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(chelis_ir::eval::InheritedResultClaim {
+                    rank: claim.rank,
+                    axes,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1587,6 +1632,9 @@ impl<'a> EvalContext<'a> {
                 items.insert(0, args[0].clone());
                 let mut producers = match arg_producers.get(1).and_then(Option::as_ref) {
                     Some(ResultProducer::Aggregate(children)) => children.clone(),
+                    Some(uniform @ ResultProducer::Uniform(_)) => {
+                        vec![Some(uniform.clone()); items.len().saturating_sub(1)]
+                    }
                     _ => vec![None; items.len().saturating_sub(1)],
                 };
                 producers.insert(0, arg_producers.first().cloned().flatten());
@@ -1677,6 +1725,30 @@ impl<'a> EvalContext<'a> {
                         Err(_) => None,
                     };
                     producer.filter(|producer| producer.matches_value(&value))
+                }
+                // `take` is a selection: its prefix keeps each element's
+                // producer, as `skip`'s suffix does.
+                "take" => {
+                    let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
+                        "take count disappeared after successful builtin evaluation".to_string()
+                    })?;
+                    let producer = match usize::try_from(count) {
+                        Ok(count) => arg_producers
+                            .first()
+                            .and_then(Option::as_ref)
+                            .and_then(|producer| producer.aggregate_prefix(count)),
+                        // A count above every addressable length keeps the
+                        // whole List.
+                        Err(_) => arg_producers.first().cloned().flatten(),
+                    };
+                    producer.filter(|producer| producer.matches_value(&value))
+                }
+                // spec/04 section 4.7: a builtin produces every tensor held in
+                // the aggregate it returns.
+                _ if chelis_ir::host::produces_its_result(name)
+                    && !matches!(value, RuntimeValue::Tensor(_)) =>
+                {
+                    Some(ResultProducer::Uniform(name.to_string()))
                 }
                 _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };
@@ -1786,7 +1858,67 @@ impl<'a> EvalContext<'a> {
     /// need not be known until the returned branch or callee actually executes.
     fn declared_result_claim(declared: Option<&Expr>) -> Option<DeclaredResultClaim> {
         let (rank, axes) = declared_literal_result_extents(declared)?;
-        Some(DeclaredResultClaim { rank, axes })
+        Some(DeclaredResultClaim {
+            rank,
+            axes: axes
+                .into_iter()
+                .map(|(axis, required)| ResultAxisClaim::literal(axis, required))
+                .collect(),
+        })
+    }
+
+    /// Add a fixed-rank declaration's named axes to its invocation claim.
+    ///
+    /// A binder is resolved from its first witness among the tensor
+    /// parameters, in signature order, which is the canonical side the entry
+    /// plan compares every later witness against. A binder no tensor
+    /// parameter declares has no witness here and adds nothing. Axes stay in
+    /// declared order, which the C lane's claim frame also follows.
+    fn with_named_result_axes(
+        claim: Option<DeclaredResultClaim>,
+        declared: Option<&Expr>,
+        witnesses: &[(String, NamedResultSource, usize)],
+    ) -> Result<Option<DeclaredResultClaim>, String> {
+        let Some((_, dim_exprs)) = declared.and_then(tensor_type_dim_exprs) else {
+            return Ok(claim);
+        };
+        if dim_exprs
+            .iter()
+            .any(|dim| dim.tag() == Some(DeepTag::DRank))
+        {
+            return Ok(claim);
+        }
+        let mut named = Vec::new();
+        for (axis, dim_expr) in dim_exprs.iter().enumerate() {
+            let Some((DeepTag::DName | DeepTag::DVar, kids)) = tagged_expr_children(dim_expr)
+            else {
+                continue;
+            };
+            let Some(binder) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let Some((_, source, size)) = witnesses.iter().find(|(name, _, _)| name == binder)
+            else {
+                continue;
+            };
+            let required = i64::try_from(*size)
+                .map_err(|_| format!("dimension binder `{binder}` exceeds the exact i64 range"))?;
+            named.push(ResultAxisClaim {
+                axis,
+                required,
+                source: Some(source.clone()),
+            });
+        }
+        if named.is_empty() {
+            return Ok(claim);
+        }
+        let mut claim = claim.unwrap_or(DeclaredResultClaim {
+            rank: dim_exprs.len(),
+            axes: Vec::new(),
+        });
+        claim.axes.extend(named);
+        claim.axes.sort_by_key(|axis| axis.axis);
+        Ok(Some(claim))
     }
 
     /// Actualize a rank-polymorphic authored result at the invocation boundary.
@@ -1866,7 +1998,7 @@ impl<'a> EvalContext<'a> {
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Lit(required) => Some(
                     i64::try_from(*required)
-                        .map(|required| (axis, required))
+                        .map(|required| ResultAxisClaim::literal(axis, required))
                         .map_err(|_| "declared result extent exceeds the exact i64 range"),
                 ),
                 DimInfo::Named(_, _) => None,
@@ -2130,7 +2262,9 @@ impl<'a> EvalContext<'a> {
                     .iter()
                     .enumerate()
                     .filter_map(|(axis, dim)| match dim {
-                        DimInfo::Lit(required) => Some((axis, *required as i64)),
+                        DimInfo::Lit(required) => {
+                            Some(ResultAxisClaim::literal(axis, *required as i64))
+                        }
                         DimInfo::Named(_, _) => None,
                     })
                     .collect();
@@ -2477,6 +2611,8 @@ impl<'a> EvalContext<'a> {
                     // extent as compiled lowering instead of looking up an
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
+                    let mut named_result_witnesses: Vec<(String, NamedResultSource, usize)> =
+                        Vec::new();
                     let checked_params = checked_signature
                         .as_ref()
                         .and_then(checked_function_children)
@@ -2492,11 +2628,27 @@ impl<'a> EvalContext<'a> {
                             unreachable!("entry actualization returns tensor arguments only");
                         };
                         let parameter = params[index].clone();
-                        for (dim, size) in ty.dims.iter().zip(&tensor.value.shape) {
+                        for (axis, (dim, size)) in
+                            ty.dims.iter().zip(&tensor.value.shape).enumerate()
+                        {
                             if let DimInfo::Named(name, _) = dim
                                 && name != "*"
                             {
                                 dimension_bindings.entry(name.clone()).or_insert(*size);
+                                if !named_result_witnesses
+                                    .iter()
+                                    .any(|(seen, _, _)| seen == name)
+                                {
+                                    named_result_witnesses.push((
+                                        name.clone(),
+                                        NamedResultSource {
+                                            claim: chelis_ir::lower::extent_binder_label(name),
+                                            parameter: parameter.clone(),
+                                            axis,
+                                        },
+                                        *size,
+                                    ));
+                                }
                             }
                         }
                         entry_inputs.push(chelis_ir::host::HostTensorInput {
@@ -2578,6 +2730,11 @@ impl<'a> EvalContext<'a> {
                         checked_params,
                         &param_types,
                         &args,
+                    )?;
+                    let declaration_claim = Self::with_named_result_axes(
+                        declaration_claim,
+                        declared_result,
+                        &named_result_witnesses,
                     )?;
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {

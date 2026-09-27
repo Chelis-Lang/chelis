@@ -1954,6 +1954,20 @@ pub struct HostExpr<T = HostTypeTerm> {
     pub merged_spans: Vec<String>,
 }
 
+/// The builtins that return one contiguous part of their input selected by
+/// an `i64` index or count. They project rather than produce (spec/04 section
+/// 4.7), so a tensor they return or hold keeps its producer.
+pub const BUILTIN_PROJECTIONS: &[&str] = &["index", "skip", "take"];
+
+/// Whether builtin `name` produces every tensor it returns, directly or held
+/// at any depth in its aggregate result (spec/04 section 4.7): every builtin
+/// of the catalogue except the projections, so a new builtin is covered
+/// without editing a list. `tests/builtin_result_producers.rs` checks the
+/// projections against the spec's own statement of them.
+pub fn produces_its_result(name: &str) -> bool {
+    !BUILTIN_PROJECTIONS.contains(&name) && chelis_types::builtin_decl(name).is_some()
+}
+
 /// One invocation-local literal result obligation retained when host
 /// specialization inlines away the authored function boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5545,12 +5559,26 @@ fn lower_def_body_kernel(
     )))
 }
 
+/// The result axes a whole-body helper's lowering owns: every literal axis,
+/// and every named axis whose binder a tensor parameter witnesses, since the
+/// helper's graph carries that parameter's signature witness. A binder
+/// witnessed only outside the tensor parameters stays with the host frame.
 fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    let witnessed = |binder: &str| {
+        signature.params.iter().any(|param| {
+            matches!(&param.ty, HostTypeTerm::Tensor(ty)
+                if ty.dims.iter().any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, _) if name == binder)))
+        })
+    };
     sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
         .into_iter()
         .flat_map(|ty| ty.dims.into_iter().enumerate())
         .filter_map(|(axis, dim)| {
-            matches!(dim, crate::dag::DimInfo::Lit(_)).then(|| {
+            let owned = match &dim {
+                crate::dag::DimInfo::Lit(_) => true,
+                crate::dag::DimInfo::Named(binder, _) => binder != "*" && witnessed(binder),
+            };
+            owned.then(|| {
                 crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits i32"))
             })
         })
