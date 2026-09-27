@@ -60,6 +60,9 @@ MODELS = {
     "misc_std_models": "MiscStdModels",
     "sort_std_models": "SortStdModels",
     "preflight_std_models": "PreflightStdModels",
+    "retain_closure_state": "RetainClosureState",
+    "str_pattern_models": "StrPatternModels",
+    "iterator_consumer_models": "IteratorConsumerModels",
     "collection_std_models": "CollectionStdModels",
 }
 
@@ -80,6 +83,12 @@ MODEL_EDITIONS = {"join_shared_projection": "2024"}
 
 # These regressions require a restricted root, rather than all local items.
 MODEL_ROOTS = {
+    "retain_closure_state": (
+        "retain_closure_state::{impl retain_closure_state::Subst}::take_operand_gates_on",
+        "retain_closure_state::cancel_shape_checks",
+        "retain_closure_state::drop_odds",
+        "retain_closure_state::first_occurrences",
+    ),
     "production_sequences": tuple(f"production_sequences::{entry}" for entry in (
         "remove_at",
         "clear_then_extend",
