@@ -880,54 +880,143 @@ def manual_gate_entries(document: str) -> dict[str, list[str]]:
     return entries
 
 
-def _cargo_test_invocation(segment: list[str]) -> tuple[list[str], list[str]] | None:
-    while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
+# A manual-gate command cell is one code span of shell words joined by these
+# operators. A segment is classified only when every word is plain and is an
+# argument the runner below knows; anything else is rejected, never skipped.
+COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
+PLAIN_WORD = re.compile(r"[A-Za-z0-9_.,/:=-]+")
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+# The value-taking options each runner accepts before ``--``, by role, and the
+# harness options and flags after it. A bare word is a test-name filter.
+CARGO_TEST_RUNNERS: dict[tuple[str, ...], dict[str, str]] = {
+    ("cargo", "test"): {"-p": "package", "--package": "package", "--test": "test"},
+    ("cargo", "nextest", "run"): {
+        "-p": "package",
+        "--package": "package",
+        "--test": "test",
+        "--run-ignored": "run-ignored",
+    },
+}
+HARNESS_OPTIONS = {"--test-threads": "setting"}
+HARNESS_FLAGS = {"--ignored", "--exact", "--nocapture"}
+
+
+@dataclass(frozen=True)
+class CargoTestRun:
+    packages: tuple[str, ...]
+    tests: tuple[str, ...]
+    ignored: bool
+    filtered: bool
+
+
+def _arguments(
+    args: list[str],
+    valued: Mapping[str, str],
+    flags: frozenset[str] | set[str] = frozenset(),
+) -> list[tuple[str, str]]:
+    """Return ``(role, value)`` for each argument, rejecting any other spelling."""
+    parsed = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        name, equals, value = arg.partition("=")
+        if equals and name.startswith("--") and name in valued:
+            parsed.append((valued[name], value))
+            index += 1
+        elif (
+            arg in valued
+            and index + 1 < len(args)
+            and not args[index + 1].startswith("-")
+        ):
+            parsed.append((valued[arg], args[index + 1]))
+            index += 2
+        elif arg in flags:
+            parsed.append((arg, ""))
+            index += 1
+        elif not arg.startswith("-"):
+            parsed.append(("filter", arg))
+            index += 1
+        else:
+            raise ValueError(f"unrecognized argument {arg!r}")
+    return parsed
+
+
+def _cargo_test_run(segment: list[str]) -> CargoTestRun:
+    """Classify one command segment as a Cargo test run, or reject it."""
+    for word in segment:
+        if not PLAIN_WORD.fullmatch(word):
+            raise ValueError(f"unrecognized word {word!r}")
+    while segment and ENV_ASSIGNMENT.fullmatch(segment[0]):
         segment = segment[1:]
-    if segment[:2] == ["cargo", "test"]:
-        args = segment[2:]
-    elif segment[:3] == ["cargo", "nextest", "run"]:
-        args = segment[3:]
-    else:
-        return None
-    if "--" in args:
-        args = args[: args.index("--")]
-    packages: list[str] = []
-    tests: list[str] = []
-    for index, arg in enumerate(args):
-        following = args[index + 1] if index + 1 < len(args) else ""
-        if arg in {"-p", "--package"}:
-            packages.append(following)
-        elif arg.startswith("--package="):
-            packages.append(arg.split("=", 1)[1])
-        elif arg == "--test":
-            tests.append(following)
-        elif arg.startswith("--test="):
-            tests.append(arg.split("=", 1)[1])
-    return packages, tests
+    runner = next(
+        (
+            runner
+            for runner in CARGO_TEST_RUNNERS
+            if tuple(segment[: len(runner)]) == runner
+        ),
+        None,
+    )
+    if runner is None:
+        raise ValueError("not `cargo test` or `cargo nextest run`")
+    args = segment[len(runner) :]
+    split = args.index("--") if "--" in args else len(args)
+    arguments = _arguments(args[:split], CARGO_TEST_RUNNERS[runner]) + _arguments(
+        args[split + 1 :], HARNESS_OPTIONS, HARNESS_FLAGS
+    )
+    run_ignored = [value for role, value in arguments if role == "run-ignored"]
+    if not set(run_ignored) <= {"all", "only"}:
+        raise ValueError(f"unrecognized --run-ignored value in {run_ignored}")
+    return CargoTestRun(
+        packages=tuple(value for role, value in arguments if role == "package"),
+        tests=tuple(value for role, value in arguments if role == "test"),
+        ignored=bool(run_ignored) or ("--ignored", "") in arguments,
+        filtered=any(role == "filter" for role, _ in arguments),
+    )
 
 
-def cargo_test_invocations(command: str) -> list[tuple[list[str], list[str]]]:
-    """Return the ``(packages, test targets)`` of each Cargo test run in a cell.
-
-    The cell must be exactly one code span. Each ``&&``, ``||``, ``;`` or ``|``
-    segment that is ``cargo test`` or ``cargo nextest run`` after leading
-    environment assignments contributes its package and ``--test`` values
-    before ``--``; any other segment contributes nothing.
-    """
+def _command_segments(command: str) -> list[list[str]]:
+    """Split one code-span command cell into its operator-separated words."""
     span = re.fullmatch(r"`([^`]+)`", command)
     if span is None:
         raise ValueError(f"manual gate command is not one code span: {command!r}")
-    invocations = []
-    segment: list[str] = []
-    for token in [*shlex.split(span.group(1)), "&&"]:
-        if token in {"&&", "||", ";", "|"}:
-            invocation = _cargo_test_invocation(segment)
-            if invocation is not None:
-                invocations.append(invocation)
-            segment = []
+    try:
+        words = shlex.split(span.group(1))
+    except ValueError as error:
+        raise ValueError(f"manual gate command does not parse: {command!r}") from error
+    segments: list[list[str]] = [[]]
+    for word in words:
+        if word in COMMAND_SEPARATORS:
+            segments.append([])
         else:
-            segment.append(token)
-    return invocations
+            segments[-1].append(word)
+    return segments
+
+
+def _classify(name: str, command: str, segments: list[list[str]]) -> list[CargoTestRun]:
+    """Classify every given segment of a wired entry's command, or reject it.
+
+    Quoting is rejected so that the classified words are the words the shell
+    passes to Cargo.
+    """
+    if segments and re.search(r"[\\'\"]", command):
+        raise ValueError(
+            f"{MANUAL_GATES_PATH} entry {name!r} quotes or escapes a word: {command}"
+        )
+    runs = []
+    for segment in segments:
+        try:
+            runs.append(_cargo_test_run(segment))
+        except ValueError as error:
+            raise ValueError(
+                f"{MANUAL_GATES_PATH} entry {name!r} has a segment that is not a "
+                f"recognized Cargo test run ({error}): {command}"
+            ) from error
+    return runs
+
+
+def _names(target: str, text: str) -> bool:
+    """Whether ``text`` names ``target`` as a whole word."""
+    return re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", text) is not None
 
 
 def validate_manual_gate_entries(
@@ -936,13 +1025,16 @@ def validate_manual_gate_entries(
 ) -> None:
     """Bind every manual-gate row to exactly the wired entries that run it.
 
-    Each cited entry must exist once, and every Cargo test run in its command
-    must name exactly the row's package and target. An uncited entry whose
-    command runs the target makes the row stale.
+    Each cited entry must exist once, and every segment of its command must be
+    a Cargo test run of exactly the row's package and target with its ignored
+    tests; at least one cited entry must run them with no name filter. An
+    uncited entry that runs the target makes the row stale, and a segment of
+    any entry that names the target but cannot be classified is rejected.
     """
     entries = manual_gate_entries(document)
     for identity, gate in sorted(targets.items()):
-        exact = ([identity.package], [identity.target])
+        exact = ((identity.package,), (identity.target,))
+        whole_suite = False
         for name in gate.entries:
             commands = entries.get(name, [])
             if len(commands) != 1:
@@ -951,29 +1043,48 @@ def validate_manual_gate_entries(
                     f"which names {len(commands)} rows of {MANUAL_GATES_PATH} "
                     f"{MANUAL_GATES_SECTION!r}; exactly one is required"
                 )
-            invocations = cargo_test_invocations(commands[0])
-            if not invocations or any(row != exact for row in invocations):
+            runs = _classify(name, commands[0], _command_segments(commands[0]))
+            if any(
+                (run.packages, run.tests) != exact or not run.ignored for run in runs
+            ):
                 raise ValueError(
                     f"{MANUAL_GATES_PATH} entry {name!r} does not run exactly "
-                    f"{identity.canonical}: {commands[0]}"
+                    f"{identity.canonical} with its ignored tests: {commands[0]}"
                 )
-        # Only commands that mention the target are parsed, so an unrelated
-        # prose row cannot fail every plan.
-        uncited = sorted(
-            name
-            for name, commands in entries.items()
-            if name not in gate.entries
-            and any(
-                identity.package in packages and identity.target in tests
-                for command in commands
-                if identity.target in command
-                for packages, tests in cargo_test_invocations(command)
+            whole_suite = whole_suite or any(not run.filtered for run in runs)
+        if not whole_suite:
+            raise ValueError(
+                f"manual-gate target {identity.canonical} cites no "
+                f"{MANUAL_GATES_PATH} entry that runs its whole ignored suite "
+                "without a name filter"
             )
-        )
+        uncited = []
+        for name, commands in sorted(entries.items()):
+            if name in gate.entries:
+                continue
+            for command in commands:
+                # A command that does not name the target is left alone, so an
+                # unrelated row the parser cannot read fails no plan.
+                try:
+                    segments = _command_segments(command)
+                except ValueError:
+                    if _names(identity.target, command):
+                        raise
+                    continue
+                named = [
+                    segment
+                    for segment in segments
+                    if any(_names(identity.target, word) for word in segment)
+                ]
+                if any(
+                    identity.package in run.packages and identity.target in run.tests
+                    for run in _classify(name, command, named)
+                ):
+                    uncited.append(name)
         if uncited:
             raise ValueError(
                 f"manual-gate target {identity.canonical} does not cite "
-                f"{MANUAL_GATES_PATH} entries that run it: {uncited}"
+                f"{MANUAL_GATES_PATH} entries that run it: {sorted(set(uncited))}"
             )
 
 

@@ -195,8 +195,9 @@ suite and records exact per-test results. It becomes stale if an active test is
 added and cannot be combined with a target or test exclusion. When the ignored
 tests need prerequisites no Linux PR worker has, a `manual_gate_target` row
 instead cites every `docs/manual_gates.md` entry whose command runs that exact
-target; the same rules apply, and the report lists the ignored tests, runs none,
-and records the target as a manual gate not executed in PR CI.
+target, and one of them must run all its ignored tests with no name filter; the
+same rules apply, and the report lists the ignored tests, runs none, and records
+the target as a manual gate not executed in PR CI.
 
 If planning reports an unknown shared path, add a reviewed mapping to its real
 packages or existing automated owner in `.config/ci-test-targets.toml`. Do not

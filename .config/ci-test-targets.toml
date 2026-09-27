@@ -889,15 +889,17 @@ tracking_issue = "chelis#1863"
 # modification is listed with its ignored tests, rejected if an active test
 # appears, and reported as a manual gate that PR CI did not execute. Each
 # `manual_gates` value is a docs/manual_gates.md row whose command runs exactly
-# this target; an uncited row that runs it makes this row stale.
+# this target's ignored tests, and one of them runs all of them with no name
+# filter; an uncited row that runs it makes this row stale.
 [[manual_gate_target]]
 package = "chelis-cli"
 name = "shoals_oracle"
 manual_gates = [
   "phase3l_shoals_oracle",
   "phase3l_shoals_oracle_grad_greeks_match_analytic",
+  "shoals_oracle suite",
 ]
-reason = "both Shoals finance-oracle rows need a Shoals checkout that the Linux PR workers do not have"
+reason = "the Shoals finance-oracle rows need a Shoals checkout that the Linux PR workers do not have"
 tracking_issue = "chelis#1824"
 
 [[manual_gate_target]]

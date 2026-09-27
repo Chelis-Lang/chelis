@@ -144,7 +144,8 @@ disposition = "owner"
 
 
 GATE_REASON = "the gate needs a checkout the PR workers do not have"
-Q_GATE = "`cargo test -p q --test smoke q_case -- --ignored --exact`"
+Q_GATE = "`cargo test -p q --test smoke -- --ignored`"
+Q_CASE = "`cargo test -p q --test smoke q_case -- --ignored --exact --nocapture`"
 
 
 def manual_gate_row(
@@ -585,15 +586,16 @@ class SchemaTests(unittest.TestCase):
 
         validate(manual_gate_row(), gate_sources())
         validate(
-            manual_gate_row(manual_gates=["q_gate", "q_nextest"]),
+            manual_gate_row(manual_gates=["q_case", "q_nextest", "q_all"]),
             gate_sources(
                 manual_gates_doc(
-                    ("q_gate", Q_GATE),
+                    ("q_case", Q_CASE),
                     (
                         "q_nextest",
                         "`CHELIS_X=1 cargo nextest run --package=q --test=smoke "
-                        "-- --ignored`",
+                        "-- --ignored --test-threads=1`",
                     ),
+                    ("q_all", "`cargo nextest run -p q --test smoke --run-ignored all`"),
                 )
             ),
         )
@@ -626,7 +628,7 @@ class SchemaTests(unittest.TestCase):
                 gate_sources(
                     manual_gates_doc(("q_gate", "`scripts/hip_test.py -p q --test smoke`"))
                 ),
-                "does not run exactly q::smoke",
+                "not a recognized Cargo test run",
             ),
             (
                 manual_gate_row(),
@@ -682,6 +684,108 @@ class SchemaTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     validate(row, sources)
 
+    def test_manual_gate_citations_run_the_whole_ignored_suite(self) -> None:
+        """A cited command that runs no ignored test, or only a filtered part."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(row: str, *entries: tuple[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + row),
+                fixture_metadata(),
+                tracked,
+                gate_sources(manual_gates_doc(*entries)).__getitem__,
+            )
+
+        validate(
+            manual_gate_row(manual_gates=["q_gate", "q_case"]),
+            ("q_gate", Q_GATE),
+            ("q_case", Q_CASE),
+        )
+        cases = [
+            ("`cargo test -p q --test smoke`", "does not run exactly q::smoke"),
+            ("`cargo nextest run -p q --test smoke`", "does not run exactly q::smoke"),
+            ("`cargo test -p q --test smoke --no-run -- --ignored`", "'--no-run'"),
+            ("`cargo test -p q --test smoke -- --ignored --list`", "'--list'"),
+            ("`cargo test -p q --test smoke -- --list`", "'--list'"),
+            (
+                "`cargo nextest run -p q --test smoke --run-ignored default`",
+                "--run-ignored value",
+            ),
+            ("`false && cargo test -p q --test smoke -- --ignored`", "not `cargo test`"),
+            ("`echo cargo test -p q --test smoke -- --ignored`", "not `cargo test`"),
+            ("`cargo test -p q --test smoke -- --ignored &&`", "not `cargo test`"),
+            (Q_CASE, "cites no docs/manual_gates.md entry that runs its whole"),
+            (
+                "`cargo test -p q --test smoke no_such_test -- --ignored --exact`",
+                "cites no docs/manual_gates.md entry that runs its whole",
+            ),
+        ]
+        for command, message in cases:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate(manual_gate_row(), ("q_gate", command))
+        with self.assertRaisesRegex(ValueError, "cites no docs/manual_gates.md entry"):
+            validate(
+                manual_gate_row(manual_gates=["q_gate", "q_case"]),
+                ("q_gate", Q_CASE),
+                ("q_case", Q_CASE.replace("q_case", "q_other")),
+            )
+
+    def test_manual_gate_commands_naming_the_target_must_classify(self) -> None:
+        """An unrecognized spelling is rejected where it could run the target."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(*entries: tuple[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + manual_gate_row()),
+                fixture_metadata(),
+                tracked,
+                gate_sources(manual_gates_doc(*entries)).__getitem__,
+            )
+
+        # Rows that do not name the target are left alone, however spelled.
+        validate(
+            ("q_gate", Q_GATE),
+            ("other_token", "`GITHUB_TOKEN=$(gh auth token) cargo test -p q --test other`"),
+            ("other_hip", "`scripts/hip_test.py -p q --test other -- --ignored`"),
+            ("smoke_extra", "`scripts/hip_test.py -p q --test smoke_extra -- --ignored`"),
+            ("other_prose", "Run the other reproducer by hand"),
+        )
+        smoke = "cargo test -p q --test smoke -- --ignored"
+        other = "cargo test -p q --test other -- --ignored"
+        spellings = [
+            "cargo t -p q --test smoke -- --ignored",
+            "cargo +stable test -p q --test smoke -- --ignored",
+            "env X=1 cargo test -p q --test smoke -- --ignored",
+            "scripts/hip_test.py -p q --test smoke -- --ignored",
+            "NAME=$(gh auth token) cargo test -p q --test smoke -- --ignored",
+            "cargo test -p q --test smoke --tests -- --ignored",
+            "cargo test -p q --test smoke -- --ignored&&cargo test -p q --test other",
+            'cargo test -p q --test "smoke" -- --ignored',
+            'cargo test -p q --test smo""ke -- --ignored',
+        ]
+        for spelling in spellings:
+            with self.subTest(uncited=spelling):
+                with self.assertRaisesRegex(ValueError, "'q_extra'"):
+                    validate(("q_gate", Q_GATE), ("q_extra", f"`{spelling}`"))
+        with self.subTest(uncited="prose"):
+            with self.assertRaisesRegex(ValueError, "not one code span"):
+                validate(("q_gate", Q_GATE), ("q_extra", "Run smoke by hand"))
+        cited = [
+            f"{smoke} && {other.replace('cargo test', 'cargo t')}",
+            f"{smoke} && {other.replace('cargo', 'cargo +stable')}",
+            f"{smoke} && env X=1 {other}",
+            f"{smoke} && scripts/hip_test.py -p q --test other",
+            "cargo test -p q --test smoke --tests -- --ignored",
+            f"{smoke}&&{other}",
+            f"{smoke} ; cargo build -p q",
+            f'{smoke} "&&" {other}',
+        ]
+        for spelling in cited:
+            with self.subTest(cited=spelling):
+                with self.assertRaisesRegex(ValueError, "'q_gate'"):
+                    validate(("q_gate", f"`{spelling}`"))
+
     def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
         """The check behind script-unit's docs/manual_gates.md path rule."""
         root = Path(__file__).resolve().parents[1]
@@ -721,6 +825,7 @@ class SchemaTests(unittest.TestCase):
                     (
                         "phase3l_shoals_oracle",
                         "phase3l_shoals_oracle_grad_greeks_match_analytic",
+                        "shoals_oracle suite",
                     ),
                     "chelis#1824",
                 ),
