@@ -4735,33 +4735,33 @@ impl<'a> EvalContext<'a> {
     }
 }
 
+enum DictStage {
+    Find,
+    AfterKey,
+    AfterValue,
+}
+
+enum Step<'a> {
+    Pair(&'a RuntimeValue, &'a RuntimeValue),
+    Sequence {
+        lhs: &'a [RuntimeValue],
+        rhs: &'a [RuntimeValue],
+        next: usize,
+    },
+    Dict {
+        lhs: &'a [(RuntimeValue, RuntimeValue)],
+        rhs: &'a [(RuntimeValue, RuntimeValue)],
+        matched: Vec<bool>,
+        lhs_index: usize,
+        rhs_index: usize,
+        stage: DictStage,
+    },
+}
+
 /// Structural equality for `test_assert_eq`. Every nested container walk,
 /// including a dictionary candidate search, runs from an explicit stack so
 /// value depth cannot consume the native stack (chelis#2592).
 pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
-    enum DictStage {
-        Find,
-        AfterKey,
-        AfterValue,
-    }
-
-    enum Step<'a> {
-        Pair(&'a RuntimeValue, &'a RuntimeValue),
-        Sequence {
-            lhs: &'a [RuntimeValue],
-            rhs: &'a [RuntimeValue],
-            next: usize,
-        },
-        Dict {
-            lhs: &'a [(RuntimeValue, RuntimeValue)],
-            rhs: &'a [(RuntimeValue, RuntimeValue)],
-            matched: Vec<bool>,
-            lhs_index: usize,
-            rhs_index: usize,
-            stage: DictStage,
-        },
-    }
-
     let mut steps = vec![Step::Pair(lhs, rhs)];
     // The result of the last child comparison is consumed by its parent
     // frame. A false dictionary candidate resumes the search; a false
