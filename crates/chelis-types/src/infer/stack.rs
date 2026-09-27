@@ -162,6 +162,15 @@ impl<'a> StackBudget<'a> {
         Self { native, record }
     }
 
+    /// A budget over the same native services and bail record, borrowed from
+    /// this one, that a callback can own instead of capturing `&mut self`.
+    pub(crate) fn reborrow(&mut self) -> StackBudget<'_> {
+        StackBudget {
+            native: self.native,
+            record: self.record,
+        }
+    }
+
     /// Enter one guarded frame and probe the stack budget.
     ///
     /// Returns `false` when the walker may recurse; it must then call

@@ -226,3 +226,145 @@ fn unknown_form_subtrees_are_traversed_not_dropped() {
     assert_eq!(report.renamed_references, 1);
     assert_eq!(report.residual_old_references, 0);
 }
+
+fn flat(module: &[chelis_deep::Expr]) -> String {
+    module
+        .iter()
+        .map(chelis_deep::printer::print_expr_flat)
+        .collect()
+}
+
+/// Rename honours every binding scope of the mutating walker: a `let` name
+/// shadows the later binding values and the body but not its own value, a
+/// match arm's pattern shadows its guard and body only, a property
+/// quantifier shadows the declaration's metadata, and each scope ends with
+/// its construct.
+#[test]
+fn rename_skips_names_shadowed_by_let_arm_and_quantifier_scopes() {
+    let source = r#"(module {}
+  demo.scope
+  (export {} target caller)
+  (defsig {} target (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {} target (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))
+  (defsig {} caller (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32)))
+  (def {property_preconditions: (tuple {} (app {} (var {} target) (lit {} 1.0)))}
+    caller
+    (fn {}
+      (params {} (y {type: (t-prim {} f32)}))
+      (app {}
+        (var {} add)
+        (let {}
+          (bind {}
+            target (app {} (var {} target) (var {} y))
+            z (app {} (var {} target) (var {} target)))
+          (app {} (var {} target) (var {} z)))
+        (match {}
+          (var {} y)
+          (arm {} (pat-var {} target) () (app {} (var {} target) (var {} target)))
+          (arm {} (pat-wild {}) () (app {} (var {} target) (var {} y)))))))
+  (def {property_quantifiers: (params {} (target {type: (t-prim {} f32)})),
+        property_preconditions: (tuple {} (app {} (var {} target) (var {} target)))}
+    prop
+    (fn {} (params {}) (lit {} true))))
+"#;
+    let report = rename_function(&parse(source), "target", "renamed").expect("rename");
+    let text = flat(&report.module);
+    for expected in [
+        "property_preconditions: (tuple {} (app {} (var {} renamed) (lit {} 1.0)))",
+        "(bind {} target (app {} (var {} renamed) (var {} y)) z (app {} (var {} target) (var {} target)))",
+        "(app {} (var {} target) (var {} z))",
+        "(arm {} (pat-var {} target) () (app {} (var {} target) (var {} target)))",
+        "(arm {} (pat-wild {}) () (app {} (var {} renamed) (var {} y)))",
+        "property_preconditions: (tuple {} (app {} (var {} target) (var {} target)))",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+    assert_eq!(report.renamed_references, 3);
+    assert_eq!(report.residual_old_references, 0);
+}
+
+fn signature_module(caller_body: &str) -> Vec<chelis_deep::Expr> {
+    parse(&format!(
+        r#"(module {{}}
+  demo.sig
+  (defsig {{}}
+    pair
+    (t-fn {{eff: (effects {{}})}} (t-prim {{}} f32) (t-prim {{}} f32) (t-prim {{}} f32)))
+  (def {{}}
+    pair
+    (fn {{}}
+      (params {{}} (x {{type: (t-prim {{}} f32)}}) (y {{type: (t-prim {{}} f32)}}))
+      (app {{}} (var {{}} sub) (var {{}} x) (var {{}} y))))
+  (defsig {{}}
+    caller
+    (t-fn {{eff: (effects {{}})}} (t-prim {{}} f32) (t-prim {{}} f32) (t-prim {{}} f32)))
+  (def {{}}
+    caller
+    (fn {{}}
+      (params {{}} (a {{type: (t-prim {{}} f32)}}) (b {{type: (t-prim {{}} f32)}}))
+      {caller_body})))
+"#
+    ))
+}
+
+fn swap_pair_arguments(
+    module: &[chelis_deep::Expr],
+) -> Result<chelis_deep::authoring::ChangeSignatureReport, chelis_deep::authoring::AuthoringError> {
+    let new_defsig = parse(
+        "(defsig {} pair (t-fn {eff: (effects {})} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))",
+    );
+    let new_params = parse("(params {} (y {type: (t-prim {} f32)}) (x {type: (t-prim {} f32)}))");
+    change_signature(
+        module,
+        "pair",
+        &new_defsig[0],
+        &new_params[0],
+        &["y".to_string(), "x".to_string()],
+        &[],
+    )
+}
+
+/// A rewritten call's reordered arguments are walked afterwards, so a call
+/// nested in an argument is rewritten too. A call missing an argument named
+/// by the new order fails: at the root of a body the error is returned, and
+/// inside a body that call is left as it is and the cascade reports it.
+#[test]
+fn change_signature_rewrites_nested_calls_and_reports_underapplied_calls() {
+    let report = swap_pair_arguments(&signature_module(
+        "(app {} (var {} pair) (app {} (var {} pair) (var {} a) (var {} b)) (var {} b))",
+    ))
+    .expect("nested calls rewrite");
+    assert!(
+        flat(&report.module).contains(
+            "(app {} (var {} pair) (var {} b) (app {} (var {} pair) (var {} b) (var {} a)))"
+        ),
+        "{}",
+        flat(&report.module)
+    );
+    assert_eq!(report.rewritten_calls, 2);
+
+    let error = swap_pair_arguments(&signature_module("(app {} (var {} pair) (var {} a))"))
+        .expect_err("an under-applied call at the body root fails");
+    assert!(
+        error
+            .to_string()
+            .contains("argument_order references unknown old parameter `y`"),
+        "{error}"
+    );
+
+    let error = swap_pair_arguments(&signature_module(
+        "(app {} (var {} add) (app {} (var {} pair) (var {} a)) (app {} (var {} pair) (var {} a) (var {} b)))",
+    ))
+    .expect_err("a nested under-applied call leaves the cascade incomplete");
+    assert!(
+        matches!(
+            error,
+            chelis_deep::authoring::AuthoringError::CascadeIncomplete {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}

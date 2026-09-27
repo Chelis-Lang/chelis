@@ -6,6 +6,48 @@ use crate::{
     metadata::{MetadataError, MetadataRole},
 };
 
+/// Leaf protocol markers of [`LeafMapper`]: they keep the blanket impls for
+/// fallible and infallible closures disjoint under coherence.
+pub(crate) struct Fallible;
+pub(crate) struct Infallible;
+
+/// One leaf rewrite of `try_map_payloads`. Threading the same `&mut M`
+/// through the rebuild (instead of wrapping each caller's callback in
+/// adapter closures) keeps the mutable state of every caller at one level.
+pub(crate) trait LeafMapper<E, K> {
+    fn map_leaf(&mut self, value: &Expr, role: MetadataRole) -> Result<Expr, E>;
+}
+
+/// The callbacks of the `try_map_*` entry points.
+impl<E, F: FnMut(&Expr, MetadataRole) -> Result<Expr, E>> LeafMapper<E, Fallible> for F {
+    fn map_leaf(&mut self, value: &Expr, role: MetadataRole) -> Result<Expr, E> {
+        self(value, role)
+    }
+}
+
+/// The callback of `map_expressions`.
+impl<F: FnMut(&Expr, MetadataRole) -> Expr> LeafMapper<MetadataError, Infallible> for F {
+    fn map_leaf(&mut self, value: &Expr, role: MetadataRole) -> Result<Expr, MetadataError> {
+        Ok(self(value, role))
+    }
+}
+
+/// One mapped leaf, re-admitted: the replacement inherits the original
+/// leaf's opaque annotations before it can enter the rebuilt metadata.
+fn map_leaf_readmitted<E: From<MetadataError>, K, M: LeafMapper<E, K>>(
+    f: &mut M,
+    value: &Expr,
+    role: MetadataRole,
+) -> Result<Expr, E> {
+    Ok(f.map_leaf(value, role)?.try_inherit_extensions(value)?)
+}
+
+/// The annotations callback of every entry point that does not transform
+/// structural annotations.
+fn keep_annotations<E>(metadata: Metadata, _owner: Option<DeepTag>) -> Result<Metadata, E> {
+    Ok(metadata)
+}
+
 pub(crate) fn parts(
     expr: Expr,
     tag: DeepTag,
@@ -341,11 +383,7 @@ impl Metadata {
         &self,
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(
-            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
-            true,
-            &mut |metadata, _| Ok(metadata),
-        )
+        self.try_map_payloads::<E, Fallible, _, _>(f, true, &mut keep_annotations)
     }
 
     /// Rebuild exactly the borrowed leaves yielded by `visit_expressions`, in
@@ -355,11 +393,7 @@ impl Metadata {
         &self,
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(
-            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
-            false,
-            &mut |metadata, _| Ok(metadata),
-        )
+        self.try_map_payloads::<E, Fallible, _, _>(f, false, &mut keep_annotations)
     }
     /// Transform annotations attached to structural payloads separately from
     /// expressions. The callback receives the owning tag (or a detached binder)
@@ -369,31 +403,37 @@ impl Metadata {
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
         annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(
-            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
-            true,
-            annotations,
-        )
+        self.try_map_payloads::<E, Fallible, _, _>(f, true, annotations)
     }
 
-    fn try_map_payloads<E: From<MetadataError>>(
+    fn try_map_payloads<
+        E: From<MetadataError>,
+        K,
+        M: LeafMapper<E, K>,
+        A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+    >(
         &self,
-        f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
+        f: &mut M,
         rewrite_bindings: bool,
-        annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        annotations: &mut A,
     ) -> Result<Self, E> {
         use MetadataRole as R;
         use MetadataValue as V;
-        fn container<E: From<MetadataError>>(
+        fn container<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
             v: &Container,
-            f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
+            f: &mut M,
             rewrite_bindings: bool,
-            annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+            annotations: &mut A,
             owner: Option<DeepTag>,
         ) -> Result<Container, E> {
-            let metadata = v
-                .metadata
-                .try_map_payloads(f, rewrite_bindings, annotations)?;
+            let metadata =
+                v.metadata
+                    .try_map_payloads::<E, K, M, A>(f, rewrite_bindings, annotations)?;
             let mut metadata = annotations(metadata, owner)?;
             metadata
                 .extensions_mut()
@@ -408,151 +448,205 @@ impl Metadata {
                 span: v.span,
             })
         }
-        fn variable<E: From<MetadataError>>(
+        fn variable<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
             v: &VariableRef,
-            f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
+            f: &mut M,
             rewrite_bindings: bool,
-            annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+            annotations: &mut A,
         ) -> Result<VariableRef, E> {
             if !rewrite_bindings {
                 return Ok(VariableRef {
-                    container: container(&v.container, f, false, annotations, Some(DeepTag::Var))?,
+                    container: container::<E, K, M, A>(
+                        &v.container,
+                        f,
+                        false,
+                        annotations,
+                        Some(DeepTag::Var),
+                    )?,
                     name: v.name.clone(),
                 });
             }
-            Ok(VariableRef::try_from_expression(f(
-                &v.to_expression(),
-                R::Expression,
-            )?)?)
+            let value = map_leaf_readmitted::<E, K, M>(f, &v.to_expression(), R::Expression)?;
+            Ok(VariableRef::try_from_expression(value)?)
         }
-        fn binder<E: From<MetadataError>>(
-            v: &PropertyBinder,
-            f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
+        fn variables<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
+            vs: &[VariableRef],
+            f: &mut M,
             rewrite_bindings: bool,
-            annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+            annotations: &mut A,
+        ) -> Result<Vec<VariableRef>, E> {
+            let mut out = Vec::new();
+            for v in vs.iter() {
+                out.push(variable::<E, K, M, A>(v, f, rewrite_bindings, annotations)?);
+            }
+            Ok(out)
+        }
+        fn binder<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
+            v: &PropertyBinder,
+            f: &mut M,
+            rewrite_bindings: bool,
+            annotations: &mut A,
         ) -> Result<PropertyBinder, E> {
             if !rewrite_bindings {
                 return Ok(PropertyBinder {
-                    container: container(&v.container, f, false, annotations, None)?,
+                    container: container::<E, K, M, A>(&v.container, f, false, annotations, None)?,
                     name: v.name.clone(),
                     spelling: v.spelling,
                     metadata_span: v.metadata_span,
                 });
             }
-            Ok(PropertyBinder::try_from_expression(f(
-                &v.to_expression(),
-                R::Syntax,
-            )?)?)
+            let value = map_leaf_readmitted::<E, K, M>(f, &v.to_expression(), R::Syntax)?;
+            Ok(PropertyBinder::try_from_expression(value)?)
         }
-        fn effects<E: From<MetadataError>>(
-            v: &EffectSet,
-            f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
+        fn binders<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
+            vs: &[PropertyBinder],
+            f: &mut M,
             rewrite_bindings: bool,
-            annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+            annotations: &mut A,
+        ) -> Result<Vec<PropertyBinder>, E> {
+            let mut out = Vec::new();
+            for v in vs.iter() {
+                out.push(binder::<E, K, M, A>(v, f, rewrite_bindings, annotations)?);
+            }
+            Ok(out)
+        }
+        fn effects<
+            E: From<MetadataError>,
+            K,
+            M: LeafMapper<E, K>,
+            A: FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
+        >(
+            v: &EffectSet,
+            f: &mut M,
+            rewrite_bindings: bool,
+            annotations: &mut A,
         ) -> Result<EffectSet, E> {
+            let effects_container = container::<E, K, M, A>(
+                &v.container,
+                f,
+                rewrite_bindings,
+                annotations,
+                Some(DeepTag::Effects),
+            )?;
+            let mut values = Vec::new();
+            for member in v.values.iter() {
+                values.push(match member {
+                    EffectMember::Name(name) => EffectMember::Name(name.clone()),
+                    EffectMember::Resource(v) => EffectMember::Resource(ResourceEffect {
+                        container: container::<E, K, M, A>(
+                            &v.container,
+                            f,
+                            rewrite_bindings,
+                            annotations,
+                            Some(DeepTag::Resource),
+                        )?,
+                        name: v.name.clone(),
+                    }),
+                });
+            }
             Ok(EffectSet {
-                container: container(
-                    &v.container,
-                    f,
-                    rewrite_bindings,
-                    annotations,
-                    Some(DeepTag::Effects),
-                )?,
-                values: v
-                    .values
-                    .iter()
-                    .map(|member| {
-                        Ok(match member {
-                            EffectMember::Name(name) => EffectMember::Name(name.clone()),
-                            EffectMember::Resource(v) => EffectMember::Resource(ResourceEffect {
-                                container: container(
-                                    &v.container,
-                                    f,
-                                    rewrite_bindings,
-                                    annotations,
-                                    Some(DeepTag::Resource),
-                                )?,
-                                name: v.name.clone(),
-                            }),
-                        })
-                    })
-                    .collect::<Result<_, E>>()?,
+                container: effects_container,
+                values,
             })
+        }
+        fn preconditions<E: From<MetadataError>, K, M: LeafMapper<E, K>>(
+            vs: &[RuntimeExpression],
+            f: &mut M,
+        ) -> Result<Vec<RuntimeExpression>, E> {
+            let mut out = Vec::new();
+            for v in vs.iter() {
+                out.push(RuntimeExpression::try_for_key(
+                    map_leaf_readmitted::<E, K, M>(f, v.expression(), R::Expression)?,
+                    "property_preconditions",
+                )?);
+            }
+            Ok(out)
         }
         let mut result = Self::default();
         for value in self.values() {
             let rebuilt = match value {
-                V::Type(v) => V::Type(TypeSyntax::try_new(f(v.expression(), R::Type)?)?),
+                V::Type(v) => V::Type(TypeSyntax::try_new(map_leaf_readmitted::<E, K, M>(
+                    f,
+                    v.expression(),
+                    R::Type,
+                )?)?),
                 V::PropertyTolerance(v) => V::PropertyTolerance(RuntimeExpression::try_for_key(
-                    f(v.expression(), R::Expression)?,
+                    map_leaf_readmitted::<E, K, M>(f, v.expression(), R::Expression)?,
                     "property_tolerance",
                 )?),
                 V::PropertySeed(v) => V::PropertySeed(RuntimeExpression::try_for_key(
-                    f(v.expression(), R::Expression)?,
+                    map_leaf_readmitted::<E, K, M>(f, v.expression(), R::Expression)?,
                     "property_seed",
                 )?),
                 V::PropertySamples(v) => V::PropertySamples(RuntimeExpression::try_for_key(
-                    f(v.expression(), R::Expression)?,
+                    map_leaf_readmitted::<E, K, M>(f, v.expression(), R::Expression)?,
                     "property_samples",
                 )?),
-                V::Eff(v) => V::Eff(effects(v, f, rewrite_bindings, annotations)?),
-                V::Effects(v) => V::Effects(effects(v, f, rewrite_bindings, annotations)?),
-                V::Wrt(WrtTargets::Variable(v)) => V::Wrt(WrtTargets::Variable(variable(
-                    v,
-                    f,
-                    rewrite_bindings,
-                    annotations,
-                )?)),
+                V::Eff(v) => V::Eff(effects::<E, K, M, A>(v, f, rewrite_bindings, annotations)?),
+                V::Effects(v) => {
+                    V::Effects(effects::<E, K, M, A>(v, f, rewrite_bindings, annotations)?)
+                }
+                V::Wrt(WrtTargets::Variable(v)) => {
+                    V::Wrt(WrtTargets::Variable(variable::<E, K, M, A>(
+                        v,
+                        f,
+                        rewrite_bindings,
+                        annotations,
+                    )?))
+                }
                 V::Wrt(WrtTargets::Tuple(v)) => V::Wrt(WrtTargets::Tuple(VariableTuple {
-                    container: container(
+                    container: container::<E, K, M, A>(
                         &v.container,
                         f,
                         rewrite_bindings,
                         annotations,
                         Some(DeepTag::Tuple),
                     )?,
-                    first: variable(&v.first, f, rewrite_bindings, annotations)?,
-                    rest: v
-                        .rest
-                        .iter()
-                        .map(|v| variable(v, f, rewrite_bindings, annotations))
-                        .collect::<Result<_, _>>()?,
+                    first: variable::<E, K, M, A>(&v.first, f, rewrite_bindings, annotations)?,
+                    rest: variables::<E, K, M, A>(&v.rest, f, rewrite_bindings, annotations)?,
                 })),
                 V::PropertyQuantifiers(v) => V::PropertyQuantifiers(PropertyQuantifiers {
-                    container: container(
+                    container: container::<E, K, M, A>(
                         &v.container,
                         f,
                         rewrite_bindings,
                         annotations,
                         Some(DeepTag::Params),
                     )?,
-                    values: v
-                        .values
-                        .iter()
-                        .map(|v| binder(v, f, rewrite_bindings, annotations))
-                        .collect::<Result<_, _>>()?,
+                    values: binders::<E, K, M, A>(&v.values, f, rewrite_bindings, annotations)?,
                 }),
                 V::PropertyPreconditions(v) => V::PropertyPreconditions(PropertyPreconditions {
-                    container: container(
+                    container: container::<E, K, M, A>(
                         &v.container,
                         f,
                         rewrite_bindings,
                         annotations,
                         Some(DeepTag::Tuple),
                     )?,
-                    values: v
-                        .values
-                        .iter()
-                        .map(|v| {
-                            Ok(RuntimeExpression::try_for_key(
-                                f(v.expression(), R::Expression)?,
-                                "property_preconditions",
-                            )?)
-                        })
-                        .collect::<Result<_, E>>()?,
+                    values: preconditions::<E, K, M>(&v.values, f)?,
                 }),
                 V::PropertyContracts(v) => V::PropertyContracts(PropertyContracts {
-                    container: container(
+                    container: container::<E, K, M, A>(
                         &v.container,
                         f,
                         rewrite_bindings,
@@ -561,15 +655,29 @@ impl Metadata {
                     )?,
                     values: v.values.clone(),
                 }),
-                V::Invariant(v) if rewrite_bindings => V::Invariant(
-                    InvariantPredicate::try_from_expression(f(&v.to_expression(), R::Expression)?)?,
-                ),
+                V::Invariant(v) if rewrite_bindings => {
+                    V::Invariant(InvariantPredicate::try_from_expression(
+                        map_leaf_readmitted::<E, K, M>(f, &v.to_expression(), R::Expression)?,
+                    )?)
+                }
                 V::Invariant(v) => V::Invariant(InvariantPredicate {
-                    container: container(&v.container, f, false, annotations, Some(DeepTag::Fn))?,
-                    params: container(&v.params, f, false, annotations, Some(DeepTag::Params))?,
-                    binder: binder(&v.binder, f, false, annotations)?,
+                    container: container::<E, K, M, A>(
+                        &v.container,
+                        f,
+                        false,
+                        annotations,
+                        Some(DeepTag::Fn),
+                    )?,
+                    params: container::<E, K, M, A>(
+                        &v.params,
+                        f,
+                        false,
+                        annotations,
+                        Some(DeepTag::Params),
+                    )?,
+                    binder: binder::<E, K, M, A>(&v.binder, f, false, annotations)?,
                     body: RuntimeExpression::try_for_key(
-                        f(v.body.expression(), R::Expression)?,
+                        map_leaf_readmitted::<E, K, M>(f, v.body.expression(), R::Expression)?,
                         "invariant",
                     )?,
                 }),
@@ -605,6 +713,15 @@ impl Metadata {
         &self,
         f: &mut impl FnMut(&Expr, MetadataRole) -> Expr,
     ) -> Result<Self, MetadataError> {
-        self.try_map_expressions(&mut |v, role| Ok(f(v, role)))
+        self.try_map_payloads::<MetadataError, Infallible, _, _>(f, true, &mut keep_annotations)
+    }
+
+    /// `map_expressions` over any crate-internal leaf mapper (authoring's
+    /// metadata edits).
+    pub(crate) fn map_expressions_with<K, M: LeafMapper<MetadataError, K>>(
+        &self,
+        f: &mut M,
+    ) -> Result<Self, MetadataError> {
+        self.try_map_payloads::<MetadataError, K, M, _>(f, true, &mut keep_annotations)
     }
 }

@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::annotations_transform::LeafMapper;
+use crate::metadata::{MetadataError, MetadataRole};
 use crate::tag::DeepTag;
 use crate::{
     Atom, DeepPath, Expr, List, Metadata, PathSegment, ResolveError, Span, function_body, printer,
@@ -669,11 +671,14 @@ fn rename_metadata_references(
     let Some(Expr::Map(meta, _)) = def.elements.get_mut(1) else {
         return 0;
     };
-    let mut count = 0;
-    edit_metadata(meta, &mut |value| {
-        count += rename_unshadowed_vars(value, old_name, new_name, top_level_names, scope);
-    });
-    count
+    let mut visitor = RenameUnshadowed {
+        old_name,
+        new_name,
+        top_level_names,
+        count: 0,
+    };
+    edit_metadata(meta, &mut visitor, scope);
+    visitor.count
 }
 
 fn rewrite_metadata_direct_calls(
@@ -801,10 +806,35 @@ fn rename_unshadowed_vars(
         *name = new_name.to_string();
         count += 1;
     }
-    walk_children_mut(expr, scope, &mut |child, scope| {
-        count += rename_unshadowed_vars(child, old_name, new_name, top_level_names, scope);
-    });
-    count
+    let mut visitor = RenameUnshadowed {
+        old_name,
+        new_name,
+        top_level_names,
+        count,
+    };
+    walk_children_mut(expr, scope, &mut visitor);
+    visitor.count
+}
+
+/// The child visitor of `rename_unshadowed_vars`; `count` accumulates the
+/// renames of the visited children.
+struct RenameUnshadowed<'n> {
+    old_name: &'n str,
+    new_name: &'n str,
+    top_level_names: &'n BTreeSet<String>,
+    count: usize,
+}
+
+impl ChildVisitor for RenameUnshadowed<'_> {
+    fn visit_child(&mut self, child: &mut Expr, scope: &mut BTreeSet<String>) {
+        self.count += rename_unshadowed_vars(
+            child,
+            self.old_name,
+            self.new_name,
+            self.top_level_names,
+            scope,
+        );
+    }
 }
 
 fn rewrite_direct_calls(
@@ -818,45 +848,84 @@ fn rewrite_direct_calls(
     let mut count = 0;
     if top_level_names.contains(target_name)
         && !scope.contains(target_name)
+        && let Some(new_elements) = reordered_call(expr, target_name, old_params, argument_order)?
         && let Some(list) = app_list_mut(expr)
     {
-        let is_target = list
-            .elements
-            .get(2)
-            .and_then(var_name)
-            .is_some_and(|name| name == target_name);
-        if is_target {
-            let old_args: Vec<Expr> = list.elements.iter().skip(3).cloned().collect();
-            let mut old_by_name = BTreeMap::new();
-            for (name, arg) in old_params.iter().zip(old_args) {
-                old_by_name.insert(name.clone(), arg);
-            }
-            let mut new_elements = list.elements[..3].to_vec();
-            for name in argument_order {
-                let arg = old_by_name.get(name).ok_or_else(|| {
-                    AuthoringError::InvalidDecl(format!(
-                        "argument_order references unknown old parameter `{name}`"
-                    ))
-                })?;
-                new_elements.push(arg.clone());
-            }
-            list.elements = new_elements;
-            count += 1;
-        }
+        list.elements = new_elements;
+        count += 1;
     }
-    walk_children_mut(expr, scope, &mut |child, scope| {
+    let mut visitor = RewriteDirectCalls {
+        target_name,
+        old_params,
+        argument_order,
+        top_level_names,
+        count,
+    };
+    walk_children_mut(expr, scope, &mut visitor);
+    Ok(visitor.count)
+}
+
+/// The child visitor of `rewrite_direct_calls`; `count` accumulates the
+/// rewrites of the visited children. A child's error drops that child's
+/// count and does not stop the walk.
+struct RewriteDirectCalls<'n> {
+    target_name: &'n str,
+    old_params: &'n [String],
+    argument_order: &'n [String],
+    top_level_names: &'n BTreeSet<String>,
+    count: usize,
+}
+
+impl ChildVisitor for RewriteDirectCalls<'_> {
+    fn visit_child(&mut self, child: &mut Expr, scope: &mut BTreeSet<String>) {
         if let Ok(child_count) = rewrite_direct_calls(
             child,
-            target_name,
-            old_params,
-            argument_order,
-            top_level_names,
+            self.target_name,
+            self.old_params,
+            self.argument_order,
+            self.top_level_names,
             scope,
         ) {
-            count += child_count;
+            self.count += child_count;
         }
-    });
-    Ok(count)
+    }
+}
+
+/// The elements of `expr` rewritten for `argument_order` when `expr` is a
+/// direct call of `target_name`, `None` otherwise. Fails when
+/// `argument_order` names a parameter missing from `old_params`.
+fn reordered_call(
+    expr: &Expr,
+    target_name: &str,
+    old_params: &[String],
+    argument_order: &[String],
+) -> Result<Option<Vec<Expr>>, AuthoringError> {
+    let Some(list) = tagged_list(expr, DeepTag::App) else {
+        return Ok(None);
+    };
+    let is_target = list
+        .elements
+        .get(2)
+        .and_then(var_name)
+        .is_some_and(|name| name == target_name);
+    if !is_target {
+        return Ok(None);
+    }
+    let old_args: Vec<Expr> = list.elements.iter().skip(3).cloned().collect();
+    let mut old_by_name = BTreeMap::new();
+    for (name, arg) in old_params.iter().zip(old_args) {
+        old_by_name.insert(name.clone(), arg);
+    }
+    let mut new_elements = list.elements[..3].to_vec();
+    for name in argument_order {
+        let arg = old_by_name.get(name).ok_or_else(|| {
+            AuthoringError::InvalidDecl(format!(
+                "argument_order references unknown old parameter `{name}`"
+            ))
+        })?;
+        new_elements.push(arg.clone());
+    }
+    Ok(Some(new_elements))
 }
 
 fn stale_direct_calls(
@@ -927,9 +996,18 @@ fn rename_local_vars(
     {
         *name = new_name.clone();
     }
-    walk_children_mut(expr, shadowed, &mut |child, shadowed| {
-        rename_local_vars(child, renames, shadowed);
-    });
+    walk_children_mut(expr, shadowed, &mut RenameLocalVars { renames });
+}
+
+/// The child visitor of `rename_local_vars`.
+struct RenameLocalVars<'n> {
+    renames: &'n BTreeMap<String, String>,
+}
+
+impl ChildVisitor for RenameLocalVars<'_> {
+    fn visit_child(&mut self, child: &mut Expr, shadowed: &mut BTreeSet<String>) {
+        rename_local_vars(child, self.renames, shadowed);
+    }
 }
 
 fn walk_children<F>(expr: &Expr, scope: &mut BTreeSet<String>, path: String, mut f: F)
@@ -1001,11 +1079,11 @@ where
             .first()
             .and_then(params_node_names)
             .unwrap_or_default();
-        with_scope(scope, added, |scope| {
-            if let Some(body) = node.children.get(1) {
-                f(body, scope, format!("{path}.1"));
-            }
-        });
+        let inserted = enter_scope(scope, added);
+        if let Some(body) = node.children.get(1) {
+            f(body, scope, format!("{path}.1"));
+        }
+        exit_scope(scope, inserted);
         return;
     }
     if node.tag == DeepTag::Let {
@@ -1053,11 +1131,11 @@ where
         };
         f(pattern, scope, format!("{path}.0"));
         let added = crate::pattern_binder_names(pattern);
-        with_scope(scope, added, |scope| {
-            for (semantic_index, child) in node.children.iter().enumerate().skip(1) {
-                f(child, scope, format!("{path}.{semantic_index}"));
-            }
-        });
+        let inserted = enter_scope(scope, added);
+        for (semantic_index, child) in node.children.iter().enumerate().skip(1) {
+            f(child, scope, format!("{path}.{semantic_index}"));
+        }
+        exit_scope(scope, inserted);
         return;
     }
     for (semantic_index, child) in node.children.iter().enumerate() {
@@ -1065,18 +1143,28 @@ where
     }
 }
 
-fn walk_children_mut<F>(expr: &mut Expr, scope: &mut BTreeSet<String>, f: &mut F)
-where
-    F: FnMut(&mut Expr, &mut BTreeSet<String>),
-{
+/// The child callback of `walk_children_mut`. The mutating authoring passes
+/// are visitor structs that own their result and hold only shared borrows,
+/// so the walker threads one `&mut V` to every child without wrapping it.
+trait ChildVisitor {
+    fn visit_child(&mut self, child: &mut Expr, scope: &mut BTreeSet<String>);
+}
+
+impl<F: FnMut(&mut Expr, &mut BTreeSet<String>)> ChildVisitor for F {
+    fn visit_child(&mut self, child: &mut Expr, scope: &mut BTreeSet<String>) {
+        self(child, scope)
+    }
+}
+
+fn walk_children_mut<V: ChildVisitor>(expr: &mut Expr, scope: &mut BTreeSet<String>, f: &mut V) {
     let list = match expr {
         Expr::Map(meta, _) => {
-            edit_metadata(meta, &mut |value| f(value, scope));
+            edit_metadata(meta, f, scope);
             return;
         }
         Expr::MetaExpr(meta, _) => {
-            edit_metadata(&mut meta.metadata, &mut |value| f(value, scope));
-            f(&mut meta.expr, scope);
+            edit_metadata(&mut meta.metadata, f, scope);
+            f.visit_child(&mut meta.expr, scope);
             return;
         }
         Expr::List(list, _) => list,
@@ -1099,21 +1187,21 @@ where
         // desynchronizes rename's cascade accounting.
         Expr::BareList(children, _) => {
             for child in children.iter_mut() {
-                f(child, scope);
+                f.visit_child(child, scope);
             }
             return;
         }
         Expr::UnknownForm(data) => {
-            edit_metadata(&mut data.meta, &mut |value| f(value, scope));
+            edit_metadata(&mut data.meta, f, scope);
             for child in &mut data.children {
-                f(child, scope);
+                f.visit_child(child, scope);
             }
             return;
         }
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {
-        f(meta, scope);
+        f.visit_child(meta, scope);
     }
     if tag == Some(DeepTag::Fn) {
         let added = list
@@ -1121,50 +1209,24 @@ where
             .get(FN_PARAMS_INDEX)
             .and_then(params_node_names)
             .unwrap_or_default();
-        with_scope(scope, added, |scope| {
-            if let Some(body) = list.elements.get_mut(3) {
-                f(body, scope);
-            }
-        });
+        let inserted = enter_scope(scope, added);
+        if let Some(body) = list.elements.get_mut(3) {
+            f.visit_child(body, scope);
+        }
+        exit_scope(scope, inserted);
         return;
     }
     if tag == Some(DeepTag::Let) {
         let mut inserted = Vec::new();
         if let Some(bind) = list.elements.get_mut(2) {
             if let Some(bind) = tagged_list_mut(bind, DeepTag::Bind) {
-                if let Some(meta) = bind.elements.get_mut(1) {
-                    f(meta, scope);
-                }
-                let mut pair_start = 2;
-                while pair_start < bind.elements.len() {
-                    let name = bind
-                        .elements
-                        .get(pair_start)
-                        .and_then(symbol)
-                        .map(str::to_string);
-                    if let Some(name_expr) = bind.elements.get_mut(pair_start) {
-                        f(name_expr, scope);
-                    }
-                    let has_value = if let Some(value) = bind.elements.get_mut(pair_start + 1) {
-                        f(value, scope);
-                        true
-                    } else {
-                        false
-                    };
-                    if has_value
-                        && let Some(name) = name
-                        && scope.insert(name.clone())
-                    {
-                        inserted.push(name);
-                    }
-                    pair_start += 2;
-                }
+                walk_let_bindings(bind, scope, f, &mut inserted);
             } else {
-                f(bind, scope);
+                f.visit_child(bind, scope);
             }
         }
         if let Some(body) = list.elements.get_mut(3) {
-            f(body, scope);
+            f.visit_child(body, scope);
         }
         for name in inserted {
             scope.remove(&name);
@@ -1178,35 +1240,78 @@ where
             .map(crate::pattern_binder_names)
             .unwrap_or_default();
         if let Some(pattern) = list.elements.get_mut(2) {
-            f(pattern, scope);
+            f.visit_child(pattern, scope);
         }
-        with_scope(scope, added, |scope| {
-            for child in list.elements.iter_mut().skip(3) {
-                f(child, scope);
-            }
-        });
+        let inserted = enter_scope(scope, added);
+        let mut index = 3;
+        while index < list.elements.len() {
+            f.visit_child(&mut list.elements[index], scope);
+            index += 1;
+        }
+        exit_scope(scope, inserted);
         return;
     }
-    for child in list.elements.iter_mut().skip(2) {
-        f(child, scope);
+    let mut index = 2;
+    while index < list.elements.len() {
+        f.visit_child(&mut list.elements[index], scope);
+        index += 1;
     }
 }
 
-fn with_scope<R, F>(scope: &mut BTreeSet<String>, added: Vec<String>, f: F) -> R
-where
-    F: FnOnce(&mut BTreeSet<String>) -> R,
-{
+/// The binding list of a `let`: its annotations, then each (name, value)
+/// pair. A bound name enters the scope after its value; `inserted` records
+/// the names that were not already in scope.
+fn walk_let_bindings<V: ChildVisitor>(
+    binding: &mut List,
+    scope: &mut BTreeSet<String>,
+    f: &mut V,
+    inserted: &mut Vec<String>,
+) {
+    if let Some(meta) = binding.elements.get_mut(1) {
+        f.visit_child(meta, scope);
+    }
+    let mut pair_start = 2;
+    while pair_start < binding.elements.len() {
+        let name = binding
+            .elements
+            .get(pair_start)
+            .and_then(symbol)
+            .map(str::to_string);
+        if let Some(name_expr) = binding.elements.get_mut(pair_start) {
+            f.visit_child(name_expr, scope);
+        }
+        let has_value = if let Some(value) = binding.elements.get_mut(pair_start + 1) {
+            f.visit_child(value, scope);
+            true
+        } else {
+            false
+        };
+        if has_value
+            && let Some(name) = name
+            && scope.insert(name.clone())
+        {
+            inserted.push(name);
+        }
+        pair_start += 2;
+    }
+}
+
+/// Add a binding scope's names; returns the names this call inserted, which
+/// `exit_scope` removes again when the scope ends.
+fn enter_scope(scope: &mut BTreeSet<String>, added: Vec<String>) -> Vec<String> {
     let mut inserted = Vec::new();
     for name in added {
         if scope.insert(name.clone()) {
             inserted.push(name);
         }
     }
-    let result = f(scope);
+    inserted
+}
+
+fn exit_scope(scope: &mut BTreeSet<String>, inserted: Vec<String>) {
     for name in inserted {
         scope.remove(&name);
     }
-    result
 }
 
 struct ParsedFunctionBundle {
@@ -1434,12 +1539,19 @@ fn rename_export_symbol(expr: &mut Expr, old_name: &str, new_name: &str) {
     let Some(list) = tagged_list_mut(expr, DeepTag::Export) else {
         return;
     };
-    for element in list.elements.iter_mut().skip(2) {
-        if let Expr::Atom(Atom::Name(name), _) = element
+    rename_export_names(list, old_name, new_name);
+}
+
+/// Rename `old_name` among the exported names of an export list.
+fn rename_export_names(export: &mut List, old_name: &str, new_name: &str) {
+    let mut index = 2;
+    while index < export.elements.len() {
+        if let Expr::Atom(Atom::Name(name), _) = &mut export.elements[index]
             && name == old_name
         {
             *name = new_name.to_string();
         }
+        index += 1;
     }
 }
 
@@ -1745,13 +1857,27 @@ fn render_path(path: &DeepPath) -> String {
         .join(".")
 }
 
-fn edit_metadata(meta: &mut Metadata, f: &mut impl FnMut(&mut Expr)) {
+/// Leaf protocol marker of [`MetaEdit`].
+struct Edit;
+
+/// The metadata leaf mapper of `edit_metadata`: each expression leaf is
+/// cloned, edited in place by the child visitor, and handed back.
+struct MetaEdit<'a, V> {
+    visitor: &'a mut V,
+    scope: &'a mut BTreeSet<String>,
+}
+
+impl<V: ChildVisitor> LeafMapper<MetadataError, Edit> for MetaEdit<'_, V> {
+    fn map_leaf(&mut self, value: &Expr, _role: MetadataRole) -> Result<Expr, MetadataError> {
+        let mut value = value.clone();
+        self.visitor.visit_child(&mut value, self.scope);
+        Ok(value)
+    }
+}
+
+fn edit_metadata<V: ChildVisitor>(meta: &mut Metadata, f: &mut V, scope: &mut BTreeSet<String>) {
     *meta = meta
-        .map_expressions(&mut |value, _| {
-            let mut value = value.clone();
-            f(&mut value);
-            value
-        })
+        .map_expressions_with::<Edit, _>(&mut MetaEdit { visitor: f, scope })
         .expect("authoring transformation preserves metadata shape");
 }
 
