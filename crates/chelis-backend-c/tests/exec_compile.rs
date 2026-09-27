@@ -73,6 +73,82 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         .unwrap()
 }
 
+/// Compile a group of checked C cases in one link. Generated kernels stay in
+/// separate translation units so their private helpers cannot collide; the
+/// harnesses have unique entry/helper names in one translation unit. Every
+/// case still runs in its own ASan/UBSan process.
+fn checked_indexing_run_batch(cases: &[(String, String)]) -> Vec<std::process::Output> {
+    assert!(!cases.is_empty());
+    let probe = common::probe_dir("checked_c_batch");
+    let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    let mut main_source = String::new();
+    for (index, (source, harness)) in cases.iter().enumerate() {
+        fs::write(dir.join(format!("kernel_{index}.c")), source).unwrap();
+        main_source.push_str(harness);
+    }
+    main_source.push_str("#include <stdlib.h>\n");
+    main_source.push_str("int main(int argc, char **argv) {\n");
+    main_source.push_str("    if (argc != 2) return 97;\n");
+    main_source.push_str("    int (*const cases[])(void) = {");
+    for index in 0..cases.len() {
+        main_source.push_str(&format!("case_{index},"));
+    }
+    main_source.push_str("};\n");
+    main_source.push_str("    int index = atoi(argv[1]);\n");
+    main_source.push_str(
+        "    if (index < 0 || (size_t)index >= sizeof cases / sizeof cases[0]) return 98;\n",
+    );
+    main_source.push_str("    return cases[index]();\n}\n");
+    fs::write(dir.join("main.c"), main_source).unwrap();
+
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            needs_blas: cases
+                .iter()
+                .any(|(source, _)| source.contains("#include \"chelis_blas.h\"")),
+            ..Default::default()
+        },
+    );
+    let binary = dir.join("probe");
+    let mut compiler = Command::new(toolchain.compiler);
+    compiler
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+        ])
+        .args(toolchain.compile_flags)
+        .arg("-I")
+        .arg(dir);
+    for index in 0..cases.len() {
+        compiler.arg(dir.join(format!("kernel_{index}.c")));
+    }
+    let compiled = compiler
+        .arg(dir.join("main.c"))
+        .arg(&staged.archive)
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "checked C batch compile failed:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    (0..cases.len())
+        .map(|index| {
+            Command::new(&binary)
+                .arg(index.to_string())
+                .env("ASAN_OPTIONS", "detect_leaks=0")
+                .output()
+                .unwrap()
+        })
+        .collect()
+}
+
 fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, output: Prim) -> Dag {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -680,6 +756,8 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
         (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
         (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
     ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
         for (index_prim, index_dtype, index_type) in [
             (Prim::Int32, "CHELIS_DTYPE_I32", "int32_t"),
             (Prim::Int64, "CHELIS_DTYPE_I64", "int64_t"),
@@ -753,7 +831,9 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
                 }
                 let output = dag.add_node(decl, op, inputs, ty(&output_shape, prim), None);
                 dag.add_root(output);
-                let generated = codegen(&dag, "checked_sparse").unwrap();
+                let case_index = compiled_cases.len();
+                let function_name = format!("checked_sparse_{case_index}");
+                let generated = codegen(&dag, &function_name).unwrap();
                 let dimensions =
                     |s: &[usize]| s.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
                 let base_dims = dimensions(&base_shape);
@@ -768,26 +848,26 @@ fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
                     r#"
 #include "chelis_runtime.h"
 #include <string.h>
-void checked_sparse(chelis_tensor **, int, chelis_tensor **, int);
-static uint64_t bits(int64_t index, int update) {{
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+static uint64_t bits_{case_index}(int64_t index, int update) {{
     return {dtype} == CHELIS_DTYPE_BOOL ? (uint64_t)(((index/2+index)%2)^update) : UINT64_C({seed}) + (uint64_t)index + (update ? 32 : 0);
 }}
-static void fill(chelis_tensor *t, int update) {{
+static void fill_{case_index}(chelis_tensor *t, int update) {{
     chelis_tensor_write *g = chelis_tensor_begin_write(t);
     chelis_write_view v = chelis_tensor_write_view(g);
-    for (int64_t i=0;i<v.count;++i) {{ uint64_t value=bits(i,update); memcpy((unsigned char*)v.data+i*chelis_dtype_size({dtype}), &value, chelis_dtype_size({dtype})); }}
+    for (int64_t i=0;i<v.count;++i) {{ uint64_t value=bits_{case_index}(i,update); memcpy((unsigned char*)v.data+i*chelis_dtype_size({dtype}), &value, chelis_dtype_size({dtype})); }}
     chelis_tensor_end_write(g);
 }}
-int main(void) {{
+int case_{case_index}(void) {{
     chelis_tensor *base=chelis_alloc({base_rank},(int64_t[]){{{base_dims}}},{dtype});
     chelis_tensor *indices=chelis_alloc(2,(int64_t[]){{2,2}},{index_dtype});
     chelis_tensor *updates=chelis_alloc({update_rank},(int64_t[]){{{update_dims}}},{dtype});
-    fill(base,0); fill(updates,1);
+    fill_{case_index}(base,0); fill_{case_index}(updates,1);
     chelis_tensor_write *g=chelis_tensor_begin_write(indices);
     {index_type} values[4]={{{selected}}};
     memcpy(chelis_tensor_write_view(g).data,values,sizeof values); chelis_tensor_end_write(g);
     chelis_tensor *in[]={{base,indices,updates}}, *out[1]={{0}};
-    checked_sparse(in,{input_count},out,1);
+    {function_name}(in,{input_count},out,1);
     int64_t shape[]={{{output_dims}}}; int expected[]={{{map}}};
     if (chelis_tensor_rank(out[0])!={output_rank}) return 2;
     for (int a=0;a<{output_rank};++a) if(chelis_tensor_shape(out[0],a)!=shape[a]) return 3;
@@ -795,23 +875,33 @@ int main(void) {{
     if (v.count != sizeof expected / sizeof expected[0]) return 4;
     for(int64_t i=0;i<v.count;++i) {{
         uint64_t got=0; memcpy(&got,(const unsigned char*)v.data+i*chelis_dtype_size({dtype}),chelis_dtype_size({dtype}));
-        int index=expected[i]; uint64_t want=bits(index<0 ? -index-1 : index, !{gather} && index>=0);
+        int index=expected[i]; uint64_t want=bits_{case_index}(index<0 ? -index-1 : index, !{gather} && index>=0);
         if(got!=want) return 5;
     }}
     chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
-    puts("SPARSE PASS"); return 0;
+    puts("SPARSE PASS {case_index}"); return 0;
 }}
 "#
                 );
-                let result = checked_indexing_run(&generated.c_source, &harness);
-                assert!(
-                    result.status.success(),
-                    "{prim:?}/{index_prim:?}: {}\n{}",
-                    String::from_utf8_lossy(&result.stderr),
-                    generated.c_source
-                );
-                assert_eq!(result.stdout, b"SPARSE PASS\n");
+                compiled_cases.push((generated.c_source, harness));
+                case_labels.push(format!("{prim:?}/{index_prim:?}"));
             }
+        }
+        for (case_index, (label, result)) in case_labels
+            .into_iter()
+            .zip(checked_indexing_run_batch(&compiled_cases))
+            .enumerate()
+        {
+            assert!(
+                result.status.success(),
+                "{label}: {}\n{}",
+                String::from_utf8_lossy(&result.stderr),
+                compiled_cases[case_index].0
+            );
+            assert_eq!(
+                result.stdout,
+                format!("SPARSE PASS {case_index}\n").as_bytes()
+            );
         }
     }
 }
@@ -1246,6 +1336,8 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
         (Prim::Int8, "CHELIS_DTYPE_I8", 100),
         (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
     ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
         for (input_shape, output_shape, op, expected) in &cases {
             let ty = |shape: &[usize]| TensorType {
                 dims: shape.iter().copied().map(DimInfo::Lit).collect(),
@@ -1262,7 +1354,23 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
             );
             let output = dag.add_node(decl, op.clone(), vec![input], ty(output_shape), None);
             dag.add_root(output);
-            let generated = codegen(&dag, "checked_movement").unwrap();
+            let case_index = compiled_cases.len();
+            let function_name = if prim == Prim::Int64 {
+                "checked_movement".to_string()
+            } else {
+                format!("checked_movement_{case_index}")
+            };
+            let entry = if prim == Prim::Int64 {
+                "int main(void)".to_string()
+            } else {
+                format!("int case_{case_index}(void)")
+            };
+            let pass_line = if prim == Prim::Int64 {
+                "CHECKED MOVEMENT PASS".to_string()
+            } else {
+                format!("CHECKED MOVEMENT PASS {case_index}")
+            };
+            let generated = codegen(&dag, &function_name).unwrap();
             assert!(generated.c_source.contains("chelis_movement_index("));
             assert!(generated.c_source.contains("chelis_movement_plan_release("));
             let spell = |values: &[usize]| {
@@ -1292,8 +1400,8 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
                 r#"
 #include "chelis_runtime.h"
 #include <string.h>
-void checked_movement(chelis_tensor **, int, chelis_tensor **, int);
-int main(void) {{
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+{entry} {{
     int64_t in_dims[] = {{ {input_dims} }}, out_dims[] = {{ {output_dims} }}, map[] = {{ {map} }};
     chelis_tensor *x = chelis_alloc({rank_in}, in_dims, {dtype});
     chelis_tensor_write *guard = chelis_tensor_begin_write(x);
@@ -1304,7 +1412,7 @@ int main(void) {{
     }}
     chelis_tensor_end_write(guard);
     chelis_tensor *inputs[] = {{x}}, *outputs[1] = {{NULL}};
-    checked_movement(inputs, 1, outputs, 1);
+    {function_name}(inputs, 1, outputs, 1);
     chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
     if (out.count != {count_out} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {rank_out}) return 2;
     for (int32_t axis = 0; axis < {rank_out}; ++axis)
@@ -1313,20 +1421,22 @@ int main(void) {{
         if (memcmp((const unsigned char *)out.data + (size_t)i * width,
             (const unsigned char *)in.data + (size_t)map[i] * width, width)) return 4;
     chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
-    puts("CHECKED MOVEMENT PASS"); return 0;
+    puts("{pass_line}"); return 0;
 }}
 "#
             );
-            let run = checked_indexing_run(&generated.c_source, &harness);
-            assert!(
-                run.status.success(),
-                "{prim:?} {op:?}: {}",
-                String::from_utf8_lossy(&run.stderr)
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&run.stdout),
-                "CHECKED MOVEMENT PASS\n"
-            );
+            if prim == Prim::Int64 {
+                let run = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    run.status.success(),
+                    "{prim:?} {op:?}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&run.stdout),
+                    "CHECKED MOVEMENT PASS\n"
+                );
+            }
             if prim == Prim::Int64
                 && (input_shape == &[2, 3] || input_shape == &[2, 1] && count_out > 0)
             {
@@ -1394,6 +1504,27 @@ int main(void) {{
                     "coordinate bypass must corrupt the exact result"
                 );
             }
+            if prim != Prim::Int64 {
+                compiled_cases.push((generated.c_source, harness));
+                case_labels.push(format!("{prim:?} {op:?}"));
+            }
+        }
+        if prim != Prim::Int64 {
+            for (case_index, (label, run)) in case_labels
+                .into_iter()
+                .zip(checked_indexing_run_batch(&compiled_cases))
+                .enumerate()
+            {
+                assert!(
+                    run.status.success(),
+                    "{label}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    run.stdout,
+                    format!("CHECKED MOVEMENT PASS {case_index}\n").as_bytes()
+                );
+            }
         }
     }
 }
@@ -1422,6 +1553,8 @@ fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
         (Prim::Int8, "CHELIS_DTYPE_I8", 100, 1),
         (Prim::Bool, "CHELIS_DTYPE_BOOL", 0, 1),
     ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
         let pairs = |v: &[(usize, usize)]| {
             v.iter()
                 .map(|&(a, b)| (RtDim::Lit(a), RtDim::Lit(b)))
@@ -1501,7 +1634,8 @@ fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
                 vec![0],
             ),
         ];
-        for (input_shape, output_shape, op, expected) in cases {
+        for (case_index, (input_shape, output_shape, op, expected)) in cases.into_iter().enumerate()
+        {
             let ty = |shape: &[usize]| TensorType {
                 dims: shape.iter().copied().map(DimInfo::Lit).collect(),
                 precision: prim,
@@ -1517,7 +1651,8 @@ fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
             );
             let y = dag.add_node(decl, op.clone(), vec![x], ty(&output_shape), None);
             dag.add_root(y);
-            let generated = codegen(&dag, "affine_movement").unwrap();
+            let function_name = format!("affine_movement_{case_index}");
+            let generated = codegen(&dag, &function_name).unwrap();
             let spell = |values: Vec<i64>| {
                 if values.is_empty() {
                     "0".into()
@@ -1545,8 +1680,8 @@ fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
                 r#"
 #include "chelis_runtime.h"
 #include <string.h>
-void affine_movement(chelis_tensor **, int, chelis_tensor **, int);
-int main(void) {{
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+int case_{case_index}(void) {{
     int64_t input_shape[] = {{{input_dims}}}, output_shape[] = {{{output_dims}}}, map[] = {{{map}}};
     chelis_tensor *x = chelis_alloc({input_rank}, input_shape, {dtype});
     chelis_tensor_write *guard = chelis_tensor_begin_write(x);
@@ -1555,7 +1690,7 @@ int main(void) {{
     for (int64_t i=0; i<{input_count}; ++i) {{uint64_t bits = {bits}; memcpy(data + i*width, &bits, width);}}
     chelis_tensor_end_write(guard);
     chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
-    affine_movement(inputs, 1, outputs, 1);
+    {function_name}(inputs, 1, outputs, 1);
     chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
     if (out.count != {output_count} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {output_rank}) return 2;
     for (int axis=0; axis<{output_rank}; ++axis) if (chelis_tensor_shape(outputs[0], axis) != output_shape[axis]) return 3;
@@ -1565,17 +1700,24 @@ int main(void) {{
         if (memcmp((const unsigned char*)out.data + i*width, expected, width)) return 4;
     }}
     chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
-    puts("AFFINE PASS"); return 0;
+    puts("AFFINE PASS {case_index}"); return 0;
 }}
 "#
             );
-            let run = checked_indexing_run(&generated.c_source, &harness);
+            compiled_cases.push((generated.c_source, harness));
+            case_labels.push(format!("{prim:?} {op:?}"));
+        }
+        for (case_index, (label, run)) in case_labels
+            .into_iter()
+            .zip(checked_indexing_run_batch(&compiled_cases))
+            .enumerate()
+        {
             assert!(
                 run.status.success(),
-                "{prim:?} {op:?}: {}",
+                "{label}: {}",
                 String::from_utf8_lossy(&run.stderr)
             );
-            assert_eq!(run.stdout, b"AFFINE PASS\n");
+            assert_eq!(run.stdout, format!("AFFINE PASS {case_index}\n").as_bytes());
         }
     }
 }

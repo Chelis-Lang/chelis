@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
 from scripts import ci_change_owned as owned
+from scripts import ci_timing
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -369,6 +376,62 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
         assert_change_owned_topology(
             self, self.workflow, self.expansion_workflow
         )
+
+    def test_census_timings_land_inside_each_uploaded_shard_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            for workflow, job_name in (
+                (self.workflow, "change-owned-shard"),
+                (self.expansion_workflow, "package-expansion-shard"),
+            ):
+                with self.subTest(job=job_name):
+                    steps = workflow["jobs"][job_name]["steps"]
+                    execute = next(
+                        step for step in steps
+                        if "scripts/ci_change_owned.py run-shard" in step.get("run", "")
+                    )
+                    upload = next(
+                        step for step in steps
+                        if step.get("uses", "").startswith("actions/upload-artifact@")
+                    )
+                    receipt = upload["with"]["path"]
+                    self.assertIn(f"--output {receipt}", execute["run"])
+                    self.assertEqual(upload["if"], "always()")
+                    self.assertEqual(
+                        execute["env"]["CHELIS_CI_TIMING_DIR"],
+                        f"${{{{ github.workspace }}}}/{receipt}/census-timings",
+                    )
+
+                    timing_dir = Path(workspace) / receipt.replace(
+                        "${{ matrix.shard }}", "0"
+                    ) / "census-timings"
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "CHELIS_CI_TIMING_DIR": str(timing_dir),
+                            "CHELIS_TIMING_TEST_SENTINEL": "probe output",
+                        },
+                    ):
+                        with ci_timing.subprocesses():
+                            result = subprocess.run(
+                                [
+                                    sys.executable,
+                                    "-c",
+                                    "import os; print(os.environ"
+                                    "['CHELIS_TIMING_TEST_SENTINEL'])",
+                                ],
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                            )
+                    self.assertEqual(result.stdout, "probe output\n")
+                    rows = [
+                        json.loads(line)
+                        for path in timing_dir.glob("*.jsonl")
+                        for line in path.read_text().splitlines()
+                    ]
+                    self.assertEqual([row["event"] for row in rows], ["start", "finish"])
+                    self.assertEqual(rows[-1]["returncode"], 0)
+                    self.assertNotIn("probe output", json.dumps(rows))
 
     def test_the_executor_deadline_stays_under_the_job_that_kills_it(
         self,

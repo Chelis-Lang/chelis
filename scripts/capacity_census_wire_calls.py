@@ -324,6 +324,11 @@ def build_driver(root: Path, directory: Path) -> Path:
     return output
 
 
+def build_binding_driver(root: Path, target: Path) -> Path:
+    """Use one source-bound wrapper for both sequential binding scopes."""
+    return build_driver(root, target / "binding-invocations-driver")
+
+
 @dataclass(frozen=True)
 class InvocationEvidence:
     identity: str
@@ -773,6 +778,18 @@ def _compiler_definitions(value):
             yield from _compiler_definitions(child)
 
 
+def invocation_target_for_scope(target: Path, scope: str | None) -> Path:
+    if scope not in (None, "compiler-json", "native-bindings"):
+        raise ValueError("unknown compiled boundary scope")
+    # The binding collectors run in sequence and have the same selected crate.
+    # Share only their dependency artifacts; wire remains in its own target.
+    return target / (
+        "wire-invocations/cargo"
+        if scope is None
+        else "binding-invocations/cargo"
+    )
+
+
 def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), scope=None) -> dict:
     """Requires the project build slot. Fresh output forces the target callback.
 
@@ -781,20 +798,12 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
     call, codec implementation and dynamic-return obligation.
     """
     root, target = root.resolve(), target.resolve()
-    if scope not in (None, "compiler-json", "native-bindings"):
-        raise ValueError("unknown compiled boundary scope")
     if not target.is_relative_to(root / "target"):
         raise ValueError("invocation target must belong to this worktree")
     # The driver must execute for the selected crate, bypassing compiler caches.
-    # Keep its Cargo artifacts separate from the ordinary cache wrapper's
-    # read-only outputs. This retained namespace uses the same source/config;
-    # all provenance below comes from this invocation's own Cargo stream.
-    namespace = {
-        None: "wire-invocations/cargo",
-        "compiler-json": "compiler-json-invocations/cargo",
-        "native-bindings": "native-bindings-invocations/cargo",
-    }[scope]
-    invocation_target = target / namespace
+    # Keep these Cargo artifacts separate from the ordinary cache wrapper's
+    # read-only outputs. Each scope still binds its own fresh Cargo stream.
+    invocation_target = invocation_target_for_scope(target, scope)
     if driver.resolve() != build_driver(root, driver.parent).resolve():
         raise ValueError("driver does not match the current source and compiler")
     binary_hash = hashlib.sha256(driver.read_bytes()).hexdigest()

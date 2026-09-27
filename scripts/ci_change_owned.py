@@ -4625,14 +4625,114 @@ def _duration_seconds(value: Any, label: str) -> float:
     return float(value)
 
 
+def _expansion_duration_observations(
+    receipt: Mapping[str, Any],
+    timings: Mapping[str, Any],
+    junit_path: Path,
+) -> dict[Identity, int]:
+    """Divide grouped command wall time by JUnit work, retaining test floors."""
+    selected = set(receipt["selected_targets"])
+    if not receipt["success"] or receipt["failures"]:
+        raise ValueError("expansion duration sample requires successful receipts")
+    if set(receipt["executed_targets"]) != selected or (
+        set(receipt["selected_tests"]) != set(receipt["executed_tests"])
+    ):
+        raise ValueError("expansion duration sample has incomplete coverage")
+    if receipt["manual_gate_tests"]:
+        raise ValueError("expansion duration sample contains manual-gate tests")
+
+    case_seconds: dict[str, list[float]] = {canonical: [] for canonical in selected}
+    observed_tests: set[str] = set()
+    for case in ET.parse(junit_path).iter("testcase"):
+        classname = case.get("classname")
+        name = case.get("name")
+        if not classname or not name or classname not in selected:
+            raise ValueError("expansion duration JUnit has an unselected test")
+        if case.find("skipped") is not None or case.find("failure") is not None or (
+            case.find("error") is not None
+        ):
+            raise ValueError("expansion duration JUnit contains an incomplete or failed test")
+        test = f"{classname}::{name}"
+        if test in observed_tests:
+            raise ValueError(f"expansion duration JUnit repeats test: {test}")
+        observed_tests.add(test)
+        raw_seconds = case.get("time")
+        try:
+            seconds = float(raw_seconds) if raw_seconds is not None else None
+        except ValueError as error:
+            raise ValueError(f"expansion duration {test} time is malformed") from error
+        case_seconds[classname].append(
+            _duration_seconds(seconds, f"expansion duration {test} time")
+        )
+    if observed_tests != set(receipt["executed_tests"]):
+        raise ValueError("expansion duration JUnit and receipt tests disagree")
+
+    raw_targets = timings["targets"]
+    if not isinstance(raw_targets, dict) or set(raw_targets) != selected:
+        raise ValueError("expansion duration timings must cover selected targets exactly")
+    groups: dict[tuple[str, ...], dict[str, Any]] = {}
+    for canonical, row in raw_targets.items():
+        if not isinstance(row, dict) or set(row) != {
+            "command_group", "list_started_at", "list_finished_at",
+            "list_seconds", "run_started_at", "run_finished_at", "run_seconds",
+        }:
+            raise ValueError(f"expansion duration timing has the wrong shape: {canonical}")
+        members = row["command_group"]
+        if (
+            not isinstance(members, list)
+            or canonical not in members
+            or len(members) != len(set(members))
+            or not set(members) <= selected
+            or len({Identity.parse(member).package for member in members}) != 1
+        ):
+            raise ValueError(f"expansion duration command group is invalid: {canonical}")
+        group = tuple(members)
+        if group in groups and groups[group] != row:
+            raise ValueError("expansion duration grouped timing rows disagree")
+        groups[group] = row
+    if sorted(member for group in groups for member in group) != sorted(selected):
+        raise ValueError("expansion duration command groups do not partition the shard")
+
+    observations: dict[Identity, int] = {}
+    for group, row in groups.items():
+        wall = _duration_seconds(row["list_seconds"], "expansion list_seconds")
+        wall += _duration_seconds(row["run_seconds"], "expansion run_seconds")
+        work = {canonical: sum(case_seconds[canonical]) for canonical in group}
+        total_work = sum(work.values())
+        for canonical in group:
+            share = (
+                work[canonical] / total_work
+                if total_work > 0 else 1 / len(group)
+            )
+            floor = max(case_seconds[canonical], default=0.0)
+            observations[Identity.parse(canonical)] = max(
+                1, math.ceil(1000 * max(floor, wall * share))
+            )
+    return observations
+
+
 def build_duration_baseline(
     samples: Sequence[tuple[Path, Path]],
+    *,
+    seed: Path | None = None,
 ) -> dict[str, Any]:
-    if not samples:
+    if not samples and seed is None:
         raise ValueError("duration baseline generation requires at least one sample")
     sources: list[dict[str, str]] = []
     observations: dict[Identity, list[int]] = {}
     seen_sources: set[tuple[str, str]] = set()
+    if seed is not None:
+        load_duration_baseline(seed)
+        previous = _strict_json_object(seed)
+        sources.extend(previous["sources"])
+        seen_sources.update(
+            (row["candidate_sha"], row["plan_digest"])
+            for row in previous["sources"]
+        )
+        observations.update({
+            Identity.parse(canonical): [row["milliseconds"]] * row["samples"]
+            for canonical, row in previous["targets"].items()
+        })
 
     for plan_path, receipts_root in samples:
         plan = _strict_json_object(plan_path)
@@ -4654,13 +4754,16 @@ def build_duration_baseline(
         receipt_paths = sorted(receipts_root.rglob("receipt.json"))
         if len(receipt_paths) != len(SHARDS):
             raise ValueError(
-                "duration sample requires exactly four change-owned receipts"
+                "duration sample requires exactly four receipts"
             )
         by_shard: dict[int, tuple[Path, dict[str, Any]]] = {}
+        sample_lane: str | None = None
         for receipt_path in receipt_paths:
             receipt = _load_receipt_at(receipt_path)
-            if receipt["lane"] != "change-owned":
-                raise ValueError("duration sample contains a non-change-owned receipt")
+            if sample_lane is None:
+                sample_lane = receipt["lane"]
+            elif receipt["lane"] != sample_lane:
+                raise ValueError("duration sample mixes receipt lanes")
             if receipt["plan_digest"] != plan["plan_digest"]:
                 raise ValueError("duration sample receipt plan digest mismatch")
             shard = receipt["shard"]
@@ -4668,11 +4771,12 @@ def build_duration_baseline(
                 raise ValueError(f"duplicate duration sample shard: {shard}")
             by_shard[shard] = (receipt_path, receipt)
         if set(by_shard) != set(SHARDS):
-            raise ValueError("duration sample is missing a change-owned shard")
+            raise ValueError("duration sample is missing a shard")
 
         for shard in SHARDS:
             receipt_path, receipt = by_shard[shard]
-            expected = plan["shards"]["change_owned"][str(shard)]
+            assert sample_lane is not None
+            expected = execution_shards(plan, sample_lane)[str(shard)]
             if receipt["selected_targets"] != expected:
                 raise ValueError(
                     f"duration sample shard {shard} selected targets mismatch"
@@ -4701,6 +4805,14 @@ def build_duration_baseline(
                     "duration sample timings contain unselected targets: "
                     f"{unexpected}"
                 )
+            if sample_lane == "package-expansion":
+                for identity, milliseconds in _expansion_duration_observations(
+                    receipt,
+                    timings,
+                    receipt_path.parent / receipt["junit_file"],
+                ).items():
+                    observations.setdefault(identity, []).append(milliseconds)
+                continue
             executed = set(receipt["executed_targets"])
             for canonical, row in raw_targets.items():
                 identity = Identity.parse(canonical)
@@ -4917,7 +5029,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     duration_baseline = subparsers.add_parser(
         "build-duration-baseline",
-        help="build a reviewed change-owned target-duration baseline",
+        help="build a reviewed target-duration baseline from complete shard receipts",
     )
     duration_baseline.add_argument(
         "--sample",
@@ -4926,7 +5038,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=("PLAN", "RECEIPTS_ROOT"),
         type=Path,
         required=True,
-        help="authenticated plan and its four change-owned receipt directories",
+        help="authenticated plan and its four same-lane receipt directories",
+    )
+    duration_baseline.add_argument(
+        "--seed",
+        type=Path,
+        help="validated prior baseline whose observations and sources are retained",
     )
     duration_baseline.add_argument("--output", type=Path, required=True)
 
@@ -5029,7 +5146,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "build-duration-baseline":
         result = build_duration_baseline(
-            [(plan, receipts) for plan, receipts in args.sample]
+            [(plan, receipts) for plan, receipts in args.sample],
+            seed=args.seed,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(canonical_json(result))

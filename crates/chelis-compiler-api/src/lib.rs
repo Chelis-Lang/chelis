@@ -29,7 +29,7 @@ mod source_arch;
 
 /// Re-export of reef package-root discovery so callers (e.g. the Python
 /// bindings' `compile_and_load` auto-discovery) can resolve the enclosing
-/// reef project without depending on `chelis-reef` directly. See issue #816.
+/// reef project through the compiler API. See issue #816.
 pub use chelis_reef::{find_package_root_for_dir, find_package_root_for_input};
 /// Cooperative cancellation for long-running evaluation (chelis#914).
 /// Install a token on the thread that will run the eval, hand a clone to
@@ -48,7 +48,7 @@ pub use compiler::{
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
     CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, HandoffDigest,
-    compile_reef_context, load_or_compile_for_package,
+    compile_reef_context, compile_reef_context_for_entries, load_or_compile_for_package,
     load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation

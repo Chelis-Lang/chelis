@@ -23,6 +23,7 @@ sealed-runtime = ["chelis-runtime-bundle/sealed"]
 chelis-abi.workspace = true
 chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
+chelis-reef.workspace = true
 chelis-runtime-bundle.workspace = true
 chelis-vocab.workspace = true
 libc = "0.2"

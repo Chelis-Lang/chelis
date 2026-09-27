@@ -9,6 +9,7 @@ import unittest
 from zipfile import ZipFile
 
 from scripts import ci_candidate_identity as identity
+from scripts import ci_candidate_lifecycle as lifecycle
 from scripts import ci_rebase_reuse as reuse
 
 
@@ -225,6 +226,23 @@ class RebaseRepository:
         )
         self.new_candidate_sha = git(self.path, "rev-parse", "HEAD")
 
+    def merge_base_into_feature(self) -> None:
+        git(self.path, "switch", "-C", "merged-feature", self.old_head_sha)
+        git(self.path, "merge", "--no-ff", "main", "-m", "merge main")
+        self.new_head_sha = git(self.path, "rev-parse", "HEAD")
+        git(self.path, "switch", "-C", "merged-candidate", self.new_base_sha)
+        git(self.path, "merge", "--no-ff", "merged-feature", "-m", "candidate")
+        self.new_candidate_sha = git(self.path, "rev-parse", "HEAD")
+
+    def make_candidate_shallow(self) -> None:
+        # A depth-one checkout can have every needed ancestor object while its
+        # checked-out synthetic merge remains a shallow graft boundary.
+        shallow = Path(git(self.path, "rev-parse", "--git-path", "shallow"))
+        if not shallow.is_absolute():
+            shallow = self.path / shallow
+        shallow.write_text(self.new_candidate_sha + "\n")
+        assert git(self.path, "show", "-s", "--format=%P", self.new_candidate_sha) == ""
+
     def prior_receipt(self, *, reuse_eligible: bool = True) -> dict[str, object]:
         prior = identity.build_identity(
             repository_path=self.path,
@@ -307,6 +325,27 @@ class RebaseRepository:
 
 
 class RebaseReuseTests(unittest.TestCase):
+    def test_shallow_candidate_reuses_prior_evidence_for_rebase_and_base_merge(self) -> None:
+        for mode in ("base-rebase", "base-merge"):
+            with self.subTest(mode=mode):
+                repository = RebaseRepository(feature_path="docs/feature.md")
+                try:
+                    if mode == "base-merge":
+                        repository.merge_base_into_feature()
+                    classification = lifecycle.classify_update(
+                        before=repository.old_head_sha,
+                        head=repository.new_head_sha,
+                        base=repository.new_base_sha,
+                        graph=lifecycle.GitGraph(repository.path),
+                    )
+                    self.assertEqual(classification, mode)
+                    repository.make_candidate_shallow()
+                    decision = repository.evaluate()
+                    self.assertEqual(decision["lane"], "docs")
+                    self.assertEqual(decision["prior_receipt_run_id"], 202)
+                finally:
+                    repository.close()
+
     def test_docs_only_clean_rebase_reuses_prior_evidence(self) -> None:
         repository = RebaseRepository(feature_path="docs/feature.md")
         self.addCleanup(repository.close)

@@ -56,8 +56,11 @@
 //! ## Deserialization boundary
 //!
 //! Decode validates the checked library without another type-inference session.
-//! It reruns the remaining semantic checks and the lower phase. The canonical
-//! lower result must match the cache payload before contextual code can use it.
+//! When the entry carries a lowering it reruns the lower phase, and the
+//! canonical lower result must match the cache payload before contextual code
+//! can use it; the stored effect and linearity results are then adopted
+//! (chelis#2558). An entry without a lowering reruns the effect and linearity
+//! checkers instead.
 
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_types::{CheckedProgram, StructuralStats, TypeEnv};
@@ -189,9 +192,16 @@ impl<'de> Deserialize<'de> for StdLibContext {
     {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        let library =
+        // The stored effect and linearity results are adopted only when a
+        // stored lowering is re-derived and compared below; without one the
+        // program has nothing else to disagree with, so the checkers rerun
+        // (chelis#2558).
+        let library = if wire.library_dag.is_some() {
+            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
+        } else {
             chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
-                .map_err(serde::de::Error::custom)?;
+        }
+        .map_err(serde::de::Error::custom)?;
         let library_dag = match wire.library_dag {
             Some(cached) => {
                 if cached.library_proof_id() != library.program().library_proof_id() {
@@ -400,17 +410,31 @@ fn non_empty_env(name: &str) -> Option<String> {
     }
 }
 
-/// The on-disk path for the bundled chelis-std's cache entry.
+/// The on-disk path for a chelis-std typecheck cache entry.
 ///
-/// `pub(crate)` so [`crate::library_cache::evict_typecheck_cache`] can tell the
-/// RUNNING build's Layer-1 entry apart from the entries other builds left
-/// behind (chelis#1156 made Layer 1 one-per-compiler-build, not one-per-stdlib).
+/// Layer 1 holds one entry per compiler build (chelis#1156) and linked
+/// chelis-std module set (chelis#2558). The name starts with
+/// [`running_build_stdlib_cache_prefix`], so
+/// [`crate::library_cache::evict_typecheck_cache`] can tell every entry the
+/// RUNNING build can still read apart from the entries other builds left
+/// behind.
 pub(crate) fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
     cache_dir.join(format!(
-        "chelis-std-{}-{}.tc",
-        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        "{}{}.tc",
+        running_build_stdlib_cache_prefix(),
         hex_prefix(&key, 8),
     ))
+}
+
+/// The file-name prefix shared by every Layer-1 entry the running compiler
+/// build writes: the bundled chelis-std version and a tag of
+/// [`crate::build_fingerprint`], which the key itself also folds.
+pub(crate) fn running_build_stdlib_cache_prefix() -> String {
+    format!(
+        "chelis-std-{}-{}-",
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        hex_prefix(&Sha256::digest(crate::build_fingerprint().as_bytes()), 8),
+    )
 }
 
 /// Whether the disk cache is disabled for this process.
@@ -427,9 +451,13 @@ pub(crate) enum TypecheckCacheLoad<T> {
     /// No file, or a valid file under a different key.
     Miss,
     /// Cancellation was requested and the payload decode did not complete.
-    /// Decoding revalidates the cached proof, and that revalidation polls the
-    /// cancel token, so an abandoned decode says nothing about the file. The
-    /// caller propagates the cancellation and leaves the file in place.
+    /// Each cache site polls the cancel token before calling
+    /// `cache_envelope::load`, and inside the decode a stdlib payload's
+    /// re-lowering and a dependency payload's effect and linearity reruns poll
+    /// it again, so an abandoned load says nothing about the file.
+    /// `cache_envelope` itself does not poll: the capacity census compiles it
+    /// against a fixed crate set that excludes `chelis_types` (chelis#2673). The caller propagates the
+    /// cancellation and leaves the file in place.
     Cancelled,
     /// The bytes are present but cannot be used; the caller warns, rebuilds
     /// and overwrites.
@@ -488,6 +516,12 @@ pub fn load_or_build_stdlib_context(
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
 
+    // Observe a cancelled caller before the payload decode (chelis#2617).
+    if chelis_types::cancellation_requested() {
+        return Err(crate::compiler::cancelled_stage_error(
+            "chelis-std typecheck cache",
+        ));
+    }
     match classify_typecheck_cache_load(cache_envelope::load::<StdLibContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(ctx),
         TypecheckCacheLoad::Miss => {}

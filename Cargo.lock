@@ -798,6 +798,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-compiler-api",
+ "chelis-reef",
  "chelis-runtime-bundle",
  "chelis-vocab",
  "libc",

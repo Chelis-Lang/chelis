@@ -1,9 +1,11 @@
 //! chelis#2617: a cache load abandoned by cancellation is a cancellation,
 //! never an unusable cache.
 //!
-//! Decoding any of the three persisted compiler caches (the chelis-std and
-//! dependency typecheck caches and the compiled package context) revalidates
-//! the cached proof, and revalidation polls the cancel token. Each row primes
+//! Loading any of the three persisted compiler caches (the chelis-std and
+//! dependency typecheck caches and the compiled package context) polls the
+//! cancel token before the payload decode, and the decode polls it again: the
+//! stdlib and compiled-context decoders in their re-lowering, the dependency
+//! decoder in its effect and linearity reruns (chelis#2558). Each row primes
 //! a valid cache in one fresh process, then loads it in another whose cancel
 //! token is already tripped. The load must report the cancellation, must not
 //! print the "unusable; rebuilding and overwriting" warning or the internal
@@ -21,6 +23,7 @@ use chelis_compiler_api::{
     load_or_build_library_context, load_or_build_stdlib_context, load_or_compile_for_package,
     stdlib_cache_key,
 };
+use chelis_reef::EntryImports;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -135,7 +138,8 @@ fn load_site(site: Site, package_root: &Path, reef_home: &Path, cancelled: bool)
             if cancelled {
                 token.cancel();
             }
-            load_or_compile_for_package(reef_home, package_root, true).map(|_| ())
+            load_or_compile_for_package(reef_home, package_root, &EntryImports::none(), true)
+                .map(|_| ())
         }
     };
     match result {

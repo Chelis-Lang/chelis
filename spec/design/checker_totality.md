@@ -389,42 +389,82 @@ successful result. Every cache envelope verifies format and build identity and
 its own byte integrity before decoding. What happens after that decode differs
 by route, and the difference is not a preference (chelis#2211).
 
-Every **on-disk cache entry** reruns the effect and linearity checkers over the
-decoded program, because the entry outlives the process that wrote it and there
-is no second channel on which its producer could have said what the bytes ought
-to be. How much more each route does varies with what its wire carries, and the
-three are not interchangeable:
+Every **on-disk cache entry** is checked for envelope integrity (format
+version, build identity, and the payload digest), its binding to what is being
+compiled, and proof-identity agreement between its two halves
+(`TypeEnv::matches_checked_program`). The binding differs by cache: a compiled
+context recomputes the live `source_hash` and `CacheIdentity`, while a
+typecheck cache (`.tc`) is found under a key derived from the linked
+declarations, the source digest and the build fingerprint, so a changed input
+selects a different entry. The
+entry outlives the process that wrote it, and there is no second channel on
+which its producer could have said what the bytes ought to be, so whether the
+decoder may adopt the effect and linearity results the program carries depends
+on what else its wire carries. The rule is exact: **a route drops the effect
+and linearity reruns only where its payload carries a lowering of the program
+that the decoder re-derives and compares.** Every other route reruns both
+checkers over the decoded program.
 
-- `CompiledContext::load_if_fresh` also re-lowers and compares the result
-  against the transmitted lowered payload, since its wire always carries one.
-- `StdLibContext` carries an optional lowered payload and performs that
-  comparison only when one is present.
-- `LibraryContext` carries none (`LibraryContextWire`, `library_cache.rs`), so
-  the checker rerun and the type-environment agreement are its whole
-  post-decode check.
+The reason is what each check can see. Both checkers replace the effect rows
+and linearity facts they are handed rather than comparing against them, so a
+rerun rejects a decoded program only when that program fails a checker. Where
+the wire carries a lowering, an edit to the program half that changes what it
+lowers to makes the re-lowered program disagree with the stored one and is
+rejected there (an edit that lowers identically is accepted by the
+comparison), and making the program invalid while surviving the
+comparison needs a consistent rewrite of program and lowering. That is the capability chelis#2257 records,
+and with it a writer can plant a *valid* program that every route accepts, so
+the rerun adds nothing against it. Where the wire carries no lowering, an edit
+to the program half under a recomputed payload digest has nothing to disagree
+with except the checkers, and the rerun is what rejects it. The routes, and
+what each does:
+
+- `CompiledContext::load_if_fresh` re-lowers and compares the result against
+  the transmitted lowered payload, since its wire always carries one, and
+  adopts the checker results (`chelis_pipeline_core::bind_cached_library`,
+  chelis#2558).
+- `StdLibContext` carries an optional lowered payload. When it is present the
+  decoder re-lowers, compares, and adopts the checker results; when it is
+  absent the decoder reruns both checkers, as the dependency route does.
+- `LibraryContext`, the dependency typecheck cache, carries none
+  (`LibraryContextWire`, `library_cache.rs`). Its decoder keeps rerunning both
+  checkers (`chelis_pipeline_core::validate_cached_library`), and those reruns
+  with the type-environment agreement are its whole post-decode semantic
+  check. `cache_wire_compatibility.rs`'s
+  `caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation` is
+  the control: a program edited into a use after consume and resealed is
+  rejected by the linearity rerun. The rerun is paid only on `chelis check`
+  and `chelis build` in a package whose build lane has a dependency prefix.
 
 Where the comparison does run, it catches a payload whose parts stopped
 agreeing with each other, and the envelope's embedded digest cannot stand in
 for it, because whoever rewrote the payload recomputed that digest;
 `cache_wire_compatibility.rs`'s
 `cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed`
-is the control that demonstrates exactly that. What the rerun and the
-comparison cannot do is establish provenance. A *substituted* payload -- a
-different library, compiled by the same build, carrying the victim's
-`source_hash` and `identity` -- is internally consistent by construction, so
-it passes every one of these checks (chelis#2257).
+is the control that demonstrates exactly that, and
+`cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recomputed`
+shows the edit it catches lies in the checked program rather than the
+lowering. What the reruns, the agreement and the comparison cannot do is
+establish provenance. A *substituted* payload -- a different library, compiled by the
+same build, carrying the victim's `source_hash` and `identity` -- is internally
+consistent by construction, so it passes every one of these checks
+(chelis#2257). The disk routes therefore rest on an assumption: the cache
+directory (created `0o700`) is private to the user, so whoever can rewrite an
+entry can already run code as that user. They defend against accidents --
+corruption, torn writes, stale formats, a mismatched half -- not against an
+adversary with write access to the cache.
 
 A **parent-to-worker handoff** -- `CompiledContext::encode_for_handoff` and
 `decode_authenticated`, which `chelis test` uses -- does have a second channel.
 The parent writes the bytes to a tempfile and passes their digest in the
 worker's environment, so the worker can establish that the bytes on disk are
-the ones the parent wrote, and does not rerun the checkers. That is a different
-question from the one the comparison answers, and a strictly harder one to
-defeat: the digest rejects every payload but the parent's, the substituted
-well-formed one included, which is the case the re-derivation accepts. It was
-executed rather than argued, in the chelis#2258 review: a library compiled from
-rewritten sources at the same package root was accepted by `decode` and refused
-by `decode_authenticated`.
+the ones the parent wrote, and does not repeat the lowering comparison. That is
+a different question from the one the comparison answers, and a strictly harder
+one to defeat: the digest rejects every payload but the parent's, the
+substituted well-formed one included, which is the case the re-derivation
+accepts. It was executed rather than argued, in the chelis#2258 review: a
+library compiled from rewritten sources at the same package root was accepted
+by `decode` and refused by `decode_authenticated`.
 
 Note what the channel does not claim. A same-user process can read another's
 environment, so this is not same-user isolation and is not attempting it;
@@ -433,25 +473,35 @@ already runs chosen code as this user. What the digest defends is the gap the
 file's `0600` mode leaves open, which is a `TMPDIR` other users can write to,
 the ordinary shape of a shared build machine.
 
-Skipping the reruns is sound only while rerunning them reproduces the program
-they were handed. `chelis-compiler-api`'s
-`compiled_context_authenticated_handoff.rs` reconstructs one payload through
-both routes and requires byte-identical results. Other tests assert that fixed
-point for the *untrusted* route -- `cache_wire_compatibility.rs`'s
-`current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct`
-compares `decode`'s output against the producer's -- so a normalizing pass in
-either checker would be caught somewhere regardless. What is specific to this
-test is the authenticated route: every other use of `decode_authenticated`
-asserts only acceptance or rejection, so this is the only place that compares
-what that route produces against anything.
+Adopting the producer's checker results is sound only while rerunning the
+checkers reproduces the program they were handed. The compiled-context and
+stdlib routes no longer re-derive them, so nothing at run time would notice a
+checker that started to normalize, sort, dedup or intern, or a layer
+composition that lost one layer's results. `chelis-compiler-api`'s
+`compiled_context_authenticated_handoff.rs` holds the test that would:
+`cached_program_is_a_checker_fixed_point` builds a package that links the
+bundled standard library and a path dependency, takes the checked program
+each cache layer stores (the layered compiled context, the stdlib typecheck
+cache, and the dependency typecheck cache), runs
+`chelis_effects::check_program` and `chelis_types::check_linearity` over it,
+and requires the result to serialize to the same bytes. That target is a standing target in
+`.config/ci-test-targets.toml`, so the lock runs on every candidate rather than
+waiting for package expansion. The same file's
+`both_decode_routes_reconstruct_identical_contexts` requires the two
+`CompiledContext` routes to reconstruct byte-identical values, which after
+chelis#2558 says that they bind the program the same way.
 
 Until chelis#2211 this section read "deserialization does not rerun semantic
 checking; cache bytes are a trusted internal artifact", while both routes were
 in fact rerunning the checkers. The doc was wrong in the permissive direction:
 read as permission, it would have licensed removing the disk route's
 re-derivation on the strength of a sentence, which is the escalation
-`AGENTS.md` warns about under "permission-to-mandate". The disk route keeps its
-re-derivation for the reason above, not because no document said to remove it.
+`AGENTS.md` warns about under "permission-to-mandate". chelis#2558 removed the
+checker reruns from the disk routes that carry a lowering by amending the rule
+above with its threat model, kept the lowering comparison, and kept the reruns
+on the dependency route, which has no lowering to compare; the fixed-point
+test replaces the removed reruns as the guard that adopting equals
+re-deriving.
 
 This boundary is documented in the witness, type-context, and compiler-api
 cache module docs.

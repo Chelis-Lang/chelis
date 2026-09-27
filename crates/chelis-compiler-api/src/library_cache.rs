@@ -43,19 +43,24 @@
 //! build produces: the dependency decls are content-addressed, the
 //! chelis-std base is itself a byte-identical cached artifact, and the
 //! proof-bound library extension over that base is deterministic. Decode
-//! reruns the effect and linearity checks to rebind the proof, never
-//! trusting the wire bytes. So the entry checked against a warm-loaded context
-//! composes to the same whole-program `CheckedProgram` as the cold path —
+//! reruns the effect and linearity checks to rebind the proof rather than
+//! adopting the stored checker results. The stdlib and compiled-context
+//! decoders adopt them because they re-lower the program and compare it
+//! against a stored lowering; this wire carries no lowering, so the reruns
+//! are what reject an edited program (chelis#2558). So the entry checked
+//! against a warm-loaded context composes to the same whole-program
+//! `CheckedProgram` as the cold path —
 //! and, per the acceptance oracle, as the monolithic path. The cache is a
 //! pure speedup; it never changes an output or a diagnostic.
 //!
 //! ## Unbounded growth (chelis#1183)
 //!
-//! Layer 1 (`chelis-std-<ver>-<hash>.tc`) is bounded by toolchain identity,
-//! but since chelis#1156 that identity is the compiler BUILD, not the stdlib
-//! build: its key folds `build_fingerprint()`, so each locally built compiler
-//! mints its own entry and the ones belonging to superseded builds are dead
-//! weight (see [`evict_typecheck_cache`], which reclaims them first).
+//! Layer 1 (`chelis-std-<ver>-<build>-<hash>.tc`) is bounded by toolchain
+//! identity and linked chelis-std module set (chelis#2558), but since
+//! chelis#1156 that identity is the compiler BUILD, not the stdlib build: its
+//! key folds `build_fingerprint()`, so each locally built compiler mints its
+//! own entries and the ones belonging to superseded builds are dead weight
+//! (see [`evict_typecheck_cache`], which reclaims them first).
 //! Layer 2's key is a
 //! hash of USER source, and for a single-package project the "dependency
 //! prefix" is the developer's own non-entry modules. So every save of a
@@ -183,9 +188,10 @@ impl LibraryContext {
 
 /// Serde carrier for the cache envelope. Decode revalidates the proof: it
 /// checks the type-environment relationship and reruns effect and linearity
-/// before it rebinds the `CheckedLibrary`, mirroring the stdlib and
-/// compiled-context cache parsers. A forged or mismatched entry is rejected,
-/// never trusted.
+/// before it rebinds the `CheckedLibrary`. A forged or mismatched entry is
+/// rejected, never trusted. The stdlib and compiled-context parsers skip the
+/// reruns because their wires carry a lowering they re-derive and compare;
+/// this one carries none, so it keeps them (chelis#2558).
 #[derive(Serialize, Deserialize)]
 struct LibraryContextWire {
     type_env: TypeEnv,
@@ -368,6 +374,12 @@ pub fn load_or_build_library_context(
     };
     let cache_path = library_cache_path(&cache_dir, key);
 
+    // Observe a cancelled caller before the payload decode (chelis#2617).
+    if chelis_types::cancellation_requested() {
+        return Err(crate::compiler::cancelled_stage_error(
+            "dependency typecheck cache",
+        ));
+    }
     match classify_typecheck_cache_load(cache_envelope::load::<LibraryContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(Some(ctx)),
         TypecheckCacheLoad::Miss => {}
@@ -395,11 +407,10 @@ pub fn load_or_build_library_context(
                 // chelis#1183: keep the cache dir bounded. Only on the miss
                 // path, after a successful write, never evicting what we just
                 // wrote. Best-effort.
-                let live_stdlib = crate::stdlib_cache::stdlib_cache_path(&cache_dir, stdlib_key);
                 evict_typecheck_cache(
                     &cache_dir,
                     &cache_path,
-                    Some(&live_stdlib),
+                    &crate::stdlib_cache::running_build_stdlib_cache_prefix(),
                     typecheck_cache_max_bytes(),
                 );
             }
@@ -433,15 +444,18 @@ fn typecheck_cache_max_bytes() -> u64 {
 ///
 /// Policy: oldest-first by mtime within three tiers, evicted in this order.
 ///
-/// 1. **Superseded `chelis-std-*`** - Layer-1 entries that are not the running
-///    build's. Before chelis#1156 there was only ever one, because the key
+/// 1. **Superseded `chelis-std-*`** - Layer-1 entries another compiler build
+///    wrote. Before chelis#1156 there was only ever one, because the key
 ///    folded `COMPILER_VERSION`; now it folds `build_fingerprint()`, so every
 ///    compiler build a developer or CI matrix produces mints its own multi-MiB
 ///    entry and the previous one is never read again. Reclaiming these first is
 ///    the only tier where eviction costs nothing at all.
 /// 2. **`chelis-lib-*`** - keyed on user source, churns per sibling edit.
-/// 3. **The running build's `chelis-std-*`** - written once and hit forever, so
-///    evicting it forces a costly re-inference. Last resort.
+/// 3. **The running build's `chelis-std-*`** - one per linked chelis-std module
+///    set (chelis#2558), each written once and hit forever, so evicting one
+///    forces a costly re-inference. Last resort. They share the file-name
+///    prefix `running_build_stdlib`
+///    ([`crate::stdlib_cache::running_build_stdlib_cache_prefix`]).
 ///
 /// Without tier 1 the old two-tier policy would protect every superseded stdlib
 /// entry ahead of live Layer-2 entries, which inverts the intent on exactly the
@@ -458,7 +472,7 @@ fn typecheck_cache_max_bytes() -> u64 {
 fn evict_typecheck_cache(
     cache_dir: &Path,
     just_written: &Path,
-    live_stdlib: Option<&Path>,
+    running_build_stdlib: &str,
     max_bytes: u64,
 ) {
     let Ok(read_dir) = std::fs::read_dir(cache_dir) else {
@@ -495,11 +509,12 @@ fn evict_typecheck_cache(
         }
         total += meta.len();
         let path = entry.path();
-        // 0 = superseded stdlib entry, 1 = library entry, 2 = the running
-        // build's stdlib entry. See the doc comment for why this order.
+        // 0 = superseded stdlib entry, 1 = library entry, 2 = one of the
+        // running build's stdlib entries. See the doc comment for why this
+        // order.
         let tier: u8 = if name.starts_with("chelis-lib-") {
             1
-        } else if live_stdlib.is_some_and(|live| live == path) {
+        } else if name.starts_with(running_build_stdlib) {
             2
         } else {
             0
@@ -685,11 +700,11 @@ mod tests {
         // tier, not the mtime.
         let stale_std = write("chelis-std-0.4.0-aaaaaaaaaaaaaaaa.tc", 4096);
         let live_lib = write("chelis-lib-bbbbbbbbbbbbbbbb.tc", 4096);
-        let live_std = write("chelis-std-0.4.0-cccccccccccccccc.tc", 4096);
+        let live_std = write(&running_build_std_name("cccccccccccccccc"), 4096);
         let just_written = write("chelis-lib-dddddddddddddddd.tc", 4096);
 
         // Cap below the total so eviction must free exactly one file.
-        evict_typecheck_cache(root, &just_written, Some(&live_std), 12288);
+        evict_running_build(root, &just_written, 12288);
 
         assert!(
             !stale_std.exists(),
@@ -721,11 +736,11 @@ mod tests {
             std::fs::write(&p, vec![b'x'; bytes]).expect("write");
             p
         };
-        let live_std = write("chelis-std-0.4.0-cccccccccccccccc.tc", 4096);
+        let live_std = write(&running_build_std_name("cccccccccccccccc"), 4096);
         let old_lib = write("chelis-lib-bbbbbbbbbbbbbbbb.tc", 4096);
         let just_written = write("chelis-lib-dddddddddddddddd.tc", 4096);
 
-        evict_typecheck_cache(root, &just_written, Some(&live_std), 8192);
+        evict_running_build(root, &just_written, 8192);
 
         assert!(
             !old_lib.exists(),
@@ -736,6 +751,65 @@ mod tests {
             "the running build's stdlib entry must survive"
         );
         assert!(just_written.exists());
+    }
+
+    /// chelis#2558: the running build writes one Layer-1 entry per linked
+    /// chelis-std module set, so its entry for another set is not
+    /// superseded. Only another build's entries are reclaimed ahead of the
+    /// library tier.
+    #[test]
+    fn eviction_keeps_the_running_builds_entries_for_other_linked_sets() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let at = |seconds: u64| {
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+        };
+        let write = |name: &str, modified: std::time::SystemTime| -> PathBuf {
+            let p = root.join(name);
+            std::fs::write(&p, vec![b'x'; 4096]).expect("write");
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .and_then(|file| file.set_modified(modified))
+                .expect("set mtime");
+            p
+        };
+        // The running build's entry for another linked set is the OLDEST
+        // file, so only its tier can keep it.
+        let other_set = write(&running_build_std_name("aaaaaaaaaaaaaaaa"), at(1_000));
+        let other_build = write("chelis-std-0.4.0-bbbbbbbbbbbbbbbb.tc", at(2_000));
+        let lib = write("chelis-lib-cccccccccccccccc.tc", at(3_000));
+        let this_set = write(&running_build_std_name("dddddddddddddddd"), at(4_000));
+        let just_written = write("chelis-lib-eeeeeeeeeeeeeeee.tc", at(5_000));
+
+        // Cap below the total so eviction must free exactly two files.
+        evict_running_build(root, &just_written, 12288);
+
+        assert!(!other_build.exists(), "another build's entry goes first");
+        assert!(!lib.exists(), "then the library tier");
+        assert!(
+            other_set.exists(),
+            "the running build's entry for another linked set is not superseded"
+        );
+        assert!(this_set.exists());
+        assert!(just_written.exists());
+    }
+
+    fn running_build_std_name(key: &str) -> String {
+        crate::stdlib_cache::stdlib_cache_path(Path::new(""), [0; 32])
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name")
+            .replace("0000000000000000", key)
+    }
+
+    fn evict_running_build(root: &Path, just_written: &Path, max_bytes: u64) {
+        evict_typecheck_cache(
+            root,
+            just_written,
+            &crate::stdlib_cache::running_build_stdlib_cache_prefix(),
+            max_bytes,
+        );
     }
 
     /// A minimal well-formed dependency `Decl` slice. The exact shape is

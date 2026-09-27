@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -158,8 +159,15 @@ def validate_compile_outcomes(outcomes):
         "missing, duplicate, reordered, or unexpected cache compile case",
     )
     for case, row in zip(COMPILE_CASES, outcomes, strict=True):
+        # Rustc can emit many secondary notes. Keep the primary error visible
+        # in the CI log without printing an unbounded compiler transcript.
+        first_error = re.search(r"(?m)^error(?:\[[^\n]+\])?:", row.stderr)
+        excerpt = row.stderr[first_error.start() if first_error else 0:][:3500]
+        excerpt = excerpt or "<empty>"
         require(
-            (row.returncode == 0) == case.success, f"wrong compile outcome: {case.name}"
+            (row.returncode == 0) == case.success,
+            f"wrong compile outcome: {case.name}; rustc stderr "
+            f"(first error, at most 3500 chars): {excerpt}",
         )
         require(
             row.source_sha256 and row.command, f"missing execution inputs: {case.name}"

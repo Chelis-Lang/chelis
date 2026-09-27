@@ -533,7 +533,8 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    fn fork(&self) -> Self {
+    // Every branch supplies its own execution frontier.
+    fn fork_with_paths(&self, paths: Vec<CallPath>) -> Self {
         Self {
             unit: self.unit.clone(),
             module: self.module.clone(),
@@ -548,7 +549,7 @@ impl<'a> CallCollector<'a> {
             local_type_aliases: self.local_type_aliases.clone(),
             block_scope: self.block_scope.clone(),
             binding_depth: self.binding_depth,
-            paths: self.paths.clone(),
+            paths,
         }
     }
 
@@ -651,13 +652,12 @@ impl<'a> CallCollector<'a> {
     }
 
     fn closure_target(&self, path: &CallPath, closure: &syn::ExprClosure) -> CallTarget {
-        let mut collector = self.fork();
         let mut closure_path = CallPath {
             bindings: path.bindings.clone(),
             receiver_bindings: path.receiver_bindings.clone(),
             ..CallPath::default()
         };
-        collector.binding_depth += 1;
+        let closure_depth = self.binding_depth + 1;
         for (index, input) in closure.inputs.iter().enumerate() {
             let mut names = BTreeSet::new();
             collect_pattern_names(input, &mut names);
@@ -667,7 +667,7 @@ impl<'a> CallCollector<'a> {
                     .entry(name.clone())
                     .or_default()
                     .push(ValueBinding {
-                        depth: collector.binding_depth,
+                        depth: closure_depth,
                         value: AbstractValue::Callable(CallTarget::Parameter(index)),
                     });
                 closure_path
@@ -675,12 +675,13 @@ impl<'a> CallCollector<'a> {
                     .entry(name)
                     .or_default()
                     .push(ReceiverBinding {
-                        depth: collector.binding_depth,
+                        depth: closure_depth,
                         owner: pattern_type_owner(input),
                     });
             }
         }
-        collector.paths = vec![closure_path];
+        let mut collector = self.fork_with_paths(vec![closure_path]);
+        collector.binding_depth = closure_depth;
         collector.visit_expr(&closure.body);
         CallTarget::Inline(
             collector
@@ -743,8 +744,7 @@ impl<'a> CallCollector<'a> {
                 self.evaluate_expression_value(path, &unary.expr)
             }
             _ => {
-                let mut collector = self.fork();
-                collector.paths = vec![path];
+                let mut collector = self.fork_with_paths(vec![path]);
                 collector.visit_expr(expression);
                 collector
                     .paths
@@ -862,10 +862,9 @@ impl<'a> CallCollector<'a> {
                 if !pattern_can_match_value(&arm.pat, &scrutinee) {
                     continue;
                 }
-                let mut branch = self.fork();
+                let mut branch = self.fork_with_paths(vec![scrutinee_path.clone()]);
                 branch.binding_depth += 1;
                 let arm_depth = branch.binding_depth;
-                branch.paths = vec![scrutinee_path.clone()];
                 Self::bind_pattern_value(&mut branch.paths, &arm.pat, scrutinee.clone(), arm_depth);
                 let branch_paths = branch.paths.clone();
                 let guard_paths = if let Some((_, guard)) = &arm.guard {
@@ -905,13 +904,12 @@ impl<'a> CallCollector<'a> {
         path: CallPath,
         block: &syn::Block,
     ) -> Vec<(CallPath, AbstractValue)> {
-        let mut branch = self.fork();
+        let mut branch = self.fork_with_paths(vec![path]);
         let outer_imports = branch.local_imports.clone();
         let outer_type_aliases = branch.local_type_aliases.clone();
         branch.block_scope.push(block as *const syn::Block as usize);
         branch.binding_depth += 1;
         let block_depth = branch.binding_depth;
-        branch.paths = vec![path];
 
         let tail = block.stmts.last().and_then(|statement| match statement {
             syn::Stmt::Expr(expression, None) => Some(expression),
@@ -1479,8 +1477,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
                 let evaluated = self.evaluate_expression_value(path, &init.expr);
                 if let Some((_, diverge)) = &init.diverge {
                     for (evaluated_path, _) in &evaluated {
-                        let mut branch = self.fork();
-                        branch.paths = vec![evaluated_path.clone()];
+                        let mut branch = self.fork_with_paths(vec![evaluated_path.clone()]);
                         branch.visit_expr(diverge);
                         values.extend(
                             branch
@@ -1672,8 +1669,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             if let Some(pattern) = pattern {
                 let body_depth = body.binding_depth + 1;
                 Self::bind_pattern(&mut body.paths, pattern, body_depth);
@@ -1732,8 +1728,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
                     AbstractValue::Iterable(values) => {
                         let mut iteration_paths = vec![iterable_path];
                         for value in values {
-                            let mut body = self.fork();
-                            body.paths = iteration_paths;
+                            let mut body = self.fork_with_paths(iteration_paths);
                             let body_depth = body.binding_depth + 1;
                             Self::bind_pattern_value(
                                 &mut body.paths,
@@ -1787,8 +1782,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             let body_depth = body.binding_depth + 1;
             Self::bind_pattern(&mut body.paths, &expression.pat, body_depth);
             body.visit_block(&expression.body);
@@ -1842,8 +1836,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             body.visit_block(&expression.body);
             let mut next_inputs = Vec::new();
             for mut path in body.paths {

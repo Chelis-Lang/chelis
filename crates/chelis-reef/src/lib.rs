@@ -9,6 +9,7 @@ use chelis_surf::ast::{
 use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -442,7 +443,8 @@ pub struct PreparedProgram {
     pub package_root: PathBuf,
     /// The chelis-std-only slice of `decls`, in the same relative order.
     /// The cross-process chelis-std typecheck cache content-addresses
-    /// this. Empty when the graph has no chelis-std package.
+    /// this. Empty when the package and entry reach no chelis-std module
+    /// (chelis#2558).
     pub stdlib_decls: Vec<Decl>,
     /// Digest of the exact chelis-std manifest, source inventory, source
     /// bytes, and published artifact identities that produced
@@ -717,6 +719,15 @@ impl PreparedReefGraph {
         let mut owned = Vec::<OwnedDecl>::new();
         for (package_name, package) in &self.graph.packages {
             for module in package.modules.values() {
+                // chelis#2558: a chelis-std module the graph did not link is
+                // not part of the program, so it has no declarations here.
+                // Only linked modules keep an entry in `internal_maps`.
+                if !self
+                    .internal_maps
+                    .contains_key(&(package_name.clone(), module.module_name.clone()))
+                {
+                    continue;
+                }
                 let rewritten = rewrite_module_decls(
                     module,
                     &self.graph,
@@ -1546,6 +1557,125 @@ fn collect_pattern_references(pattern: &Pattern, out: &mut BTreeSet<String>) {
     }
 }
 
+/// The modules a caller's entry sources import (chelis#2558). A prepared
+/// graph links only the chelis-std modules that its packages and these
+/// entries reach, so a caller that will rewrite entry sources against a
+/// graph, or against a context compiled from one, collects their imports
+/// before it prepares or loads either.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntryImports {
+    modules: BTreeSet<String>,
+}
+
+impl EntryImports {
+    /// No entry beyond the package's own modules, such as a `check` or
+    /// `build` of a package module.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The modules `decls` import, looking inside a `module` wrapper.
+    pub fn from_decls(decls: &[Decl]) -> Self {
+        let mut imports = Self::none();
+        imports.add_decls(decls);
+        imports
+    }
+
+    /// The modules a Surf source imports. A source that does not parse
+    /// reports its parse error, because it cannot be run against any graph.
+    pub fn from_surf_source(source: &str) -> Result<Self, String> {
+        chelis_surf::parser::parse_str(source)
+            .map(|decls| Self::from_decls(&decls))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Add the modules `decls` import, looking inside a `module` wrapper.
+    pub fn add_decls(&mut self, decls: &[Decl]) {
+        for decl in decls {
+            match decl {
+                Decl::Import { module, .. } => {
+                    self.modules.insert(module.clone());
+                }
+                Decl::Module { decls, .. } => self.add_decls(decls),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The chelis-std modules a prepared graph links (chelis#2558): the
+/// transitive `import` closure of every module outside chelis-std, which is
+/// every module of the root package and of each dependency and is always
+/// linked, together with `entry_roots`. The linker resolves a name from
+/// another module only through an `import` declaration
+/// (`build_name_resolver`), so no other chelis-std module is reachable. When
+/// chelis-std is itself the root package, all of its modules are roots.
+fn linked_stdlib_closure(graph: &PackageGraph, entry_roots: &BTreeSet<String>) -> BTreeSet<String> {
+    let Some(stdlib) = graph.packages.get(CHELIS_STD_PACKAGE_NAME) else {
+        return BTreeSet::new();
+    };
+    if graph.root_package == CHELIS_STD_PACKAGE_NAME {
+        return stdlib.modules.keys().cloned().collect();
+    }
+    let mut pending = entry_roots
+        .iter()
+        .filter(|module_name| stdlib.modules.contains_key(*module_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    for (package_name, package) in &graph.packages {
+        if package_name == CHELIS_STD_PACKAGE_NAME {
+            continue;
+        }
+        for module in package.modules.values() {
+            pending.extend(stdlib_imports_of(
+                graph,
+                package_name,
+                module_imports(&module.decls),
+            ));
+        }
+    }
+    let mut closure = BTreeSet::new();
+    while let Some(module_name) = pending.pop() {
+        if !closure.insert(module_name.clone()) {
+            continue;
+        }
+        if let Some(module) = stdlib.modules.get(&module_name) {
+            pending.extend(stdlib_imports_of(
+                graph,
+                CHELIS_STD_PACKAGE_NAME,
+                module_imports(&module.decls),
+            ));
+        }
+    }
+    closure
+}
+
+fn module_imports(decls: &[Decl]) -> impl Iterator<Item = &String> {
+    decls.iter().filter_map(|decl| match decl {
+        Decl::Import { module, .. } => Some(module),
+        _ => None,
+    })
+}
+
+/// The imports among `imports` that the linker's own lookup, run from
+/// `package`, resolves to a chelis-std module. An import that resolves
+/// nowhere is not a root: the rewrite of the module or entry naming it
+/// reports it.
+fn stdlib_imports_of<'a>(
+    graph: &'a PackageGraph,
+    package: &'a str,
+    imports: impl Iterator<Item = &'a String> + 'a,
+) -> impl Iterator<Item = String> + 'a {
+    imports.filter_map(
+        move |module_name| match find_imported_module(graph, package, module_name) {
+            Ok((package_name, _)) if package_name == CHELIS_STD_PACKAGE_NAME => {
+                Some(module_name.clone())
+            }
+            _ => None,
+        },
+    )
+}
+
 /// A reef package graph that has been resolved, linked, and cached for reuse
 /// across multiple per-file compiles.
 ///
@@ -1571,8 +1701,10 @@ pub struct PreparedReefGraph {
     /// The chelis-std-only slice of `linked_library_decls`, in the same
     /// relative order. The cross-process chelis-std typecheck cache checks
     /// and caches this sub-context under a content-addressed key derived
-    /// from the linked chelis-std decls. Empty when the graph has no
-    /// chelis-std package, such as a package that depends on nothing.
+    /// from the linked chelis-std decls. It holds only the modules in
+    /// [`PreparedReefGraph::linked_stdlib_modules`], so it is empty for a
+    /// package, and entries, that import no chelis-std module
+    /// (chelis#2558).
     pub linked_stdlib_decls: Vec<Decl>,
     /// Exact-source determinant paired with `linked_stdlib_decls`. Persisting
     /// it in the prepared graph keeps the typecheck-cache hot path free of a
@@ -1607,6 +1739,47 @@ impl PreparedReefGraph {
     /// Exact source determinant for the linked chelis-std slice.
     pub fn stdlib_source_digest(&self) -> [u8; 32] {
         self.stdlib_source_digest
+    }
+
+    /// The chelis-std modules this graph links (chelis#2558). They are the
+    /// only chelis-std modules with an entry in `internal_maps`, so a
+    /// decoded graph answers from its own data.
+    pub fn linked_stdlib_modules(&self) -> BTreeSet<String> {
+        self.graph
+            .packages
+            .get(CHELIS_STD_PACKAGE_NAME)
+            .map(|stdlib| {
+                stdlib
+                    .modules
+                    .keys()
+                    .filter(|module_name| {
+                        self.internal_maps.contains_key(&(
+                            CHELIS_STD_PACKAGE_NAME.to_string(),
+                            (*module_name).clone(),
+                        ))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// This graph, relinked when `entries` import a chelis-std module it
+    /// does not link yet (chelis#2558). The graph is returned unchanged when
+    /// it already links every module the entries reach.
+    pub fn covering(&self, entries: &EntryImports) -> Result<Cow<'_, Self>, String> {
+        let linked = self.linked_stdlib_modules();
+        let mut roots = linked.clone();
+        roots.extend(stdlib_imports_of(
+            &self.graph,
+            &self.graph.root_package,
+            entries.modules.iter(),
+        ));
+        if linked_stdlib_closure(&self.graph, &roots) == linked {
+            return Ok(Cow::Borrowed(self));
+        }
+        prepare_graph_from_loaded(self.package_root.clone(), self.graph.clone(), &roots)
+            .map(Cow::Owned)
     }
 
     /// Returns a content digest for the complete live `.ch` inventory under
@@ -1678,6 +1851,26 @@ impl PreparedReefGraph {
                     });
                 }
             }
+        }
+        // chelis#2558: the graph links only the chelis-std modules its
+        // packages and its caller's entries reach, so two graphs of one
+        // package over the same sources can link different modules. This
+        // row names that set, so every cache keyed on these digests (the
+        // prepared graph, the chelis-std typecheck cache through
+        // `stdlib_source_digest`, and the compiled context) tells them apart.
+        if let Some(stdlib) = self.graph.packages.get(CHELIS_STD_PACKAGE_NAME) {
+            let mut hasher = Sha256::new();
+            hasher.update(b"chelis-linked-stdlib-modules-v1");
+            for module_name in self.linked_stdlib_modules() {
+                hasher.update((module_name.len() as u64).to_le_bytes());
+                hasher.update(module_name.as_bytes());
+            }
+            digests.push(SourceDigest {
+                package_name: stdlib.id.name.clone(),
+                package_version: stdlib.id.version.clone(),
+                module_name: "<linked::stdlib-modules>".to_string(),
+                sha256: hasher.finalize().into(),
+            });
         }
         let lock_path = self.package_root.join("reef.lock");
         if lock_path.exists() {
@@ -2141,7 +2334,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         Err(_) if !lock_path.exists() || read_lockfile(&lock_path).is_err() => {
             let loaded = resolve_package_graph(&root, LoadOptions::default_for_load())?;
             write_lockfile(&lock_path, &build_lockfile(&loaded))?;
-            prepare_graph_from_loaded(root.clone(), loaded)?
+            prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new())?
         }
         Err(error) => return Err(error),
     };
@@ -2153,12 +2346,12 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     if !lock_path.exists() || read_lockfile(&lock_path).is_err() {
         write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
     }
-    let entry_module = module_name_for_input(&root, file, &graph.graph.root_package)?;
     let root_package = graph
         .graph
         .packages
         .get(&graph.graph.root_package)
         .ok_or_else(|| "root package missing from prepared reef graph".to_string())?;
+    let entry_module = module_name_for_input(&root, file, root_package)?;
     let module = root_package
         .modules
         .get(&entry_module)
@@ -2221,15 +2414,40 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
         ));
     };
     let graph = load_package_graph_for_eval(&root)?;
-    prepare_graph_from_loaded(root, graph)
+    prepare_graph_from_loaded(root, graph, &BTreeSet::new())
 }
 
+/// [`prepare_reef_graph_cached`], extended to link every chelis-std module
+/// `entries` reach (chelis#2558). Callers that will rewrite entry sources
+/// against the graph, or against a context compiled from it, prepare it
+/// here with those entries' imports.
+pub fn prepare_reef_graph_for_entries(
+    context_dir: &Path,
+    entries: &EntryImports,
+) -> Result<PreparedReefGraph, String> {
+    let graph = prepare_reef_graph_cached(context_dir)?;
+    Ok(graph.covering(entries)?.into_owned())
+}
+
+/// Resolve, link, and name the prepared graph. Only the chelis-std modules
+/// in [`linked_stdlib_closure`] of `stdlib_roots` are linked, and only they
+/// keep an entry in `internal_maps`, so the prepared graph records exactly
+/// which standard-library modules it carries.
 fn prepare_graph_from_loaded(
     root: PathBuf,
     graph: PackageGraph,
+    stdlib_roots: &BTreeSet<String>,
 ) -> Result<PreparedReefGraph, String> {
-    let linked = link_graph_with_package_tags(&graph, &[])?;
-    let internal_maps = build_internal_maps(&graph);
+    let stdlib_closure = linked_stdlib_closure(&graph, stdlib_roots);
+    let linked = link_graph_with_package_tags(&graph, &[], &stdlib_closure)?;
+    let mut internal_maps = build_internal_maps(&graph);
+    if let Some(stdlib) = graph.packages.get(CHELIS_STD_PACKAGE_NAME) {
+        for module_name in stdlib.modules.keys() {
+            if !stdlib_closure.contains(module_name) {
+                internal_maps.remove(&(CHELIS_STD_PACKAGE_NAME.to_string(), module_name.clone()));
+            }
+        }
+    }
     let dep_shells = dependency_shells(&graph);
     let eval_module_prefix = graph
         .packages
@@ -2876,13 +3094,18 @@ pub fn compile_rewritten_entry_batch_with_reef_graph(
 /// Compile an in-memory entry decl list against a previously prepared reef
 /// graph. This is the cheap per-file work: only the entry module is rewritten
 /// and appended to the cached library decls.
+///
+/// The graph is first extended with every chelis-std module the entry
+/// imports that it does not link yet (chelis#2558), because the returned
+/// program carries the library decls itself.
 pub fn compile_with_reef_graph(
     graph: &PreparedReefGraph,
     entry_decls: &[Decl],
 ) -> Result<PreparedProgram, String> {
-    let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(graph, entry_decls)?;
+    let graph = graph.covering(&EntryImports::from_decls(entry_decls))?;
+    let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(&graph, entry_decls)?;
     Ok(assemble_rewritten_entry_program(
-        graph,
+        &graph,
         &rewritten_entry_decls,
     ))
 }
@@ -2972,16 +3195,7 @@ pub fn build_package_with_options(
     let lock = build_lockfile(&graph);
     write_lockfile(&root.join("reef.lock"), &lock)?;
 
-    let root_pkg = graph
-        .packages
-        .get(&graph.root_package)
-        .ok_or_else(|| "root package missing from graph".to_string())?;
-    let entry_modules = root_pkg.modules.keys().cloned().collect::<Vec<_>>();
-    let linked = link_graph(&graph, &entry_modules)?;
-    let linked_decls = linked
-        .into_iter()
-        .flat_map(|module| module.decls)
-        .collect::<Vec<_>>();
+    let (root_pkg, linked_decls) = link_package_for_build(&graph)?;
     let deep = expanded_desugared_program(&linked_decls)?;
     let checked = checked_library_with_effects(&deep)?;
 
@@ -5791,13 +6005,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     let lock = build_lockfile(&graph);
     write_lockfile(&root.join("reef.lock"), &lock)?;
 
-    let root_pkg = graph
-        .packages
-        .get(&graph.root_package)
-        .ok_or_else(|| "root package missing from graph".to_string())?;
-    let entry_modules = root_pkg.modules.keys().cloned().collect::<Vec<_>>();
-    let linked = link_graph(&graph, &entry_modules)?;
-    let linked_decls: Vec<_> = linked.into_iter().flat_map(|m| m.decls).collect();
+    let (root_pkg, linked_decls) = link_package_for_build(&graph)?;
     let deep = expanded_desugared_program(&linked_decls)?;
     let checked = checked_library_with_effects(&deep)?;
 
@@ -6292,10 +6500,29 @@ fn reconstruct_graph_from_lockfile(
         }
     }
 
+    insert_implicit_runtime(&mut packages)?;
     Ok(PackageGraph {
         root_package: root_name,
         packages,
     })
+}
+
+/// chelis#2414: every package depends on the bundled `chelis-std` runtime
+/// whether or not its manifest names it, the way `build_lockfile` records
+/// it. Both graph constructors (manifest resolution and lockfile
+/// reconstruction) end here, so an import of `Std.*` resolves against the
+/// same package set whether or not a `reef.lock` exists. A graph that
+/// already carries the runtime (an explicit dependency, a lockfile entry,
+/// or `chelis-std` itself as the root) is left unchanged.
+fn insert_implicit_runtime(packages: &mut BTreeMap<String, LoadedPackage>) -> Result<(), String> {
+    if packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
+        return Ok(());
+    }
+    packages.insert(
+        CHELIS_STD_PACKAGE_NAME.to_string(),
+        bundled_runtime_package()?,
+    );
+    Ok(())
 }
 
 /// Sentinel string smuggled through `run_with_timeout`'s
@@ -6590,6 +6817,7 @@ fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGra
         &mut stack,
         options,
     )?;
+    insert_implicit_runtime(&mut packages)?;
     Ok(PackageGraph {
         root_package: root_id.name,
         packages,
@@ -6715,12 +6943,7 @@ fn resolve_package_recursive(
                     }
                     // The declared version is the bundled one: the runtime
                     // comes from the compiler, never from the registry.
-                    if !packages.contains_key(CHELIS_STD_PACKAGE_NAME) {
-                        packages.insert(
-                            CHELIS_STD_PACKAGE_NAME.to_string(),
-                            bundled_runtime_package()?,
-                        );
-                    }
+                    insert_implicit_runtime(packages)?;
                     continue;
                 }
                 // Item 8 insertion point: missing-from-registry deps
@@ -7816,11 +8039,11 @@ fn validate_source_signature_pairs(decls: &[Decl], module: &str) -> Result<(), S
     Ok(())
 }
 
-fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result<String, String> {
-    let root_pkg = resolve_package_graph(root, LoadOptions::default_for_load())?
-        .packages
-        .remove(package_name)
-        .ok_or_else(|| "root package missing".to_string())?;
+fn module_name_for_input(
+    root: &Path,
+    file: &Path,
+    root_pkg: &LoadedPackage,
+) -> Result<String, String> {
     let canonical = file
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize {}: {e}", file.display()))?;
@@ -8921,23 +9144,37 @@ fn effect_name(effect: &EffectExpr) -> String {
     }
 }
 
-fn link_graph(graph: &PackageGraph, entry_modules: &[String]) -> Result<Vec<LinkedModule>, String> {
-    Ok(link_graph_with_package_tags(graph, entry_modules)?
+/// Link a package for `chelis reef build` and [`package_schema`]: every
+/// module of the root package as an entry, its dependencies, and the
+/// chelis-std modules they import (chelis#2558). A build has no entries
+/// beyond the package's own modules, so the closure has no other roots.
+fn link_package_for_build(graph: &PackageGraph) -> Result<(&LoadedPackage, Vec<Decl>), String> {
+    let root_pkg = graph
+        .packages
+        .get(&graph.root_package)
+        .ok_or_else(|| "root package missing from graph".to_string())?;
+    let entry_modules = root_pkg.modules.keys().cloned().collect::<Vec<_>>();
+    let stdlib_closure = linked_stdlib_closure(graph, &BTreeSet::new());
+    let linked_decls = link_graph_with_package_tags(graph, &entry_modules, &stdlib_closure)?
         .into_iter()
-        .map(|(_package_name, module)| module)
-        .collect())
+        .flat_map(|(_package_name, module)| module.decls)
+        .collect();
+    Ok((root_pkg, linked_decls))
 }
 
-/// Like [`link_graph`], but each linked module is paired with the name of
-/// the package it came from. The cross-process chelis-std typecheck cache
-/// uses this to partition the linked library decls into the chelis-std
-/// portion (cached under a content-addressed sub-key) and everything
-/// else. Iteration order matches `link_graph` exactly (a `BTreeMap` walk
-/// over `graph.packages`, then `package.modules`), so callers that flatten
-/// either result get identical decl ordering.
+/// Link `graph`, pairing each linked module with the name of the package it
+/// came from. The cross-process chelis-std typecheck cache uses the tag to
+/// partition the linked library decls into the chelis-std portion (cached
+/// under a content-addressed sub-key) and everything else. Iteration order
+/// is a `BTreeMap` walk over `graph.packages`, then `package.modules`.
+///
+/// `stdlib_modules` is the set of chelis-std modules to link, a
+/// [`linked_stdlib_closure`]; the others are skipped (chelis#2558). Every
+/// module of every other package is linked.
 fn link_graph_with_package_tags(
     graph: &PackageGraph,
     entry_modules: &[String],
+    stdlib_modules: &BTreeSet<String>,
 ) -> Result<Vec<(String, LinkedModule)>, String> {
     let internal_maps = build_internal_maps(graph);
     let dep_shells = dependency_shells(graph);
@@ -8945,6 +9182,11 @@ fn link_graph_with_package_tags(
     let mut linked = Vec::new();
     for (package_name, package) in &graph.packages {
         for module in package.modules.values() {
+            if package_name == CHELIS_STD_PACKAGE_NAME
+                && !stdlib_modules.contains(&module.module_name)
+            {
+                continue;
+            }
             let entry = package_name == &graph.root_package
                 && entry_modules
                     .iter()
@@ -9039,7 +9281,29 @@ fn build_name_resolver(
             .ok_or_else(|| format!("package `{import_pkg}` missing"))?;
         let internal_map = internal_maps
             .get(&(import_pkg.clone(), import_module.clone()))
-            .ok_or_else(|| format!("missing internal map for module `{import_module}`"))?;
+            .ok_or_else(|| {
+                if import_pkg == CHELIS_STD_PACKAGE_NAME
+                    && module.package_name == CHELIS_STD_PACKAGE_NAME
+                {
+                    // chelis#2558: a linked chelis-std module's imports are
+                    // linked with it, so this module is not linked either.
+                    format!(
+                        "standard-library module `{}` imports `{import_module}`, which is not \
+                         linked into this prepared package graph: only linked \
+                         standard-library modules may be rewritten against it",
+                        module.module_name
+                    )
+                } else if import_pkg == CHELIS_STD_PACKAGE_NAME {
+                    // chelis#2558: the graph links only the chelis-std
+                    // modules its caller declared through `EntryImports`.
+                    format!(
+                        "standard-library module `{import_module}` is not linked into this \
+                         prepared package graph: it was prepared without this entry's imports"
+                    )
+                } else {
+                    format!("missing internal map for module `{import_module}`")
+                }
+            })?;
         // spec/02 Import/Export: visibility is module-scoped, not package-scoped.
         // Local helpers remain in module_internal; importing a sibling module
         // does not grant access to its explicitly unexported bindings (#1878).
@@ -13239,14 +13503,22 @@ module_prefix = "Stray"
         let graph = prepare_reef_graph(&root).expect("prepare graph");
         let digests = graph.source_digests().expect("source_digests");
         // Sort key invariant: digests are returned in (pkg, ver, mod)
-        // order. Validate the count and the load-bearing ordering for
-        // the fixture's two known modules.
+        // order. Validate the count and the ordering for the fixture's two
+        // known modules. The implicit chelis-std runtime (chelis#2414) is
+        // in every graph and contributes its own rows.
+        let fixture_digests = digests
+            .iter()
+            .filter(|d| d.package_name != CHELIS_STD_PACKAGE_NAME)
+            .count();
         assert_eq!(
-            digests.len(),
-            5,
-            "got {} digests: {:?}",
-            digests.len(),
+            fixture_digests, 5,
+            "got {fixture_digests} fixture digests: {digests:?}"
+        );
+        assert!(
             digests
+                .iter()
+                .any(|d| d.package_name == CHELIS_STD_PACKAGE_NAME),
+            "the implicit runtime must contribute source digests: {digests:?}"
         );
         assert!(
             digests
@@ -13568,6 +13840,169 @@ module_prefix = "RegistryLib"
             restored.internal_maps.len(),
             "internal maps survive round-trip"
         );
+    }
+
+    /// chelis#2414: manifest resolution and lockfile reconstruction yield the
+    /// same package set, and both carry the implicit `chelis-std` runtime even
+    /// though the manifest never names it and a hand-edited lock omits it.
+    #[test]
+    fn manifest_and_lockfile_graphs_carry_the_same_implicit_runtime() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        let from_manifest =
+            resolve_package_graph(&root, LoadOptions { auto_fetch: false }).expect("manifest");
+        let lock = build_lockfile(&from_manifest);
+        let from_lock =
+            reconstruct_graph_from_lockfile(&root, &lock, LoadOptions { auto_fetch: false })
+                .expect("lockfile");
+        let mut runtime_free_lock = lock.clone();
+        runtime_free_lock
+            .dependencies
+            .retain(|dep| dep.name != CHELIS_STD_PACKAGE_NAME);
+        let from_runtime_free_lock = reconstruct_graph_from_lockfile(
+            &root,
+            &runtime_free_lock,
+            LoadOptions { auto_fetch: false },
+        )
+        .expect("lockfile without runtime entry");
+
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+
+        let packages = |graph: &PackageGraph| graph.packages.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            packages(&from_manifest),
+            vec![
+                CHELIS_STD_PACKAGE_NAME.to_string(),
+                "myapp".into(),
+                "mylib".into()
+            ]
+        );
+        assert_eq!(packages(&from_manifest), packages(&from_lock));
+        assert_eq!(packages(&from_manifest), packages(&from_runtime_free_lock));
+        let std_modules = |graph: &PackageGraph| {
+            graph.packages[CHELIS_STD_PACKAGE_NAME]
+                .modules
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(std_modules(&from_manifest).contains(&"Std.Io.Json".to_string()));
+        assert_eq!(std_modules(&from_manifest), std_modules(&from_lock));
+        assert_eq!(
+            std_modules(&from_manifest),
+            std_modules(&from_runtime_free_lock)
+        );
+    }
+
+    /// chelis#2558: `chelis reef build` and `package_schema` link the root
+    /// package, its dependencies, and only the chelis-std modules they
+    /// import. Each linked chelis-std declaration is attributed to its
+    /// module through the linker's own internal names.
+    #[test]
+    fn a_package_build_links_only_the_stdlib_modules_it_imports() {
+        let _guard = lock_reef_home_env();
+        let dir = tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+        let package = |name: &str, main: &str| {
+            let root = dir.path().join(name);
+            write(
+                &root.join("reef.toml"),
+                &format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+                ),
+            );
+            write(&root.join("src/main.ch"), main);
+            let graph = resolve_package_graph(&root, LoadOptions { auto_fetch: false })
+                .expect("resolve package graph");
+            let (_, decls) = link_package_for_build(&graph).expect("link for build");
+            let stdlib = &graph.packages[CHELIS_STD_PACKAGE_NAME];
+            let mut owner = BTreeMap::new();
+            for module in stdlib.modules.values() {
+                for symbol in module.symbols.keys() {
+                    owner.insert(
+                        internal_name(CHELIS_STD_PACKAGE_NAME, &module.module_name, symbol),
+                        module.module_name.clone(),
+                    );
+                }
+            }
+            decls
+                .iter()
+                .filter_map(|decl| match decl {
+                    Decl::FunDef { name, .. }
+                    | Decl::LetDef { name, .. }
+                    | Decl::Sig { name, .. }
+                    | Decl::TypeDef { name, .. }
+                    | Decl::TypeAlias { name, .. } => owner.get(name).cloned(),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let no_import = package(
+            "noimp",
+            "module Probe.Main\nexport (main)\ndef main() -> i64 = cast(1, i64)\n",
+        );
+        let json = package(
+            "json",
+            "module Probe.Main\nimport Std.Io.Json (try_parse_json)\nexport (parses)\n\
+             def parses() -> bool = match try_parse_json(\"{}\") with {\n  | Some(_) => true\n  | None => false\n}\n",
+        );
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+
+        assert_eq!(no_import, BTreeSet::new());
+        // `Std.Io.Json` imports `Std.Text`; nothing else is reachable.
+        assert_eq!(
+            json,
+            BTreeSet::from(["Std.Io.Json".to_string(), "Std.Text".to_string()])
+        );
+    }
+
+    /// Negative parity for chelis#2558: rewriting a chelis-std module the
+    /// prepared graph did not link is refused, and the error names that
+    /// standard-library module rather than blaming an entry's imports.
+    #[test]
+    fn rewriting_an_unlinked_stdlib_module_names_the_stdlib_module() {
+        let _guard = lock_reef_home_env();
+        let dir = tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+        let root = dir.path().join("noimp");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"noimp\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Probe.Main\nexport (main)\ndef main() -> i64 = cast(1, i64)\n",
+        );
+        let graph = prepare_reef_graph(&root);
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+        let graph = graph.expect("prepare graph");
+        assert_eq!(graph.linked_stdlib_modules(), BTreeSet::new());
+        // `Std.Io.Json` imports `Std.Text`.
+        let json = &graph.graph.packages[CHELIS_STD_PACKAGE_NAME].modules["Std.Io.Json"];
+        let error =
+            rewrite_module_decls(json, &graph.graph, &graph.internal_maps, &graph.dep_shells)
+                .expect_err("Std.Text is not linked");
+        assert!(
+            error.contains("standard-library module `Std.Io.Json` imports `Std.Text`"),
+            "{error}"
+        );
+        assert!(!error.contains("entry"), "{error}");
     }
 
     #[test]
