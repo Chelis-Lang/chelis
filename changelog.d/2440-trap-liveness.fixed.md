@@ -45,7 +45,8 @@ refuse the `if` with a typed error
 runs it as host control flow or refuses to build it.
 `where` no longer reads or shape-checks a branch
 its condition selects in no element, so a condition that selects one branch
-everywhere returns that branch at its own shape. Under `grad`
+everywhere returns that branch, which must still be shaped like the
+condition. Under `grad`
 such an arm also contributes exactly nothing to the gradient, even where the
 values it computes are not finite, so a `log` of zero in an untaken arm, or
 of the zeros an untaken draw yields, no longer turns the gradient into NaN;

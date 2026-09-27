@@ -415,3 +415,79 @@ fn key_tensors_keep_their_storage_callables() {
         chelis_tensor_release(source);
     }
 }
+
+const WHERE_CHILD_ENV: &str = "CHELIS_OP53_WHERE_CHILD";
+
+/// A bool condition of `flags`, and f32 branches of `then_len` and
+/// `else_len` elements numbered from 1 and from 11.
+unsafe fn uniform_where_operands(
+    flags: &[u8],
+    then_len: usize,
+    else_len: usize,
+) -> [*mut chelis_tensor; 3] {
+    let condition = tensor(CHELIS_DTYPE_BOOL, &[flags.len() as i64]);
+    write(condition, flags);
+    let then_tensor = tensor(CHELIS_DTYPE_F32, &[then_len as i64]);
+    write(
+        then_tensor,
+        &(1..=then_len).map(|v| v as f32).collect::<Vec<_>>(),
+    );
+    let else_tensor = tensor(CHELIS_DTYPE_F32, &[else_len as i64]);
+    write(
+        else_tensor,
+        &(11..11 + else_len).map(|v| v as f32).collect::<Vec<_>>(),
+    );
+    [condition, then_tensor, else_tensor]
+}
+
+/// [05-OP-53]: the condition's shape equals the shape of every branch it
+/// selects, and a branch it selects nowhere is neither read nor
+/// shape-checked. A uniform condition shaped like its selected branch yields
+/// that branch whatever the other branch's extent; one shaped unlike it is
+/// refused with the runtime's shape trap.
+///
+/// Evidentiary status: REGRESSION TEST for the refused rows (at 1a026f823
+/// each returns its selected branch); DISPOSITION LOCK for the accepted rows.
+#[test]
+fn where_refuses_a_uniform_condition_shaped_unlike_its_selected_branch() {
+    if let Ok(case) = env::var(WHERE_CHILD_ENV) {
+        unsafe {
+            let [condition, then_tensor, else_tensor] = match case.as_str() {
+                "uniform-true" => uniform_where_operands(&[1, 1, 1], 2, 3),
+                "uniform-false" => uniform_where_operands(&[0, 0, 0], 3, 2),
+                other => panic!("unknown where case: {other}"),
+            };
+            chelis_tensor_where(condition, then_tensor, else_tensor);
+        }
+        panic!("where case `{case}` returned instead of terminating");
+    }
+    unsafe {
+        for (flags, then_len, else_len, expected) in [
+            (&[1_u8, 1][..], 2, 3, vec![1.0_f32, 2.0]),
+            (&[0_u8, 0, 0][..], 2, 3, vec![11.0_f32, 12.0, 13.0]),
+        ] {
+            let operands = uniform_where_operands(flags, then_len, else_len);
+            let selected = chelis_tensor_where(operands[0], operands[1], operands[2]);
+            assert_eq!(read::<f32>(selected), expected, "{flags:?}");
+            chelis_tensor_release(selected);
+            for operand in operands {
+                chelis_tensor_release(operand);
+            }
+        }
+    }
+    let test_binary = env::current_exe().expect("current test binary");
+    for case in ["uniform-true", "uniform-false"] {
+        let output = Command::new(&test_binary)
+            .env(WHERE_CHILD_ENV, case)
+            .arg("--exact")
+            .arg("where_refuses_a_uniform_condition_shaped_unlike_its_selected_branch")
+            .arg("--nocapture")
+            .output()
+            .expect("run where child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("where expects matching tensor shape"),
+            "where case `{case}` was not refused with the shape trap:\n{stderr}"
+        );
+    }
+}

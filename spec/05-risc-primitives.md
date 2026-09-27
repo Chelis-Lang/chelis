@@ -3520,10 +3520,11 @@ path even though bare `round` under `grad` remains a structural
 > element is silently narrowed.
 >
 > Result: Where selects stored bits directly from the chosen branch without
-> converting bool to numeric. Its shape agreement binds only the branches its
-> condition selects: a branch selected in no element is neither read nor
-> shape-checked, so a condition selecting one branch in every element yields
-> that branch, and an empty condition yields an empty result of its own shape.
+> converting bool to numeric. The condition's shape must equal the shape of
+> each branch it selects in some element; a branch selected in no element is
+> neither read nor shape-checked, so a condition selecting one branch in every
+> element yields that branch, and an empty condition yields an empty result of
+> its own shape.
 > Cumsum returns inclusive axis-prefix sums;
 > sort orders each axis slice using [05-OP-33]'s NaN/tie rule; diagonal uses
 > that atom's axis ordering, and trace sums the diagonal. Clamp follows the

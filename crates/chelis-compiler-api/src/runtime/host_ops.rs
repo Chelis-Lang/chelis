@@ -2548,12 +2548,16 @@ pub(super) fn tensor_where_value(
         .storage()
         .to_i64_exact_vec()
         .expect("bool tensor storage reads exactly");
-    // [05-OP-53]: shapes agree only across what the condition selects. A
-    // branch selected nowhere is neither read nor shape-checked.
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked.
     let then_selected = cond_mask.iter().any(|flag| *flag != 0);
     let else_selected = cond_mask.contains(&0);
+    let shape_error =
+        || "where expects condition and both branches to have identical shape".to_string();
     match (then_selected, else_selected) {
+        (true, false) if cond.value.shape != then_tensor.value.shape => return Err(shape_error()),
         (true, false) => return Ok(then_tensor.clone()),
+        (false, true) if cond.value.shape != else_tensor.value.shape => return Err(shape_error()),
         (false, true) => return Ok(else_tensor.clone()),
         (false, false) => {
             return Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
@@ -2566,9 +2570,7 @@ pub(super) fn tensor_where_value(
     if cond.value.shape != then_tensor.value.shape
         || then_tensor.value.shape != else_tensor.value.shape
     {
-        return Err(
-            "where expects condition and both branches to have identical shape".to_string(),
-        );
+        return Err(shape_error());
     }
     // reuse_* contract: `where` selects existing elements from the two
     // branches (section C3, element-preserving). Start from the then

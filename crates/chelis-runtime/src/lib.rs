@@ -6300,10 +6300,10 @@ pub unsafe extern "C" fn chelis_tensor_where(
             diagnostic_dtype_name(else_dtype)
         );
     }
-    // [05-OP-53]: shapes agree only across what the condition selects. A
-    // branch selected nowhere is neither read nor shape-checked, so a
-    // condition selecting one branch everywhere yields that branch, and an
-    // empty condition yields an empty result of its own shape.
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked,
+    // so a condition selecting one branch everywhere yields that branch, and
+    // an empty condition yields an empty result of its own shape.
     let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
     let (mut then_selected, mut else_selected) = (false, false);
     for i in 0..(*cond).count() {
@@ -6314,8 +6314,14 @@ pub unsafe extern "C" fn chelis_tensor_where(
         }
     }
     let shape_source = match (then_selected, else_selected) {
-        (true, false) => then_tensor,
-        (false, true) => else_tensor,
+        (true, false) => {
+            require_same_tensor_shape_validated(cond, then_tensor, "where");
+            then_tensor
+        }
+        (false, true) => {
+            require_same_tensor_shape_validated(cond, else_tensor, "where");
+            else_tensor
+        }
         (false, false) => cond,
         (true, true) => {
             require_same_tensor_shape_validated(cond, then_tensor, "where");

@@ -3713,10 +3713,10 @@ impl CEmitter {
         self.emit_realize(id, &inputs[1..], ty);
     }
 
-    /// [05-OP-53]: shapes agree only across what the condition selects. A
-    /// branch selected nowhere is neither read nor shape-checked, so a
-    /// condition selecting one branch everywhere yields that branch; the
-    /// condition itself is checked when it mixes or is empty, the evaluator's
+    /// [05-OP-53]: the condition's shape equals the shape of every branch it
+    /// selects. A branch selected nowhere is neither read nor shape-checked,
+    /// so a condition selecting one branch everywhere yields that branch; the
+    /// condition itself is always checked, the evaluator's
     /// `where_elementwise` rule.
     fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let condition = inputs[0].0;
@@ -3739,10 +3739,10 @@ impl CEmitter {
         self.line("}");
         self.line(&format!("const int {mixed} = {then_read} && {else_read};"));
         // Each distinct operand's step is taken, and its shape checked, only
-        // under the roles that read it.
+        // under the roles that read it; the condition's role always does.
         let mut reads: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         for (node, read) in [
-            (condition, format!("({then_read} == {else_read})")),
+            (condition, "1".to_string()),
             (then_value, then_read.clone()),
             (else_value, else_read.clone()),
         ] {

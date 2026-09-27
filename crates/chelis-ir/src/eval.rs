@@ -1420,14 +1420,17 @@ fn where_elementwise(
         .storage()
         .to_i64_exact_vec()
         .expect("sealed bool storage has an exact integer view");
-    // [05-OP-53]: shapes agree only across what the condition selects. A
-    // branch selected nowhere is neither read nor shape-checked, so a
-    // condition selecting one branch everywhere yields that branch, and an
-    // empty condition yields an empty result of its own shape.
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked,
+    // so a condition selecting one branch everywhere yields that branch, and
+    // an empty condition yields an empty result of its own shape.
     let then_selected = condition_values.iter().any(|selected| *selected != 0);
     let else_selected = condition_values.contains(&0);
+    let shape_error = || "where: condition and branch shapes must match exactly".to_string();
     match (then_selected, else_selected) {
+        (true, false) if condition.shape != then_value.shape => return Err(shape_error()),
         (true, false) => return Ok(then_value.clone()),
+        (false, true) if condition.shape != else_value.shape => return Err(shape_error()),
         (false, true) => return Ok(else_value.clone()),
         (false, false) => {
             return Ok(TensorValue::from_storage(
@@ -1438,7 +1441,7 @@ fn where_elementwise(
         (true, true) => {}
     }
     if condition.shape != then_value.shape || then_value.shape != else_value.shape {
-        return Err("where: condition and branch shapes must match exactly".into());
+        return Err(shape_error());
     }
     let writes = condition_values
         .into_iter()
@@ -5549,14 +5552,18 @@ mod tests {
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
 
-    /// [05-OP-53]: a branch the condition selects nowhere is neither read
-    /// nor shape-checked. A uniform condition yields the selected branch at
-    /// its own shape, an empty one an empty result of its shape, and a mixed
-    /// one still requires every shape to agree (decisions section 25).
+    /// [05-OP-53]: the condition's shape equals the shape of every branch it
+    /// selects, and a branch it selects nowhere is neither read nor
+    /// shape-checked. A uniform condition yields the selected branch when
+    /// that branch is shaped like the condition, whatever the other branch's
+    /// shape, and is refused when it is not; an empty one yields an empty
+    /// result of its shape, and a mixed one still requires every shape to
+    /// agree (decisions section 25).
     ///
-    /// Evidentiary status: REGRESSION TEST for the uniform and empty rows
-    /// (each fails the shape check at 096daea8c); DISPOSITION LOCK for the
-    /// mixed row.
+    /// Evidentiary status: REGRESSION TEST for the accepted uniform and
+    /// empty rows (each fails the shape check at 096daea8c) and for the
+    /// refused uniform rows (each returns its selected branch at 1a026f823);
+    /// DISPOSITION LOCK for the mixed rows.
     #[test]
     fn where_checks_only_the_branches_its_condition_selects() {
         let condition = |flags: &[i64]| {
@@ -5567,9 +5574,16 @@ mod tests {
         let selected = where_elementwise(&condition(&[1, 1]), &two, &three).unwrap();
         assert_eq!(selected.shape, vec![2]);
         assert_eq!(selected.to_f64_lossy_vec(), vec![7.0, 8.0]);
-        let selected = where_elementwise(&condition(&[0, 0]), &two, &three).unwrap();
+        let selected = where_elementwise(&condition(&[0, 0, 0]), &two, &three).unwrap();
         assert_eq!(selected.shape, vec![3]);
         assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+        for flags in [&[1, 1, 1][..], &[0, 0][..]] {
+            assert_eq!(
+                where_elementwise(&condition(flags), &two, &three).unwrap_err(),
+                "where: condition and branch shapes must match exactly",
+                "{flags:?}"
+            );
+        }
         let empty = where_elementwise(&condition(&[]), &two, &three).unwrap();
         assert_eq!(empty.shape, vec![0]);
         assert_eq!(empty.prim(), Prim::F64);

@@ -968,14 +968,17 @@ fn an_untaken_claimed_arm_checks_nothing_and_a_taken_one_traps_in_eval_file_and_
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
-/// [05-OP-53] in the host interpreter's `where` builtin: a branch the
-/// condition selects nowhere is not shape-checked, so a uniform condition
-/// returns its branch at that branch's extent, and a mixed condition over
-/// branches of different extents still fails with the typed shape error
-/// (decisions section 25). `b` is `a` without its last element.
+/// [05-OP-53] in the host interpreter's `where` builtin: the condition's
+/// shape equals the shape of every branch it selects, and a branch it selects
+/// nowhere is not shape-checked. A uniform condition returns its branch when
+/// that branch is shaped like the condition, whatever the other branch's
+/// extent, and fails with the typed shape error when it is not; a mixed
+/// condition over branches of different extents fails with it too (decisions
+/// section 25). `b` is `a` without its last element.
 ///
-/// Evidentiary status: REGRESSION TEST for the uniform rows (each fails the
-/// shape check at 096daea8c); DISPOSITION LOCK for the mixed row.
+/// Evidentiary status: REGRESSION TEST for the two refused uniform rows (at
+/// 1a026f823 each returns its selected branch); DISPOSITION LOCK for the
+/// accepted uniform rows and the mixed row.
 #[test]
 fn the_where_builtin_checks_only_the_branches_its_condition_selects_in_eval_file() {
     let source = "def pick(c: tensor[*, bool], a: tensor[*, f32], b: tensor[*, f32]) -> tensor[*, f32] = where(&c, &a, &b)
@@ -985,6 +988,7 @@ def main() -> tensor[*, f32] = {
   pick(to_tensor({c}), a, b)
 }
 ";
+    let shape_error = "where expects condition and both branches to have identical shape";
     let directory = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
     for (index, (condition, expected)) in [
@@ -993,13 +997,12 @@ def main() -> tensor[*, f32] = {
             Ok("main = tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
         ),
         (
-            "[false, false, false]",
+            "[false, false]",
             Ok("main = tensor(shape=[2], data=[1.0, 2.0])"),
         ),
-        (
-            "[true, false, true]",
-            Err("where expects condition and both branches to have identical shape"),
-        ),
+        ("[true, true]", Err(shape_error)),
+        ("[false, false, false]", Err(shape_error)),
+        ("[true, false, true]", Err(shape_error)),
     ]
     .into_iter()
     .enumerate()
@@ -1013,6 +1016,67 @@ def main() -> tensor[*, f32] = {
             (Ok(stdout), Ok(line)) if stdout.trim() == line => {}
             (Err(stderr), Err(error)) if stderr.contains(error) => {}
             _ => failures.push(format!("{condition}: {outcome:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// [05-OP-53]: a uniform condition shaped unlike the branch it selects, by
+/// extent, by axis order, or with the unselected branch shaped like the
+/// selected one, is refused. The host interpreter fails with the typed shape
+/// error; the whole-program C refuses to build the graph, whose operand types
+/// already disagree.
+///
+/// Evidentiary status: REGRESSION TEST for every H row (at 1a026f823 each
+/// returns its selected branch); DISPOSITION LOCK for the C rows.
+#[test]
+fn a_condition_shaped_unlike_its_selected_branch_is_refused_in_eval_file_and_c() {
+    let pick = |rank: &str| {
+        format!(
+            "def pick(c: tensor[{rank}bool], a: tensor[{rank}f32], b: tensor[{rank}f32]) -> tensor[{rank}f32] = where(c, a, b)\n"
+        )
+    };
+    let rows = [
+        (
+            "an all-true condition longer than its branch",
+            format!(
+                "{}def main() -> tensor[*, f32] = pick(to_tensor([true, true, true, true, true]), to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32]))\n",
+                pick("*, ")
+            ),
+        ),
+        (
+            "an all-true condition transposed against its branch",
+            format!(
+                "{}def main() -> tensor[*, *, f32] = pick(to_tensor([[true, true, true], [true, true, true]]), to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32], [5.0f32, 6.0f32]]), to_tensor([[7.0f32, 8.0f32], [9.0f32, 1.0f32], [2.0f32, 3.0f32]]))\n",
+                pick("*, *, ")
+            ),
+        ),
+        (
+            "an all-false condition longer than both branches",
+            format!(
+                "{}def main() -> tensor[*, f32] = pick(to_tensor([false, false, false, false]), to_tensor([1.0f32]), to_tensor([9.0f32]))\n",
+                pick("*, ")
+            ),
+        ),
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for (index, (row, source)) in rows.iter().enumerate() {
+        let stem = format!("where_selected_{index}");
+        let h = h_file(directory.path(), &stem, source);
+        let h_refused = h.as_ref().is_err_and(|stderr| {
+            stderr.contains("where expects condition and both branches to have identical shape")
+        });
+        if !h_refused {
+            failures.push(format!("{row}, H: {h:?}"));
+        }
+        let c = c_file(directory.path(), &stem, source);
+        let c_refused = c.as_ref().is_err_and(|stderr| {
+            stderr.starts_with("build: ")
+                && stderr.contains("condition and branches must have exactly matching shape")
+        });
+        if !c_refused {
+            failures.push(format!("{row}, C: {c:?}"));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
