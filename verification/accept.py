@@ -475,14 +475,19 @@ def reject_sorry(chain: str, plan: dict, run: Path) -> None:
 
 
 def validate_shell(chain: str, shell: dict) -> None:
-    """The shell report must list exactly verification/native_shell.json, bind every
-    boundary item to a Lean model, and show no extracted item reaching shell internals."""
+    """The shell report must list exactly verification/native_shell.json, select
+    exactly the members an entry pins, bind every boundary item to a Lean model,
+    and show no extracted item reaching shell internals."""
     declared = json.loads((VERIFICATION / "native_shell.json").read_text())["items"]
     reported = shell.get("items", {})
     if set(reported) != {item["pattern"] for item in declared}:
         raise AcceptanceFailure(f"{chain}: native shell report differs from native_shell.json")
     for item in declared:
         entry = reported[item["pattern"]]
+        if "members" in item and sorted(entry.get("members", [])) != sorted(item["members"]):
+            raise AcceptanceFailure(
+                f"{chain}: shell entry {item['pattern']} selects {sorted(entry.get('members', []))}, "
+                f"not its pinned members")
         if item["kind"] in SHELL_BOUNDARY and not entry.get("lean_model"):
             raise AcceptanceFailure(f"{chain}: shell boundary item {item['pattern']} has no Lean model")
         if item["kind"] in SHELL_INTERNAL and entry.get("core_dependents"):

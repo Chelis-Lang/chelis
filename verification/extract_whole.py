@@ -146,7 +146,10 @@ class ExtractionFailure(RuntimeError):
 
 def load_native_shell() -> list[dict]:
     """verification/native_shell.json: the FCIS imperative shell, never extracted.
-    Every chunk (and every planner dump) makes these patterns opaque."""
+    Every chunk (and every planner dump) makes these patterns opaque. An entry may
+    pin the exact local items it selects (`members`); an entry naming an anonymous
+    item (`_`, `_#N`: rustc numbers these in source order, so an edit elsewhere in
+    the module renumbers them) must, so that it cannot silently select another item."""
     items = json.loads(NATIVE_SHELL.read_text())["items"]
     patterns = [item["pattern"] for item in items]
     if len(set(patterns)) != len(patterns):
@@ -154,6 +157,13 @@ def load_native_shell() -> list[dict]:
     for item in items:
         if item["kind"] not in SHELL_BOUNDARY + SHELL_INTERNAL or not item.get("justification"):
             raise ExtractionFailure(f"{NATIVE_SHELL}: bad entry {item}")
+        members = item.get("members")
+        if members is not None and (not members or not all(isinstance(m, str) for m in members)
+                                    or len(set(members)) != len(members)):
+            raise ExtractionFailure(f"{NATIVE_SHELL}: bad members of {item['pattern']}")
+        if members is None and any(re.fullmatch(r"_(#\d+)?", part) for part in split_top(item["pattern"])):
+            raise ExtractionFailure(f"{NATIVE_SHELL}: {item['pattern']} names an anonymous item "
+                                    "and must pin its members")
     return items
 
 

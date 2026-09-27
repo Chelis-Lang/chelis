@@ -32,7 +32,8 @@ The FCIS imperative shell (verification/native_shell.json) is never extracted:
 the dumps and every chunk make its patterns opaque, no chunk owns its items,
 and the plan's `native_shell` section lists, per shell pattern, its kind, its
 local items and `core_dependents` (the non-shell local items with a deps edge
-into it). A shell pattern that selects no local item rejects the plan.
+into it). A shell pattern that selects no local item, or other local items than
+the `members` its entry pins, rejects the plan.
 
 Chains: `default` extracts all crates with default features. `lowering-trace`
 enables the feature on chelis-ir and chelis-pipeline-core; their chunks get the
@@ -446,6 +447,11 @@ def main() -> None:
     unmatched = sorted(pattern for pattern, entry in shell_report.items() if not entry["members"])
     if unmatched:
         raise ExtractionFailure(f"native_shell.json patterns select no local item: {unmatched}")
+    for item in shell:
+        selected = sorted(member["name"] for member in shell_report[item["pattern"]]["members"])
+        if "members" in item and selected != sorted(item["members"]):
+            raise ExtractionFailure(f"native_shell.json pattern {item['pattern']} selects {selected}, "
+                                    f"not its pinned members {sorted(item['members'])}")
     for entry in shell_report.values():
         entry["members"].sort(key=lambda member: (member["kind"], member["name"]))
         entry["core_dependents"] = sorted(entry["core_dependents"])
