@@ -25,8 +25,11 @@ outside this run's evidence directory.
 
 The executed program and bitwise driver reuse the maintained manifested callable
 smoke fixture. The installed CLI generates C; runtime/header outputs must match
-the installed archive. C is copied to a header-free consumer directory, compiled
-with the **shipped** headers, and linked with the **shipped** static runtime.
+the installed archive, and the staging receipt must record a `sealed` build of
+that archive. A development build would also stage here, because the runner
+holds the checkout it was built from. C is copied to a header-free consumer
+directory, compiled with the **shipped** headers, and linked with the
+**shipped** static runtime.
 Three native invocations check every result bit, dtype, ordered shape and both
 unchanged input buffers. An unavailable automatic root must reject before leaving
 an artifact. Two separately compiled caller-side fault injections corrupt the

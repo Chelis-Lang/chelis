@@ -105,6 +105,33 @@ def verify_installed(root: Path, inventory: dict[str, str]) -> None:
             raise ValueError(f"installed bytes differ: {relative}")
 
 
+def require_staged_runtime(output: Path, inventory: dict[str, str]) -> None:
+    """Require `chelis build` to stage the shipped runtime from a sealed build.
+
+    The staged runtime is the one the installed chelis carries, and the tarball
+    must ship those same bytes (spec/08-backends.md §2.1). A release binary must
+    also be sealed: a development build would stage here too, because this
+    runner holds the checkout it was built from, so only the staging receipt's
+    mode tells them apart.
+    """
+    archive = inventory["lib/libchelis_runtime.a"]
+    if digest(output / "libchelis_runtime.a") != archive:
+        raise ValueError("generated build used a different runtime archive")
+    for header in HEADERS:
+        if digest(output / Path(header).name) != inventory[header]:
+            raise ValueError(f"embedded/shipped header mismatch: {header}")
+    try:
+        receipt = json.loads((output / "chelis_runtime.receipt.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"unreadable staging receipt: {error}") from None
+    expected = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",
+                "archive_sha256": archive, "mode": "sealed"}
+    observed = {key: receipt.get(key) for key in expected} if isinstance(receipt, dict) else None
+    if observed != expected:
+        raise ValueError(f"staging receipt is not the shipped sealed runtime: {observed}")
+
+
+
 def installer_archive(source: Path, destination: Path, *, candidate: bool,
                       version: str, slug: str) -> None:
     """chelisup requires a chelis-v* archive root, even for local candidates.
@@ -264,13 +291,7 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     source.write_text(fixture.ADD_PROGRAM)
     output = root / "generated"
     runner.run("build", [shim, "build", source, "--output", output])
-    # The staged runtime is the one the installed chelis carries; the tarball
-    # must ship those same bytes (spec/08-backends.md §2.1).
-    if digest(output / "libchelis_runtime.a") != inventory["lib/libchelis_runtime.a"]:
-        raise ValueError("generated build used a different runtime archive")
-    for header in HEADERS:
-        if digest(output / Path(header).name) != inventory[header]:
-            raise ValueError(f"embedded/shipped header mismatch: {header}")
+    require_staged_runtime(output, inventory)
     # Quoted includes search the source directory first. Move only generated C
     # into a header-free directory, then explicitly use shipped include/lib.
     consumer = root / "consumer"
