@@ -63,19 +63,32 @@ MODELS = {
     "retain_closure_state": "RetainClosureState",
     "str_pattern_models": "StrPatternModels",
     "iterator_consumer_models": "IteratorConsumerModels",
+    "thiserror_models": "ThiserrorModels",
     "owned_rev_models": "OwnedRevModels",
     "provided_method_models": "ProvidedMethodModels",
     "collection_std_models": "CollectionStdModels",
+    "int_method_models": "IntMethodModels",
+    "slice_str_models": "SliceStrModels",
+    "hash_models": "HashModels",
+    "char_case_models": "CharCaseModels",
+    "slice_search_models": "SliceSearchModels",
+    "scalar_ref_models": "ScalarRefModels",
+    "collection_misc_models": "CollectionMiscModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
 # name, so that the models keyed on production paths replace their primitives.
-MODEL_CRATES = {"lowering_runtime_models": "chelis_ir"}
+MODEL_CRATES = {"lowering_runtime_models": "chelis_ir", "thiserror_models": "thiserror"}
 
 # The native shell of a primitives fixture: the items of
 # verification/native_shell.json under this prefix, hard-opaque as in the
 # production extraction.
 MODEL_SHELLS = {"lowering_runtime_models": "chelis_ir::lowering_runtime::"}
+
+# Fixtures of a dependency crate's items (compiled under the dependency's crate name, see
+# MODEL_CRATES) copy those items verbatim; they are hard-opaque, as the items of a
+# dependency are in production, so that its library models replace them.
+MODEL_DEPENDENCIES = {"thiserror_models": ("thiserror::display",)}
 
 # Retain the post-move discriminant checks produced by drop elaboration.
 MODEL_MIR = {"move_cleanup": "elaborated"}
@@ -301,6 +314,8 @@ def charon_command(
         "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry}",
         *[argument for entry in roots for argument in ("--start-from", entry)],
         *[argument for entry in shell_patterns(name) for argument in ("--opaque-hard", entry)],
+        *[argument for entry in MODEL_DEPENDENCIES.get(name, ())
+          for argument in ("--opaque-hard", entry)],
         "--", f"--edition={MODEL_EDITIONS.get(name, '2021')}", "--crate-type=lib",
         *crate_arguments(name), str(source),
     ]

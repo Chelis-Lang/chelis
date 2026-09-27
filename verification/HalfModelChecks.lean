@@ -119,7 +119,7 @@ def main : IO Unit := do
         h := fnv h (ok! (F16.from_f64 (f64 (sign <<< 63 ||| exp <<< 52 ||| m)))).bits.toNat
       IO.println s!"f64-to-f16-{sign}-{exp}={h}"
   for hi in List.range 256 do
-    let mut hs := List.replicate 6 fnvStart
+    let mut hs := List.replicate 8 fnvStart
     for lo in List.range 256 do
       let bits := hi <<< 8 ||| lo
       let x := f16 bits
@@ -127,10 +127,10 @@ def main : IO Unit := do
       let values := [(ok! (F16.to_f32 x)).bits.toNat,
         (ok! (half.binary16.FromF64F16.from_ x)).bits.toNat, bool (ok! (F16.is_nan x)),
         (ok! (BF16.to_f32 y)).bits.toNat, (ok! (half.bfloat.FromF64BF16.from_ y)).bits.toNat,
-        bool (ok! (BF16.is_nan y))]
+        bool (ok! (BF16.is_nan y)), bool (ok! (F16.is_finite x)), bool (ok! (BF16.is_finite y))]
       hs := (hs.zip values).map fun (h, v) => fnv h v
     for (label, h) in ["f16-to-f32", "f16-to-f64", "f16-is-nan", "bf16-to-f32", "bf16-to-f64",
-        "bf16-is-nan"].zip hs do
+        "bf16-is-nan", "f16-is-finite", "bf16-is-finite"].zip hs do
       IO.println s!"{label}-{hi}={h}"
   cmpRows "f16" half.binary16.PartialOrdF16 f16 0x7C00 0x3C00
   cmpRows "bf16" half.bfloat.PartialOrdBF16 bf16 0x7F80 0x3F80

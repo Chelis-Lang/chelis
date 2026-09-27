@@ -99,18 +99,19 @@ fn main() {
         }
     }
     for hi in 0..256u64 {
-        let mut hs = [FNV_START; 6];
+        let mut hs = [FNV_START; 8];
         for lo in 0..256u64 {
             let bits = (hi << 8 | lo) as u16;
             let (x, y) = (f16::from_bits(bits), bf16::from_bits(bits));
             let values = [x.to_f32().to_bits() as u64, f64::from(x).to_bits(), x.is_nan() as u64,
-                y.to_f32().to_bits() as u64, f64::from(y).to_bits(), y.is_nan() as u64];
+                y.to_f32().to_bits() as u64, f64::from(y).to_bits(), y.is_nan() as u64,
+                x.is_finite() as u64, y.is_finite() as u64];
             for (h, v) in hs.iter_mut().zip(values) {
                 *h = fnv(*h, v);
             }
         }
         for (label, h) in ["f16-to-f32", "f16-to-f64", "f16-is-nan", "bf16-to-f32", "bf16-to-f64",
-            "bf16-is-nan"].into_iter().zip(hs) {
+            "bf16-is-nan", "f16-is-finite", "bf16-is-finite"].into_iter().zip(hs) {
             println!("{label}-{hi}={h}");
         }
     }
