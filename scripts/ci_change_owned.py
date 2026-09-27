@@ -59,7 +59,7 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 3
 PLAN_VERSION = 5
-RECEIPT_VERSION = 2
+RECEIPT_VERSION = 3
 STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
 DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
@@ -2487,6 +2487,9 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         "failures",
         "receipt_digest",
     }
+    version = receipt.get("version")
+    if version == RECEIPT_VERSION:
+        expected_keys |= {"reused_targets", "reused_tests", "fast_reuse_digest"}
     if set(receipt) != expected_keys:
         raise ValueError(
             f"receipt schema keys mismatch: "
@@ -2495,9 +2498,9 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         )
     if (
         type(receipt.get("version")) is not int
-        or receipt["version"] != RECEIPT_VERSION
+        or receipt["version"] not in (2, RECEIPT_VERSION)
     ):
-        raise ValueError(f"receipt version must be {RECEIPT_VERSION}")
+        raise ValueError(f"receipt version must be 2 or {RECEIPT_VERSION}")
     lane = receipt.get("lane")
     if lane not in LANE_KEYS:
         raise ValueError(f"invalid receipt lane: {lane!r}")
@@ -2518,6 +2521,32 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
             TestIdentity.parse(row)
         if len(rows) != len(set(rows)):
             raise ValueError(f"receipt {key} contains duplicates")
+    if version == RECEIPT_VERSION:
+        _identity_list(receipt, "reused_targets")
+        reused_tests = receipt["reused_tests"]
+        if (
+            not isinstance(reused_tests, list)
+            or any(not isinstance(test, str) for test in reused_tests)
+            or reused_tests != sorted(set(reused_tests))
+        ):
+            raise ValueError("receipt reused_tests must be sorted unique")
+        for test in reused_tests:
+            TestIdentity.parse(test)
+        if (
+            set(receipt["reused_targets"]) & set(receipt["executed_targets"])
+            or not set(receipt["reused_targets"]) <= set(receipt["selected_targets"])
+            or set(reused_tests) & set(receipt["executed_tests"])
+            or {TestIdentity.parse(test).target_identity.canonical
+                for test in reused_tests} != set(receipt["reused_targets"])
+        ):
+            raise ValueError("receipt reused targets/tests overlap execution or are incomplete")
+        fast_digest = receipt["fast_reuse_digest"]
+        if fast_digest is not None and (
+            not isinstance(fast_digest, str) or not DIGEST.fullmatch(fast_digest)
+        ):
+            raise ValueError("receipt fast_reuse_digest must be a SHA-256 digest")
+        if receipt["reused_targets"] and (lane != "package-expansion" or fast_digest is None):
+            raise ValueError("receipt reuse needs package-expansion authorization")
     # A manual-gate test is listed and never run, so it is neither selected
     # nor executed, and only the required lane lists one.
     gate_tests = receipt["manual_gate_tests"]
@@ -3393,6 +3422,7 @@ def execute_shard(
     repo: Path = ROOT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = run_command,
     duration_baseline: DurationBaseline | None = None,
+    fast_reuse: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if duration_baseline is None:
         duration_baseline = load_duration_baseline()
@@ -3415,6 +3445,21 @@ def execute_shard(
     )
     deadline_exhausted = False
     selected = list(execution_shards(plan, lane)[str(shard)])
+    reused_targets: list[str] = []
+    reused_tests: list[str] = []
+    fast_reuse_digest: str | None = None
+    if fast_reuse is not None:
+        if lane != "package-expansion":
+            raise ValueError("Fast reuse belongs only to package expansion")
+        if __package__:
+            from . import ci_expansion_fast_reuse as fast_reuse_module
+        else:
+            import ci_expansion_fast_reuse as fast_reuse_module
+        fast_reuse_module.validate_manifest(plan, fast_reuse, shard)
+        reused_targets = list(fast_reuse["reused_targets"])
+        reused_tests = list(fast_reuse["reused_tests"])
+        fast_reuse_digest = fast_reuse["digest"]
+    selected_for_execution = sorted(set(selected) - set(reused_targets))
     output.mkdir(parents=True, exist_ok=True)
     junit_output = output / "junit.xml"
     timing_output = output / "timings.json"
@@ -3484,7 +3529,7 @@ def execute_shard(
     test_env = os.environ.copy()
 
     build_succeeded = True
-    if selected:
+    if selected_for_execution:
         build_command = [
             "cargo",
             "build",
@@ -3552,7 +3597,7 @@ def execute_shard(
                 test_env["CHELIS_RUNTIME_LIB"] = str(runtime_archive)
 
     if build_succeeded:
-        groups = execution_groups(plan, lane=lane, selected=selected)
+        groups = execution_groups(plan, lane=lane, selected=selected_for_execution)
         for group_index, identities in enumerate(groups):
             if deadline_exhausted:
                 break
@@ -3835,6 +3880,9 @@ def execute_shard(
         "selected_tests": sorted(selected_tests),
         "executed_tests": sorted(executed_tests),
         "manual_gate_tests": sorted(manual_gate_tests),
+        "reused_targets": reused_targets,
+        "reused_tests": reused_tests,
+        "fast_reuse_digest": fast_reuse_digest,
         "commands_file": command_output.name,
         "timings_file": timing_output.name,
         "test_list_file": listing_output.name,
@@ -3863,6 +3911,7 @@ def prepare_shard(
     github_output: Path,
     repo: Path = ROOT,
     duration_baseline: DurationBaseline | None = None,
+    fast_reuse: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Write an empty receipt or tell the hosted worker to prepare execution."""
     if duration_baseline is None:
@@ -3887,6 +3936,7 @@ def prepare_shard(
         output=output,
         repo=repo,
         duration_baseline=duration_baseline,
+        fast_reuse=fast_reuse,
     )
 
 
@@ -4089,7 +4139,9 @@ def classify_expansion_failures(
         selected = receipt.get("selected_targets")
         executed = receipt.get("executed_targets")
         if isinstance(selected, list) and isinstance(executed, list):
-            unrun_targets |= set(selected) - set(executed)
+            unrun_targets |= (
+                set(selected) - set(executed) - set(receipt.get("reused_targets", []))
+            )
         selected_tests = receipt.get("selected_tests")
         executed_tests = receipt.get("executed_tests")
         if isinstance(selected_tests, list) and isinstance(executed_tests, list):
@@ -4515,7 +4567,37 @@ def summarize_package_expansion(
     baseline_unavailable: str | None = None,
     repo: Path = ROOT,
     ancestor_distance: Callable[[Path, str, str], int | None] | None = None,
+    fast_reuse_manifests: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    fast_reuse_manifests = fast_reuse_manifests or {}
+    if fast_reuse_manifests:
+        if __package__:
+            from . import ci_expansion_fast_reuse as fast_reuse_module
+        else:
+            import ci_expansion_fast_reuse as fast_reuse_module
+        for shard in SHARDS:
+            manifest = fast_reuse_manifests.get(shard)
+            if manifest is None:
+                raise ValueError(f"missing Fast reuse manifest for shard {shard}")
+            fast_reuse_module.validate_manifest(plan, manifest, shard)
+    reused_targets: set[str] = set()
+    fast_tests: set[str] = set()
+    for receipt in receipts:
+        shard = receipt.get("shard")
+        manifest = fast_reuse_manifests.get(shard)
+        expected_targets = manifest["reused_targets"] if manifest else []
+        expected_tests = manifest["reused_tests"] if manifest else []
+        expected_digest = (
+            manifest["digest"]
+            if manifest and receipt.get("selected_targets") else None
+        )
+        if (receipt.get("reused_targets", []) != expected_targets
+                or receipt.get("reused_tests", []) != expected_tests
+                or receipt.get("fast_reuse_digest") != expected_digest):
+            raise ValueError(f"shard {shard} Fast reuse differs from authorization")
+        reused_targets.update(expected_targets)
+        if manifest:
+            fast_tests.update(manifest["fast_tests"])
     findings = _report_findings(
         plan,
         receipts,
@@ -4567,7 +4649,25 @@ def summarize_package_expansion(
         "observed_success": observed_success,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["package_expansion"]),
-        "standing_reused_targets": [],
+        "standing_reused_targets": sorted(reused_targets),
+        "fast_overlap_targets": sorted(
+            set(plan["standing_targets"]) & set(plan["package_expansion"])
+        ),
+        "fast_reuse_fallback_targets": sorted(
+            set(plan["standing_targets"]) & set(plan["package_expansion"])
+            - reused_targets
+        ),
+        "known_repeated_fast_tests": sorted(
+            fast_tests & {test for receipt in receipts
+                          for test in receipt["executed_tests"]}
+        ),
+        "fast_overlap_measurement_complete": bool(fast_reuse_manifests)
+        and all(
+            manifest["status"] == "fast_evidence"
+            for shard, manifest in fast_reuse_manifests.items()
+            if set(execution_shards(plan, "package-expansion")[str(shard)])
+            & set(plan["standing_targets"])
+        ),
         "shard_durations": shard_durations(
             plan,
             receipts,
@@ -4794,6 +4894,17 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
                 f"listed: {len(row['listed_tests'])}, run: 0. Run by hand: "
                 f"{MANUAL_GATES_PATH} {entries} ({row['tracking_issue']})"
             )
+    if report["lane"] == "package-expansion":
+        lines.extend([
+            f"- Fast/expansion overlap targets: {len(report.get('fast_overlap_targets', []))}",
+            f"- Fast targets reused: {len(report.get('standing_reused_targets', []))}",
+            f"- Fast overlap targets run by expansion: "
+            f"{len(report.get('fast_reuse_fallback_targets', []))}",
+            f"- Identical Fast test cases rerun (verified sources only): "
+            f"{len(report.get('known_repeated_fast_tests', []))}",
+            f"- Repeated-case measurement complete: "
+            f"{str(report.get('fast_overlap_measurement_complete', False)).lower()}",
+        ])
     lines.extend(_classification_counts(report))
     for row in report.get("shard_durations", []):
         weight = row["estimated_milliseconds"] / 1000
@@ -4949,6 +5060,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_shard.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
     run_shard.add_argument("--shard", type=int, choices=SHARDS, required=True)
     run_shard.add_argument("--output", type=Path, required=True)
+    run_shard.add_argument("--fast-reuse", type=Path)
 
     prepare_shard_parser = subparsers.add_parser(
         "prepare-shard",
@@ -4965,6 +5077,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_shard_parser.add_argument(
         "--github-output", type=Path, required=True
     )
+    prepare_shard_parser.add_argument("--fast-reuse", type=Path)
 
     classify = subparsers.add_parser(
         "classify-paths",
@@ -4999,6 +5112,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
     report.add_argument("--receipts-root", type=Path, required=True)
     report.add_argument("--standing-coverage", type=Path)
+    report.add_argument("--fast-reuse-root", type=Path)
     report.add_argument(
         "--failure-baseline",
         type=Path,
@@ -5060,6 +5174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lane=args.lane,
             shard=args.shard,
             output=args.output,
+            fast_reuse=(load_json(args.fast_reuse) if args.fast_reuse else None),
         )
         print(
             f"{args.lane.upper()} SHARD {args.shard}: "
@@ -5074,6 +5189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             shard=args.shard,
             output=args.output,
             github_output=args.github_output,
+            fast_reuse=(load_json(args.fast_reuse) if args.fast_reuse else None),
         )
         disposition = "EMPTY" if receipt is not None else "SELECTED"
         print(f"{args.lane.upper()} SHARD {args.shard}: {disposition}")
@@ -5179,6 +5295,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 failure_baseline=failure_baseline,
                 baseline_unavailable=baseline_unavailable,
+                fast_reuse_manifests=(
+                    {
+                        shard: load_json(
+                            args.fast_reuse_root / f"fast-reuse-{shard}.json"
+                        )
+                        for shard in SHARDS
+                    }
+                    if args.fast_reuse_root is not None else None
+                ),
             )
         except (
             ValueError,

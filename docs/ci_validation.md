@@ -300,6 +300,21 @@ the run, while a changed head or target retarget does. Classified failures,
 unrun coverage, missing shards and exclusions are recorded by `Manual Package
 Expansion Summary`; neither that summary nor its workers feed `Integration Tests
 (Linux)`.
+The expansion workflow's default-branch authorizer checks each shard for a
+completed Fast Tests job on the *same synthetic candidate*. It verifies the
+successful Fast job, both retained artifacts, coverage digest, exact JUnit
+cases, selected and executed target sets, ownership digest, Nextest profile
+settings, test mode, and Cargo feature requirements. It reuses only complete
+ordinary targets whose expansion command has the same default-feature mode;
+feature-bearing groups, ignored-only targets, and excluded tests still run.
+The authorization is checked again by default-branch code in the summary.
+Open PR heads that predate the reuse receipt format keep the existing complete
+expansion path.
+If Fast CI is still running when a shard checks, or any evidence is missing or
+incomplete, that shard runs its full selection. The summary lists reused
+targets, overlap targets run by expansion, and the number of identical Fast
+cases observed to rerun when Fast evidence was available. Sanitizer and
+feature-specific execution remain separate configurations.
 Once review repairs have fixed the intended content, agents start it alongside
 the final required implementation checks; there is no dependency between their
 verdicts. Inspect both before merging and record the reviewed SHA and run link.

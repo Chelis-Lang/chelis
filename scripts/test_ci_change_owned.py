@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from scripts import ci_change_owned as owned
+from scripts import ci_expansion_fast_reuse as fast_reuse
 from scripts import ci_detect_docs_only as detect
 from scripts import runtime_representation_oracle
 
@@ -1901,7 +1902,7 @@ class DurationBaselineTests(unittest.TestCase):
                 (output / name).write_bytes(payload)
             failed = bool(selected) and not receipt_success
             receipt = {
-                "version": owned.RECEIPT_VERSION,
+                "version": 2,  # historical receipt remains readable
                 "lane": "change-owned",
                 "shard": shard,
                 "plan_digest": plan["plan_digest"],
@@ -3747,6 +3748,43 @@ class ShardingAndExecutionTests(unittest.TestCase):
         owned.attach_plan_digest(plan)
         return plan
 
+    def test_authorized_whole_expansion_target_skips_build_and_run(self) -> None:
+        plan = self._plan(lane="package-expansion")
+        plan["standing_targets"] = ["p::smoke"]
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        shard = next(
+            shard for shard in owned.SHARDS
+            if "p::smoke" in owned.execution_shards(plan, "package-expansion")[str(shard)]
+        )
+        manifest = fast_reuse._seal({
+            **fast_reuse.fallback_manifest(plan, shard, "initial"),
+            "status": "fast_evidence",
+            "reason": "complete successful exact-candidate Fast job",
+            "source": {"run_id": 1, "job_id": 2,
+                       "receipts_artifact_id": 3, "junit_artifact_id": 4},
+            "fast_tests": ["p::smoke::fast_case"],
+            "reused_targets": ["p::smoke"],
+            "reused_tests": ["p::smoke::fast_case"],
+        })
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "_commit", return_value="b" * 40
+        ):
+            root = Path(tmp)
+            def no_command(*_args, **_kwargs):
+                self.fail("fully reused shard must not build or run")
+            receipt = owned.execute_shard(
+                plan, lane="package-expansion", shard=shard,
+                output=root / "receipt", repo=root, runner=no_command,
+                fast_reuse=manifest,
+            )
+            self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+        self.assertTrue(receipt["success"])
+        self.assertEqual(receipt["selected_targets"], ["p::smoke"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertEqual(receipt["reused_targets"], ["p::smoke"])
+        self.assertEqual(receipt["reused_tests"], ["p::smoke::fast_case"])
+
     def test_listing_rejects_unconfigured_filtering_and_stale_exclusions(self) -> None:
         identity = owned.Identity("p", "smoke")
         listing = {
@@ -4660,7 +4698,7 @@ class ReportTests(unittest.TestCase):
             )[str(shard)]
             tests = [f"{identity}::fast_case" for identity in selected]
             receipt = {
-                "version": owned.RECEIPT_VERSION,
+                "version": 2,  # historical receipt remains readable
                 "lane": surface.replace("_", "-"),
                 "shard": shard,
                 "plan_digest": self.plan["plan_digest"],
@@ -4956,6 +4994,68 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(summary["observed_success"])
         self.assertEqual(summary["failures"], [])
         self.assertNotIn("soft budget", json.dumps(summary))
+
+    def test_expansion_reuse_is_covered_without_claiming_local_execution(self) -> None:
+        target = "p::default_gated"
+        fixture_baseline = set_package_expansion(
+            self.plan, [owned.Identity("p", "default_gated")]
+        )
+        self.plan["standing_targets"] = sorted(
+            self.plan["standing_targets"] + [target]
+        )
+        owned.attach_plan_digest(self.plan)
+        receipts = self.receipts(surface="package_expansion")
+        manifests = {
+            shard: fast_reuse.fallback_manifest(self.plan, shard, "empty shard")
+            for shard in owned.SHARDS
+        }
+        selected_shard = next(
+            shard for shard, receipt in enumerate(receipts)
+            if target in receipt["selected_targets"]
+        )
+        manifests[selected_shard] = fast_reuse._seal({
+            **manifests[selected_shard],
+            "status": "fast_evidence",
+            "reason": "complete successful exact-candidate Fast job",
+            "source": {"run_id": 1, "job_id": 2,
+                       "receipts_artifact_id": 3, "junit_artifact_id": 4},
+            "fast_tests": [f"{target}::fast_case"],
+            "reused_targets": [target],
+            "reused_tests": [f"{target}::fast_case"],
+        })
+        for shard, receipt in enumerate(receipts):
+            receipt.update(
+                version=owned.RECEIPT_VERSION,
+                reused_targets=manifests[shard]["reused_targets"],
+                reused_tests=manifests[shard]["reused_tests"],
+                fast_reuse_digest=(
+                    manifests[shard]["digest"] if receipt["selected_targets"] else None
+                ),
+            )
+            if shard == selected_shard:
+                receipt.update(executed_targets=[], selected_tests=[], executed_tests=[])
+            owned.attach_receipt_digest(receipt)
+        summary = owned.summarize_package_expansion(
+            self.plan, receipts, duration_baseline=fixture_baseline,
+            failure_baseline=owned.FailureBaseline(
+                workflow="heavy-e2e.yml", run_id="1", run_url="https://example.invalid",
+                head_sha="d" * 40, created_at="2026-09-19T00:00:00Z",
+                observed=frozenset(), failed=frozenset(),
+            ),
+            ancestor_distance=lambda *_: 0,
+            fast_reuse_manifests=manifests,
+        )
+        self.assertTrue(summary["observed_success"])
+        self.assertEqual(summary["standing_reused_targets"], [target])
+        self.assertEqual(summary["failure_classification"]["unrun_targets"], [])
+        self.assertEqual(summary["known_repeated_fast_tests"], [])
+        receipts[selected_shard]["reused_targets"] = []
+        owned.attach_receipt_digest(receipts[selected_shard])
+        with self.assertRaisesRegex(ValueError, "differs from authorization"):
+            owned.summarize_package_expansion(
+                self.plan, receipts, duration_baseline=fixture_baseline,
+                fast_reuse_manifests=manifests,
+            )
 
     def test_informational_summary_splits_introduced_from_inherited(
         self,

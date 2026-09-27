@@ -31,6 +31,7 @@ jobs:
     outputs:
       base_ref: ${{ steps.pr-identity.outputs.base_ref }}
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      reuse_supported: ${{ steps.reuse-capability.outputs.supports_reuse }}
     steps:
       - name: Checkout trusted candidate validator
         uses: actions/checkout@v6
@@ -86,6 +87,13 @@ jobs:
           --pr-head "$EXPECTED_HEAD_SHA"
           --output target/integration-change/plan.json
 
+      - name: Detect candidate Fast reuse receipt support
+        id: reuse-capability
+        run: >-
+          python3 trusted/scripts/ci_expansion_fast_reuse.py supports
+          --candidate-root candidate
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Upload integration change plan
         uses: actions/upload-artifact@v7
         with:
@@ -107,6 +115,7 @@ jobs:
     timeout-minutes: 90
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     needs: [integration-plan]
     if: ${{ !cancelled() && needs.integration-plan.result == 'success' }}
@@ -126,6 +135,12 @@ jobs:
           ref: ${{ needs.integration-plan.outputs.candidate_sha }}
           fetch-depth: 0
 
+      - name: Checkout trusted Fast reuse authorizer
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+
       - name: Download integration change plan for shard selection
         uses: actions/download-artifact@v7
         with:
@@ -141,6 +156,19 @@ jobs:
           --shard ${{ matrix.shard }}
           --output target/integration-change/package-expansion-${{ matrix.shard }}
           --github-output "$GITHUB_OUTPUT"
+
+      - name: Record empty-shard Fast reuse fallback
+        if: needs.integration-plan.outputs.reuse_supported == 'true' && steps.shard-selection.outputs.has_targets == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 trusted/scripts/ci_expansion_fast_reuse.py authorize
+          --plan "${{ runner.temp }}/integration-change/plan.json"
+          --candidate-root .
+          --repository "$REPOSITORY"
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/fast-reuse-${{ matrix.shard }}.json
 
       - name: Free disk space (Ubuntu)
         if: steps.shard-selection.outputs.has_targets == 'true'
@@ -184,8 +212,33 @@ jobs:
           name: integration-change-plan
           path: target/integration-change
 
+      - name: Refresh exact-candidate Fast evidence before execution
+        if: needs.integration-plan.outputs.reuse_supported == 'true' && steps.shard-selection.outputs.has_targets == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 trusted/scripts/ci_expansion_fast_reuse.py authorize
+          --plan target/integration-change/plan.json
+          --candidate-root .
+          --repository "$REPOSITORY"
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/fast-reuse-${{ matrix.shard }}.json
+
       - name: Execute the informational package-expansion shard
-        if: steps.shard-selection.outputs.has_targets == 'true'
+        if: needs.integration-plan.outputs.reuse_supported == 'true' && steps.shard-selection.outputs.has_targets == 'true'
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py run-shard
+          --plan target/integration-change/plan.json
+          --lane package-expansion
+          --shard ${{ matrix.shard }}
+          --fast-reuse target/integration-change/fast-reuse-${{ matrix.shard }}.json
+          --output target/integration-change/package-expansion-${{ matrix.shard }}
+
+      - name: Execute the legacy informational package-expansion shard
+        if: needs.integration-plan.outputs.reuse_supported != 'true' && steps.shard-selection.outputs.has_targets == 'true'
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: >-
@@ -194,6 +247,15 @@ jobs:
           --lane package-expansion
           --shard ${{ matrix.shard }}
           --output target/integration-change/package-expansion-${{ matrix.shard }}
+
+      - name: Upload trusted Fast reuse authorization
+        if: always() && needs.integration-plan.outputs.reuse_supported == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fast-reuse-${{ matrix.shard }}
+          path: target/integration-change/fast-reuse-${{ matrix.shard }}.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload package-expansion shard receipt
         if: always()
@@ -248,6 +310,31 @@ jobs:
           pattern: integration-package-expansion-*
           path: candidate/target/integration-change/receipts/package-expansion
 
+      - name: Download Fast reuse authorizations
+        if: needs.integration-plan.outputs.reuse_supported == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: fast-reuse-*
+          merge-multiple: true
+          path: candidate/target/integration-change/fast-reuse
+
+      - name: Verify every omission against trusted Fast evidence
+        if: needs.integration-plan.outputs.reuse_supported == 'true'
+        id: reuse-verification
+        continue-on-error: true
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 ../trusted/scripts/ci_expansion_fast_reuse.py verify
+          --plan target/integration-change/plan.json
+          --candidate-root .
+          --repository "$REPOSITORY"
+          --manifests-root target/integration-change/fast-reuse
+          --receipts-root target/integration-change/receipts/package-expansion
+
       - name: Record the default-branch failure baseline
         id: failure-baseline
         continue-on-error: true
@@ -289,10 +376,15 @@ jobs:
                 --validate-checkout 2>&1
             ) || candidate_status=$?
             report_status=0
+            reuse_args=()
+            if [ "${{ needs.integration-plan.outputs.reuse_supported }}" = "true" ]; then
+              reuse_args+=(--fast-reuse-root target/integration-change/fast-reuse)
+            fi
             .venv/bin/python scripts/ci_change_owned.py report \
               --plan target/integration-change/plan.json \
               --lane package-expansion \
               --receipts-root target/integration-change/receipts/package-expansion \
+              "${reuse_args[@]}" \
               --output target/integration-change/package-expansion-summary ||
               report_status=$?
             {
@@ -304,8 +396,15 @@ jobs:
               else
                 echo "PASS: ${candidate_output}"
               fi
+              if [ "${{ needs.integration-plan.outputs.reuse_supported }}" = "true" ]; then
+                echo "Fast reuse verification: ${{ steps.reuse-verification.outcome }}"
+              else
+                echo "Fast reuse verification: legacy candidate interface"
+              fi
             } >> target/integration-change/package-expansion-summary/summary.md
-            if [ "$report_status" -ne 0 ] || [ "$candidate_status" -ne 0 ]; then
+            if [ "$report_status" -ne 0 ] || [ "$candidate_status" -ne 0 ] ||
+               { [ "${{ needs.integration-plan.outputs.reuse_supported }}" = "true" ] &&
+                 [ "${{ steps.reuse-verification.outcome }}" != "success" ]; }; then
               exit 1
             fi
           else

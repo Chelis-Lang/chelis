@@ -2217,6 +2217,24 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_expansion_fast_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit tests the trusted Fast receipt authorization and fail-closed expansion fallback"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_expansion_fast_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the Fast-to-expansion reuse boundary regressions"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_script_tests.py"
 disposition = "owner"
 workflow = "ci.yml"
