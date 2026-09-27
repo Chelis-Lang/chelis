@@ -144,10 +144,9 @@ fn a_key_tensor_sharing_its_extent_with_data_runs_in_eval_and_c() {
         ),
         (
             "w7",
-            format!(
-                "def f[n](ks: tensor[n, key], xs: tensor[n, 4, f32]) -> tensor[n, 4, f32] = vmap(fn (j: key, v: tensor[4, f32]) -> dropout(j, v, 0.5f32))(ks, xs)\n\
+            "def f[n](ks: tensor[n, key], xs: tensor[n, 4, f32]) -> tensor[n, 4, f32] = vmap(fn (j: key, v: tensor[4, f32]) -> dropout(j, v, 0.5f32))(ks, xs)\n\
                  def main() -> tensor[2, 4, f32] = f(split_keys(key_from_seed(1i64), 2i64), to_tensor([[1.0f32, 1.0f32, 1.0f32, 1.0f32], [1.0f32, 1.0f32, 1.0f32, 1.0f32]]))\n"
-            ),
+                .to_string(),
             main_is("tensor(shape=[2, 4], data=[0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"),
         ),
         (
