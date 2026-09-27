@@ -47,6 +47,7 @@ pub mod cli;
 pub mod install;
 pub mod paths;
 pub mod resolve;
+pub mod runtime_check;
 pub mod shim;
 pub mod version;
 

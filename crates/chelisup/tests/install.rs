@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{bin, build_fixture_tarball, run_cli};
+use common::{ReleaseRuntime, bin, build_fixture_tarball, build_release_tarball, run_cli, sha256};
 use std::path::Path;
 use std::process::Command;
 
@@ -27,6 +27,176 @@ fn install(home: &Path, release: &Path, version: &str) -> std::process::Output {
         &["install", version],
         &[("CHELISUP_RELEASE_BASE", release.to_str().unwrap())],
     )
+}
+
+/// A release after 0.18.11, so `install` checks its runtime files.
+const CHECKED: &str = "0.19.0";
+
+/// Nothing of `version` reached the store: no toolchain, shim or default.
+fn assert_store_untouched(home: &Path, version: &str) {
+    assert!(!home.join("toolchains").join(version).exists());
+    assert!(!home.join("bin/chelis").exists());
+    assert!(!home.join("default").exists());
+}
+
+#[test]
+fn install_checks_runtime_files_against_the_release_export() {
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    let runtime = ReleaseRuntime::matching(CHECKED);
+    build_release_tarball(release.path(), CHECKED, slug(), &runtime);
+
+    // A caller's runtime directory must not reach the export, which refuses one.
+    let out = run_cli(
+        home.path(),
+        home.path(),
+        &["install", CHECKED],
+        &[
+            ("CHELISUP_RELEASE_BASE", release.path().to_str().unwrap()),
+            ("CHELIS_RUNTIME_DIR", "/elsewhere"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains(&format!(
+            "match `chelis runtime export` (libchelis_runtime.a sha256 {})",
+            sha256(&runtime.shipped_archive)
+        )),
+        "stdout: {}",
+        stdout(&out)
+    );
+    assert!(
+        !stderr(&out).contains("warning"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let toolchain = home.path().join("toolchains").join(CHECKED);
+    assert!(toolchain.join("lib/libchelis_runtime.a").is_file());
+    assert!(toolchain.join("include/chelis_math.h").is_file());
+}
+
+/// A refused release: its name, how it departs from a matching release, and
+/// the error text `install` must print.
+type Refusal = (&'static str, fn(&mut ReleaseRuntime), &'static str);
+
+#[test]
+fn install_refuses_runtime_files_its_export_does_not_report() {
+    let cases: [Refusal; 11] = [
+        (
+            "swapped archive",
+            |runtime| runtime.shipped_archive = b"another runtime".to_vec(),
+            "ships lib/libchelis_runtime.a with SHA-256",
+        ),
+        (
+            "linked archive",
+            |runtime| runtime.archive_is_symlink = true,
+            "no usable lib/libchelis_runtime.a",
+        ),
+        (
+            "swapped header",
+            |runtime| runtime.shipped_headers[0].1 = b"/* other */\n".to_vec(),
+            "ships include/chelis_runtime.h with SHA-256",
+        ),
+        (
+            "missing header",
+            |runtime| {
+                runtime.shipped_headers.pop();
+            },
+            "no usable include/chelis_math.h",
+        ),
+        (
+            "development build",
+            |runtime| runtime.receipt["mode"] = "development".into(),
+            "records mode \"development\", not \"sealed\"",
+        ),
+        (
+            "another version",
+            |runtime| runtime.receipt["chelis_version"] = "0.19.1".into(),
+            "records chelis_version \"0.19.1\", not \"0.19.0\"",
+        ),
+        (
+            "another receipt schema",
+            |runtime| runtime.receipt["schema"] = "chelis-runtime-staging/2".into(),
+            "records schema",
+        ),
+        (
+            "no archive digest",
+            |runtime| runtime.receipt["archive_sha256"] = "unknown".into(),
+            "records no archive_sha256",
+        ),
+        (
+            "no headers",
+            |runtime| runtime.receipt["headers"] = serde_json::json!({}),
+            "lists no headers",
+        ),
+        (
+            "header outside include",
+            |runtime| {
+                runtime.receipt["headers"] =
+                    serde_json::json!({ "../escape.h": sha256(b"/* runtime */\n") })
+            },
+            "which is not a file name",
+        ),
+        (
+            "failed export",
+            |runtime| runtime.export_status = 1,
+            "`chelis runtime export` from the chelis 0.19.0 release failed",
+        ),
+    ];
+    for (case, change, expected) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let release = tempfile::tempdir().unwrap();
+        let mut runtime = ReleaseRuntime::matching(CHECKED);
+        change(&mut runtime);
+        build_release_tarball(release.path(), CHECKED, slug(), &runtime);
+
+        let out = install(home.path(), release.path(), CHECKED);
+        assert!(
+            !out.status.success(),
+            "{case}: installed; stdout: {}",
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains(expected),
+            "{case}: stderr: {}",
+            stderr(&out)
+        );
+        assert_store_untouched(home.path(), CHECKED);
+    }
+}
+
+#[test]
+fn releases_before_the_export_install_unchecked_with_a_warning() {
+    // A release up to 0.18.11 has no export to run, so a failing one is never
+    // consulted; the first later release is checked and refused.
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    for version in ["0.18.11", "0.18.12"] {
+        let mut runtime = ReleaseRuntime::matching(version);
+        runtime.export_status = 1;
+        build_release_tarball(release.path(), version, slug(), &runtime);
+    }
+
+    let old = install(home.path(), release.path(), "0.18.11");
+    assert!(old.status.success(), "stderr: {}", stderr(&old));
+    assert!(
+        stderr(&old).contains(
+            "warning: chelis 0.18.11 predates `chelis runtime export`, so its lib/ and include/ \
+             runtime files were installed unchecked"
+        ),
+        "stderr: {}",
+        stderr(&old)
+    );
+    assert!(home.path().join("toolchains/0.18.11/bin/chelis").is_file());
+
+    let first_checked = install(home.path(), release.path(), "0.18.12");
+    assert!(!first_checked.status.success());
+    assert!(
+        stderr(&first_checked).contains("from the chelis 0.18.12 release failed"),
+        "stderr: {}",
+        stderr(&first_checked)
+    );
+    assert!(!home.path().join("toolchains/0.18.12").exists());
 }
 
 #[test]

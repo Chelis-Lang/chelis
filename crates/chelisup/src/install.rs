@@ -2,9 +2,12 @@
 //!
 //! `chelisup install <ver>` downloads the host-platform release tarball
 //! (`chelis-vX.Y.Z-<slug>.tar.gz`) from `Chelis-Lang/chelis` release
-//! `v<ver>`, unpacks it to `<home>/toolchains/<ver>/`, installs/refreshes
-//! the `chelis` shim, and seeds the default on the first install. It is
-//! idempotent: an already-installed version refreshes the shim only.
+//! `v<ver>`, unpacks it, checks its runtime files against the unpacked
+//! compiler's `chelis runtime export` (see [`crate::runtime_check`]), moves it
+//! to `<home>/toolchains/<ver>/`, installs/refreshes the `chelis` shim, and
+//! seeds the default on the first install. A failed check leaves the store
+//! untouched. It is idempotent: an already-installed version refreshes the
+//! shim only.
 //!
 //! # Fetch seams
 //!
@@ -28,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::paths::Store;
+use crate::runtime_check::{self, RuntimeCheck};
 use crate::version::validate_install_version;
 
 const DEFAULT_REPO: &str = "Chelis-Lang/chelis";
@@ -36,8 +40,13 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// What an install did. The CLI prints a different line for each.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// The toolchain was downloaded and unpacked.
-    Installed { version: String, slug: String },
+    /// The toolchain was downloaded, its runtime files checked, and unpacked
+    /// into the store.
+    Installed {
+        version: String,
+        slug: String,
+        runtime: RuntimeCheck,
+    },
     /// The toolchain was already present; the shim was refreshed.
     AlreadyInstalled { version: String },
 }
@@ -98,6 +107,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     let tarball = scratch.path().join(&asset);
     fetch_asset(version, &asset, &tarball)?;
     let unpacked = extract_tarball(&tarball, scratch.path())?;
+    let runtime = runtime_check::check(version, &unpacked, scratch.path())?;
     install_into_store(store, version, &unpacked)?;
 
     ensure_shim_installed(store)?;
@@ -106,6 +116,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     Ok(InstallOutcome::Installed {
         version: version.to_string(),
         slug: slug.to_string(),
+        runtime,
     })
 }
 
