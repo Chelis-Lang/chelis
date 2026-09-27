@@ -19,12 +19,18 @@ fn checked(source: &str) -> bool {
         if !before.zip(allocate).is_some_and(|(a, b)| a < b) {
             return false;
         }
+        // An affine movement runs its copy and releases its plan through
+        // `emit_movement_copy`, which zero-fills where no row of its
+        // activation holds, so a requirement it meets is met there.
+        let copy = body
+            .contains("self.emit_movement_copy(")
+            .then(|| method(source, "emit_movement_copy"));
         for required in [
             "chelis_movement_count(",
             "chelis_movement_index(",
             "chelis_movement_plan_release(",
         ] {
-            if !body.contains(required) {
+            if !body.contains(required) && !copy.is_some_and(|copy| copy.contains(required)) {
                 return false;
             }
         }

@@ -127,6 +127,18 @@ fn method<'a>(source: &'a str, name: &str) -> &'a str {
 }
 
 fn check_dag(source: &str) -> Result<(), String> {
+    // The element-loop helper bounds every element, row by row under a
+    // per-row activation, by the size it is given.
+    let helper = method(source, "open_element_loop");
+    for bound in [
+        "for (int64_t {var} = 0; {var} < {size}; {var}++) {{",
+        "const int64_t __row_len_{id} = ({size}) / __act_rows_{id};",
+        "{var} < (__row_{id} + 1) * __row_len_{id}",
+    ] {
+        if !helper.contains(bound) {
+            return Err("open_element_loop: missing checked loop bound".to_string());
+        }
+    }
     for name in DAG_METHODS {
         let body = method(source, name);
         for retired in [
@@ -160,7 +172,12 @@ fn check_dag(source: &str) -> Result<(), String> {
                 return Err(format!("{name}: scalar admitted to fast path"));
             }
         }
-        if !body.contains("i < t{id}_size") {
+        // The loop is bounded by the checked output count, written out or
+        // passed to the element-loop helper that bounds by it.
+        let compact = body.split_whitespace().collect::<String>();
+        if !compact.contains("i<t{id}_size")
+            && !compact.contains("open_element_loop(id,\"i\",&format!(\"t{id}_size\")")
+        {
             return Err(format!("{name}: missing checked loop bound"));
         }
         if !body.contains("_step") {
@@ -223,6 +240,16 @@ fn cohort_control_rejects_raw_helpers_late_validation_and_unchecked_loop_bounds(
         (
             "i < t{id}_size",
             "i < t{a}_size",
+            "missing checked loop bound",
+        ),
+        (
+            "&format!(\"t{id}_size\")",
+            "&format!(\"t{a}_size\")",
+            "missing checked loop bound",
+        ),
+        (
+            "{var} < {size}; {var}++",
+            "{var} < {size} + 1; {var}++",
             "missing checked loop bound",
         ),
         (
