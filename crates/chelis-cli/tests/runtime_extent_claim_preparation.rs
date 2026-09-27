@@ -10,10 +10,15 @@
 mod common;
 
 use chelis_backend_c::GeneratedHeader;
-use common::{gcc_available, link_generated};
+use common::{gcc_available, generated_source_needs_blas, link_generated};
 use serde_json::{Value, json};
-use std::{fs, path::Path, process::Command};
-use tempfile::tempdir;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+use tempfile::{TempDir, tempdir};
 
 #[derive(Clone)]
 struct Input {
@@ -355,6 +360,52 @@ fn receipt(stage: &str, output: &std::process::Output) -> Value {
         "stderr":String::from_utf8_lossy(&output.stderr).trim()})
 }
 
+const DRIVER_RESULT: &str = r#"printf("out = tensor(shape=[");
+for (int32_t axis = 0; axis < chelis_tensor_rank(result); ++axis) {
+    if (axis) printf(", ");
+    printf("%lld", (long long)chelis_tensor_shape(result, axis));
+}
+printf("], data=[");
+chelis_read_view view = chelis_tensor_read_view(result);
+if (view.dtype != CHELIS_DTYPE_F32) return 12;
+for (int64_t i = 0; i < view.count; ++i) {
+    if (i) printf(", ");
+    printf("%.9g", (double)((const float *)view.data)[i]);
+}
+printf("])\n");
+chelis_tensor_release(result);
+"#;
+
+fn append_export_call(text: &mut String, header: &str, input_count: usize) {
+    let args = (0..input_count)
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let authored_f = "chelis_fn_66";
+    if header
+        .lines()
+        .any(|line| line.starts_with(&format!("chelis_tensor* {authored_f}(")))
+    {
+        text.push_str(&format!("chelis_tensor *result = {authored_f}({args});\n"));
+    } else {
+        // A single pure tensor definition is exported through the named
+        // kernel ABI. Exercise that public entry rather than inventing a
+        // host wrapper which the compiler did not emit.
+        let generated = GeneratedHeader::parse(header).expect("generated fixture header");
+        let fixture = generated
+            .declaration("fixture")
+            .expect("named-kernel fixture declaration");
+        assert_eq!(
+            fixture.declaration(),
+            "void fixture(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);",
+            "unknown exported fixture ABI"
+        );
+        text.push_str(&format!(
+            "chelis_tensor *inputs[] = {{{args}}};\nchelis_tensor *result = NULL;\nfixture(inputs, {input_count}, &result, 1);\n"
+        ));
+    }
+}
+
 fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
     let mut text = String::from(
         "\n#include <stdio.h>\n#include <stdlib.h>\nint main(int argc, char **argv) {\n(void)argc;\n(void)argv;\n",
@@ -380,54 +431,147 @@ fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
         }
         text.push_str(&format!("chelis_tensor *a{i} = chelis_tensor_entry_borrow({}, shape{i}, CHELIS_DTYPE_F32, data{i}, sizeof(data{i}));\n", input.dims.len()));
     }
-    let args = (0..inputs.len())
-        .map(|i| format!("a{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let authored_f = "chelis_fn_66";
-    if header
-        .lines()
-        .any(|line| line.starts_with(&format!("chelis_tensor* {authored_f}(")))
-    {
-        text.push_str(&format!("chelis_tensor *result = {authored_f}({args});\n"));
-    } else {
-        // A single pure tensor definition is exported through the named
-        // kernel ABI. Exercise that public entry rather than inventing a
-        // host wrapper which the compiler did not emit.
-        let generated = GeneratedHeader::parse(header).expect("generated fixture header");
-        let fixture = generated
-            .declaration("fixture")
-            .expect("named-kernel fixture declaration");
+    append_export_call(&mut text, header, inputs.len());
+    text.push_str(DRIVER_RESULT);
+    text.push_str("return 0;\n}\n");
+    (text, argv)
+}
+
+fn dynamic_driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
+    let mut text = String::from(
+        "\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\nint main(int argc, char **argv) {\nint cursor = 1;\n",
+    );
+    let mut argv = Vec::new();
+    for (i, input) in inputs.iter().enumerate() {
+        assert!(
+            input.dims.len() <= 1,
+            "call matrix inputs are rank zero/one"
+        );
         assert_eq!(
-            fixture.declaration(),
-            "void fixture(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);",
-            "unknown exported fixture ABI"
+            input.values.len(),
+            input.dims.iter().product::<usize>(),
+            "input shape and values must agree"
         );
         text.push_str(&format!(
-            "chelis_tensor *inputs[] = {{{args}}};\nchelis_tensor *result = NULL;\nfixture(inputs, {}, &result, 1);\n",
-            inputs.len()
+            "int64_t shape{i}[{}];\nsize_t count{i} = 1;\n",
+            input.dims.len().max(1)
+        ));
+        for (axis, dim) in input.dims.iter().enumerate() {
+            argv.push(dim.to_string());
+            text.push_str(&format!(
+                "if (cursor >= argc) return 11;\nshape{i}[{axis}] = strtoll(argv[cursor++], NULL, 10);\ncount{i} *= (size_t)shape{i}[{axis}];\n"
+            ));
+        }
+        for value in &input.values {
+            argv.push(value.to_bits().to_string());
+        }
+        text.push_str(&format!(
+            "float *data{i} = malloc((count{i} ? count{i} : 1) * sizeof(float));\nif (!data{i}) return 13;\nfor (size_t j = 0; j < count{i}; ++j) {{\n  if (cursor >= argc) return 11;\n  uint32_t bits = (uint32_t)strtoul(argv[cursor++], NULL, 10);\n  memcpy(&data{i}[j], &bits, sizeof(bits));\n}}\nchelis_tensor *a{i} = chelis_tensor_entry_borrow({}, shape{i}, CHELIS_DTYPE_F32, data{i}, count{i} * sizeof(float));\n",
+            input.dims.len()
         ));
     }
-    text.push_str(
-        r#"printf("out = tensor(shape=[");
-for (int32_t axis = 0; axis < chelis_tensor_rank(result); ++axis) {
-    if (axis) printf(", ");
-    printf("%lld", (long long)chelis_tensor_shape(result, axis));
-}
-printf("], data=[");
-chelis_read_view view = chelis_tensor_read_view(result);
-if (view.dtype != CHELIS_DTYPE_F32) return 12;
-for (int64_t i = 0; i < view.count; ++i) {
-    if (i) printf(", ");
-    printf("%.9g", (double)((const float *)view.data)[i]);
-}
-printf("])\n");
-chelis_tensor_release(result);
-return 0;
-}
-"#,
-    );
+    text.push_str("if (cursor != argc) return 11;\n");
+    append_export_call(&mut text, header, inputs.len());
+    text.push_str(DRIVER_RESULT);
+    for i in 0..inputs.len() {
+        text.push_str(&format!("free(data{i});\n"));
+    }
+    text.push_str("return 0;\n}\n");
     (text, argv)
+}
+
+// The exported call-route matrix varies runtime input extents while compiling
+// the same generated C for several cases. Keep one binary per exact generated
+// source/header/caller pair within this test invocation. Every case still runs
+// its own check and build and executes a fresh C process with exact input bits.
+struct ExportBinaryCache {
+    dir: TempDir,
+    binaries: BTreeMap<(String, String, String, String), PathBuf>,
+    runtime_identity: Option<Value>,
+    toolchains: [Option<String>; 2],
+    reused: usize,
+}
+
+impl ExportBinaryCache {
+    fn new() -> Self {
+        Self {
+            dir: tempdir().expect("export binary cache directory"),
+            binaries: BTreeMap::new(),
+            runtime_identity: None,
+            toolchains: [None, None],
+            reused: 0,
+        }
+    }
+
+    fn binary(&mut self, out: &Path, source: &str, header: &str) -> PathBuf {
+        // The CLI stages and verifies the archive bytes before publishing
+        // this receipt. Read each fresh build's receipt, and fail if runtime
+        // or public headers change during one supposedly fixed test run.
+        let runtime: Value = serde_json::from_slice(
+            &fs::read(out.join("chelis_runtime.receipt.json"))
+                .expect("fresh staged runtime receipt"),
+        )
+        .expect("staged runtime receipt JSON");
+        assert!(
+            runtime["archive_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+            "staged runtime receipt must identify the linked archive"
+        );
+        if let Some(expected) = &self.runtime_identity {
+            assert_eq!(
+                &runtime, expected,
+                "staged runtime changed within one fixture matrix"
+            );
+        } else {
+            self.runtime_identity = Some(runtime.clone());
+        }
+        let needs_blas = generated_source_needs_blas(out, "fixture.c");
+        // The test never mutates toolchain environment variables; resolve
+        // once per BLAS mode and bind the chosen compiler and flags into keys.
+        let toolchain = self.toolchains[usize::from(needs_blas)]
+            .get_or_insert_with(|| {
+                format!(
+                    "{:?}",
+                    chelis_backend_c::toolchain::runtime_toolchain(
+                        chelis_backend_c::toolchain::CodegenRequirements {
+                            wants_openmp: true,
+                            needs_blas,
+                        }
+                    )
+                )
+            })
+            .clone();
+        let key = (
+            source.to_owned(),
+            header.to_owned(),
+            toolchain,
+            runtime.to_string(),
+        );
+        if let Some(path) = self.binaries.get(&key) {
+            self.reused += 1;
+            return path.clone();
+        }
+        let path = self
+            .dir
+            .path()
+            .join(format!("export-{}", self.binaries.len()));
+        assert!(
+            link_generated(out, "fixture.c", "fixture").success(),
+            "exported fixture link failed"
+        );
+        fs::copy(out.join("fixture"), &path).expect("cache exact exported fixture binary");
+        self.binaries.insert(key, path.clone());
+        path
+    }
+
+    fn report(&self, matrix: &str) {
+        eprintln!(
+            "{matrix} C BINARIES: {} compiled, {} reused",
+            self.binaries.len(),
+            self.reused
+        );
+    }
 }
 
 fn observe(case: &Case) -> Value {
@@ -435,10 +579,20 @@ fn observe(case: &Case) -> Value {
 }
 
 fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
-    observe_host_lane(case, library, "c", false)
+    observe_host_lane(case, library, "c", false, None)
 }
 
-fn observe_host_lane(case: &Case, library: Option<&str>, target: &str, api: bool) -> Value {
+fn observe_with_export_cache(case: &Case, cache: &mut ExportBinaryCache) -> Value {
+    observe_host_lane(case, None, "c", false, Some(cache))
+}
+
+fn observe_host_lane(
+    case: &Case,
+    library: Option<&str>,
+    target: &str,
+    api: bool,
+    cache: Option<&mut ExportBinaryCache>,
+) -> Value {
     let dir = tempdir().expect("fixture directory");
     if let Some(library) = library {
         let version = chelis_compiler_api::COMPILER_VERSION;
@@ -584,28 +738,42 @@ fn observe_host_lane(case: &Case, library: Option<&str>, target: &str, api: bool
         }
         let c_path = out.join("fixture.c");
         fs::write(&c_path, &source).expect("write selected host source");
+        let mut cached_binary = None;
         let args = if let Some(inputs) = &case.exported {
             // A nullary helper also creates an observation entry. Exercise
             // f through the independent exported caller below.
             source = source.replacen("int main(", "int fixture_generated_main(", 1);
-            let (driver, args) = driver(inputs, &header);
-            source.push_str(&driver);
-            fs::write(&c_path, &source).expect("append exported runtime caller");
-            args
+            if let Some(cache) = cache {
+                let (driver, args) = dynamic_driver(inputs, &header);
+                source.push_str(&driver);
+                fs::write(&c_path, &source).expect("append dynamic exported caller");
+                cached_binary = Some(cache.binary(&out, &source, &header));
+                args
+            } else {
+                let (driver, args) = driver(inputs, &header);
+                source.push_str(&driver);
+                fs::write(&c_path, &source).expect("append exported runtime caller");
+                args
+            }
         } else {
             Vec::new()
         };
         if !source.contains("int main(") {
             json!({"stage":"no_entry", "success":false, "stdout":"", "stderr":"accepted root has no C entry"})
         } else {
-            assert!(
-                link_generated(&out, "fixture.c", "fixture").success(),
-                "fixture link failed: {}",
-                case.id
-            );
+            let executable = if let Some(binary) = cached_binary {
+                binary
+            } else {
+                assert!(
+                    link_generated(&out, "fixture.c", "fixture").success(),
+                    "fixture link failed: {}",
+                    case.id
+                );
+                out.join("fixture")
+            };
             receipt(
                 "execute",
-                &Command::new(out.join("fixture"))
+                &Command::new(executable)
                     .args(args)
                     .current_dir(dir.path())
                     .output()
@@ -814,8 +982,9 @@ fn collect() -> (Value, Vec<String>) {
     );
     let mut observed = serde_json::Map::new();
     let mut failures = Vec::new();
+    let mut cache = ExportBinaryCache::new();
     for case in cases() {
-        let result = observe(&case);
+        let result = observe_with_export_cache(&case, &mut cache);
         failures.extend(contract_failures(&case, &result));
         assert!(
             observed.insert(case.id, result).is_none(),
@@ -827,6 +996,7 @@ fn collect() -> (Value, Vec<String>) {
         observed.len(),
         failures.len()
     );
+    cache.report("CLAIMED EXTENT");
     (Value::Object(observed), failures)
 }
 
@@ -1520,11 +1690,13 @@ fn host_produced_reshape_targets_preserve_declared_claims() {
     }
     assert_eq!(cases.len(), 60);
     let mut failures = Vec::new();
+    let mut cache = ExportBinaryCache::new();
     for case in cases {
-        let observed = observe(&case);
+        let observed = observe_with_export_cache(&case, &mut cache);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
     }
+    cache.report("HOST TARGET");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -1637,11 +1809,13 @@ fn staged_reshape_sources_preserve_captures_and_order() {
     }
     assert_eq!(cases.len(), 60);
     let mut failures = Vec::new();
+    let mut cache = ExportBinaryCache::new();
     for case in cases {
-        let observed = observe(&case);
+        let observed = observe_with_export_cache(&case, &mut cache);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
     }
+    cache.report("STAGED SOURCE");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -1983,7 +2157,7 @@ fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
     let mut failures = Vec::new();
     for case in cases {
         for api in [false, true] {
-            let observed = observe_host_lane(&case, None, "hip", api);
+            let observed = observe_host_lane(&case, None, "hip", api, None);
             println!("{} api={api}: {}", case.id, observed);
             failures.extend(
                 contract_failures(&case, &observed)
@@ -2017,7 +2191,7 @@ fn staged_claims_preserve_hip_host_cli_and_api_execution() {
     let mut failures = Vec::new();
     for case in cases {
         for api in [false, true] {
-            let observed = observe_host_lane(&case, None, "hip", api);
+            let observed = observe_host_lane(&case, None, "hip", api, None);
             println!("{} api={api}: {}", case.id, observed);
             failures.extend(contract_failures(&case, &observed));
         }
@@ -2354,8 +2528,9 @@ fn computed_claim_result_graph_contract() {
     }
     assert_eq!(fixtures.len(), 69);
     let mut failures = Vec::new();
+    let mut cache = ExportBinaryCache::new();
     for (case, main_signature) in fixtures {
-        let observed = observe(&case);
+        let observed = observe_with_export_cache(&case, &mut cache);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
         if let Some(signature) = main_signature
@@ -2367,6 +2542,7 @@ fn computed_claim_result_graph_contract() {
             ));
         }
     }
+    cache.report("RESULT GRAPH");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -2615,8 +2791,9 @@ fn omitted_extent_claim_contract() {
     }
     assert_eq!(fixtures.len(), 120);
     let mut failures = Vec::new();
+    let mut cache = ExportBinaryCache::new();
     for (case, main_signature) in &fixtures {
-        let observation = observe(case);
+        let observation = observe_with_export_cache(case, &mut cache);
         println!("{}: {}", case.id, observation);
         failures.extend(contract_failures(case, &observation));
         if case.id.starts_with("checked.example.") {
@@ -2639,6 +2816,7 @@ fn omitted_extent_claim_contract() {
             }
         }
     }
+    cache.report("OMITTED EXTENT");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
