@@ -11,8 +11,8 @@ fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let directory = tempfile::tempdir().unwrap();
-        let staged =
-            chelis_runtime_bundle::stage(directory.path()).expect("stage the carried runtime");
+        let staged = chelis_runtime_bundle::stage(directory.path())
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
         let binary = directory.path().join("device-owner-contract");
         let object = directory.path().join("device-owner.o");
         let compiled = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()))
@@ -140,6 +140,9 @@ fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
 fn published_owner_is_opaque_and_packet_observation_cannot_be_mutated() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let directory = tempfile::tempdir().unwrap();
+    for (header, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(directory.path().join(header), contents).unwrap();
+    }
     for (name, body, success) in [
         (
             "opaque-use",
@@ -177,7 +180,7 @@ fn published_owner_is_opaque_and_packet_observation_cannot_be_mutated() {
             .args(["-std=c++17", "-fsyntax-only", "-I"])
             .arg(root.join("runtime"))
             .arg("-I")
-            .arg(root.join("../chelis-runtime/include"))
+            .arg(directory.path())
             .arg(source)
             .output()
             .unwrap();

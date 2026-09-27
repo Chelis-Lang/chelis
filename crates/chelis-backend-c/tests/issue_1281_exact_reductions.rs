@@ -34,7 +34,8 @@ fn symbolic_vector(name: &str, precision: Prim) -> TensorType {
 fn compile_and_run(name: &str, source: &str, harness: &str) -> Output {
     let probe = common::probe_dir(&format!("issue_1281_{name}"));
     let dir = probe.path();
-    let staged = chelis_runtime_bundle::stage(dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(dir.join("kernel.c"), source).expect("write generated C");
     fs::write(dir.join("main.c"), harness).expect("write C harness");
     let binary = dir.join("probe");

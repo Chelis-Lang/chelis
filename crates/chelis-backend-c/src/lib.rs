@@ -541,7 +541,8 @@ mod tests {
     /// `dst` (spec/08-backends.md §2.1). Nothing is looked up in a build
     /// directory: the bundle writes its own verified bytes.
     fn stage_runtime(dst: &std::path::Path) {
-        chelis_runtime_bundle::stage(dst).expect("stage the carried runtime");
+        chelis_runtime_bundle::stage(dst)
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     }
 
     /// Link the runtime `stage_runtime` wrote into `dir`, by exact path.

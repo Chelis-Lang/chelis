@@ -34,7 +34,8 @@ mod common;
 fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
     let probe = common::probe_dir("checked_c_indexing");
     let dir = probe.path();
-    let staged = chelis_runtime_bundle::stage(dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(dir.join("kernel.c"), source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let toolchain = chelis_backend_c::toolchain::test_toolchain(
@@ -1991,7 +1992,8 @@ fn compile_and_run_kernel_capturing(
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("trap_bin");
     let compile = Command::new("gcc")
         .arg("-O2")
@@ -2031,7 +2033,8 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Opt
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
     let runtime_lib = staged.archive;
@@ -3162,7 +3165,8 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
     let runtime_lib = staged.archive;
@@ -3684,7 +3688,8 @@ fn compile_and_run_kernel_with_blas(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
     let runtime_lib = staged.archive;

@@ -129,7 +129,8 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let result = chelis_backend_c::codegen(verified, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.c", &result.c_source);
 
     let prim = dag

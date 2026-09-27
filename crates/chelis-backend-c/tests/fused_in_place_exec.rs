@@ -86,7 +86,8 @@ int main(void) {
 }
 "#;
         let dir = tempfile::tempdir().unwrap();
-        let staged = chelis_runtime_bundle::stage(dir.path()).expect("stage the carried runtime");
+        let staged = chelis_runtime_bundle::stage(dir.path())
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
         let source = dir.path().join("probe.c");
         fs::write(&source, format!("{prefix}\n{instrumented}\n{main}")).unwrap();
         let toolchain = chelis_backend_c::toolchain::test_toolchain(generated.requirements);
@@ -135,7 +136,8 @@ fn compile_and_run(
     requirements: chelis_backend_c::toolchain::CodegenRequirements,
 ) -> String {
     let tmp = tempfile::tempdir().unwrap();
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(tmp.path().join("model.c"), c_source).unwrap();
     fs::write(
         tmp.path().join("main.c"),

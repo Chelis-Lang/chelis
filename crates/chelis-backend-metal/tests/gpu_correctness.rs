@@ -202,7 +202,8 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         "chelis_metal_runtime.h",
         &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h")).expect("metal runtime header"),
     );
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.mm", &result.mm_source);
     write_temp_file(
         tmp.path(),
@@ -863,7 +864,8 @@ int main(void) {{
             &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h"))
                 .expect("metal runtime header"),
         );
-        let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+        let staged = chelis_runtime_bundle::stage(tmp.path())
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
         write_temp_file(tmp.path(), "model.mm", &result.mm_source);
         write_temp_file(
             tmp.path(),
@@ -1316,7 +1318,8 @@ fn compile_and_run_count(
         "chelis_metal_runtime.h",
         &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h")).expect("metal runtime header"),
     );
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.mm", &result.mm_source);
     write_temp_file(
         tmp.path(),

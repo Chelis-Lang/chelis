@@ -78,7 +78,8 @@ fn compile_and_run_kernel(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
     let runtime_lib = staged.archive;

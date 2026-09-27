@@ -285,7 +285,8 @@ fn compile_source(
 ) -> Executable {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let directory = tempfile::tempdir().unwrap();
-    let staged = chelis_runtime_bundle::stage(directory.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(directory.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     if mutation == Some("return-borrow") {
         let old = "outputs[0] = chelis_device_tensor_clone(inputs[0]);";
         assert!(source.contains(old));

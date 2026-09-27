@@ -218,7 +218,8 @@ fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<Str
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let staged = chelis_runtime_bundle::stage(&dir).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("test_bin");
     let runtime_lib = staged.archive;
     let compile = Command::new("gcc")

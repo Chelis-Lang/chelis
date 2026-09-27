@@ -1833,7 +1833,8 @@ fn s14_generated_hip_source_compiles_when_hipcc_available() {
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
     support::stage_device_runtime(tmp.path());
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     let main_cpp = r#"
 #include "chelis_runtime.h"

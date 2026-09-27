@@ -4002,7 +4002,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 if command[1] == "build":
-                    return successful_product_build(command, kwargs)
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 self.assertEqual(command[1:3], ["nextest", "list"])
                 payload = {
                     "rust-suites": {

@@ -580,7 +580,8 @@ fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),

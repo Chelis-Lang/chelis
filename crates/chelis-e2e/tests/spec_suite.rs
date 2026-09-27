@@ -441,7 +441,8 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     .unwrap();
     let result = chelis_backend_c::codegen(verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let staged = chelis_runtime_bundle::stage(tmp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let write = |name: &str, content: &str| {
         let path = tmp.path().join(name);
         let mut f = std::fs::File::create(&path).unwrap();

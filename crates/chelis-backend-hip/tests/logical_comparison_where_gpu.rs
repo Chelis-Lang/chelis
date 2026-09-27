@@ -170,7 +170,8 @@ fn compile_and_run_shaped(
     assert_eq!(result.output_labels.len(), outputs.len());
     let temp = tempfile::tempdir().expect("tempdir");
     stage_hip_support(temp.path());
-    let staged = chelis_runtime_bundle::stage(temp.path()).expect("stage the carried runtime");
+    let staged = chelis_runtime_bundle::stage(temp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(temp.path().join("model.cpp"), &result.c_source).expect("write model");
     fs::write(
         temp.path().join("main.cpp"),
