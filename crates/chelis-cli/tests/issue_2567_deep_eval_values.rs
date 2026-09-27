@@ -137,3 +137,27 @@ fn shallow_values_render_exactly() {
          d = Deeper(dict(k: Stop))\n"
     );
 }
+
+/// chelis#2592: doubling a fold-built Chain must no longer copy every
+/// preceding link at each step. Four times the input should take under six
+/// times as long, with room for process startup and a busy CI host. The
+/// old owned-Vec payload took 0.39 s at 1,000 links and 4.22 s at 4,000
+/// links on the merge head; both outputs were correct.
+#[test]
+fn fold_chain_growth_is_subquadratic() {
+    let measure = |n: usize| {
+        let roots = format!(
+            "def head(n: i64) -> i64 = match chain(n) with {{\n  | End => 0i64\n  | Link(k, rest) => k\n}}\na = head({n}i64)\n"
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(eval(&roots), format!("a = {}\n", n - 1));
+        started.elapsed()
+    };
+    let best_of_two = |n| std::cmp::min(measure(n), measure(n));
+    let small = best_of_two(1_000);
+    let large = best_of_two(4_000);
+    assert!(
+        large < small * 6,
+        "fold of 4,000 links took {large:?} versus {small:?} for 1,000 links"
+    );
+}
