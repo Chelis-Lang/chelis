@@ -62,3 +62,15 @@ def pairs (v : alloc.vec.Vec (U32 × U32)) : List (Nat × Nat) := v.val.map fun 
   expect "Option<&mut u32>::expect on None panics (expect_failed)"
     (decode (fun ((v, s) : U32 × Option U32) => (v.val, optNat s))
       (misc_std_models.expect_slot none)) (.error "failure")
+  expect "Vec::drain left early removes the whole range"
+    (decode (fun ((t, v) : alloc.vec.Vec U32 × alloc.vec.Vec U32) => (naturals t, naturals v))
+      (misc_std_models.drain_until ⟨[1#u32, 2#u32, 3#u32, 4#u32], by scalar_tac⟩ 3#u32))
+    (.ok ([2], [1, 3]))
+  expect "Vec::drain exhausted"
+    (decode (fun ((t, v) : alloc.vec.Vec U32 × alloc.vec.Vec U32) => (naturals t, naturals v))
+      (misc_std_models.drain_until ⟨[1#u32, 2#u32], by scalar_tac⟩ 9#u32))
+    (.ok ([2], [1, 9]))
+  expect "Vec::drain of an empty range"
+    (decode (fun ((t, v) : alloc.vec.Vec U32 × alloc.vec.Vec U32) => (naturals t, naturals v))
+      (misc_std_models.drain_until ⟨[5#u32], by scalar_tac⟩ 9#u32))
+    (.ok ([], [5, 9]))

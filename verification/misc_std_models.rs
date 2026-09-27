@@ -89,6 +89,21 @@ pub fn expect_slot(slot: Option<&mut u32>) -> u32 {
     *value
 }
 
+/// `Vec::drain` in a loop left at `stop` (chelis-ir ownership/last_use.rs drains
+/// in loops left early with `?`): dropping the drain removes the whole range, and
+/// the vector is pushed to again afterwards.
+pub fn drain_until(mut values: Vec<u32>, stop: u32) -> (Vec<u32>, Vec<u32>) {
+    let mut taken = Vec::new();
+    for value in values.drain(1..) {
+        if value == stop {
+            break;
+        }
+        taken.push(value);
+    }
+    values.push(stop);
+    (taken, values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +152,12 @@ mod tests {
         assert_eq!(expect_slot(Some(&mut slot)), 4);
         assert_eq!(slot, 4);
         assert!(std::panic::catch_unwind(|| expect_slot(None)).is_err());
+    }
+
+    #[test]
+    fn drain_left_early() {
+        assert_eq!(drain_until(vec![1, 2, 3, 4], 3), (vec![2], vec![1, 3]));
+        assert_eq!(drain_until(vec![1, 2], 9), (vec![2], vec![1, 9]));
+        assert_eq!(drain_until(vec![5], 9), (vec![], vec![5, 9]));
     }
 }

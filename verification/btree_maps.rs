@@ -437,6 +437,32 @@ pub fn maps_equal() -> (bool, bool, bool, bool) {
     (map == same, map != changed, map == shorter, map != same)
 }
 
+/// std's `Entry` methods, translated from their bodies: `or_default`,
+/// `or_insert_with` (the closure, whose captured counter is given back, runs only
+/// for a vacant entry), and `insert_entry`, which keeps an occupied entry's stored
+/// key and gives back an entry whose `get_mut` writes reach the map; removing
+/// through the returned entry takes out the inserted pair with its key. The
+/// modeled `Entry::key` is the stored key of an occupied entry.
+pub fn std_entry_methods() -> (u32, u32, (u32, u32), Vec<(u32, u32, u32)>) {
+    let mut map = populated();
+    *map.entry(key(2, 99)).or_default() += 5;
+    *map.entry(key(4, 40)).or_default() += 4;
+    let mut calls = 0;
+    *map.entry(key(5, 50)).or_insert_with(|| {
+        calls += 1;
+        500
+    }) += 1;
+    map.entry(key(1, 77)).or_insert_with(|| {
+        calls += 10;
+        0
+    });
+    let stored = map.entry(key(3, 99)).key().identity;
+    let mut inserted = map.entry(key(1, 11)).insert_entry(111);
+    *inserted.get_mut() += 1;
+    let (removed, value) = map.entry(key(6, 60)).insert_entry(600).remove_entry();
+    (calls, stored, (removed.identity, value), snapshot(&map))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +525,21 @@ mod tests {
             (vec![2, 3], vec![100, 200, 300], (2, Some(2)), Some(10), 3)
         );
         assert_eq!(maps_equal(), (true, true, false, false));
+        assert_eq!(
+            std_entry_methods(),
+            (
+                1,
+                30,
+                (60, 600),
+                vec![
+                    (1, 10, 112),
+                    (2, 20, 205),
+                    (3, 30, 300),
+                    (4, 40, 4),
+                    (5, 50, 501)
+                ]
+            )
+        );
         assert_eq!(zipped_iterator_callbacks(), (1, 1, 1, 1));
         assert_eq!(delegated_collection_state(2), (vec![(1, 10), (2, 20)], 13));
         assert_eq!(delegated_collection_state(0), (vec![], 11));

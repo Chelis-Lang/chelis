@@ -40,6 +40,10 @@ CORE_FAMILIES = (
     "core::f64::consts::FRAC_PI_2",
     "core::iter::traits::iterator::Iterator::by_ref",
     "{core::iter::traits::iterator::Iterator}::by_ref",
+    # BTreeMap's Entry methods or_insert, or_insert_with, or_default and insert_entry,
+    # translated over the modeled OccupiedEntry/VacantEntry operations (Entry::key is
+    # modeled; and_modify and or_insert_with_key inline B-tree internals: rejected).
+    "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry}",
 )
 
 

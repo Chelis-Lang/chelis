@@ -95,7 +95,7 @@ MODEL_ROOTS = {
         "shared_collect", "duplicate_from_iterator", "empty_from_iterator",
         "wrapped_entry_restoration", "zipped_iterator_callbacks", "keys_collected",
         "keys_and_values", "maps_equal", "delegated_collection_state", "borrowed_for_loop",
-        "borrowed_generic_total", "generic_loop_totals",
+        "borrowed_generic_total", "generic_loop_totals", "std_entry_methods",
     )),
     "btree_sets": (
         "btree_sets::duplicate_from_iterator", "btree_sets::borrowed_lookup",
@@ -248,6 +248,8 @@ def charon_command(
         "--include", "core::f64::consts::FRAC_PI_2",
         "--include", "core::iter::traits::iterator::Iterator::by_ref",
         "--include", "{core::iter::traits::iterator::Iterator}::by_ref",
+        "--include",
+        "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry}",
         *[argument for entry in roots for argument in ("--start-from", entry)],
         *[argument for entry in shell_patterns(name) for argument in ("--opaque-hard", entry)],
         "--", f"--edition={MODEL_EDITIONS.get(name, '2021')}", "--crate-type=lib",

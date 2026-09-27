@@ -100,4 +100,10 @@ set_option synthInstance.maxSize 512 in
     (decode (fun ((total, count, empty) : U32 × U32 × Bool) => (total.val, count.val, empty))
       btree_maps.generic_loop_totals)
     (.ok (1400, 3, false))
-  IO.println "BTreeMap smoke: 26 behavioral checks passed"
+  expect "std Entry methods run a vacant entry's closure, keep stored keys and write back"
+    (decode (fun ((calls, stored, (removed, value), entries) :
+        U32 × U32 × (U32 × U32) × alloc.vec.Vec (U32 × U32 × U32)) =>
+      (calls.val, stored.val, (removed.val, value.val), triples entries))
+      btree_maps.std_entry_methods)
+    (.ok (1, 30, (60, 600), [(1, 10, 112), (2, 20, 205), (3, 30, 300), (4, 40, 4), (5, 50, 501)]))
+  IO.println "BTreeMap smoke: 27 behavioral checks passed"
