@@ -3949,8 +3949,11 @@ path even though bare `round` under `grad` remains a structural
 > their separate identities and cannot act as implicit fallbacks.
 >
 > Adjoint: Float-to-float casts use the cast adjoint specified by spec/06
-> and [04-NUM-14]; discrete source/target casts structurally reject
-> differentiation.
+> and [04-NUM-14]. A float source cast to an integer or bool target is
+> piecewise constant and structurally rejects differentiation with
+> `AdRejectionReason::PiecewiseConstant`; it never contributes a silent
+> zero. A bool or integer source is a discrete forward-only value and
+> carries no cotangent, irrespective of target.
 >
 > Accumulator: None.
 
