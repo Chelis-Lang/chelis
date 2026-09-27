@@ -23,6 +23,7 @@ const DAG_METHODS: [&str; 20] = [
     "emit_realize",
     "emit_cast",
 ];
+const WHERE_CHECKED_PROJECTION: &str = "{read} ? chelis_tensor_elementwise_index_step_for_shape(t{node}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0";
 const HOST_ARMS: [&str; 4] = [
     "emit_binary_elementwise_arm",
     "emit_binary_func_elementwise_arm",
@@ -139,19 +140,6 @@ fn check_dag(source: &str) -> Result<(), String> {
             return Err("open_element_loop: missing checked loop bound".to_string());
         }
     }
-    // `where` reads only the branches its condition selects ([05-OP-53]), so
-    // its projection authority takes each checked step under that input's read.
-    let read_under = method(source, "emit_elementwise_index_steps_read_under");
-    for required in [
-        "{read} ? chelis_tensor_elementwise_index_step_for_shape(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0",
-        "t{id}_size <= 1 || ({})",
-    ] {
-        if !read_under.contains(required) {
-            return Err(
-                "emit_elementwise_index_steps_read_under: missing checked projection".to_string(),
-            );
-        }
-    }
     for name in DAG_METHODS {
         let body = method(source, name);
         for retired in [
@@ -163,8 +151,11 @@ fn check_dag(source: &str) -> Result<(), String> {
                 return Err(format!("{name}: retired coordinate arithmetic"));
             }
         }
+        // `where` reads only the branches its condition selects ([05-OP-53]),
+        // so it takes the same checked step for each operand under that
+        // operand's read instead of for every input.
         let projection = if name == "emit_where" {
-            body.find("self.emit_elementwise_index_steps_read_under(id, &reads, ty)")
+            body.find(WHERE_CHECKED_PROJECTION)
         } else {
             body.find("self.emit_elementwise_index_steps(id, inputs, ty)")
         }
@@ -254,13 +245,8 @@ fn cohort_control_rejects_raw_helpers_late_validation_and_unchecked_loop_bounds(
             "missing checked projection",
         ),
         (
-            "let identity = self.emit_elementwise_index_steps_read_under(id, &reads, ty);",
-            "let identity = String::from(\"1\");",
-            "missing checked projection",
-        ),
-        (
-            "{read} ? chelis_tensor_elementwise_index_step_for_shape(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0",
-            "{read} ? 1 /* {input} {rank} {shape} */ : 0",
+            WHERE_CHECKED_PROJECTION,
+            "{read} ? 1 /* {node} {rank} {shape} */ : 0",
             "missing checked projection",
         ),
         (
