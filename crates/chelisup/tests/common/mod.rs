@@ -78,6 +78,9 @@ pub struct ReleaseRuntime {
     pub archive_is_symlink: bool,
     /// Ship `lib` as a symlink to a sibling `lib.real` directory.
     pub lib_is_symlink: bool,
+    /// Ship the top-level `chelis-v*` entry as a link to an absolute path
+    /// outside the tarball, where the release's files are.
+    pub root_is_symlink: bool,
     /// `include/<name>` files in the tarball.
     pub shipped_headers: Vec<(String, Vec<u8>)>,
     /// The staging receipt the fake export writes.
@@ -114,6 +117,7 @@ impl ReleaseRuntime {
             shipped_archive: archive,
             archive_is_symlink: false,
             lib_is_symlink: false,
+            root_is_symlink: false,
             shipped_headers: headers,
             receipt,
             export_status: 0,
@@ -188,6 +192,13 @@ pub fn build_release_tarball(
         fs::rename(root.join("lib"), root.join("lib.real")).unwrap();
         std::os::unix::fs::symlink("lib.real", root.join("lib")).unwrap();
     }
+    if runtime.root_is_symlink {
+        let top = root.file_name().unwrap().to_str().unwrap().to_owned();
+        let outside = release_dir.join(format!("outside-{top}"));
+        fs::create_dir_all(release_dir).unwrap();
+        fs::rename(&root, &outside).unwrap();
+        return write_link_tarball(release_dir, &top, &outside);
+    }
     write_tarball(release_dir, &root)
 }
 
@@ -207,6 +218,22 @@ fn write_tarball(release_dir: &Path, root: &Path) -> PathBuf {
     builder.append_dir_all(&top, root).unwrap();
     let enc = builder.into_inner().unwrap();
     enc.finish().unwrap();
+    asset
+}
+
+/// Write `<release_dir>/<top>.tar.gz` holding only the link `top -> target`.
+fn write_link_tarball(release_dir: &Path, top: &str, target: &Path) -> PathBuf {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let asset = release_dir.join(format!("{top}.tar.gz"));
+    let enc = GzEncoder::new(fs::File::create(&asset).unwrap(), Compression::fast());
+    let mut builder = tar::Builder::new(enc);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    builder.append_link(&mut header, top, target).unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
     asset
 }
 

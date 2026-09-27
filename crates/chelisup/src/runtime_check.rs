@@ -16,10 +16,12 @@
 //!
 //! A refused release newer than the running chelisup may use a format this
 //! chelisup does not know, and chelisup does not update itself, so that
-//! refusal says how to get the latest chelisup. A release whose `chelis` this
-//! machine cannot start is not refused for its runtime files, and a newer
-//! chelisup would unpack the same binary, so that error says why it cannot
-//! start instead.
+//! refusal says how to get the latest chelisup. When the operating system
+//! refuses to execute a release's `chelis`, the release is not refused for
+//! its runtime files, and a newer chelisup would unpack the same binary, so
+//! that error says why it cannot run instead. A dynamic loader that rejects
+//! the binary after execution starts shows up as a failed export, with the
+//! loader's message.
 
 use std::fs;
 use std::io;
@@ -81,7 +83,8 @@ pub(crate) fn check(
         .map_err(|refusal| advise_upgrade(refusal, version, CHELISUP_VERSION))
 }
 
-/// The error for a release whose `bin/chelis` this machine cannot start.
+/// The error for a release whose `bin/chelis` the operating system refuses
+/// to execute.
 fn cannot_start(version: &str, error: &io::Error) -> String {
     // Extraction found `bin/chelis`, so what is missing is a file it names.
     let cause = if error.kind() == io::ErrorKind::NotFound {

@@ -87,7 +87,7 @@ type Refusal = (&'static str, fn(&mut ReleaseRuntime), &'static str);
 
 #[test]
 fn install_refuses_runtime_files_its_export_does_not_report() {
-    let cases: [Refusal; 12] = [
+    let cases: [Refusal; 13] = [
         (
             "swapped archive",
             |runtime| runtime.shipped_archive = b"another runtime".to_vec(),
@@ -102,6 +102,11 @@ fn install_refuses_runtime_files_its_export_does_not_report() {
             "linked lib directory",
             |runtime| runtime.lib_is_symlink = true,
             "no usable lib/libchelis_runtime.a: lib is not a directory",
+        ),
+        (
+            "linked release root",
+            |runtime| runtime.root_is_symlink = true,
+            "expected exactly one chelis-v* directory (not a link) in the tarball, found []",
         ),
         (
             "swapped header",

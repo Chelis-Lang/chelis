@@ -129,8 +129,9 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
   Releases up to 0.18.11 predate the export and install unchecked, with a
   warning. A refused release newer than the running chelisup may use a format
   that chelisup does not know, so the refusal says how to get the latest
-  chelisup. A release whose `chelis` the machine cannot start is reported as
-  such, without that advice.
+  chelisup. When the operating system refuses to execute the release's
+  `chelis`, the error says so, without that advice; a dynamic loader that
+  rejects it is reported as a failed export, with the loader's message.
 - `chelisup default <ver>` — set the recorded default the shim falls back to.
 - `chelisup show` / `list-installed` / `which` — status.
 - `chelisup update` — self-update the installer.

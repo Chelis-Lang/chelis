@@ -374,7 +374,8 @@ fn github_repo() -> String {
 }
 
 /// Unpack `tarball` (gzip) into `dest` and return the single
-/// top-level `chelis-v*` directory, verified to contain `bin/chelis`.
+/// top-level `chelis-v*` directory, a real directory rather than a link,
+/// verified to contain `bin/chelis`.
 fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let file = fs::File::open(tarball)
         .map_err(|e| format!("could not open {}: {e}", tarball.display()))?;
@@ -387,13 +388,16 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|e| format!("could not read {}: {e}", dest.display()))?
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
+        // `DirEntry::file_type` does not follow links. Through a linked root,
+        // the runtime check and the store entry would reach outside the
+        // release.
+        .filter(|e| {
+            e.file_type().is_ok_and(|kind| kind.is_dir())
+                && e.file_name()
+                    .to_str()
                     .is_some_and(|n| n.starts_with("chelis-v"))
         })
+        .map(|e| e.path())
         .collect();
     if candidates.len() != 1 {
         let names: Vec<String> = candidates
@@ -406,7 +410,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
             })
             .collect();
         return Err(format!(
-            "expected exactly one chelis-v* directory in the tarball, found {names:?}"
+            "expected exactly one chelis-v* directory (not a link) in the tarball, found {names:?}"
         ));
     }
     let unpacked = candidates.remove(0);
