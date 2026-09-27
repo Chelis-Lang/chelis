@@ -390,9 +390,13 @@ its own byte integrity before decoding. What happens after that decode differs
 by route, and the difference is not a preference (chelis#2211).
 
 Every **on-disk cache entry** is checked for envelope integrity (format
-version, build identity, and the payload digest), live source and build
-identity (the recomputed `source_hash` and `CacheIdentity`), and proof-identity
-agreement between its two halves (`TypeEnv::matches_checked_program`). The
+version, build identity, and the payload digest), its binding to what is being
+compiled, and proof-identity agreement between its two halves
+(`TypeEnv::matches_checked_program`). The binding differs by cache: a compiled
+context recomputes the live `source_hash` and `CacheIdentity`, while a
+typecheck cache (`.tc`) is found under a key derived from the linked
+declarations, the source digest and the build fingerprint, so a changed input
+selects a different entry. The
 entry outlives the process that wrote it, and there is no second channel on
 which its producer could have said what the bytes ought to be, so whether the
 decoder may adopt the effect and linearity results the program carries depends
@@ -404,10 +408,11 @@ checkers over the decoded program.
 The reason is what each check can see. Both checkers replace the effect rows
 and linearity facts they are handed rather than comparing against them, so a
 rerun rejects a decoded program only when that program fails a checker. Where
-the wire carries a lowering, an edit to the program half alone makes the
-re-lowered program disagree with the stored one and is rejected there, and
-making the program invalid while surviving the comparison needs a consistent
-rewrite of program and lowering. That is the capability chelis#2257 records,
+the wire carries a lowering, an edit to the program half that changes what it
+lowers to makes the re-lowered program disagree with the stored one and is
+rejected there (an edit that lowers identically is accepted by the
+comparison), and making the program invalid while surviving the
+comparison needs a consistent rewrite of program and lowering. That is the capability chelis#2257 records,
 and with it a writer can plant a *valid* program that every route accepts, so
 the rerun adds nothing against it. Where the wire carries no lowering, an edit
 to the program half under a recomputed payload digest has nothing to disagree
@@ -443,7 +448,11 @@ lowering. What the reruns, the agreement and the comparison cannot do is
 establish provenance. A *substituted* payload -- a different library, compiled by the
 same build, carrying the victim's `source_hash` and `identity` -- is internally
 consistent by construction, so it passes every one of these checks
-(chelis#2257).
+(chelis#2257). The disk routes therefore rest on an assumption: the cache
+directory (created `0o700`) is private to the user, so whoever can rewrite an
+entry can already run code as that user. They defend against accidents --
+corruption, torn writes, stale formats, a mismatched half -- not against an
+adversary with write access to the cache.
 
 A **parent-to-worker handoff** -- `CompiledContext::encode_for_handoff` and
 `decode_authenticated`, which `chelis test` uses -- does have a second channel.

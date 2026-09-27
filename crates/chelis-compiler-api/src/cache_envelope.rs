@@ -440,9 +440,10 @@ pub(crate) fn load<T: CachePayload>(
         ));
     }
 
-    // A `StdLibContext` decode reruns no checker (chelis#2558), so its only
-    // polling step is the re-lowering; a cancelled caller is observed here,
-    // before either payload type pays for a decode (chelis#2617).
+    // Observe a cancelled caller before either payload type pays for a decode
+    // (chelis#2617). The decode itself may still poll: through the re-lowering
+    // where a lowering is stored, and through the checker reruns where it is
+    // not (chelis#2558); this check does not depend on which.
     if chelis_types::cancellation_requested() {
         return Err(CacheError::Cancelled);
     }

@@ -70,10 +70,11 @@ pub fn check_prepared_library(
 /// `CompiledContext` decoder and a `StdLibContext` decoder holding a stored
 /// lowering call it. They establish the rest before or after this call: the envelope's payload digest, format
 /// version and build identity pin the bytes to a producer running this
-/// compiler build, the live source hash and cache identity pin them to the
-/// sources being compiled, and the decoder re-lowers the program and compares
-/// the result against the transmitted lowered payload, so an edit to either
-/// half alone is rejected. The producer ran both checkers before writing, and
+/// compiler build, the live source hash and cache identity (a compiled context)
+/// or the content-derived cache key (a typecheck cache) pin them to the sources
+/// being compiled, and the decoder re-lowers the program and compares the
+/// result against the transmitted lowered payload, so an edit to either half
+/// that changes the lowering is rejected. The producer ran both checkers before writing, and
 /// they are deterministic, so the adopted program is the one rerunning them
 /// would produce; `chelis-compiler-api`'s
 /// `cached_program_is_a_checker_fixed_point` locks that equality instead of
