@@ -323,6 +323,10 @@ fn infer_app_inner(
             }
         }
     } else {
+        product.callee_reference = matches!(
+            kids[0].carrier(),
+            chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
+        );
         infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // The constructor callee no longer passes through `infer_expr`, but it is

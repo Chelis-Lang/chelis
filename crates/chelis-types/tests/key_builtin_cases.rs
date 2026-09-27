@@ -113,12 +113,14 @@ fn witnesses(case: BuiltinSiblingCaseId) -> Vec<Option<String>> {
         Case::LenList => vec![some("def f(ks: List[key]) -> i64 = len(ks)\n")],
         Case::LenDict => vec![some("def f(d: Dict[string, key]) -> i64 = len(d)\n")],
         Case::IndexList => vec![some("def f(ks: List[key]) -> key = index(ks, 0i64)\n")],
-        Case::AppendList => vec![some(
-            "def f(ks: List[key], k: key) -> List[key] = append(ks, k)\n",
-        )],
-        Case::ConcatList => vec![some(
-            "def f(a: List[key], b: List[key]) -> List[key] = concat(a, b)\n",
-        )],
+        Case::AppendList => {
+            let source = "def f(ks: List[key], k: key) -> List[key] = append(ks, k)\n";
+            vec![some(source), some(source)]
+        }
+        Case::ConcatList => {
+            let source = "def f(a: List[key], b: List[key]) -> List[key] = concat(a, b)\n";
+            vec![some(source), some(source)]
+        }
         Case::TakeList => vec![some("def f(ks: List[key]) -> List[key] = take(ks, 1i64)\n")],
         Case::SkipList => vec![some("def f(ks: List[key]) -> List[key] = skip(ks, 1i64)\n")],
         Case::ChunkList => vec![some(

@@ -743,6 +743,45 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
     }
 }
 
+/// [04-LIN-9] and spec/04 section 1.1: a builtin named as a value rather
+/// than called (`map(to_int, ks)`, a builtin in a tuple or an `if` arm) is
+/// judged by the key allow-list at the parameters of the function type it
+/// is instantiated at, as a call is judged operand by operand in linearity.
+/// Every type variable of a parameter the builtin does not admit a key at
+/// (`crate::key_admission::builtin_key_operand`, over all its sibling cases)
+/// is key-free, so instantiating it at a key-carrying type is refused and
+/// names the builtin. A user binding that shadows a builtin name is a
+/// generic whose variables generalization already made key-free.
+fn forbid_keys_a_builtin_value_does_not_admit(name: &str, ty: &Type, subst: &Subst) {
+    let Some(decl) = crate::builtins::builtin_decl(name) else {
+        return;
+    };
+    let Type::Fn(params, _) = ty else {
+        return;
+    };
+    let cases: Vec<crate::builtins::BuiltinSiblingCaseId> = decl
+        .capability
+        .sibling_cases
+        .iter()
+        .map(|case| case.case)
+        .collect();
+    for (index, param) in params.iter().enumerate() {
+        if crate::key_admission::builtin_key_operand(name, &cases, index).is_ok() {
+            continue;
+        }
+        for var in crate::env::free_tvars(param) {
+            subst.forbid_key_instantiation(
+                var,
+                crate::unify::GenericParameter {
+                    generic: Some(name.to_string()),
+                    binder: None,
+                    value: false,
+                },
+            );
+        }
+    }
+}
+
 pub(super) fn infer_var(
     node: &DeepNode,
     env: &mut Env,
@@ -752,6 +791,7 @@ pub(super) fn infer_var(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
+    let called = std::mem::take(&mut product.callee_reference);
     let kids = node.children_slice();
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
         // chelis#317: a nullary constructor at a construction site (a bare
@@ -799,6 +839,9 @@ pub(super) fn infer_var(
             // pins that this is the same instantiation the two projections
             // used to perform.
             let instantiated = env.instantiate_scheme(&scheme, vg, subst);
+            if !called {
+                forbid_keys_a_builtin_value_does_not_admit(name, &instantiated.ty, subst);
+            }
             // chelis#1801: the application rule reads these back to decide
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).

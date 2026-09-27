@@ -411,23 +411,25 @@ const TO_STRING_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
 };
 
 /// [04-LIN-9], [04-LIN-10] and spec/04 section 1.1: what one builtin case's
-/// atom does with a key-carrying value. A builtin in the Numeric domain alone
-/// has no sibling case; its operands are tensor element dtypes, which admit
-/// `key` only where the atom names it (`KEY_OPERAND_BUILTINS` in the
-/// linearity checker). Every Container and Boundary case declares its rule in
-/// [`case_keys`], which has no wildcard arm, so a new case must decide.
+/// atom does with a key-carrying value, read by the allow-list
+/// ([`crate::key_admission::case_key_operand`]). A builtin in the Numeric
+/// domain alone has no sibling case and admits a key only as a key
+/// primitive's key operand ([`crate::key_admission::KeyPrimitive`]). Every
+/// Container and Boundary case declares its rule in [`case_keys`], which has
+/// no wildcard arm, so a new case must decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseKeys {
     /// The atom fixes every operand type (strings, paths, i64 counts,
     /// booleans, CSV tables, mapped files), so no operand carries a key.
     NoKeyOperand,
-    /// The atom's domain names no `key` at these zero-based operands (a
-    /// tensor element dtype domain, the equality domain, the rendering
-    /// domain): an operand listed here whose type carries a key is refused.
+    /// The atom's domain names no `key` (a tensor element dtype domain, the
+    /// equality domain, the rendering domain). The listed zero-based
+    /// operands are the ones a key-carrying type can reach; like every
+    /// other operand of the case, each refuses it.
     Refused(&'static [usize]),
     /// The atom takes values of any checked type. Every type parameter is
-    /// declared with the site that instantiates it at a call and how its
-    /// values are routed.
+    /// declared at each operand that instantiates it, with how its values
+    /// are routed; an operand with no declared parameter admits no key.
     Values(&'static [KeyParameter]),
 }
 
@@ -451,6 +453,15 @@ pub enum KeyParameterSite {
     ListElement(usize),
     /// The result type of the zero-based callback argument.
     CallbackResult(usize),
+}
+
+impl KeyParameterSite {
+    /// The zero-based argument the site reads.
+    pub const fn operand(self) -> usize {
+        match self {
+            Self::Argument(index) | Self::ListElement(index) | Self::CallbackResult(index) => index,
+        }
+    }
 }
 
 /// How a builtin case routes each value of one type parameter.
@@ -546,9 +557,16 @@ pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
             CaseKeys::Values(key_parameters![("collection", Argument(0), Borrowed)])
         }
         Case::IndexList => CaseKeys::Values(key_parameters![("T", ListElement(0), Borrowed)]),
-        Case::AppendList
-        | Case::ConcatList
-        | Case::TakeList
+        // [05-OP-54]: each element moves to one place in the result.
+        Case::AppendList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", Argument(1), OneConsumer)
+        ]),
+        Case::ConcatList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", ListElement(1), OneConsumer)
+        ]),
+        Case::TakeList
         | Case::SkipList
         | Case::ChunkList
         | Case::FlattenList

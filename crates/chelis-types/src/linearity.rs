@@ -10,13 +10,11 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::builtins::{
-    BUILTIN_NAMES, BuiltinSemanticDomain, BuiltinSiblingCaseId, CaseKeys, KeyParameterSite,
-    KeyRouting, builtin_decl, case_keys,
-};
+use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
+use crate::key_admission::{KeyAdmission, KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
 use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -969,6 +967,9 @@ impl Checker {
                     }
                     return;
                 }
+                if let TagKeys::Refuses(refusal) = tag_keys(tag) {
+                    self.refuse_key_children(tag, children, refusal, scope);
+                }
                 match tag {
                     DeepTag::Var => self.consume_var_expr(expr, scope, generic_site(expr)),
                     DeepTag::Copy => self.check_copy(children, scope),
@@ -1129,10 +1130,14 @@ impl Checker {
     fn check_copy(&mut self, children: &[Expr], scope: &mut LinearScope) {
         if let Some(child) = children.first() {
             let copied = borrow_inner(child).unwrap_or(child);
-            if is_var_expr(copied) && self.expr_holds_key(copied, scope) {
+            if self.operand_holds_key(child, scope) {
                 // [04-LIN-9]: a key is never copied, explicitly or by the
                 // compiler; a second key comes from deriving, not copying.
-                self.reject_key_read(copied, "copied");
+                // `check_expr` refused it by the allow-list (`tag_keys`); the
+                // copied expression is still walked for its own uses.
+                if !is_var_expr(copied) {
+                    self.check_expr(copied, scope);
+                }
                 return;
             }
             if let Some(borrowed) = borrow_inner(child) {
@@ -1181,11 +1186,16 @@ impl Checker {
 
     fn check_app(&mut self, expr: &Expr, children: &[Expr], scope: &mut LinearScope) {
         let builtin = children.first().and_then(var_name);
-        if let Some(func) = children.first() {
+        let builtin_callee = builtin.filter(|name| self.is_builtin_reference(name, scope));
+        // A builtin callee is judged operand by operand below; a builtin
+        // named as a value is judged by the type checker
+        // (`infer::expr::forbid_keys_a_builtin_value_does_not_admit`).
+        if let Some(func) = children.first()
+            && builtin_callee.is_none()
+        {
             self.check_expr(func, scope);
         }
-        self.reject_key_operands_outside_key_operations(builtin, &children[1..], scope);
-        self.reject_keys_a_builtin_case_refuses(builtin, expr, &children[1..], scope);
+        let refused = self.admit_key_operands(builtin_callee, expr, &children[1..], scope);
         let observational = children
             .first()
             .is_some_and(callee_is_observational_higher_order);
@@ -1203,7 +1213,8 @@ impl Checker {
                 // arguments of a `grad(f)(..)` or `vmap(f)(..)` call are
                 // otherwise observed; a key argument is consumed there too.
                 // A callee position that only borrows cannot take one.
-                if !observational
+                if !refused[index - 1]
+                    && !observational
                     && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
                 {
                     self.reject_key_read(arg, "borrowed by this call");
@@ -1225,8 +1236,9 @@ impl Checker {
     }
 
     fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
-        if is_var_expr(inner) && self.expr_holds_key(inner, scope) {
-            self.reject_key_read(inner, "borrowed");
+        // [04-LIN-9]: a key is never borrowed; the application's allow-list
+        // check (`admit_key_operands`) refused it.
+        if self.operand_holds_key(borrow_expr, scope) {
             return;
         }
         if !is_var_expr(inner) {
@@ -2459,59 +2471,178 @@ impl Checker {
         }
     }
 
-    /// spec/04 section 1.1: an operation admits `key` elements only where its
-    /// own atom names `key`. Among the builtins those are [05-OP-70..72],
-    /// whose key operand is their first, and `drop` ([05-OP-67]), which
-    /// consumes any value. Every other builtin refuses a scalar key or a key
-    /// tensor in any operand position, whatever its scheme would unify.
-    fn reject_key_operands_outside_key_operations(
+    /// Whether an operand's value carries a key ([04-LIN-9]). A borrow is
+    /// read through to its target, whose type carries the evidence.
+    fn operand_holds_key(&self, operand: &Expr, scope: &LinearScope) -> bool {
+        let operand = borrow_inner(operand).unwrap_or(operand);
+        self.value_type(operand, scope)
+            .is_some_and(|ty| self.type_holds_key(&ty))
+    }
+
+    /// Whether `name` resolves to a builtin here: a builtin name that no
+    /// binding in scope shadows.
+    fn is_builtin_reference(&self, name: &str, scope: &LinearScope) -> bool {
+        BUILTIN_NAMES.contains(&name)
+            && builtin_decl(name).is_some()
+            && scope.top_id(name).is_none()
+    }
+
+    /// [04-LIN-9] and spec/04 section 1.1 at a Deep tag the allow-list
+    /// refuses (`tag_keys`): every runtime operand whose value carries a key
+    /// is refused, naming the tag.
+    fn refuse_key_children(
         &mut self,
-        builtin: Option<&str>,
-        args: &[Expr],
+        tag: DeepTag,
+        children: &[Expr],
+        refusal: KeyRefusal,
         scope: &LinearScope,
     ) {
-        let Some(name) = builtin else {
-            return;
-        };
-        // The rule binds operations whose domain is a dtype, the builtins
-        // declared in the Numeric domain. Container and boundary builtins
-        // take values of any type; a key container reaches them under the
-        // ownership rules above, not this one.
-        let numeric_domain = builtin_decl(name).is_some_and(|decl| {
-            decl.capability
-                .domains
-                .contains(&BuiltinSemanticDomain::Numeric)
-        });
-        if !BUILTIN_NAMES.contains(&name) || scope.top_id(name).is_some() || !numeric_domain {
-            return;
+        for (index, child) in children.iter().enumerate() {
+            if child_stamp_role(tag, index, children.len()) == ChildStampRole::RuntimeExpr
+                && self.operand_holds_key(child, scope)
+            {
+                self.refuse_key_operand(tag.as_str(), index, child, refusal);
+            }
         }
+    }
+
+    /// [04-LIN-9] and spec/04 section 1.1 at an application: each operand
+    /// whose value carries a key must reach an operation the allow-list
+    /// admits (`crate::key_admission`). A builtin decides per operand
+    /// (`builtin_key_operand`); every other callee (a user function, a
+    /// closure, a constructor, or a `grad`, `vmap` or `jit` application)
+    /// takes it through a key-typed parameter, whose type the type checker
+    /// fixed ([04-LIN-10]). A borrow of a key is refused whatever the callee.
+    /// Returns, per operand, whether it was refused, so no later rule reports
+    /// the same operand again.
+    fn admit_key_operands(
+        &mut self,
+        builtin: Option<&str>,
+        call: &Expr,
+        args: &[Expr],
+        scope: &LinearScope,
+    ) -> Vec<bool> {
+        let cases = builtin
+            .map(|name| self.selected_cases(name, args, scope))
+            .unwrap_or_default();
+        let mut refused = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            if KEY_OPERAND_BUILTINS.contains(&(name, index)) {
-                continue;
-            }
-            let operand = borrow_inner(arg).unwrap_or(arg);
-            let Some(ty) = self.expr_type(operand, scope) else {
-                continue;
+            let verdict = if borrow_inner(arg).is_some() {
+                Err(KeyRefusal::Read)
+            } else if let Some(name) = builtin {
+                builtin_key_operand(name, &cases, index)
+            } else {
+                Ok(KeyAdmission::KeyParameter)
             };
-            if type_expr_is_key_dtype(ty) {
-                self.push_diagnostic(CheckError::new(
-                    CheckErrorKind::PrecisionMismatch,
-                    with_macro_provenance(
-                        arg,
-                        format!(
-                            "`{name}` does not admit a `key` operand {}: an operation admits \
-                             `key` elements only where its own atom names `key` \
-                             (spec/04-type-system.md section 1.1)",
-                            diag_site(arg)
-                        ),
-                    ),
-                    vec![
-                        "Keys only feed `split_key`, `split_keys`, `fold_in` and random draws"
-                            .to_string(),
-                    ],
-                ));
+            let holds_key = match self.value_type(borrow_inner(arg).unwrap_or(arg), scope) {
+                Some(ty) => self.type_holds_key(&ty),
+                // A parameter routed to the callback and the result is in
+                // the result, so the call's own type decides when the
+                // operand's is unreadable.
+                None => {
+                    matches!(verdict, Err(KeyRefusal::CallbackAndResult { .. }))
+                        && self.expr_holds_key(call, scope)
+                }
+            };
+            let refuse = holds_key && verdict.is_err();
+            if let (true, Err(refusal)) = (refuse, verdict) {
+                let operation = match (borrow_inner(arg), builtin) {
+                    (Some(_), _) => DeepTag::Borrow.as_str(),
+                    (None, Some(name)) => name,
+                    (None, None) => "",
+                };
+                self.refuse_key_operand(operation, index, arg, refusal);
             }
+            refused.push(refuse);
         }
+        refused
+    }
+
+    /// The one diagnostic for a key-carrying operand an operation refuses
+    /// (spec/04 section 1.1, [04-LIN-9]). It names the operation; `operation`
+    /// is empty only for a call whose callee has no name.
+    fn refuse_key_operand(
+        &mut self,
+        operation: &str,
+        index: usize,
+        operand: &Expr,
+        refusal: KeyRefusal,
+    ) {
+        match refusal {
+            KeyRefusal::NotNamed => self.push_diagnostic(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                with_macro_provenance(
+                    operand,
+                    format!(
+                        "`{operation}` does not admit a key-carrying operand at argument {index} \
+                         {}: a key-carrying value reaches only a key operation, a random draw, \
+                         `drop`, a branch's join, a tuple, record or data constructor or \
+                         pattern, a builtin that routes each value to one consumer, or a \
+                         parameter whose declared type carries a key \
+                         (spec/04-type-system.md section 1.1; [04-LIN-9])",
+                        diag_site(operand)
+                    ),
+                ),
+                vec![KEY_OPERATION_SUGGESTION.to_string()],
+            )),
+            KeyRefusal::Read => {
+                let how = match operation {
+                    "borrow" => "borrowed".to_string(),
+                    "copy" => "copied".to_string(),
+                    "" => "borrowed by this call".to_string(),
+                    name => format!("borrowed by `{name}`"),
+                };
+                let target = borrow_inner(operand).unwrap_or(operand);
+                self.reject_key_read(target, &how);
+            }
+            KeyRefusal::CallbackAndResult { parameter } => self.key_reuse(
+                operand,
+                format!(
+                    "`{operation}` {} passes each value of its type parameter `{parameter}` to \
+                     its callback and also keeps it in its result, so a key-carrying \
+                     instantiation would use each key twice ([04-LIN-9])",
+                    diag_site(operand)
+                ),
+            ),
+        }
+    }
+
+    /// The sibling cases a call to `name` selects: for `concat`, whose two
+    /// cases differ, the one its second operand selects ([05-OP-54],
+    /// [05-OP-62]); otherwise every case, each of which must admit an
+    /// operand for the builtin to admit it.
+    fn selected_cases(
+        &self,
+        name: &str,
+        args: &[Expr],
+        scope: &LinearScope,
+    ) -> Vec<BuiltinSiblingCaseId> {
+        let Some(decl) = builtin_decl(name) else {
+            return Vec::new();
+        };
+        let cases: Vec<BuiltinSiblingCaseId> = decl
+            .capability
+            .sibling_cases
+            .iter()
+            .map(|case| case.case)
+            .collect();
+        if name == "concat" && cases.len() > 1 {
+            let axis = args
+                .get(1)
+                .and_then(|arg| self.value_type(arg, scope))
+                .is_some_and(|ty| {
+                    tagged_children(&ty, DeepTag::TPrim)
+                        .and_then(|kids| kids.first())
+                        .and_then(symbol_name)
+                        == Some("i32")
+                });
+            return vec![if axis {
+                BuiltinSiblingCaseId::ConcatTensors
+            } else {
+                BuiltinSiblingCaseId::ConcatList
+            }];
+        }
+        cases
     }
 
     /// [04-LIN-9] and spec/06 section 3.6: `vmap` maps tensor arguments and
@@ -2545,141 +2676,6 @@ impl Checker {
                 ],
             ));
         }
-    }
-
-    /// [04-LIN-9] and spec/04 section 1.1 for a Container or Boundary
-    /// builtin, read from its case's declaration ([`case_keys`]): an operand
-    /// whose atom names no `key` refuses a key-carrying type, and a type
-    /// parameter whose values reach both the callback and the result refuses
-    /// a key-carrying instantiation. Borrowed parameters are refused by the
-    /// borrowed-operand rule in `check_app`.
-    fn reject_keys_a_builtin_case_refuses(
-        &mut self,
-        builtin: Option<&str>,
-        call: &Expr,
-        args: &[Expr],
-        scope: &LinearScope,
-    ) {
-        let Some(name) = builtin else {
-            return;
-        };
-        let Some(decl) = builtin_decl(name) else {
-            return;
-        };
-        if scope.top_id(name).is_some() {
-            return;
-        }
-        let numeric_domain = decl
-            .capability
-            .domains
-            .contains(&BuiltinSemanticDomain::Numeric);
-        let rules = self.selected_case_keys(name, args, scope);
-        let operand_type = |checker: &Self, index: usize| -> Option<Expr> {
-            let arg = args.get(index)?;
-            checker.value_type(borrow_inner(arg).unwrap_or(arg), scope)
-        };
-        for rule in rules {
-            match rule {
-                CaseKeys::NoKeyOperand => {}
-                CaseKeys::Refused(positions) => {
-                    for &index in positions {
-                        let Some(ty) = operand_type(self, index) else {
-                            continue;
-                        };
-                        // A key dtype operand of a builtin that is also in the
-                        // Numeric domain was reported by the dtype rule.
-                        if !self.type_holds_key(&ty)
-                            || (numeric_domain && type_expr_is_key_dtype(&ty))
-                        {
-                            continue;
-                        }
-                        self.push_diagnostic(CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &args[index],
-                                format!(
-                                    "`{name}` does not admit a key-carrying operand at argument \
-                                 {index} {}: an operation admits `key` elements only where its \
-                                 own atom names `key` (spec/04-type-system.md section 1.1)",
-                                    diag_site(&args[index])
-                                ),
-                            ),
-                            vec![
-                            "Keys only feed `split_key`, `split_keys`, `fold_in` and random draws"
-                                .to_string(),
-                        ],
-                        ));
-                    }
-                }
-                CaseKeys::Values(parameters) => {
-                    for parameter in parameters {
-                        if parameter.routing != KeyRouting::CallbackAndResult {
-                            continue;
-                        }
-                        let instantiated = match parameter.site {
-                            KeyParameterSite::Argument(index)
-                            | KeyParameterSite::ListElement(index) => operand_type(self, index),
-                            KeyParameterSite::CallbackResult(index) => operand_type(self, index)
-                                .and_then(|ty| {
-                                    tagged_children(&ty, DeepTag::TFn)
-                                        .and_then(|kids| kids.last().cloned())
-                                }),
-                        }
-                        // The parameter is in the result by its routing, so the
-                        // call's own type decides when the site is unreadable.
-                        .or_else(|| self.expr_type(call, scope).cloned());
-                        if !instantiated.is_some_and(|ty| self.type_holds_key(&ty)) {
-                            continue;
-                        }
-                        self.key_reuse(
-                            call,
-                            format!(
-                                "`{name}` {} passes each value of its type parameter `{}` to its \
-                             callback and also keeps it in its result, so a key-carrying \
-                             instantiation would use each key twice ([04-LIN-9])",
-                                diag_site(call),
-                                parameter.name
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// The key rules of the case `name` selects for these operands: the one
-    /// rule every case of the builtin shares; for `concat`, whose two cases
-    /// differ, the case its second operand selects ([05-OP-54], [05-OP-62]);
-    /// and otherwise every case's rule, the union of their refusals.
-    fn selected_case_keys(&self, name: &str, args: &[Expr], scope: &LinearScope) -> Vec<CaseKeys> {
-        let Some(decl) = builtin_decl(name) else {
-            return Vec::new();
-        };
-        let mut rules: Vec<CaseKeys> = Vec::new();
-        for case in decl.capability.sibling_cases {
-            let rule = case_keys(case.case);
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        }
-        if rules.len() > 1 && name == "concat" {
-            let axis = args
-                .get(1)
-                .and_then(|arg| self.value_type(arg, scope))
-                .is_some_and(|ty| {
-                    tagged_children(&ty, DeepTag::TPrim)
-                        .and_then(|kids| kids.first())
-                        .and_then(symbol_name)
-                        == Some("i32")
-                });
-            let case = if axis {
-                BuiltinSiblingCaseId::ConcatTensors
-            } else {
-                BuiltinSiblingCaseId::ConcatList
-            };
-            return vec![case_keys(case)];
-        }
-        rules
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
@@ -3705,17 +3701,9 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &UnordSet<String
 const KEY_REUSE_SUGGESTION: &str = "Keys are single-use: derive a fresh key for each use with \
      `split_key(k)` or `split_keys(k, n)` instead of reusing `k`";
 
-/// spec/04 section 1.1: the (builtin, operand position) pairs whose atom
-/// names `key`. [05-OP-70..72], [05-OP-8] and [05-OP-37] take their key
-/// first; `drop` ([05-OP-67]) consumes any value.
-const KEY_OPERAND_BUILTINS: &[(&str, usize)] = &[
-    ("split_key", 0),
-    ("split_keys", 0),
-    ("fold_in", 0),
-    ("dropout", 0),
-    ("uniform_like", 0),
-    ("drop", 0),
-];
+/// spec/04 section 1.1: the suggestion of an operation that refuses a key.
+const KEY_OPERATION_SUGGESTION: &str =
+    "Keys only feed `split_key`, `split_keys`, `fold_in` and random draws";
 
 /// Spec/04 section 8.4.1 key evidence: `Contains` for a `key`, a tensor
 /// whose element dtype is `key`, and any tuple, reference or data type that
@@ -3785,41 +3773,6 @@ fn type_expr_holds_key(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> boo
         key_evidence(expr, key_carrying_adts),
         TensorEvidence::Contains
     )
-}
-
-/// Spec/04 section 1.1: a scalar `key` or a `tensor[.., key]`, seen through
-/// a reference. Containers of keys are not key dtypes; their elements reach
-/// operations only by being taken out.
-fn type_expr_is_key_dtype(expr: &Expr) -> bool {
-    if !type_syntax_is_well_formed(expr) {
-        return false;
-    }
-    let mut ty = expr;
-    loop {
-        match ty.carrier() {
-            ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => match children.first() {
-                Some(inner) => ty = inner,
-                None => return false,
-            },
-            ExprCarrier::MetadataExpression(meta) => ty = &meta.expr,
-            ExprCarrier::DecodedNode(DeepTag::TPrim, _, children) => {
-                return children.first().and_then(symbol_name) == Some("key");
-            }
-            ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => {
-                return children.last().is_some_and(|precision| {
-                    tagged_children(precision, DeepTag::TPrim)
-                        .and_then(|names| names.first())
-                        .and_then(symbol_name)
-                        == Some("key")
-                });
-            }
-            ExprCarrier::DecodedNode(_, _, _)
-            | ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_) => return false,
-        }
-    }
 }
 
 /// The literal position of a `tuple-get` selector, when it is one.

@@ -4716,6 +4716,73 @@ mod tests {
         ]
     }
 
+    /// chelis#2413: the verifier's key rule V4 reads the key allow-list
+    /// (`chelis_types::key_admission`). Every graph operation admits a key at
+    /// exactly the input slots of its role's admission, and the admissions
+    /// graph operations reach are exactly the list's graph admissions, the
+    /// same list the linearity checker reads.
+    ///
+    /// Evidentiary status: REGRESSION TEST for `Drop`: at `f4eeca363` a key
+    /// reaching a `Drop` broke V4, so `def f(k: key) = drop(k)` checked and
+    /// then failed the evaluator's key rules. A lock for every other op.
+    #[test]
+    fn every_risc_op_admits_a_key_exactly_where_the_allow_list_does() {
+        use crate::verify::{KeyGraph, verify_key_rules};
+        use chelis_types::key_admission::KeyAdmission;
+        use std::collections::BTreeSet;
+        let ty = |precision| TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision,
+        };
+        // An operation with no fixed key arity reads up to four inputs here.
+        const DATA_SLOTS: usize = 4;
+        let mut reached = BTreeSet::new();
+        let mut failures = Vec::new();
+        for op in one_of_every_risc_op() {
+            let arity = op.key_operand_arity().unwrap_or(DATA_SLOTS);
+            for slot in 0..arity {
+                let mut dag = Dag::new();
+                let decl = dag.declare("f");
+                let load = |dag: &mut Dag, name: &str, precision| {
+                    dag.add_node(
+                        decl,
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        ty(precision),
+                        None,
+                    )
+                };
+                let key = load(&mut dag, "k", Prim::Key);
+                let mut inputs: Vec<NodeId> = ["x0", "x1", "x2", "x3"][..arity]
+                    .iter()
+                    .map(|name| load(&mut dag, name, Prim::F32))
+                    .collect();
+                inputs[slot] = key;
+                let node = dag.add_node(decl, op.clone(), inputs, ty(Prim::F32), None);
+                dag.add_root(node);
+                let role = KeyGraph::role(&dag, node.0);
+                let mut errors = Vec::new();
+                verify_key_rules(&dag, &mut errors);
+                let refused = errors
+                    .iter()
+                    .any(|error| error.contains(&format!("reaches input {slot} of")));
+                let admission = role
+                    .admission()
+                    .filter(|_| role.key_slots().contains(&slot));
+                if refused == admission.is_some() {
+                    failures.push(format!("{op:?} slot {slot}: {admission:?}, {errors:?}"));
+                }
+                reached.extend(admission);
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        let listed: BTreeSet<KeyAdmission> = KeyAdmission::ALL
+            .into_iter()
+            .filter(|admission| admission.in_graph())
+            .collect();
+        assert_eq!(reached, listed);
+    }
+
     /// Exhaustiveness guard for the WI-2 verifier/Beacon op subset: every
     /// `RiscOp` variant must be classified, and the in/out partition must
     /// match the documented `beacon_plan.md` §3.1 corpus. A future new op

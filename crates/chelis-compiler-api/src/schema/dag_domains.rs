@@ -121,6 +121,7 @@ impl KeyGraph for DecodedKeys<'_> {
             Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
             Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
             Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            Some(WireRiscOp::Drop) => KeyRole::Drop,
             Some(WireRiscOp::Logical {
                 logical: WireLogicalKind::And,
             }) => KeyRole::And,

@@ -18,6 +18,7 @@ pub mod errors;
 pub mod fitness;
 pub mod infer;
 pub mod invariants;
+pub mod key_admission;
 pub mod known_tags;
 pub mod linearity;
 pub mod manifest;

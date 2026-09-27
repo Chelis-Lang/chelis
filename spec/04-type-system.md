@@ -3131,7 +3131,17 @@ lexical binding, change which callable is selected, or memoize function results.
 > allow for another owned value are refused for it. It SHALL NOT be
 > borrowed, copied, captured by a closure, or read by any operation that
 > leaves it live, and no signature SHALL declare a borrowed key-carrying
-> parameter. Binding it to another name moves it. Every call consumes a
+> parameter. Binding it to another name moves it. A key-carrying value
+> reaches only the operations this rule admits: a key derivation
+> ([05-OP-70] to [05-OP-72]) or a draw ([05-OP-8], [05-OP-37]) at its key
+> operand; `drop` ([05-OP-67]); a runtime branch's join; the construction
+> and destructuring of tuples, records and data values; a binding, or a
+> block's or a function's result; a builtin operation whose atom routes each
+> value of a type parameter to exactly one consumer; and a call through a
+> parameter whose declared type carries a key, whether direct or through
+> `grad`, `vmap` or `jit`. Every other operation refuses it, `realize`,
+> `cast` and `copy` included, and a builtin passed as a function value
+> admits it only where a call to that builtin would. Every call consumes a
 > key-carrying argument, including the otherwise observational arguments of
 > a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
 > value is reached only by consuming that value: a destructuring `let` or

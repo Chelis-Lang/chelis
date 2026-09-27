@@ -4,6 +4,7 @@ use crate::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim,
 };
 #[allow(unused_imports)]
+use chelis_types::key_admission::{KeyAdmission, KeyPrimitive};
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 
@@ -953,6 +954,9 @@ pub enum KeyRole {
     /// `UniformBoundAdjoint`, which reads its forward `UniformLike`'s key at
     /// input 2.
     UniformBoundAdjoint,
+    /// A `Drop`, source `drop` ([05-OP-67]), which consumes the key at
+    /// input 0 and produces no key a later node reads.
+    Drop,
     /// A two-input `And`, read by the activation exclusivity rule.
     And,
     /// A `Not`, read by the activation exclusivity rule.
@@ -973,7 +977,7 @@ impl KeyRole {
     /// ([`Self::key_slots`]), and for any node that reads none.
     fn key_slot(self) -> Option<usize> {
         match self {
-            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => Some(0),
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } | Self::Drop => Some(0),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
             Self::UniformLike => Some(3),
             Self::KeyFromSeed
@@ -988,8 +992,41 @@ impl KeyRole {
         }
     }
 
-    /// Every input slot at which this node reads a key (rule V4).
-    fn key_slots(self) -> &'static [usize] {
+    /// The allow-list entry this node's operation is
+    /// (`chelis_types::key_admission`), which the checker reads too, or
+    /// `None` for an operation that takes no key. Exhaustive, with no
+    /// wildcard arm.
+    pub fn admission(self) -> Option<KeyAdmission> {
+        match self {
+            Self::Split { .. } => Some(KeyAdmission::Primitive(KeyPrimitive::SplitKey)),
+            Self::SplitN { .. } => Some(KeyAdmission::Primitive(KeyPrimitive::SplitKeys)),
+            Self::FoldIn => Some(KeyAdmission::Primitive(KeyPrimitive::FoldIn)),
+            // A replay reads the key its forward draw consumed.
+            Self::Dropout | Self::DropoutReplay => {
+                Some(KeyAdmission::Primitive(KeyPrimitive::Dropout))
+            }
+            Self::UniformLike | Self::UniformBoundAdjoint => {
+                Some(KeyAdmission::Primitive(KeyPrimitive::UniformLike))
+            }
+            Self::Drop => Some(KeyAdmission::Drop),
+            Self::KeySelect => Some(KeyAdmission::Join),
+            Self::Store => Some(KeyAdmission::Root),
+            Self::KeyFromSeed
+            | Self::Load
+            | Self::And
+            | Self::Not
+            | Self::ConstFalse
+            | Self::ConstTrue
+            | Self::Other => None,
+        }
+    }
+
+    /// Every input slot at which this node reads a key (rule V4): none
+    /// unless the allow-list admits its operation ([`Self::admission`]).
+    pub fn key_slots(self) -> &'static [usize] {
+        if self.admission().is_none() {
+            return &[];
+        }
         match self {
             Self::KeySelect => &[0, 1],
             Self::Store => &[0],
@@ -1040,6 +1077,7 @@ impl KeyRole {
             Self::UniformLike => "`uniform_like`",
             Self::DropoutReplay => "`dropout` replay",
             Self::UniformBoundAdjoint => "`uniform_like` bound adjoint",
+            Self::Drop => "`drop`",
             Self::Load
             | Self::Store
             | Self::And
@@ -1057,7 +1095,7 @@ impl KeyRole {
     /// Whether reading the key at [`Self::key_slot`] consumes it. A replay
     /// reads its forward draw's key without consuming it.
     fn consumes(self) -> bool {
-        self.is_draw() || self.derives() || self == Self::KeySelect
+        self.is_draw() || self.derives() || matches!(self, Self::KeySelect | Self::Drop)
     }
 }
 
@@ -1160,6 +1198,7 @@ impl KeyGraph for Dag {
             Some(RiscOp::UniformLike) => KeyRole::UniformLike,
             Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
             Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            Some(RiscOp::Drop) => KeyRole::Drop,
             Some(RiscOp::Logical(crate::dag::LogicalKind::And)) => KeyRole::And,
             Some(RiscOp::Logical(crate::dag::LogicalKind::Not)) => KeyRole::Not,
             Some(RiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
@@ -1277,7 +1316,8 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   and a key may be a graph root, directly or through the `Store` that
 ///   names it; a key `Store` is the key it stores.
 /// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, one
-///   slot of one join, or one root, or at most one `Split` of each branch.
+///   `Drop`, one slot of one join, or one root, or at most one `Split` of
+///   each branch.
 ///   Every `Load` of one parameter of one declaration is one key.
 /// - V3: two uses of one key, by draws, key operations and join slots alike,
 ///   other than one `Split` of each branch, may share it only when each
@@ -1290,8 +1330,9 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   Rule S: a key derived under such sharing is consumed only under that
 ///   activation, or by the join of its branch ([`verify_confinement`]).
 /// - V4: a key reaching any other operation or slot, or a dependency list,
-///   is rejected; replays read their forward draw's key without consuming
-///   it.
+///   is rejected: the slots are those of the key allow-list's graph
+///   admissions ([`KeyRole::admission`]). Replays read their forward draw's
+///   key without consuming it.
 ///
 /// Each message names a key by [`KeyGraph::describe_key`] and a node by
 /// [`KeyGraph::describe_node`].
@@ -1330,7 +1371,12 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 graph.describe_node(node)
             ));
         }
-        if is_key(node) && !role.produces_key() && !matches!(role, KeyRole::Load | KeyRole::Store) {
+        // A `Store` is the key it names and a `Drop` mirrors the type of the
+        // key it consumes; neither is a new key.
+        if is_key(node)
+            && !role.produces_key()
+            && !matches!(role, KeyRole::Load | KeyRole::Store | KeyRole::Drop)
+        {
             errors.push(format!(
                 "{} produces a key, but only a key operation, a join or a Load produces one",
                 graph.describe_node(node)
