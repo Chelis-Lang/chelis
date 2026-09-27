@@ -305,3 +305,60 @@ fn authoring_renames_live_references_and_preserves_recorded_names() {
     assert_eq!(renamed.renamed_references, 1);
     assert!(chelis_deep::authoring::rename_function(&original, "m.absent", "renamed").is_err());
 }
+
+/// Every leaf rewrite entry point re-admits the replaced leaf's extension
+/// data, including leaves reached through a structural container: a
+/// matching replacement inherits the data and a conflicting one fails.
+#[test]
+fn leaf_rewrites_readmit_extension_data_at_every_entry_point_and_depth() {
+    use chelis_deep::metadata::MetadataError;
+    fn node_meta(source: &str) -> chelis_deep::Metadata {
+        let chelis_deep::Expr::Node(node, _) = parse_str(source).unwrap().remove(0) else {
+            panic!("node")
+        };
+        node.meta().clone()
+    }
+    fn replace(value: &chelis_deep::Expr, prefix: &str, replacement: &str) -> chelis_deep::Expr {
+        if print_expr_flat(value).starts_with(prefix) {
+            parse_str(replacement).unwrap().remove(0)
+        } else {
+            value.clone()
+        }
+    }
+    let seed = node_meta("(def {property_seed: (var {tool_data: 1} old)} f 1)");
+    let kept = seed
+        .map_expressions(&mut |value, _| replace(value, "(var ", "(var {} new)"))
+        .unwrap();
+    let text = print_expr_flat(kept.property_seed().unwrap().expression());
+    assert!(
+        text.contains("new") && text.contains("tool_data: 1"),
+        "{text}"
+    );
+    assert!(
+        seed.map_expressions(&mut |value, _| replace(value, "(var ", "(var {tool_data: 9} new)"))
+            .is_err()
+    );
+
+    let binder = node_meta(
+        "(def {property_quantifiers: (params {} (x {type: (t-prim {tool_data: 1} f32)}))} f 1)",
+    );
+    let kept = binder
+        .try_map_leaves::<MetadataError>(&mut |value, _| {
+            Ok(replace(value, "(t-prim ", "(t-prim {} i32)"))
+        })
+        .unwrap();
+    let mut types = Vec::new();
+    kept.visit_expressions(&mut |value, _| types.push(print_expr_flat(value)));
+    assert_eq!(types.len(), 1, "{types:?}");
+    assert!(
+        types[0].contains("i32") && types[0].contains("tool_data: 1"),
+        "{types:?}"
+    );
+    assert!(
+        binder
+            .try_map_leaves::<MetadataError>(&mut |value, _| {
+                Ok(replace(value, "(t-prim ", "(t-prim {tool_data: 2} i32)"))
+            })
+            .is_err()
+    );
+}

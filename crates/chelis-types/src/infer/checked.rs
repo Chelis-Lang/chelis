@@ -2630,8 +2630,10 @@ fn metadata_without_derived_effects(
     remove_here: bool,
     stack: &mut StackBudget<'_>,
 ) -> Result<deep::Metadata, EffectComparisonError> {
-    let mut result =
-        meta.try_map_expressions(&mut |expr, _| expression_without_derived_effects(expr, stack))?;
+    let mut budget = stack.reborrow();
+    let mut result = meta.try_map_expressions(&mut move |expr, _| {
+        expression_without_derived_effects(expr, &mut budget)
+    })?;
     if remove_here {
         result.remove(chelis_deep::annotations::MetadataKey::Effects);
     }

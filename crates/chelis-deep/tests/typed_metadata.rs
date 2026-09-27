@@ -615,3 +615,100 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
         "{wrong_owner}"
     );
 }
+
+/// Leaf rewrites visit the leaves in `visit_expressions` order and stop at
+/// the first failing leaf: no later leaf is visited and the callback's own
+/// error is returned. The failures fall inside effect resource containers,
+/// quantifier binders, precondition lists and `wrt` tuples.
+#[test]
+fn leaf_rewrites_stop_at_the_first_failing_leaf_in_visit_order() {
+    use chelis_deep::metadata::{MetadataError, MetadataRole};
+    use chelis_deep::printer::print_expr_flat;
+    use chelis_deep::{Expr, Metadata};
+
+    #[derive(Debug, PartialEq)]
+    enum Failure {
+        Leaf(usize),
+        Metadata,
+    }
+    impl From<MetadataError> for Failure {
+        fn from(_: MetadataError) -> Self {
+            Self::Metadata
+        }
+    }
+    fn rewrite(
+        meta: &Metadata,
+        leaves: bool,
+        fail_at: Option<usize>,
+    ) -> (Vec<String>, Result<Metadata, Failure>) {
+        let mut log = Vec::new();
+        let mut f = |value: &Expr, role: MetadataRole| {
+            let index = log.len();
+            log.push(format!("{role:?} {}", print_expr_flat(value)));
+            if fail_at == Some(index) {
+                Err(Failure::Leaf(index))
+            } else {
+                Ok(value.clone())
+            }
+        };
+        let result = if leaves {
+            meta.try_map_leaves(&mut f)
+        } else {
+            meta.try_map_expressions(&mut f)
+        };
+        (log, result)
+    }
+
+    let sources = [
+        "(t-fn {eff: (effects {type: (t-prim {} f32)} (resource {type: (t-prim {} i32)} \"cpu\") io (resource {type: (t-prim {} bool)} \"gpu\"))} (t-unit {}))",
+        "(def {property_quantifiers: (params {} (x {type: (t-prim {} f32)}) (y {type: (t-prim {} i32)})), property_preconditions: (tuple {} (var {} p1) (var {} p2) (var {} p3)), property_seed: (lit {} 7)} f (lit {} 1))",
+        "(grad {wrt: (tuple {} (var {type: (t-prim {} f32)} a) (var {type: (t-prim {} i32)} b) (var {type: (t-prim {} bool)} c))} (var {} f))",
+    ];
+    let mut full_logs = Vec::new();
+    for source in sources {
+        let program = parse_str(source).unwrap();
+        let Expr::Node(node, _) = &program[0] else {
+            panic!("typed node: {source}")
+        };
+        let meta = node.meta();
+        let mut visited = Vec::new();
+        meta.visit_expressions(&mut |value, role| {
+            visited.push(format!("{role:?} {}", print_expr_flat(value)))
+        });
+        for leaves in [true, false] {
+            let (full, result) = rewrite(meta, leaves, None);
+            assert_eq!(result.as_ref(), Ok(meta), "identity rewrite: {source}");
+            if leaves {
+                assert_eq!(full, visited, "try_map_leaves follows visit_expressions");
+            }
+            assert!(full.len() >= 3, "{source}: {full:?}");
+            for k in 0..full.len() {
+                let (log, result) = rewrite(meta, leaves, Some(k));
+                assert_eq!(result, Err(Failure::Leaf(k)), "{source} leaves={leaves}");
+                assert_eq!(log, full[..=k], "{source} leaves={leaves} fail at {k}");
+            }
+            full_logs.push(full);
+        }
+    }
+    assert_eq!(
+        full_logs[0],
+        [
+            "Type (t-prim {} f32)",
+            "Type (t-prim {} i32)",
+            "Type (t-prim {} bool)"
+        ],
+        "an effects container's annotations precede its members, which keep their order"
+    );
+    assert_eq!(
+        full_logs[3],
+        [
+            "Syntax (x {type: (t-prim {} f32)})",
+            "Syntax (y {type: (t-prim {} i32)})",
+            "Expression (var {} p1)",
+            "Expression (var {} p2)",
+            "Expression (var {} p3)",
+            "Expression (lit {} 7)"
+        ],
+        "try_map_expressions hands binders and preconditions over in order"
+    );
+}
