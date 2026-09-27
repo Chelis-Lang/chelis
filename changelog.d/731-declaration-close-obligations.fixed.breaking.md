@@ -102,6 +102,14 @@ completes.
   polymorphic-recursion diagnostics no longer suggest moving the call into a
   separate non-recursive helper `def`: that helper would call into the group
   and be called from it, so it would join the group.
+- Now rejected, in every declaration order: a `let`-bound lambda inside the
+  group that calls a member with an omitted parameter type and is applied at
+  two types, such as `h = fn (z) -> f(z, n - 1)` applied to `1i32` and to
+  `"s"` inside `g`, where `def f(x, n: i32)` is `g`'s sibling. The lambda does
+  not generalize over the member's omitted type before the group completes
+  ([04-INF-2], [04-INF-5]), so its first application fixes that type and the
+  second is reported as a mismatch. `main` checked and ran it. Writing `f`'s
+  signature, `def f[a](x: a, n: i32) -> a`, makes it check.
 - A call at a concrete type whose result the body returns makes the body itself
   determine that type: after
   `def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)`,
