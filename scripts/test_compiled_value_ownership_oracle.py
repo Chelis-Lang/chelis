@@ -1647,8 +1647,12 @@ class RuntimeLinkContractTests(unittest.TestCase):
             (target / "debug" / "deps").mkdir(parents=True)
             executable = target / "debug" / "chelis"
             executable.write_bytes(b"feature-built chelis")
+            # Cargo's own archive differs from the bytes the CLI carries, so only
+            # a digest taken from the CLI's export can pass.
             archive = target / "debug" / "deps" / "libchelis_runtime-0123abcd.a"
-            archive.write_bytes(b"instrumented runtime")
+            archive.write_bytes(b"cargo deps archive")
+            carried = b"carried instrumented runtime"
+            carried_sha256 = oracle.hashlib.sha256(carried).hexdigest()
 
             def messages(features: list[str]) -> str:
                 rows = (
@@ -1671,21 +1675,64 @@ class RuntimeLinkContractTests(unittest.TestCase):
                 )
                 return "".join(json.dumps(row) + "\n" for row in rows)
 
-            context = self.context(CARGO_TARGET_DIR=str(target))
-            built = oracle.subprocess.CompletedProcess((), 0, messages(["ownership-ledger"]), "")
-            with mock.patch.object(oracle, "_run", return_value=built):
-                context.prepare()
-            self.assertEqual(context.chelis.read_bytes(), b"feature-built chelis")
-            self.assertEqual(
-                context.runtime_sha256,
-                oracle.hashlib.sha256(b"instrumented runtime").hexdigest(),
-            )
+            def staged(path: Path, digest: str = carried_sha256) -> str:
+                return f"Staged runtime {path} (sha256 {digest})\n"
 
-            uninstrumented = self.context(CARGO_TARGET_DIR=str(target))
-            built = oracle.subprocess.CompletedProcess((), 0, messages([]), "")
-            with mock.patch.object(oracle, "_run", return_value=built):
-                with self.assertRaisesRegex(oracle.OracleFailure, "without ownership-ledger"):
-                    uninstrumented.prepare()
+            def prepare(features: list[str], report=staged, returncode: int = 0):
+                context = self.context(
+                    CARGO_TARGET_DIR=str(target),
+                    CHELIS_OWNERSHIP_LEDGER_PATH="/foreign/ledger.jsonl",
+                )
+                exports: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+                def run(argv, *, environment, **_):
+                    if argv[0] == "cargo":
+                        return oracle.subprocess.CompletedProcess(argv, 0, messages(features), "")
+                    exports.append((tuple(argv), environment))
+                    exported = Path(argv[-1])
+                    exported.mkdir()
+                    (exported / "libchelis_runtime.a").write_bytes(carried)
+                    stdout = report(exported / "libchelis_runtime.a")
+                    return oracle.subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+                with mock.patch.object(oracle, "_run", side_effect=run):
+                    context.prepare()
+                return context, exports
+
+            context, exports = prepare(["ownership-ledger"])
+            self.assertEqual(context.chelis.read_bytes(), b"feature-built chelis")
+            self.assertEqual(context.runtime_sha256, carried_sha256)
+            self.assertEqual(len(exports), 1)
+            argv, environment = exports[0]
+            self.assertEqual(argv[:3], (str(context.chelis), "runtime", "export"))
+            self.assertNotIn("CHELIS_OWNERSHIP_LEDGER_PATH", environment)
+
+            with self.assertRaisesRegex(oracle.OracleFailure, "without ownership-ledger"):
+                prepare([])
+
+            failures = (
+                ("failed export", dict(returncode=1), "could not export its runtime"),
+                ("no report", dict(report=lambda path: ""), "must report exactly"),
+                (
+                    "duplicate report",
+                    dict(report=lambda path: staged(path) + staged(path)),
+                    "must report exactly",
+                ),
+                (
+                    "other path",
+                    dict(report=lambda path: staged(path.parent / "other.a")),
+                    "must report exactly",
+                ),
+                (
+                    "digest of other bytes",
+                    dict(report=lambda path: staged(path, "0" * 64)),
+                    "but the export reported",
+                ),
+            )
+            for name, behavior, message in failures:
+                with self.subTest(case=name):
+                    with self.assertRaisesRegex(oracle.OracleFailure, message):
+                        prepare(["ownership-ledger"], **behavior)
 
             foreign = self.context(CARGO_TARGET_DIR=str(target / "debug" / "deps"))
             built = oracle.subprocess.CompletedProcess((), 0, messages(["ownership-ledger"]), "")
