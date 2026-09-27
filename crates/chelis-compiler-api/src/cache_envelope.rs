@@ -440,9 +440,9 @@ pub(crate) fn load<T: CachePayload>(
         ));
     }
 
-    // Binding the payload reruns no checker (chelis#2558), and a
-    // `LibraryContext` decode has no other step that polls the cancel token,
-    // so a cancelled caller is observed here, before the decode.
+    // A `StdLibContext` decode reruns no checker (chelis#2558), so its only
+    // polling step is the re-lowering; a cancelled caller is observed here,
+    // before either payload type pays for a decode (chelis#2617).
     if chelis_types::cancellation_requested() {
         return Err(CacheError::Cancelled);
     }

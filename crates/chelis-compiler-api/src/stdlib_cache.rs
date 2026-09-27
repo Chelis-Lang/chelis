@@ -56,8 +56,11 @@
 //! ## Deserialization boundary
 //!
 //! Decode validates the checked library without another type-inference session.
-//! It reruns the remaining semantic checks and the lower phase. The canonical
-//! lower result must match the cache payload before contextual code can use it.
+//! When the entry carries a lowering it reruns the lower phase, and the
+//! canonical lower result must match the cache payload before contextual code
+//! can use it; the stored effect and linearity results are then adopted
+//! (chelis#2558). An entry without a lowering reruns the effect and linearity
+//! checkers instead.
 
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_types::{CheckedProgram, StructuralStats, TypeEnv};
@@ -189,9 +192,16 @@ impl<'de> Deserialize<'de> for StdLibContext {
     {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        let library =
+        // The stored effect and linearity results are adopted only when a
+        // stored lowering is re-derived and compared below; without one the
+        // program has nothing else to disagree with, so the checkers rerun
+        // (chelis#2558).
+        let library = if wire.library_dag.is_some() {
             chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
-                .map_err(serde::de::Error::custom)?;
+        } else {
+            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+        }
+        .map_err(serde::de::Error::custom)?;
         let library_dag = match wire.library_dag {
             Some(cached) => {
                 if cached.library_proof_id() != library.program().library_proof_id() {
@@ -428,9 +438,10 @@ pub(crate) enum TypecheckCacheLoad<T> {
     Miss,
     /// Cancellation was requested and the payload decode did not complete.
     /// `cache_envelope::load` polls the cancel token before the payload decode,
-    /// and a stdlib decode's re-lowering polls it again, so an abandoned load
-    /// says nothing about the file. The caller propagates the cancellation and
-    /// leaves the file in place.
+    /// and inside the decode a stdlib payload's re-lowering and a dependency
+    /// payload's effect and linearity reruns poll it again, so an abandoned
+    /// load says nothing about the file. The caller propagates the
+    /// cancellation and leaves the file in place.
     Cancelled,
     /// The bytes are present but cannot be used; the caller warns, rebuilds
     /// and overwrites.

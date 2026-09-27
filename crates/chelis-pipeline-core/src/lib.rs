@@ -109,6 +109,7 @@ pub use semantic::{
     analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,
     analyze_prepared_with_library, bind_cached_library, check_prepared_library, complete_checks,
     complete_context_checks, complete_context_library_checks, complete_library_checks,
+    validate_cached_library,
 };
 
 #[cfg(test)]

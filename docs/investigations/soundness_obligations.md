@@ -644,7 +644,9 @@ obligation.
 The investigation used three independent subject reads (language, runtime, and
 integration), followed by a full synthesis read and cross-chapter reviews. Those
 reviews corrected substantive boundaries: cached reconstruction does perform
-effect/linearity revalidation and relowering; existing effect obligations are not
+effect/linearity revalidation and relowering (since chelis#2558 the effect and
+linearity reruns remain only on cache payloads without a lowering to compare,
+the dependency cache among them); existing effect obligations are not
 future work; callable and evaluator admission domains differ; and the Metal
 target/Host-routing rules are not silently reconcilable. They also separated
 inventory reconciliation from the reasoned adequacy of the discovery scope.

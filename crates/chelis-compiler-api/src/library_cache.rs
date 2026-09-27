@@ -43,10 +43,13 @@
 //! build produces: the dependency decls are content-addressed, the
 //! chelis-std base is itself a byte-identical cached artifact, and the
 //! proof-bound library extension over that base is deterministic. Decode
-//! rebinds the proof after checking that the type environment and program
-//! agree on it, and adopts the producer's effect and linearity results, which
-//! the same build wrote (chelis#2558). So the entry checked against a warm-loaded context
-//! composes to the same whole-program `CheckedProgram` as the cold path —
+//! reruns the effect and linearity checks to rebind the proof rather than
+//! adopting the stored checker results. The stdlib and compiled-context
+//! decoders adopt them because they re-lower the program and compare it
+//! against a stored lowering; this wire carries no lowering, so the reruns
+//! are what reject an edited program (chelis#2558). So the entry checked
+//! against a warm-loaded context composes to the same whole-program
+//! `CheckedProgram` as the cold path —
 //! and, per the acceptance oracle, as the monolithic path. The cache is a
 //! pure speedup; it never changes an output or a diagnostic.
 //!
@@ -182,11 +185,12 @@ impl LibraryContext {
     }
 }
 
-/// Serde carrier for the cache envelope. Decode checks the type-environment
-/// relationship before it rebinds the `CheckedLibrary`, mirroring the stdlib
-/// and compiled-context cache parsers, so a mismatched pairing is rejected.
-/// This wire carries no lowering, so unlike those parsers nothing compares the
-/// program against a second derivation of it (chelis#2558).
+/// Serde carrier for the cache envelope. Decode revalidates the proof: it
+/// checks the type-environment relationship and reruns effect and linearity
+/// before it rebinds the `CheckedLibrary`. A forged or mismatched entry is
+/// rejected, never trusted. The stdlib and compiled-context parsers skip the
+/// reruns because their wires carry a lowering they re-derive and compare;
+/// this one carries none, so it keeps them (chelis#2558).
 #[derive(Serialize, Deserialize)]
 struct LibraryContextWire {
     type_env: TypeEnv,
@@ -218,7 +222,7 @@ impl<'de> Deserialize<'de> for LibraryContext {
         let wire = LibraryContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
         let library =
-            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
+            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
                 .map_err(serde::de::Error::custom)?;
         Ok(Self {
             library,

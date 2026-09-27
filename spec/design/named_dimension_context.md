@@ -106,7 +106,10 @@ alone does not recreate a reusable binding's private label summary.
 The selected source-free boundary is a faithful snapshot from a trusted
 checker producer. Structural admission, hashes, build IDs, and proof IDs do
 not prove that a malicious producer included every required label. Existing
-owner-cache effect/linearity and lowering validation remains necessary.
+owner-cache validation remains necessary: the lowering comparison on the
+stdlib and compiled-context caches, and the effect/linearity reruns on the
+dependency cache and on a stdlib cache entry without a lowering, whose
+payloads have no lowering to compare (chelis#2558).
 No public Dim/Type/Scheme variant, School API, source signature, or runtime
 tensor layout change is selected.
 
@@ -292,7 +295,7 @@ All references below are against the baseline named above; paths omit `crates/`.
 | Local utilities | Public `Env::bind`, `lookup`, `instantiate`, `generalize` and Env serde | No public accepted-program entry currently takes Env. They are low-level utilities, not a bypass into `CheckedProgram`; keep this distinction. Internal trusted builtin/declaration construction must explicitly establish its evidence. |
 | Live checker context | `chelis-types/src/context.rs:118,197`; `infer/program.rs:483,644,794,967` builders, layering, checking | Preserve relations and root allocation high-water marks through resume/base extension. A naked Scheme cannot recreate a checked binding. |
 | Direct serde | `TypeEnv` derives Deserialize; `check_ir_with_context` resumes it without rechecking library bodies (`infer/program.rs:1012`) | This IS checker-evidence ingress, unlike display. Settle its trust policy: faithful trusted-snapshot transport or source-backed admission under an untrusted-payload boundary; absent relations must reject. Direct Env/Scheme deserialization must not be promoted into that authority. |
-| Dependency and stdlib caches | `chelis-compiler-api/src/library_cache.rs:185,215`; `stdlib_cache.rs:137,184`; payload versions 14/18 in `cache_envelope.rs:80,86` | Both deserialize TypeEnv plus CheckedProgram through `bind_cached_library`; bump owner versions/keys and re-establish relation authority, including direct serde of these wrappers. |
+| Dependency and stdlib caches | `chelis-compiler-api/src/library_cache.rs:185,215`; `stdlib_cache.rs:137,184`; payload versions 14/18 in `cache_envelope.rs:80,86` | Both deserialize TypeEnv plus CheckedProgram: the stdlib cache through `bind_cached_library` when it carries a lowering, the dependency cache (and an unlowered stdlib entry) through `validate_cached_library`; bump owner versions/keys and re-establish relation authority, including direct serde of these wrappers. |
 | Compiled contexts | `chelis-compiler-api/src/context.rs:179,205,271,792,857`; version 20 | Disk/encode/decode share an envelope, but the public Deserialize implementation also exists. Guard both, not only `decode`; preserve proof pairing, re-lowering and identity checks. |
 | Workers and bindings | `chelis-cli/src/main.rs:6823,8892`: tempfile encode/decode and package-root check; `chelis-python/src/lib.rs:869`: context loader | Workers consume the same accepted context, not a separate raw TypeEnv route. Invalid explicit handoffs stay fatal; absence may use the existing source-build path. |
 | Package metadata | `chelis-reef/src/lib.rs:8084,8104,8265`; `chelis-shell/src/lib.rs:40` type_repr/restrictions | Semantic export/query metadata, not a Scheme-to-checker importer. The linked source path builds checked libraries. Do not impose an origin wire change here merely because it prints types; add a guard that metadata alone never gains checker authority. |

@@ -9,18 +9,24 @@
 //! accompanied by a digest that did not travel with them, which settles
 //! provenance directly and leaves the comparison nothing to establish.
 //!
-//! Both routes, and the stdlib and dependency cache decoders, adopt the effect
-//! and linearity results the transmitted program carries instead of rerunning
+//! Both routes, and the stdlib typecheck cache decoder, adopt the effect and
+//! linearity results the transmitted program carries instead of rerunning
 //! those checkers (chelis#2558). That is only sound while rerunning them
 //! reproduces exactly what they were handed.
 //! `cached_program_is_a_checker_fixed_point` is the test that says so: a
-//! normalizing pass added to the effect or linearity checker fails here rather
-//! than silently serving a library that differs from a fresh check.
+//! normalizing pass added to the effect or linearity checker, or a layer
+//! composition that loses checker results, fails here rather than silently
+//! serving a library that differs from a fresh check. The dependency
+//! typecheck cache decoder still reruns both checkers, because its wire
+//! carries no lowering to compare the program against.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chelis_compiler_api::{COMPILER_VERSION, CompiledContext, HandoffDigest, compile_reef_context};
+use chelis_compiler_api::{
+    COMPILER_VERSION, CompiledContext, HandoffDigest, build_library_context, build_stdlib_context,
+    compile_reef_context,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -33,6 +39,14 @@ use tempfile::TempDir;
 /// it in is what makes the route-equivalence comparison run over a
 /// representative payload rather than a toy one.
 ///
+/// The lock is written by `prepare_program_for_file`, the resolver every
+/// source-file command uses, so it records the bundled runtime. chelis#2558
+/// review: a hand-written lock naming only the path dependency linked no
+/// chelis-std declarations at all, which sent `compile_reef_context` down the
+/// monolithic path instead of the layered one every real package takes.
+/// `cached_program_is_a_checker_fixed_point` asserts the linked stdlib is
+/// non-empty.
+///
 /// `body` lets a caller ask for a second, genuinely different library. Two
 /// copies of the same one would make a swapped type environment a no-op.
 fn library_fixture(body: &str) -> (TempDir, PathBuf) {
@@ -44,7 +58,7 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
     fs::write(
         root.join("reef.toml"),
         format!(
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\nchelis-std = {{ version = \"0.4.0\" }}\n",
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n",
         ),
     )
     .expect("write app reef.toml");
@@ -61,26 +75,25 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
     )
     .expect("write mylib reef.toml");
     fs::write(root.join("mylib/src/math.ch"), body).expect("write math.ch");
-    fs::write(
-        root.join("reef.lock"),
-        format!(
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-        ),
-    )
-    .expect("write reef.lock");
+    let root = fs::canonicalize(root).expect("canonicalize the package root");
+    chelis_reef::prepare_program_for_file(&root.join("src/main.ch"))
+        .expect("the fixture package must resolve and write its lock")
+        .expect("the entry file is inside the fixture package");
     (dir, root)
 }
 
 /// The fixture library: a fixed head that exercises linearity and effects --
-/// a list consumer, a tensor parameter, and a float constant the lowered
-/// payload carries verbatim -- followed by `bulk` generated definitions.
+/// a list consumer, a tensor parameter, a float constant the lowered payload
+/// carries verbatim, and an owned tensor argument the linearity checker
+/// records as reusable for its call's result (`settle`) -- followed by `bulk`
+/// generated definitions.
 ///
 /// The bulk is what makes the payload representative. A real handoff runs to
 /// several megabytes and is dominated by the package's own definitions, so a
 /// handful of them compares the two routes over a payload nothing like the one
 /// they carry in production.
 fn primary_library(bulk: usize) -> String {
-    let mut names: Vec<String> = ["add", "square", "host_len", "decay", "bias"]
+    let mut names: Vec<String> = ["add", "square", "host_len", "decay", "bias", "settle"]
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -91,7 +104,9 @@ fn primary_library(bulk: usize) -> String {
          def square(x: i32) -> i32 = x * x\n\
          def host_len[n](xs: tensor[n, f32]) -> i64 = len(to_list(xs))\n\
          def decay[n](xs: tensor[n, f32]) -> tensor[n, f32] = exp(xs)\n\
-         def bias() -> f32 = 0.0\n",
+         def bias() -> f32 = 0.0\n\
+         def settle(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = {\n  \
+         y = realize(x)\n  mul(w, y)\n}\n",
     );
     for index in 0..bulk {
         let scale = index % 7 + 1;
@@ -196,51 +211,128 @@ fn both_decode_routes_reconstruct_identical_contexts() {
 
 /// Adopting the transmitted checker results equals re-deriving them.
 ///
-/// Every cache and handoff decoder binds the transmitted `CheckedProgram` as
-/// it stands, trusting the effect rows and linearity facts the producer wrote
-/// (chelis#2558). That trust is the claim that the producer's program is a
-/// fixed point of both checkers: running `chelis_effects::check_program` and
-/// `chelis_types::check_linearity` over it returns it unchanged. The payload
-/// is a real package context, so the program is the composed standard library,
-/// dependency and package, each layer produced by the checker entry points
-/// its own build path uses.
+/// The compiled-context and stdlib typecheck cache decoders bind the
+/// transmitted `CheckedProgram` as it stands, trusting the effect rows and
+/// linearity facts the producer wrote (chelis#2558). That trust is the claim
+/// that the producer's program is a fixed point of both checkers: running
+/// `chelis_effects::check_program` and `chelis_types::check_linearity` over it
+/// returns it unchanged.
 ///
-/// The decode routes no longer run either checker, so this is the only place a
-/// checker that starts to normalize, sort, dedup or intern would be noticed.
-/// The target is a standing target in `.config/ci-test-targets.toml`, so it
-/// runs on every candidate. The comparison is over serialized bytes, which
-/// `hash_order_cache_bytes.rs` already requires to be stable across hash
-/// states, so a byte difference is a value difference.
+/// The claim is checked on each program a cache layer stores, produced by the
+/// entry point that layer's writer uses, over a package that links the real
+/// bundled standard library and a path dependency:
+///
+/// - the compiled context (`.ctx`), read back from the disk route. With a
+///   linked stdlib, `compile_reef_context` takes the layered path, so this
+///   program is the stdlib layer composed with the package layer through
+///   `CheckedProgram::compose`;
+/// - the stdlib typecheck cache (`StdLibContext`), built by
+///   `build_stdlib_context` over the linked stdlib declarations;
+/// - the dependency typecheck cache (`LibraryContext`), built by
+///   `build_library_context` over the dependency prefix `chelis check` and
+///   `chelis build` use, which is the stdlib composed with the dependency.
+///
+/// The dependency decoder reruns both checkers, so its program being a fixed
+/// point is what keeps a warm dependency load equal to a cold one rather than
+/// what makes it sound. The two composed programs are where a composition that
+/// drops or reorders one layer's checker results shows up.
+///
+/// The decode routes that adopt no longer run either checker, so this is the
+/// only place a checker that starts to normalize, sort, dedup or intern would
+/// be noticed. The target is a standing target in
+/// `.config/ci-test-targets.toml`, so it runs on every candidate. The
+/// comparison is over serialized bytes, which `hash_order_cache_bytes.rs`
+/// already requires to be stable across hash states, so a byte difference is
+/// a value difference.
 #[test]
 fn cached_program_is_a_checker_fixed_point() {
-    let (_dir, bytes, _digest) = encoded_fixture();
+    let (_dir, root) = library_fixture(&primary_library(FIXTURE_BULK_DEFINITIONS));
+    let context = compile_reef_context(Path::new("/tmp/chelis-2211-unused-reef-home"), &root)
+        .expect("the fixture package must compile");
+    let bytes = context.encode().expect("a compiled context must encode");
 
     // Take the program the disk route adopts: decode through it, then read the
     // bound program back out of its re-encoding.
     let decoded = CompiledContext::decode(&bytes).expect("the disk route must accept");
-    let adopted =
-        wire_of(&decoded.encode().expect("a decoded context must re-encode")).library_checked;
-    let adopted_bytes = bincode::serialize(&adopted).expect("encode the adopted program");
+    let adopted = wire_of(&decoded.encode().expect("a decoded context must re-encode"));
+    assert!(
+        !adopted.reef_state.linked_stdlib_decls.is_empty(),
+        "the fixture links no chelis-std declarations, so compile_reef_context took the \
+         monolithic path and this test does not reach the layered program every real package \
+         caches"
+    );
+    assert_checker_fixed_point("the compiled context (.ctx)", &adopted.library_checked);
+    assert_carries_reusable_inputs("the compiled context (.ctx)", &adopted.library_checked);
 
+    let prepared = chelis_reef::prepare_program_for_file(&root.join("src/main.ch"))
+        .expect("the fixture package must resolve")
+        .expect("the entry file is inside the fixture package");
+    assert!(
+        !prepared.stdlib_decls.is_empty(),
+        "the prepared program links no chelis-std declarations, so the stdlib layer checked \
+         below would be empty"
+    );
+    let (dependency_decls, _entry_decls) = prepared.dependency_entry_partition();
+    assert!(
+        !dependency_decls.is_empty(),
+        "the fixture's path dependency must form the dependency prefix, or there is no \
+         dependency typecheck cache program to check"
+    );
+    let stdlib = build_stdlib_context(&prepared.stdlib_decls)
+        .expect("the bundled standard library must build");
+    assert_checker_fixed_point(
+        "the stdlib typecheck cache (StdLibContext)",
+        stdlib.library_checked(),
+    );
+    let dependency = build_library_context(&stdlib, dependency_decls)
+        .expect("the dependency layer must build")
+        .expect("the fixture's dependency must compose over the standard library");
+    assert_checker_fixed_point(
+        "the dependency typecheck cache (LibraryContext)",
+        dependency.library_checked(),
+    );
+    assert_carries_reusable_inputs(
+        "the dependency typecheck cache (LibraryContext)",
+        dependency.library_checked(),
+    );
+}
+
+/// The composed programs must carry linearity facts from the package's own
+/// layer. Without them a composition that drops that layer's facts has
+/// nothing to drop, and the fixed-point comparison passes without looking.
+/// The fixture's `settle` is the source of those facts.
+fn assert_carries_reusable_inputs(layer: &str, stored: &chelis_types::CheckedProgram) {
+    assert!(
+        *stored.linearity() != chelis_types::LinearityInfo::default(),
+        "{layer}: the stored program records no reusable linear inputs, so the fixed-point \
+         comparison cannot see a composition that loses them; the fixture's `settle` should \
+         produce one"
+    );
+}
+
+/// Rerun the effect and linearity checkers over `stored` and require the
+/// serialized result to equal it.
+fn assert_checker_fixed_point(layer: &str, stored: &chelis_types::CheckedProgram) {
+    let stored_bytes = bincode::serialize(stored).expect("encode the stored program");
     let _linked = chelis_types::install_linked_program_guard();
-    let effected = chelis_effects::check_program(&adopted)
-        .expect("the adopted program must pass the effect checker");
+    let effected = chelis_effects::check_program(stored)
+        .unwrap_or_else(|errors| panic!("{layer}: the effect checker rejects it: {errors:?}"));
     let rederived = chelis_types::check_linearity(&effected)
-        .expect("the adopted program must pass the linearity checker");
+        .unwrap_or_else(|errors| panic!("{layer}: the linearity checker rejects it: {errors:?}"));
     let rederived_bytes = bincode::serialize(&rederived).expect("encode the re-derived program");
 
     assert_eq!(
-        adopted_bytes.len(),
+        stored_bytes.len(),
         rederived_bytes.len(),
-        "rerunning the effect and linearity checkers changed the size of the adopted program; \
-         it is no longer a fixed point of those checkers, so every cache decoder that adopts \
-         the producer's results (chelis#2558) now serves a library that differs from a fresh \
-         check"
+        "{layer}: rerunning the effect and linearity checkers changed the size of the stored \
+         program; it is no longer a fixed point of those checkers, so a cache decoder that \
+         adopts the producer's results (chelis#2558) now serves a library that differs from a \
+         fresh check"
     );
     assert!(
-        adopted_bytes == rederived_bytes,
-        "rerunning the effect and linearity checkers changed the adopted program without \
-         changing its size; it is no longer a fixed point of those checkers, so every cache \
+        stored_bytes == rederived_bytes,
+        "{layer}: rerunning the effect and linearity checkers changed the stored program \
+         without changing its size; it is no longer a fixed point of those checkers, so a cache \
          decoder that adopts the producer's results (chelis#2558) now serves a library that \
          differs from a fresh check"
     );

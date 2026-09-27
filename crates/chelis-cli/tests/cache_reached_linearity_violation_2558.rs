@@ -1,7 +1,8 @@
-//! chelis#2558: the cache decoders adopt the producer's effect and linearity
-//! results instead of rerunning those checkers over a cached library. That is
-//! sound because a library that fails either checker is never written, and a
-//! source edit moves the cache key. These tests lock both halves from the
+//! chelis#2558: the compiled-context and stdlib cache decoders adopt the
+//! producer's effect and linearity results instead of rerunning those
+//! checkers over a cached library; the dependency cache decoder still reruns
+//! them. Adopting is sound because a library that fails either checker is
+//! never written, and a source edit moves the cache key. These tests lock both halves from the
 //! command line: a linearity violation in a library module the entry reaches
 //! fails `chelis test`, `chelis check` and `chelis eval --file` on a cold cache
 //! and after a warm one, leaves no cache entry behind, and restoring the source

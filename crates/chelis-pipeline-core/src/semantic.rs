@@ -54,7 +54,8 @@ pub fn check_prepared_library(
     complete_library_checks(analyze_prepared_library(prepared)?)
 }
 
-/// Bind cached library products into a checked library.
+/// Bind cached library products whose lowering the caller re-derives and
+/// compares.
 ///
 /// The pair is accepted because its halves carry the same library proof
 /// identity: the cached `TypeEnv` and `CheckedProgram` must agree on the
@@ -64,16 +65,20 @@ pub fn check_prepared_library(
 /// individually well-formed halves.
 ///
 /// The effect and linearity results the program carries are the producer's,
-/// adopted rather than recomputed. Every caller establishes the rest before or
-/// after this call: the envelope's payload digest, format version and build
-/// identity pin the bytes to a producer running this compiler build, the live
-/// source hash and cache identity pin them to the sources being compiled, and
-/// the disk decoders re-lower the program and compare the result against the
-/// transmitted lowered payload, so an edit to either half alone is rejected.
-/// The producer ran both checkers before writing, and they are deterministic,
-/// so the adopted program is the one rerunning them would produce;
-/// `chelis-compiler-api`'s `cached_program_is_a_checker_fixed_point` locks that
-/// equality instead of every load paying for it (chelis#2558).
+/// adopted rather than recomputed. That is sound only for a caller whose
+/// payload also carries a lowering of the program, so only the
+/// `CompiledContext` decoder and a `StdLibContext` decoder holding a stored
+/// lowering call it. They establish the rest before or after this call: the envelope's payload digest, format
+/// version and build identity pin the bytes to a producer running this
+/// compiler build, the live source hash and cache identity pin them to the
+/// sources being compiled, and the decoder re-lowers the program and compares
+/// the result against the transmitted lowered payload, so an edit to either
+/// half alone is rejected. The producer ran both checkers before writing, and
+/// they are deterministic, so the adopted program is the one rerunning them
+/// would produce; `chelis-compiler-api`'s
+/// `cached_program_is_a_checker_fixed_point` locks that equality instead of
+/// every load paying for it (chelis#2558). A payload with no lowering to
+/// compare against goes through [`validate_cached_library`] instead.
 ///
 /// The stored identity is not recomputed from the decoded source. It is bound
 /// before the effect and linearity passes, and a layered build's cached library
@@ -92,6 +97,38 @@ pub fn bind_cached_library(
     Ok(CheckedLibrary {
         type_env: cached_type_env,
         program: cached_program,
+    })
+}
+
+/// Bind cached library products that carry no lowering, rerunning the effect
+/// and linearity checkers over the program.
+///
+/// This is the `LibraryContext` (dependency typecheck cache) decoder's route,
+/// and a `StdLibContext` decoder's when its optional lowering is absent. Such
+/// a payload carries the type environment and the checked program and nothing
+/// derived from them, so an edit confined to the program under a recomputed
+/// payload digest has no second derivation to disagree with. The reruns are
+/// what reject such a program when the edit breaks an effect or linearity
+/// rule, and they replace the stored annotations with freshly derived ones
+/// (chelis#2558). The proof-identity agreement is the one
+/// [`bind_cached_library`] checks, before and after the reruns.
+pub fn validate_cached_library(
+    cached_type_env: TypeEnv,
+    cached_program: CheckedProgram,
+) -> Result<CheckedLibrary, LibraryRejection> {
+    if !cached_type_env.matches_checked_program(&cached_program) {
+        return Err(LibraryRejection::ContextMismatch);
+    }
+    let effected = chelis_effects::check_program(&cached_program)
+        .map_err(|errors| LibraryRejection::Effects { errors })?;
+    let program = chelis_types::check_linearity(&effected)
+        .map_err(|errors| LibraryRejection::Linearity { errors })?;
+    if !cached_type_env.matches_checked_program(&program) {
+        return Err(LibraryRejection::ContextMismatch);
+    }
+    Ok(CheckedLibrary {
+        type_env: cached_type_env,
+        program,
     })
 }
 
