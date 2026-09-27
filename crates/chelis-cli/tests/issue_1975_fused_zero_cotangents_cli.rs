@@ -126,12 +126,31 @@ fn fused_mixed_and_repeated_eval_keeps_recorded_c_rejection_boundary() {
     }
 }
 
+/// chelis#2178 re-authored this probe's trapping primal, and the reason
+/// matters more than the edit.
+///
+/// It used to overflow a CONSTANT FLOAT into `i32`:
+/// `cast(cast(2147483648.0f64, i32), f32)`. [04-NUM-14] makes a float
+/// source cast to an integer target a structural `grad` rejection, so
+/// that program is no longer lowered at all -- the trap-erasure question
+/// this test exists to ask can never arise for it, and the probe would
+/// silently become a duplicate of
+/// `issue_2178_grad_checked_cast.rs`'s rejection coverage.
+///
+/// An INTEGER source still lowers under `grad`, because the same atom
+/// says a discrete source "carries no cotangent, irrespective of
+/// target", while an integer-to-integer cast still "traps `Overflow`
+/// when it is out of range". So `cast(2147483648i64, i32)` keeps the
+/// same op, the same `overflow in cast at i32` trap, and the same
+/// position in the same program shape -- and it is the shape where the
+/// chelis#1975 / chelis#1986 regression (fused zero-cotangent lowering
+/// erasing a constant primal trap) remains OBSERVABLE.
 #[test]
 fn fused_constant_primal_trap_survives_successful_native_link() {
     let temp = tempfile::tempdir().unwrap();
     let binary = native(
         temp.path(),
-        "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n",
+        "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648i64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n",
     );
     for output in [
         cli(temp.path(), &["eval", "--file", "zero.ch"])
