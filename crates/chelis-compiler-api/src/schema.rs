@@ -1,5 +1,7 @@
 mod artifact;
 mod dag_domains;
+#[cfg(test)]
+pub(crate) use dag_domains::wire_slot_read;
 mod directory;
 mod envelopes;
 mod execution;

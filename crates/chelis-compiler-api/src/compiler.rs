@@ -7153,6 +7153,73 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    /// chelis#2413: the wire decoder's key rules read each input slot as the
+    /// IR's do. For every operation that reads an extent through a slot,
+    /// with its bounds read by value and by axis, the encoded operation
+    /// declares the same read at every slot, and every kind of extent slot
+    /// is reached.
+    ///
+    /// Evidentiary status: LOCK. Both tables are new in this change.
+    #[test]
+    fn the_wire_and_the_ir_declare_the_same_extent_slots() {
+        use chelis_ir::dag::{ExtentWitnessSite, RtAxis};
+        use chelis_ir::verify::{ExtentSlot, SlotRead, slot_read};
+        let axis = |tensor| RtDim::InputAxis {
+            tensor,
+            axis: RtAxis::Lit(0),
+        };
+        let ops = [
+            RiscOp::Shape { axis: 0 },
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "ks".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![],
+                claims: vec![],
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: axis(1),
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            RiscOp::Reshape {
+                new_shape: vec![axis(1), RtDim::Node(2), axis(3)],
+            },
+            RiscOp::zero_pad(Prim::F32, vec![(axis(1), RtDim::Node(2))]),
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), axis(2))],
+            },
+            RiscOp::Stride {
+                strides: vec![axis(1)],
+            },
+            RiscOp::SplitN { count: axis(1) },
+            RiscOp::SplitN {
+                count: RtDim::Node(1),
+            },
+            RiscOp::Add,
+            RiscOp::Copy,
+        ];
+        let mut reached = std::collections::BTreeSet::new();
+        for op in &ops {
+            let wire = wire_op(op).unwrap();
+            for slot in 0..4 {
+                let read = slot_read(op, slot);
+                assert_eq!(
+                    crate::schema::wire_slot_read(&wire, slot),
+                    read,
+                    "{op:?} slot {slot}"
+                );
+                if let SlotRead::Extent(kind) = read {
+                    reached.insert(kind);
+                }
+            }
+        }
+        assert_eq!(reached, std::collections::BTreeSet::from(ExtentSlot::ALL));
+    }
+
     #[test]
     fn ordinary_lowering_prose_cannot_create_unsupported_identity() {
         for message in [

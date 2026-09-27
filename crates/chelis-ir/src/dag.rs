@@ -1490,8 +1490,9 @@ impl RiscOp {
         match self {
             Self::KeyFromSeed | Self::Split { .. } => Some(1),
             Self::FoldIn => Some(2),
+            // A runtime count names the input it reads, by value or by axis.
             Self::SplitN {
-                count: RtDim::Node(slot),
+                count: RtDim::Node(slot) | RtDim::InputAxis { tensor: slot, .. },
             } => Some(slot + 1),
             Self::SplitN { .. } => Some(1),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint { .. } => Some(3),
@@ -4745,6 +4746,9 @@ mod tests {
     /// graph operations reach are exactly the list's graph admissions, the
     /// same list the linearity checker reads.
     ///
+    /// Each slot's admission is its read's ([`crate::verify::slot_read`]): an
+    /// extent slot is an extent observation whatever the operation.
+    ///
     /// Evidentiary status: REGRESSION TEST for `Drop`: at `f4eeca363` a key
     /// reaching a `Drop` broke V4, so `def f(k: key) = drop(k)` checked and
     /// then failed the evaluator's key rules. A lock for every other op.
@@ -4789,9 +4793,7 @@ mod tests {
                 let refused = errors
                     .iter()
                     .any(|error| error.contains(&format!("reaches input {slot} of")));
-                let admission = role
-                    .admission()
-                    .filter(|_| role.key_slots().contains(&slot));
+                let admission = KeyGraph::slot_read(&dag, node.0, slot).admission(role, slot);
                 if refused == admission.is_some() {
                     failures.push(format!("{op:?} slot {slot}: {admission:?}, {errors:?}"));
                 }
@@ -4804,6 +4806,131 @@ mod tests {
             .filter(|admission| admission.in_graph())
             .collect();
         assert_eq!(reached, listed);
+    }
+
+    /// `op` with every runtime bound read from input 1's axis 0, the form in
+    /// which each bound is an extent slot; `None` for an operation without
+    /// bounds.
+    fn with_extent_bounds(op: &RiscOp) -> Option<RiscOp> {
+        let read = || RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        };
+        Some(match op {
+            RiscOp::Expand { axis, .. } => RiscOp::Expand {
+                axis: *axis,
+                size: read(),
+            },
+            RiscOp::Reshape { new_shape } => RiscOp::Reshape {
+                new_shape: new_shape.iter().map(|_| read()).collect(),
+            },
+            RiscOp::Pad { padding, fill } => RiscOp::Pad {
+                padding: padding.iter().map(|_| (read(), read())).collect(),
+                fill: *fill,
+            },
+            RiscOp::Shrink { bounds } => RiscOp::Shrink {
+                bounds: bounds.iter().map(|_| (read(), read())).collect(),
+            },
+            RiscOp::Stride { strides } => RiscOp::Stride {
+                strides: strides.iter().map(|_| read()).collect(),
+            },
+            RiscOp::SplitN { .. } => RiscOp::SplitN { count: read() },
+            _ => return None,
+        })
+    }
+
+    /// chelis#2413 (spec/10 §3.2, [04-LIN-9]): a key tensor's extent is not
+    /// key material. Every extent slot the table declares
+    /// ([`crate::verify::slot_read`]), found by sweeping every operation and
+    /// its bound-reading form rather than listed here, observes a key
+    /// without using it: the key's one `Drop` is still its one use, and a
+    /// second `Drop` is still refused. Every kind of extent slot is reached.
+    ///
+    /// Evidentiary status: REGRESSION TEST for the bound slots. At
+    /// `83f9781fe` a key at an `InputAxis` bound (`expand(s, 0i32, shape(ks,
+    /// 0i32))` folds to one) was refused ("reaches input 1").
+    #[test]
+    fn every_extent_slot_observes_a_key_without_using_it() {
+        use crate::verify::{ExtentSlot, SlotRead, slot_read, verify_key_rules};
+        use std::collections::BTreeSet;
+        let ty = |precision| TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision,
+        };
+        let witness = RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "ks".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        };
+        let ops = one_of_every_risc_op()
+            .iter()
+            .flat_map(|op| [Some(op.clone()), with_extent_bounds(op)])
+            .flatten()
+            .chain([witness])
+            .collect::<Vec<_>>();
+        let mut reached = BTreeSet::new();
+        let mut failures = Vec::new();
+        for op in &ops {
+            for slot in 0..4 {
+                let SlotRead::Extent(kind) = slot_read(op, slot) else {
+                    continue;
+                };
+                reached.insert(kind);
+                for drops in [1, 2] {
+                    let mut dag = Dag::new();
+                    let decl = dag.declare("f");
+                    let key = dag.add_node(
+                        decl,
+                        RiscOp::Load { name: "ks".into() },
+                        vec![],
+                        ty(Prim::Key),
+                        None,
+                    );
+                    let mut inputs = (0..=slot)
+                        .map(|input| {
+                            dag.add_node(
+                                decl,
+                                RiscOp::Load {
+                                    name: format!("x{input}").as_str().into(),
+                                },
+                                vec![],
+                                ty(Prim::F32),
+                                None,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    inputs[slot] = key;
+                    // A split produces keys whatever its count reads.
+                    let produces = match op {
+                        RiscOp::SplitN { .. } => Prim::Key,
+                        _ => Prim::F32,
+                    };
+                    let node = dag.add_node(decl, op.clone(), inputs, ty(produces), None);
+                    dag.add_root(node);
+                    for _ in 0..drops {
+                        dag.add_node(decl, RiscOp::Drop, vec![key], ty(Prim::Key), None);
+                    }
+                    let mut errors = Vec::new();
+                    verify_key_rules(&dag, &mut errors);
+                    let verdict = match drops {
+                        1 => errors.is_empty(),
+                        _ => {
+                            errors.len() == 1
+                                && errors[0].starts_with("key `ks` of `f` is consumed twice")
+                        }
+                    };
+                    if !verdict {
+                        failures.push(format!(
+                            "{op:?} slot {slot} ({kind:?}), {drops} drops: {errors:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        assert_eq!(reached, BTreeSet::from(ExtentSlot::ALL));
     }
 
     /// Exhaustiveness guard for the WI-2 verifier/Beacon op subset: every

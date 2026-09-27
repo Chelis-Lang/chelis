@@ -957,10 +957,6 @@ pub enum KeyRole {
     /// A `Drop`, source `drop` ([05-OP-67]), which consumes the key at
     /// input 0 and produces no key a later node reads.
     Drop,
-    /// An `ExtentWitness` or a `Shape`, which reads the extent of the tensor
-    /// at input 0: a key tensor's extent is not key material, so the read is
-    /// not a use and leaves the key live ([04-LIN-9]).
-    ExtentObservation,
     /// A two-input `And`, read by the activation exclusivity rule.
     And,
     /// A `Not`, read by the activation exclusivity rule.
@@ -981,11 +977,7 @@ impl KeyRole {
     /// ([`Self::key_slots`]), and for any node that reads none.
     fn key_slot(self) -> Option<usize> {
         match self {
-            Self::Split { .. }
-            | Self::FoldIn
-            | Self::SplitN { .. }
-            | Self::Drop
-            | Self::ExtentObservation => Some(0),
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } | Self::Drop => Some(0),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
             Self::UniformLike => Some(3),
             Self::KeyFromSeed
@@ -1019,7 +1011,6 @@ impl KeyRole {
             Self::Drop => Some(KeyAdmission::Drop),
             Self::KeySelect => Some(KeyAdmission::Join),
             Self::Store => Some(KeyAdmission::Root),
-            Self::ExtentObservation => Some(KeyAdmission::ExtentObservation),
             Self::KeyFromSeed
             | Self::Load
             | Self::And
@@ -1087,7 +1078,6 @@ impl KeyRole {
             Self::DropoutReplay => "`dropout` replay",
             Self::UniformBoundAdjoint => "`uniform_like` bound adjoint",
             Self::Drop => "`drop`",
-            Self::ExtentObservation => "extent read",
             Self::Load
             | Self::Store
             | Self::And
@@ -1103,10 +1093,222 @@ impl KeyRole {
     }
 
     /// Whether reading the key at [`Self::key_slot`] consumes it. A replay
-    /// reads its forward draw's key, and an extent read its key tensor's
-    /// extent, without consuming it.
+    /// reads its forward draw's key without consuming it.
     fn consumes(self) -> bool {
         self.is_draw() || self.derives() || matches!(self, Self::KeySelect | Self::Drop)
+    }
+}
+
+/// What an operation reads through one input slot ([`slot_read`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotRead {
+    /// The operand's value.
+    Value,
+    /// Only the operand's extent. A key tensor's extent is not key material,
+    /// so a key there is observed, not used, and stays live ([04-LIN-9]).
+    Extent(ExtentSlot),
+}
+
+impl SlotRead {
+    /// The allow-list entry a key at input `slot` of a node of `role` is, or
+    /// `None` where the key rules refuse it (rule V4): an extent slot is an
+    /// extent observation whatever the operation, and a value slot admits a
+    /// key exactly where the operation's own admission does.
+    pub fn admission(self, role: KeyRole, slot: usize) -> Option<KeyAdmission> {
+        match self {
+            Self::Extent(_) => Some(KeyAdmission::ExtentObservation),
+            Self::Value => role
+                .admission()
+                .filter(|_| role.key_slots().contains(&slot)),
+        }
+    }
+}
+
+/// Every carrier through which an operation reads only an input's extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExtentSlot {
+    /// `Shape`'s input 0 (source `shape` and `numel`).
+    Shape,
+    /// `ExtentWitness`'s input 0, the tensor whose axis a call's extent
+    /// contract reads.
+    ExtentWitness,
+    /// An `Expand` size (source `expand` and `insert`) read from an input's
+    /// axis.
+    ExpandSize,
+    /// A `Reshape` target read from an input's axis.
+    ReshapeTarget,
+    /// A `Pad` bound read from an input's axis.
+    PadBound,
+    /// A `Shrink` bound read from an input's axis.
+    ShrinkBound,
+    /// A `Stride` step read from an input's axis.
+    StrideStep,
+    /// A `SplitN` count read from an input's axis.
+    SplitCount,
+}
+
+impl ExtentSlot {
+    pub const ALL: [Self; 8] = [
+        Self::Shape,
+        Self::ExtentWitness,
+        Self::ExpandSize,
+        Self::ReshapeTarget,
+        Self::PadBound,
+        Self::ShrinkBound,
+        Self::StrideStep,
+        Self::SplitCount,
+    ];
+}
+
+/// The input a runtime bound reads, as [`bound_slot_read`] takes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundInput {
+    /// A literal, the end of an axis or a symbol: no input.
+    None,
+    /// `Node(slot)`: the value of a rank-0 integer input.
+    Value(usize),
+    /// `InputAxis { tensor: slot, .. }`: the extent of a tensor input.
+    Extent(usize),
+}
+
+impl BoundInput {
+    pub fn of(bound: &RtDim) -> Self {
+        match bound {
+            RtDim::Node(slot) => Self::Value(*slot),
+            RtDim::InputAxis { tensor, .. } => Self::Extent(*tensor),
+            RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => Self::None,
+        }
+    }
+}
+
+/// The read at input `slot` of an operation whose data is input 0 and whose
+/// runtime bounds are `bounds`: the extent of an input a bound names by its
+/// axis and no bound reads the value of, otherwise a value. The IR table
+/// ([`slot_read`]) and the wire decoder's read their bounds through it.
+pub fn bound_slot_read(
+    kind: ExtentSlot,
+    bounds: impl IntoIterator<Item = BoundInput>,
+    slot: usize,
+) -> SlotRead {
+    let (mut extent, mut value) = (false, slot == 0);
+    for bound in bounds {
+        match bound {
+            BoundInput::Extent(read) => extent |= read == slot,
+            BoundInput::Value(read) => value |= read == slot,
+            BoundInput::None => {}
+        }
+    }
+    if extent && !value {
+        SlotRead::Extent(kind)
+    } else {
+        SlotRead::Value
+    }
+}
+
+/// The read at input `slot` of an operation that reads only input 0's
+/// extent and every other input's value.
+pub fn operand_extent_read(kind: ExtentSlot, slot: usize) -> SlotRead {
+    if slot == 0 {
+        SlotRead::Extent(kind)
+    } else {
+        SlotRead::Value
+    }
+}
+
+/// What `op` reads through input `slot`: the one table of value and extent
+/// slots, exhaustive with no wildcard arm, so no operation reaches the key
+/// rules without declaring which of its inputs it reads only for their
+/// extent. A dependency that reads only an extent never uses a key, whether
+/// it is one of these slots or a shape dependency, which the key rules do
+/// not see ([`KeyGraph`]). A symbolic bound (`RtDim::Sym`) names a dimension
+/// and reads no input.
+pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
+    let bounds = |kind, bounds: &mut dyn Iterator<Item = &RtDim>| {
+        bound_slot_read(kind, bounds.map(BoundInput::of), slot)
+    };
+    match op {
+        RiscOp::Shape { .. } => operand_extent_read(ExtentSlot::Shape, slot),
+        RiscOp::ExtentWitness { .. } => operand_extent_read(ExtentSlot::ExtentWitness, slot),
+        RiscOp::Expand { size, .. } => bounds(ExtentSlot::ExpandSize, &mut std::iter::once(size)),
+        RiscOp::Reshape { new_shape } => bounds(ExtentSlot::ReshapeTarget, &mut new_shape.iter()),
+        RiscOp::Pad { padding, .. } => bounds(
+            ExtentSlot::PadBound,
+            &mut padding.iter().flat_map(|(before, after)| [before, after]),
+        ),
+        RiscOp::Shrink { bounds: pairs } => bounds(
+            ExtentSlot::ShrinkBound,
+            &mut pairs.iter().flat_map(|(start, end)| [start, end]),
+        ),
+        RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
+        RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint
+        | RiscOp::Neg
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Recip
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect
+        | RiscOp::Sum { .. }
+        | RiscOp::Count { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::OneHot { .. }
+        // Every input and the result are i64 scalars.
+        | RiscOp::CheckedReshapeExtent { .. }
+        // Input 0 is the refined tensor itself, not only its extent.
+        | RiscOp::CheckedUnitAxis { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Cast { .. }
+        | RiscOp::CastTrunc { .. }
+        | RiscOp::FusedElem { .. }
+        // Its dims are symbolic expressions, which name no input.
+        | RiscOp::BlasMatmul { .. }
+        | RiscOp::Gather { .. }
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => SlotRead::Value,
     }
 }
 
@@ -1129,13 +1331,17 @@ pub enum SplitCount {
 /// codec. A node is named by its position; a position that names no node
 /// has no dtype and no dims.
 ///
-/// The view has a node's value inputs and its activation, and no other
-/// edge: a shape dependency reads only its node's extent, which is not key
-/// material ([04-LIN-9]), and a result-claim dependency orders a witness, so
-/// no key rule can count either as a use.
+/// The view has a node's inputs, what it reads through each
+/// ([`Self::slot_read`]), and its activation, and no other edge: a shape
+/// dependency reads only its node's extent, which is not key material
+/// ([04-LIN-9]), and a result-claim dependency orders a witness, so no key
+/// rule can count either as a use.
 pub trait KeyGraph {
     fn node_count(&self) -> usize;
     fn role(&self, node: usize) -> KeyRole;
+    /// What `node` reads through input `slot`: [`slot_read`] of its
+    /// operation.
+    fn slot_read(&self, node: usize, slot: usize) -> SlotRead;
     /// The dtype `node` produces, or `None` when no node or no known dtype.
     fn dtype(&self, node: usize) -> Option<Prim>;
     /// Whether two existing nodes produce the same tensor type.
@@ -1213,13 +1419,17 @@ impl KeyGraph for Dag {
             Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
             Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
             Some(RiscOp::Drop) => KeyRole::Drop,
-            Some(RiscOp::ExtentWitness { .. } | RiscOp::Shape { .. }) => KeyRole::ExtentObservation,
             Some(RiscOp::Logical(crate::dag::LogicalKind::And)) => KeyRole::And,
             Some(RiscOp::Logical(crate::dag::LogicalKind::Not)) => KeyRole::Not,
             Some(RiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
             Some(RiscOp::Const { value }) if is_const_true(value) => KeyRole::ConstTrue,
             _ => KeyRole::Other,
         }
+    }
+
+    fn slot_read(&self, node: usize, slot: usize) -> SlotRead {
+        self.get(NodeId(node))
+            .map_or(SlotRead::Value, |node| slot_read(&node.op, slot))
     }
 
     fn dtype(&self, node: usize) -> Option<Prim> {
@@ -1339,10 +1549,10 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   activation, or by the join of its branch ([`verify_confinement`]).
 /// - V4: a key reaching any other operation or slot is rejected: the slots
 ///   are those of the key allow-list's graph admissions
-///   ([`KeyRole::admission`]). Replays read their forward draw's key, and
-///   extent reads their key tensor's extent, without consuming it; so does a
-///   node that names a key in its shape dependencies, which [`KeyGraph`]
-///   does not show.
+///   ([`SlotRead::admission`]). Replays read their forward draw's key
+///   without consuming it. An extent slot ([`slot_read`]) reads its key
+///   tensor's extent, which is not a use; so does a node that names a key in
+///   its shape dependencies, which [`KeyGraph`] does not show.
 ///
 /// Each message names a key by [`KeyGraph::describe_key`] and a node by
 /// [`KeyGraph::describe_node`].
@@ -1394,7 +1604,8 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
         }
         let inputs = (0..).map_while(|slot| graph.input(node, slot));
         for (slot, input) in inputs.enumerate().filter(|(_, input)| is_key(*input)) {
-            if !role.key_slots().contains(&slot) {
+            let read = graph.slot_read(node, slot);
+            if read.admission(role, slot).is_none() {
                 errors.push(format!(
                     "{} reaches input {slot} of {}; only a key operation, a join or a random primitive consumes a key",
                     key(input),
@@ -1402,7 +1613,7 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 ));
                 continue;
             }
-            if role.consumes() {
+            if read == SlotRead::Value && role.consumes() {
                 consumers[identity(input)].push(KeyUse { node, slot });
             }
         }

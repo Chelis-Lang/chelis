@@ -211,6 +211,44 @@ fn a_key_tensors_extent_read_is_not_a_use_on_the_wire() {
     rejects_domain(&twice, "is consumed twice");
 }
 
+/// An `expand` whose size reads a key tensor's axis (source `expand(s,
+/// 0i32, shape(ks, 0i32))` folds to the size's `input_axis`) reads only its
+/// extent, so the codec admits it beside the keys' one draw and still
+/// rejects a second draw. (`lower` routes such a program to the host lane,
+/// so the graph is built here.)
+///
+/// Evidentiary status: REGRESSION TEST. At `83f9781fe` the codec rejected
+/// the expansion ("reaches input 1 of node 13").
+#[test]
+fn an_extent_slot_reading_a_key_is_not_a_use_on_the_wire() {
+    let mut graph = key_chain();
+    let unit = push(
+        &mut graph,
+        json!({"kind":"load","name":"s"}),
+        &[],
+        &[1],
+        "f32",
+    );
+    let size = json!({"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}});
+    let expand = push(
+        &mut graph,
+        json!({"kind":"expand","axis":0,"size":size}),
+        &[unit, 6],
+        &[3],
+        "f32",
+    );
+    graph["roots"].as_array_mut().unwrap().push(json!(expand));
+    accepts(&graph);
+    // A second draw of the keys the first consumes.
+    let mut twice = graph.clone();
+    let mut second = graph["nodes"][9].clone();
+    let id = twice["nodes"].as_array().unwrap().len();
+    second["id"] = json!(id);
+    twice["nodes"].as_array_mut().unwrap().push(second);
+    twice["roots"].as_array_mut().unwrap().push(json!(id));
+    rejects_domain(&twice, "is consumed twice");
+}
+
 /// [05-OP-71]: a function result claim rests on a split's count axis, as on
 /// an expansion's size, so the codec admits the lowered graph whose split
 /// retains the claim's witness.

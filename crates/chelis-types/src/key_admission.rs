@@ -5,8 +5,8 @@
 //! operation refuses it, so an operation nobody listed can never admit a key.
 //! The linearity checker reads the list through [`tag_keys`] (each Deep tag)
 //! and [`builtin_key_operand`] (each builtin operand), and the IR verifier's
-//! key rules read it through each graph operation's [`KeyAdmission`]
-//! (`chelis_ir::verify::KeyRole::admission`), so the two cannot disagree
+//! key rules read it through each graph operation's input slots
+//! (`chelis_ir::verify::SlotRead::admission`), so the two cannot disagree
 //! about which operations take a key.
 
 use chelis_deep::DeepTag;
@@ -80,9 +80,10 @@ pub enum KeyAdmission {
     KeyParameter,
     /// A graph root: the key a graph returns to its caller.
     Root,
-    /// A read of a key tensor's extent: `shape` or `numel` in source, and an
-    /// `ExtentWitness` or `Shape` in the graph. The extent is not key
-    /// material, so the read is not a use and leaves the key live.
+    /// A read of a key tensor's extent: `shape` or `numel` in source, and in
+    /// the graph any input slot an operation reads only for its extent
+    /// (`chelis_ir::verify::slot_read`). The extent is not key material, so
+    /// the read is not a use and leaves the key live.
     ExtentObservation,
 }
 

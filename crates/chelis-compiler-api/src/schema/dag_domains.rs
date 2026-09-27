@@ -6,8 +6,8 @@ use super::{
 };
 use chelis_ir::dag::{DimInfo, KeyBranch};
 use chelis_ir::verify::{
-    KeyGraph, KeyRole, SplitCount, is_const_false, is_const_true, verify_key_rules,
-    verify_random_operands,
+    BoundInput, ExtentSlot, KeyGraph, KeyRole, SlotRead, SplitCount, bound_slot_read,
+    is_const_false, is_const_true, operand_extent_read, verify_key_rules, verify_random_operands,
 };
 use chelis_types::types::Prim;
 use std::borrow::Cow;
@@ -122,9 +122,6 @@ impl KeyGraph for DecodedKeys<'_> {
             Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
             Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
             Some(WireRiscOp::Drop) => KeyRole::Drop,
-            Some(WireRiscOp::ExtentWitness { .. } | WireRiscOp::Shape { .. }) => {
-                KeyRole::ExtentObservation
-            }
             Some(WireRiscOp::Logical {
                 logical: WireLogicalKind::And,
             }) => KeyRole::And,
@@ -135,6 +132,13 @@ impl KeyGraph for DecodedKeys<'_> {
             Some(WireRiscOp::Const { value }) if is_const_true(value) => KeyRole::ConstTrue,
             _ => KeyRole::Other,
         }
+    }
+
+    fn slot_read(&self, node: usize, slot: usize) -> SlotRead {
+        self.0
+            .nodes
+            .get(node)
+            .map_or(SlotRead::Value, |node| wire_slot_read(&node.op, slot))
     }
 
     fn dtype(&self, node: usize) -> Option<Prim> {
@@ -214,6 +218,109 @@ impl KeyGraph for DecodedKeys<'_> {
             })
             .collect::<Option<Vec<_>>>()
             .map(Cow::Owned)
+    }
+}
+
+/// `chelis_ir::verify::slot_read` of the operation `op` encodes: the same
+/// rows, exhaustive with no wildcard arm, each bound read by the shared
+/// `bound_slot_read`.
+pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
+    let of = |bound: &WireRtDim| match bound {
+        WireRtDim::Node { input } => {
+            usize::try_from(*input).map_or(BoundInput::None, BoundInput::Value)
+        }
+        WireRtDim::InputAxis { tensor, .. } => {
+            usize::try_from(*tensor).map_or(BoundInput::None, BoundInput::Extent)
+        }
+        WireRtDim::Lit { .. } | WireRtDim::ToEnd | WireRtDim::Sym { .. } => BoundInput::None,
+    };
+    let bounds = |kind, bounds: &mut dyn Iterator<Item = &WireRtDim>| {
+        bound_slot_read(kind, bounds.map(of), slot)
+    };
+    match op {
+        WireRiscOp::Shape { .. } => operand_extent_read(ExtentSlot::Shape, slot),
+        WireRiscOp::ExtentWitness { .. } => operand_extent_read(ExtentSlot::ExtentWitness, slot),
+        WireRiscOp::Expand { size, .. } => {
+            bounds(ExtentSlot::ExpandSize, &mut std::iter::once(size))
+        }
+        WireRiscOp::Reshape { new_shape } => {
+            bounds(ExtentSlot::ReshapeTarget, &mut new_shape.iter())
+        }
+        WireRiscOp::Pad { padding, .. } => bounds(
+            ExtentSlot::PadBound,
+            &mut padding.iter().flat_map(|(before, after)| [before, after]),
+        ),
+        WireRiscOp::Shrink { bounds: pairs } => bounds(
+            ExtentSlot::ShrinkBound,
+            &mut pairs.iter().flat_map(|(start, end)| [start, end]),
+        ),
+        WireRiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
+        WireRiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
+        WireRiscOp::Add
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::Compare { .. }
+        | WireRiscOp::Logical { .. }
+        | WireRiscOp::Where {}
+        | WireRiscOp::GuardedFail { .. }
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike {}
+        | WireRiscOp::Dropout {}
+        | WireRiscOp::DropoutReplay {}
+        | WireRiscOp::UniformBoundAdjoint { .. }
+        | WireRiscOp::KeyFromSeed {}
+        | WireRiscOp::Split { .. }
+        | WireRiscOp::FoldIn {}
+        | WireRiscOp::KeySelect {}
+        | WireRiscOp::Sum { .. }
+        | WireRiscOp::Count { .. }
+        | WireRiscOp::MaxReduce { .. }
+        | WireRiscOp::MinReduce { .. }
+        | WireRiscOp::ProdReduce { .. }
+        | WireRiscOp::ReduceWindow { .. }
+        | WireRiscOp::ReduceWindowGrad { .. }
+        | WireRiscOp::Argmax { .. }
+        | WireRiscOp::Argmin { .. }
+        | WireRiscOp::Permute { .. }
+        | WireRiscOp::OneHot { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedUnitAxis { .. }
+        | WireRiscOp::Const { .. }
+        | WireRiscOp::ConstTensor { .. }
+        | WireRiscOp::Load { .. }
+        | WireRiscOp::Store { .. }
+        | WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::FusedElem { .. }
+        | WireRiscOp::BlasMatmul { .. }
+        | WireRiscOp::Gather { .. }
+        | WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. } => SlotRead::Value,
     }
 }
 

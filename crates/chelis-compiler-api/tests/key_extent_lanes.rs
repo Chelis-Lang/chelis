@@ -189,6 +189,57 @@ fn shape_and_numel_read_a_key_tensor_and_the_key_is_used_once_in_eval_and_c() {
     both_lanes(&rows);
 }
 
+/// A key tensor's extent read through an operation's extent slot (spec/10
+/// §3.2): an `expand` or `insert` size, a `reshape` target. Each reads only
+/// the extent, so the key stays live for its one use: the result, or `drop`.
+///
+/// Evidentiary status: REGRESSION TEST. At `83f9781fe` every row evaluated
+/// and failed `chelis build` ("ownership lowering invariant failed in `dag`:
+/// key `ks` reaches input 1 of node 2").
+#[test]
+fn an_extent_slot_reads_a_key_tensor_and_the_key_is_used_once_in_eval_and_c() {
+    let keys_after = |label: &str, value: &str| {
+        vec![format!("main.0 = {value}"), format!("main.1 = {ROWS}")]
+            .into_iter()
+            .map(|line| line.replace("main", label))
+            .collect::<Vec<_>>()
+    };
+    let rows = vec![
+        (
+            "b2c",
+            format!(
+                "def f[n](ks: tensor[n, key], s: tensor[1, f32]) -> (tensor[n, f32], tensor[n, key]) = (expand(s, 0i32, shape(ks, 0i32)), ks)\ndef main() = f({KEYS3}, to_tensor([0.0f32]))\n"
+            ),
+            keys_after("main", "tensor(shape=[3], data=[0.0, 0.0, 0.0])"),
+        ),
+        (
+            "insert",
+            format!(
+                "def f[n](ks: tensor[n, key], s: tensor[2, f32]) -> (tensor[n, 2, f32], tensor[n, key]) = (insert(s, 0i32, shape(ks, 0i32)), ks)\ndef main() = f({KEYS3}, to_tensor([1.0f32, 2.0f32]))\n"
+            ),
+            keys_after(
+                "main",
+                "tensor(shape=[3, 2], data=[1.0, 2.0, 1.0, 2.0, 1.0, 2.0])",
+            ),
+        ),
+        (
+            "reshape",
+            format!(
+                "def f[n](ks: tensor[n, key], xs: tensor[3, f32]) -> (tensor[n, f32], tensor[n, key]) = (reshape(xs, [shape(ks, 0i32)]), ks)\ndef main() = f({KEYS3}, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+            ),
+            keys_after("main", "tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
+        ),
+        (
+            "then_drop",
+            format!(
+                "def f[n](ks: tensor[n, key], s: tensor[1, f32]) -> tensor[n, f32] = {{\n  ys = expand(s, 0i32, shape(ks, 0i32))\n  _ = drop(ks)\n  ys\n}}\ndef main() = f({KEYS3}, to_tensor([2.0f32]))\n"
+            ),
+            main_is("tensor(shape=[3], data=[2.0, 2.0, 2.0])"),
+        ),
+    ];
+    both_lanes(&rows);
+}
+
 /// Negative parity: an extent that disagrees traps with the typed extent
 /// error in both lanes. The key tensor's count is a runtime value, 3, and the
 /// data has 2 rows; the trap and its context line agree across the lanes.
