@@ -437,10 +437,12 @@ pub(crate) enum TypecheckCacheLoad<T> {
     /// No file, or a valid file under a different key.
     Miss,
     /// Cancellation was requested and the payload decode did not complete.
-    /// `cache_envelope::load` polls the cancel token before the payload decode,
-    /// and inside the decode a stdlib payload's re-lowering and a dependency
-    /// payload's effect and linearity reruns poll it again, so an abandoned
-    /// load says nothing about the file. The caller propagates the
+    /// Each cache site polls the cancel token before calling
+    /// `cache_envelope::load`, and inside the decode a stdlib payload's
+    /// re-lowering and a dependency payload's effect and linearity reruns poll
+    /// it again, so an abandoned load says nothing about the file.
+    /// `cache_envelope` itself does not poll: the capacity census compiles it
+    /// against a fixed crate set that excludes `chelis_types` (chelis#2673). The caller propagates the
     /// cancellation and leaves the file in place.
     Cancelled,
     /// The bytes are present but cannot be used; the caller warns, rebuilds
@@ -461,7 +463,6 @@ pub(crate) fn classify_typecheck_cache_load<T>(
     match loaded {
         Ok(Some(payload)) => TypecheckCacheLoad::Hit(payload),
         Ok(None) => TypecheckCacheLoad::Miss,
-        Err(cache_envelope::CacheError::Cancelled) => TypecheckCacheLoad::Cancelled,
         Err(cache_envelope::CacheError::Decode(_)) if chelis_types::cancellation_requested() => {
             TypecheckCacheLoad::Cancelled
         }
@@ -501,6 +502,12 @@ pub fn load_or_build_stdlib_context(
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
 
+    // Observe a cancelled caller before the payload decode (chelis#2617).
+    if chelis_types::cancellation_requested() {
+        return Err(crate::compiler::cancelled_stage_error(
+            "chelis-std typecheck cache",
+        ));
+    }
     match classify_typecheck_cache_load(cache_envelope::load::<StdLibContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(ctx),
         TypecheckCacheLoad::Miss => {}

@@ -373,6 +373,12 @@ pub fn load_or_build_library_context(
     };
     let cache_path = library_cache_path(&cache_dir, key);
 
+    // Observe a cancelled caller before the payload decode (chelis#2617).
+    if chelis_types::cancellation_requested() {
+        return Err(crate::compiler::cancelled_stage_error(
+            "dependency typecheck cache",
+        ));
+    }
     match classify_typecheck_cache_load(cache_envelope::load::<LibraryContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(Some(ctx)),
         TypecheckCacheLoad::Miss => {}
