@@ -1279,9 +1279,9 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_cond = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, cond_s, cond_ndim), cond_size, 1);
-  out[i] = cond[idx_cond] != 0
-    ? a[CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1)]
-    : b[CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1)];
+  chelis_device_metadata idx_a = cond[idx_cond] != 0 ? CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1) : 0;
+  chelis_device_metadata idx_b = cond[idx_cond] != 0 ? 0 : CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  out[i] = cond[idx_cond] != 0 ? a[idx_a] : b[idx_b];
 }}
 ",
         // The generic ternary launcher names its three metadata groups a/b/g.

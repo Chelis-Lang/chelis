@@ -1122,27 +1122,32 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 /// type stays accepted.
 #[test]
 fn never_bound_dtype_operands_are_decided_at_the_boundary() {
-    for (route, program) in [
+    for (route, program, explicit) in [
         (
             "sqrt",
             "def f() -> i32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: f32) -> sqrt(t)\n  1i32\n}\n",
         ),
         (
             "mod",
             "def f() -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: i32) -> mod(t, 3i32)\n  1i32\n}\n",
         ),
         (
             "shl",
             "def f() -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t: i32) -> shl(t, 1i32)\n  1i32\n}\n",
         ),
+        // [04-LIN-10]: a key parameter declares its type, so only the
+        // tensor operand is undetermined.
         (
             "uniform_like",
-            "def f() -> i32 = {\n  g = fn (j, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (j: key, t: tensor[3, f32]) -> uniform_like(j, t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
         if matches!(route, "sqrt" | "mod" | "shl") {
             let family = if route == "sqrt" { "Float" } else { "Int" };
-            let parameter = if route == "sqrt" { "f32" } else { "i32" };
             let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
@@ -1154,8 +1159,7 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
                 "{}",
                 summary(&errors)
             );
-            check(&program.replace("fn (t)", &format!("fn (t: {parameter})")))
-                .expect("the explicit concrete contract admits the operation");
+            check(explicit).expect("the explicit concrete contract admits the operation");
             continue;
         }
         let errors =
@@ -1167,8 +1171,7 @@ fn never_bound_dtype_operands_are_decided_at_the_boundary() {
             "{route}: {}",
             summary(&errors)
         );
-        check(&program.replace("fn (t)", "fn (t: tensor[3, f32])"))
-            .expect("the explicit tensor contract admits the operation");
+        check(explicit).expect("the explicit tensor contract admits the operation");
     }
 }
 
