@@ -242,19 +242,19 @@ fn generated_c_rejects_an_unresolved_empty_tensor_dtype() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // chelis#2518: nothing determines the empty list's element type, so the
+    // checker rejects the declaration before code generation is reached.
     assert!(
-        message.contains("host type did not resolve before the code-generation boundary"),
-        "{message}"
-    );
-    assert!(
-        message.contains("unresolved host inference variable"),
+        message.contains("`to_tensor` admits only some operand types")
+            && message.contains("never determined within `out`"),
         "{message}"
     );
     assert!(!output_dir.join("unresolved.c").exists(), "{message}");
     assert!(!output_dir.join("unresolved.h").exists(), "{message}");
 }
 
-/// [05-OP-57]: an unconstrained empty payload cannot authorize f32.
+/// [05-OP-57]: an unconstrained empty payload cannot authorize f32. Since
+/// chelis#2518 the checker rejects it before `eval` runs.
 #[test]
 fn unresolved_empty_list_dtype_rejects_in_eval() {
     let dir = tempfile::tempdir().unwrap();
@@ -272,7 +272,7 @@ fn unresolved_empty_list_dtype_rejects_in_eval() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        message.contains("resolved checked element dtype"),
+        message.contains("`to_tensor` admits only some operand types"),
         "{message}"
     );
 }

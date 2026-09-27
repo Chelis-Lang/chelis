@@ -20094,8 +20094,6 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
 /// The layout of every ADT a function parameter carries, directly or nested
 /// in a tuple, list, option, dictionary, or another ADT's field.
 ///
-/// A checker-native nominal type the registry carries no constructor for
-/// (`Result`) gets a layout with none.
 /// An ADT whose name matches several registered ADTs, or whose constructors
 /// do not all instantiate at the carried type, gets no layout; the backend
 /// that would walk it refuses it by name rather than skipping its tensors.
@@ -20138,20 +20136,8 @@ fn parameter_adt_layouts(
                 } else {
                     exact
                 };
-                // Lowering builds, matches and reads a field of an ADT only
-                // through a constructor of this table. A checker-native
-                // nominal type the registry carries no constructor for, such
-                // as `Result`, therefore has no field a body can read, and its
-                // layout is exactly that: no constructors. Any other name with
-                // no definition is a failed lookup, which gets no layout, so
-                // the backend refuses it by name.
-                if candidates.is_empty() && chelis_types::is_checker_native_nominal(name) {
-                    layouts.push(HostAdtLayout {
-                        ty: ty.clone(),
-                        constructors: Vec::new(),
-                    });
-                    continue;
-                }
+                // A name with no definition is a failed lookup, which gets no
+                // layout, so the backend refuses it by name.
                 let one_adt = candidates
                     .windows(2)
                     .all(|pair| pair[0].adt_name == pair[1].adt_name);
@@ -23032,11 +23018,38 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 
+    /// chelis#1754 (#2390), moved to check by chelis#2518: a `to_tensor([])`
+    /// whose element type nothing determines is rejected by the checker, so
+    /// no checked program exists for lowering or code generation to receive,
+    /// and no dtype can be chosen for it downstream.
     #[test]
-    fn unresolved_empty_to_tensor_rejects_before_concrete_resolution() {
-        let checked = surf_check("result = numel(to_tensor([]))\n");
+    fn unresolved_empty_to_tensor_is_rejected_at_check_before_lowering() {
+        let decls = chelis_surf::parser::parse_str("result = numel(to_tensor([]))\n")
+            .expect("surf parse failed");
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+        let rejected = chelis_types::check_ir_program(&deep)
+            .expect_err("an empty tensor without a checked dtype must be rejected before lowering");
+        assert!(
+            rejected.errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("`to_tensor` admits only some operand types")
+                    && error.message.contains("never determined within `result`")
+            }),
+            "{:?}",
+            rejected.errors
+        );
+    }
+
+    /// The code-generation boundary still rejects a checked program whose host
+    /// type never resolved: an empty list nothing gives an element type
+    /// passes check and must not reach codegen with an invented type.
+    #[test]
+    fn unresolved_empty_list_rejects_at_the_code_generation_boundary() {
+        let checked = surf_check("values = []\n");
         let error = try_lower_compiled_program(&checked)
-            .expect_err("an empty tensor without a checked dtype must not reach codegen");
+            .expect_err("a host type that never resolved must not reach codegen");
         assert!(
             error
                 .message

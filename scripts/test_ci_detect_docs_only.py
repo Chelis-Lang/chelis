@@ -102,6 +102,7 @@ class IsDocsOnlyTests(unittest.TestCase):
             "spec/design/spec_provenance.md",
             "spec/design/remediation_roadmap.md",
             "docs/investigations/remediation_status_2026_08_04.md",
+            "docs/manual_gates.md",
         ):
             with self.subTest(oracle_doc=oracle_doc):
                 self.assertFalse(m.is_docs_only([oracle_doc]))

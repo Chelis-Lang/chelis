@@ -65,7 +65,7 @@ pub(super) fn infer_reduction_app(
     // generic application's registered axis-dtype gate. Apply the same
     // registry here so every Count axis is i32, including concrete
     // multi-axis calls whose constant values are otherwise extractable.
-    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, errors) {
+    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors) {
         return rejected;
     }
 
@@ -384,117 +384,37 @@ pub(super) fn infer_reshape_app(
     let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
-    match type_for_readonly_check(&input_ty, subst) {
-        Type::Prim(precision) => {
-            if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_node_provenance(
-                                node,
-                                format!(
-                                    "reshape expects an i64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
+    let mut arg_tys = vec![input_ty];
+    if let Some(shape_expr) = kids.get(2) {
+        let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
+        let expected_shape_ty = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+        if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
+            // spec/04 §4.7.5: the slot-mismatch diagnostic names the fix, and
+            // its direction states the slot's demand rather than a
+            // unification-order artifact (chelis#916).
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "reshape expects an i64 shape list (write i64-suffixed \
+                             elements, e.g. 2i64, or cast(..., i64)), got {}",
+                            subst.apply(&shape_ty)
                         ),
-                    );
-                }
-                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
-                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                    return report(errors, error.into());
-                }
-                return Type::Tensor(dims, TensorPrec::Concrete(precision));
-            }
-
-            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
+                    ),
+                    vec![],
+                ),
+            );
         }
-        Type::Tensor(_, ref precision) => {
-            if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_node_provenance(
-                                node,
-                                format!(
-                                    "reshape expects an i64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                return check_reshape_signature(
-                    node,
-                    kids,
-                    input_var_name.as_deref(),
-                    &[input_ty.clone(), shape_ty],
-                    subst,
-                    errors,
-                );
-            }
-
-            Type::Tensor(vec![Dim::Wildcard], precision.clone())
-        }
+        arg_tys.push(shape_ty);
+    }
+    // Inferring the shape list may have bound the input's own type through a
+    // `shape(input, axis)` element, so the input is read after it.
+    match type_for_readonly_check(&arg_tys[0], subst) {
         Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_node_provenance(
-                                node,
-                                format!(
-                                    "reshape expects an i64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                // Inferring the shape list may have bound the input's own
-                // type through a `shape(input, axis)` element. Re-read the
-                // input before deriving the output.
-                if !matches!(type_for_readonly_check(&input_ty, subst), Type::Var(_)) {
-                    return check_reshape_signature(
-                        node,
-                        kids,
-                        input_var_name.as_deref(),
-                        &[input_ty.clone(), shape_ty],
-                        subst,
-                        errors,
-                    );
-                }
-
                 // chelis#1512: the target list stands on its own, so validate
                 // it here rather than only on the replay. Relocating a
                 // decision is how a check silently stops happening.
@@ -502,36 +422,30 @@ pub(super) fn infer_reshape_app(
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
-
-                // The input is still a variable, so neither the output dims
-                // nor the element-count rule can be decided yet. Suspend the
-                // route and let the ledger run this same rule once the
-                // operand binds; publishing `input_ty` here is what made a
-                // correct `reshape` fail its declared signature and an
-                // incorrect one pass.
-                return defer_or_check_shape_route(
-                    ShapeRouteKind::Reshape {
-                        input_var_name: input_var_name.clone(),
-                    },
-                    node,
-                    kids,
-                    vec![input_ty, shape_ty],
-                    vg,
-                    subst,
-                    errors,
-                    product,
-                );
             }
-            input_ty
+            // The input is still a variable, so neither its domain, the
+            // output dims, nor the element-count rule can be decided yet.
+            // Suspend the route and let the ledger run this same rule once the
+            // operand binds (chelis#2591: publishing `input_ty` here admitted
+            // any operand the variable later became).
+            defer_or_check_shape_route(
+                ShapeRouteKind::Reshape { input_var_name },
+                node,
+                kids,
+                arg_tys,
+                vg,
+                subst,
+                errors,
+                product,
+            )
         }
-        Type::Error(_) => input_ty,
-        _ => report(
+        _ => check_reshape_signature(
+            node,
+            kids,
+            input_var_name.as_deref(),
+            &arg_tys,
+            subst,
             errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                "reshape expects tensor input".to_string(),
-                vec![],
-            ),
         ),
     }
 }
@@ -539,10 +453,15 @@ pub(super) fn infer_reshape_app(
 /// `reshape`'s own rule, the single entry the eager pass and the deferred
 /// shape ledger both call.
 ///
-/// `arg_tys` is `[input, shape_list]` with the input already settled: the
-/// caller decides whether it can be, and suspends the call when it cannot.
-/// Deriving the output dims and checking the element count are one decision,
-/// so they live together here rather than being copied onto a deferred path.
+/// `arg_tys` is `[input]` or `[input, shape_list]` with the input already
+/// settled: the caller decides whether it can be, and suspends the call when
+/// it cannot. The operand's domain, the output dims and the element count are
+/// one decision, so they live together here rather than being copied onto a
+/// deferred path.
+///
+/// chelis#2591, [05-OP-49]: the operand is a tensor, or a scalar of an active
+/// data element dtype, which `reshape` reads as that dtype's rank-0 tensor.
+/// Any other operand is rejected here, however it reached the call.
 pub(super) fn check_reshape_signature(
     node: &DeepNode,
     kids: &[deep::Expr],
@@ -551,64 +470,61 @@ pub(super) fn check_reshape_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
+    let input = type_for_readonly_check(&arg_tys[0], subst);
+    let precision = match &input {
+        Type::Tensor(_, precision) => precision.clone(),
+        Type::Prim(precision) if precision.is_data_element_dtype() => {
+            TensorPrec::Concrete(*precision)
+        }
+        Type::Error(witness) => return propagate(witness),
+        other => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_node_provenance(
+                        node,
+                        format!("reshape expects tensor input, got {other}"),
+                    ),
+                    vec![],
+                ),
+            );
+        }
+    };
     let Some(shape_expr) = kids.get(2) else {
         // The two-argument form has no target to check against.
-        return match type_for_readonly_check(&arg_tys[0], subst) {
-            Type::Tensor(_, precision) => Type::Tensor(vec![Dim::Wildcard], precision),
-            Type::Prim(precision) => {
-                Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
-            }
-            other => other,
-        };
+        return Type::Tensor(vec![Dim::Wildcard], precision);
     };
-    let input_dims = match type_for_readonly_check(&arg_tys[0], subst) {
-        Type::Tensor(dims, precision) => {
-            let dims = dims.clone();
-            let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
-            if let Err(error) = validate_reshape_target_dims(&target, subst) {
-                return report(errors, error.into());
-            }
-            if subst.static_dim_products_match(&dims, &target) == Some(false) {
-                let input_numel = subst.static_dim_product(&dims);
-                let target_numel = subst.static_dim_product(&target);
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        match (target_numel, input_numel) {
-                            (Some(target), Some(input)) => format!(
-                                "reshape target has {target} elements but input tensor has {input}"
-                            ),
-                            _ => "reshape target element count does not match input tensor"
-                                .to_string(),
-                        },
-                        vec![],
-                    ),
-                );
-            }
-            return Type::Tensor(target, precision);
+    let Type::Tensor(dims, _) = input else {
+        // A scalar operand: the target is checked on its own.
+        let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
+        if let Err(error) = validate_reshape_target_dims(&target, subst) {
+            return report(errors, error.into());
         }
-        Type::Prim(precision) => {
-            let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
-            if let Err(error) = validate_reshape_target_dims(&target, subst) {
-                return report(errors, error.into());
-            }
-            return Type::Tensor(target, TensorPrec::Concrete(precision));
-        }
-        Type::Error(witness) => return propagate(&witness),
-        other => other,
+        return Type::Tensor(target, precision);
     };
-    report(
-        errors,
-        CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_node_provenance(
-                node,
-                format!("reshape expects tensor input, got {input_dims}"),
+    let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
+    if let Err(error) = validate_reshape_target_dims(&target, subst) {
+        return report(errors, error.into());
+    }
+    if subst.static_dim_products_match(&dims, &target) == Some(false) {
+        let input_numel = subst.static_dim_product(&dims);
+        let target_numel = subst.static_dim_product(&target);
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                match (target_numel, input_numel) {
+                    (Some(target), Some(input)) => {
+                        format!("reshape target has {target} elements but input tensor has {input}")
+                    }
+                    _ => "reshape target element count does not match input tensor".to_string(),
+                },
+                vec![],
             ),
-            vec![],
-        ),
-    )
+        );
+    }
+    Type::Tensor(target, precision)
 }
 
 /// `shrink(&x, [[s0, e0], [s1, e1], ...]) -> tensor[e0-s0, e1-s1, ..., p]`

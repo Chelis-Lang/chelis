@@ -45,7 +45,6 @@ pub(super) struct InferenceProduct {
     /// [`Self::post_app_key`]'s documented lifetime invariant true rather
     /// than merely asserted.
     replaying_post_app: Option<(usize, usize)>,
-    deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
     /// [04-PAT-1]: a literal pattern first seen against a flexible type must
@@ -98,9 +97,34 @@ pub(super) struct InferenceProduct {
     /// checked units may reuse the same byte offsets, so spans alone cannot
     /// identify the declaration that authored a binding.
     active_declaration_name: Option<String>,
+    /// The authored-binder contracts not yet decided: the declaration being
+    /// inferred, or every member of a recursive group inferred so far.
+    /// Decided by the close after the last step that can narrow a binder
+    /// (chelis#2537, chelis#2584).
+    authored_binder_contracts: Vec<AuthoredBinderContract>,
+    /// The declaration that owns the ledger entry being replayed, so an entry
+    /// the replay registers again keeps its owner (chelis#2584).
+    replaying_owner: Option<String>,
+    /// chelis#2590: the in-group references to recursive-group members whose
+    /// header omits a type, and each such member's own instance of its
+    /// provisional scheme, decided when the component completes
+    /// (`group_link::link_group_references`).
+    group_references: Vec<GroupReference>,
+    group_member_types: Vec<(String, Type)>,
+    /// The references to a sibling member of the recursive group being
+    /// inferred, each typed at a fresh copy of the member's provisional type
+    /// and linked to it when the group completes (`group_link::SiblingLink`).
+    sibling_links: Vec<SiblingLink>,
+    /// chelis#2626: the name and provisional monomorphic type of each member
+    /// of the recursive group being inferred whose declaration writes no
+    /// signature. The member's own body and references share it; a sibling's
+    /// reference copies it. Dropped when the group completes.
+    group_provisional_types: Vec<(String, Type)>,
 }
 
 struct InferredAdmissionContract {
+    /// The declaration whose inference recorded the contract.
+    owner: Option<String>,
     subject: String,
     variable: TypeVar,
     /// The enclosing declaration's authored type binders. A local hole may
@@ -163,6 +187,10 @@ pub(super) enum DeferredShapeRule {
         node: DeepNode,
         kids: Vec<deep::Expr>,
     },
+    /// A tuple projection or record-field read whose target was still a
+    /// type variable; `arg_tys` is `[target]` and `result_ty` is the
+    /// projected variable the access published.
+    Derivation(TypeDerivation),
     PostApp {
         /// What the replay runs. Both kinds share one entry, one key and one
         /// declaration boundary; they differ only in how much of the call is
@@ -216,6 +244,10 @@ pub(super) struct PostAppCall<'a> {
 #[derive(Clone)]
 pub(super) struct DeferredShapeCheck {
     id: u64,
+    /// The declaration whose inference registered the entry. A recursive
+    /// group decides its members' entries together, when the group completes
+    /// (chelis#2584), and each diagnostic still names its own declaration.
+    owner: Option<String>,
     rule: DeferredShapeRule,
     arg_exprs: Vec<deep::Expr>,
     arg_tys: Vec<Type>,
@@ -223,32 +255,10 @@ pub(super) struct DeferredShapeCheck {
 }
 
 struct DeferredLiteralPattern {
+    owner: Option<String>,
     pattern: deep::Expr,
     scrutinee_ty: Type,
     scrutinee_name: Option<String>,
-}
-
-#[derive(Clone)]
-enum DeferredTypeDerivation {
-    TupleProjection {
-        source: Type,
-        index: usize,
-        projected: Type,
-    },
-    /// chelis#1836: a field read whose target was still a type variable.
-    ///
-    /// `infer_access` cannot name the field's type before the target's ADT is
-    /// known, and this type system has no row-polymorphic record to bind the
-    /// target to, so the access publishes a fresh variable. Recording the
-    /// derivation here is what ties that variable to the field the target
-    /// turns out to carry; without it a shape-computed route over `q.x`
-    /// suspends on an operand nothing ever binds and is rejected at the
-    /// declaration boundary even though the application supplies `q`.
-    RecordField {
-        source: Type,
-        field: String,
-        projected: Type,
-    },
 }
 
 pub(super) struct TypeStampEpoch {
@@ -366,6 +376,184 @@ impl InferenceProduct {
             .map(str::to_string);
     }
 
+    /// Record the declaration's authored-binder contract for
+    /// `close_declaration` to decide.
+    pub(super) fn record_authored_binder_contract(&mut self, contract: AuthoredBinderContract) {
+        self.authored_binder_contracts.push(contract);
+    }
+
+    pub(super) fn take_authored_binder_contracts(&mut self) -> Vec<AuthoredBinderContract> {
+        std::mem::take(&mut self.authored_binder_contracts)
+    }
+
+    /// chelis#2590: an in-group reference to `callee`, a member whose header
+    /// omits a type, at the instance `ty` of its provisional scheme.
+    pub(super) fn record_group_reference(
+        &mut self,
+        callee: &str,
+        ty: Type,
+        span_id: Option<String>,
+        span_offset: Option<usize>,
+    ) {
+        self.group_references.push(GroupReference {
+            caller: self.active_declaration_name.clone(),
+            callee: callee.to_string(),
+            ty,
+            span_id,
+            span_offset,
+        });
+    }
+
+    /// Whether a reference to `name` from the declaration being inferred is a
+    /// reference to a sibling: a member of its recursive group other than
+    /// itself.
+    pub(super) fn references_a_sibling(&self, name: &str) -> bool {
+        self.active_declaration_name.as_deref() != Some(name)
+    }
+
+    /// Whether a reference to `name` that resolved to `scheme` is an in-group
+    /// reference to a member that writes no signature, and not to a local
+    /// binding that shadows it.
+    pub(super) fn is_unsigned_group_reference(&self, name: &str, scheme: &Scheme) -> bool {
+        scheme.tvars.is_empty()
+            && scheme.dvars.is_empty()
+            && scheme.rvars.is_empty()
+            && self
+                .group_provisional_types
+                .iter()
+                .any(|(member, provisional)| member == name && *provisional == scheme.body)
+    }
+
+    /// A reference to a sibling member, typed at the copy `ty` of its
+    /// provisional type `own` (`group_link::sibling_instance`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_sibling_link(
+        &mut self,
+        callee: &str,
+        ty: Type,
+        own: Type,
+        copies: Vec<(Variable, Variable)>,
+        awaits: bool,
+        span_id: Option<String>,
+        span_offset: Option<usize>,
+    ) {
+        self.sibling_links.push(SiblingLink {
+            caller: self.active_declaration_name.clone(),
+            callee: callee.to_string(),
+            ty,
+            own,
+            copies,
+            awaits,
+            span_id,
+            span_offset,
+        });
+    }
+
+    /// chelis#2590: the instance of `name`'s provisional scheme that its own
+    /// body is inferred against.
+    pub(super) fn record_group_member_type(&mut self, name: &str, ty: Type) {
+        self.group_member_types.push((name.to_string(), ty));
+    }
+
+    /// chelis#2626: the names and provisional types of the members of the
+    /// recursive group about to be inferred that write no signature.
+    pub(super) fn record_group_provisional_types(
+        &mut self,
+        types: impl IntoIterator<Item = (String, Type)>,
+    ) {
+        self.group_provisional_types.extend(types);
+    }
+
+    /// chelis#2626: whether `ty` is a type variable that the completion of
+    /// the recursive group being inferred determines further: a variable of
+    /// the provisional type of a member that writes no signature, or of a
+    /// sibling reference's copy of one. A rule that cannot be decided on such
+    /// a variable waits for it. A body sees neither bound by a sibling, in any
+    /// order (`group_link::sibling_instance`), so the wait, and the decision
+    /// the group's completion replays, is the same in every declaration order.
+    ///
+    /// A reference to a member whose signature omits only some types takes a
+    /// fresh instance of them (chelis#2590), which the completion decides as
+    /// the member's own type or a concrete one. Waiting on it would let the
+    /// caller's own use of the reference choose the instance, which is how a
+    /// generic function is instantiated, so a rule is decided on it where it
+    /// is inferred.
+    ///
+    /// A variable anywhere inside those types qualifies, not only the whole
+    /// type of a parameter or result: a tuple component, a list element or a
+    /// tensor's precision is linked just the same.
+    pub(super) fn awaits_group_completion(&self, ty: &Type, subst: &Subst) -> bool {
+        let Type::Var(var) = subst.apply(ty) else {
+            return false;
+        };
+        self.group_provisional_types
+            .iter()
+            .map(|(_, provisional)| provisional)
+            .chain(
+                self.sibling_links
+                    .iter()
+                    .filter(|link| link.awaits)
+                    .map(|link| &link.ty),
+            )
+            .any(|linked| crate::env::free_tvars(&resolved(linked, subst)).contains(&var))
+    }
+
+    /// chelis#2651: the member of the recursive group being inferred whose
+    /// types the group has yet to determine and that `ty`, a type variable,
+    /// stands for part of: a variable of a signature-less member's
+    /// provisional type, of a sibling reference's copy of a member's type, or
+    /// of an in-group reference's instance of a member's omitted types. A body
+    /// sees each of these unbound by any sibling, in every declaration order,
+    /// so the answer is the same in every order.
+    pub(super) fn group_variable_owner(&self, ty: &Type, subst: &Subst) -> Option<&str> {
+        let Type::Var(var) = subst.apply(ty) else {
+            return None;
+        };
+        let holds = |linked: &Type| crate::env::free_tvars(&resolved(linked, subst)).contains(&var);
+        self.group_provisional_types
+            .iter()
+            .find(|(_, provisional)| holds(provisional))
+            .map(|(name, _)| name.as_str())
+            .or_else(|| {
+                self.sibling_links
+                    .iter()
+                    .find(|link| holds(&link.ty))
+                    .map(|link| link.callee.as_str())
+            })
+            .or_else(|| {
+                self.group_references
+                    .iter()
+                    .find(|reference| holds(&reference.ty))
+                    .map(|reference| reference.callee.as_str())
+            })
+    }
+
+    /// The component's in-group references, member types and sibling links,
+    /// taken for its completion.
+    pub(super) fn take_group_links(
+        &mut self,
+    ) -> (Vec<GroupReference>, Vec<(String, Type)>, Vec<SiblingLink>) {
+        self.group_provisional_types.clear();
+        (
+            std::mem::take(&mut self.group_references),
+            std::mem::take(&mut self.group_member_types),
+            std::mem::take(&mut self.sibling_links),
+        )
+    }
+
+    /// The authored-binder contracts still to decide, without taking them.
+    pub(super) fn pending_authored_binder_contracts(&self) -> &[AuthoredBinderContract] {
+        &self.authored_binder_contracts
+    }
+
+    /// The declaration that owns a ledger entry registered now: the one whose
+    /// entry is being replayed, or else the one being inferred.
+    fn entry_owner(&self) -> Option<String> {
+        self.replaying_owner
+            .clone()
+            .or_else(|| self.active_declaration_name.clone())
+    }
+
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
         self.next_deferred_shape_id
     }
@@ -385,6 +573,7 @@ impl InferenceProduct {
             PatternSite::Other => None,
         };
         self.deferred_literal_patterns.push(DeferredLiteralPattern {
+            owner: self.entry_owner(),
             pattern: pattern.clone(),
             scrutinee_ty: scrutinee_ty.clone(),
             scrutinee_name,
@@ -405,7 +594,6 @@ impl InferenceProduct {
 
     pub(super) fn finish_deferred_literal_patterns(
         &mut self,
-        declaration: Option<&str>,
         env: &Env,
         subst: &Subst,
         adt_reg: &AdtRegistry,
@@ -416,7 +604,7 @@ impl InferenceProduct {
                 &check.pattern,
                 &check.scrutinee_ty,
                 check.scrutinee_name.as_deref(),
-                declaration,
+                check.owner.as_deref(),
                 env,
                 subst,
                 adt_reg,
@@ -456,9 +644,11 @@ impl InferenceProduct {
             .into_iter()
             .map(|(variable, _)| *variable)
             .collect();
+        let owner = self.entry_owner();
         for variable in variables {
             self.inferred_admission_contracts
                 .push(InferredAdmissionContract {
+                    owner: owner.clone(),
                     subject: subject.to_string(),
                     variable,
                     binders: binders.clone(),
@@ -557,12 +747,7 @@ impl InferenceProduct {
             .any(|contract| !contract.unmet_families(subst).is_empty())
     }
 
-    fn finish_admission_contracts(
-        &mut self,
-        declaration: Option<&str>,
-        subst: &Subst,
-        errors: &mut DiagnosticSink<'_>,
-    ) {
+    fn finish_admission_contracts(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
         let mut reported = BTreeSet::new();
         for contract in self.inferred_admission_contracts.drain(..) {
             for (variable, required) in contract.unmet_families(subst) {
@@ -576,7 +761,7 @@ impl InferenceProduct {
                          admission, but its unresolved type `{}` has no sufficient declared \
                          contract at the declaration boundary (spec/04-type-system.md §3.1)",
                         contract.subject,
-                        declaration.unwrap_or("<anonymous>"),
+                        contract.owner.as_deref().unwrap_or("<anonymous>"),
                         required.family_name(),
                         subst.apply(&Type::Var(contract.variable)),
                     ),
@@ -591,201 +776,28 @@ impl InferenceProduct {
         }
     }
 
+    /// chelis#1836, chelis#2523: tie `projected` to element `index` of
+    /// `source`, a target still unresolved at the access. The derivation is a
+    /// ledger entry like a suspended call, so it is decided when the target
+    /// binds, keeps its lambda monomorphic until then ([04-INF-1]), and is
+    /// decided at the declaration boundary if the target never binds.
     pub(super) fn defer_tuple_projection(&mut self, source: Type, index: usize, projected: Type) {
-        self.deferred_type_derivations
-            .push(DeferredTypeDerivation::TupleProjection {
-                source,
-                index,
-                projected,
-            });
+        self.defer_shape_check(
+            DeferredShapeRule::Derivation(TypeDerivation::TupleProjection { index }),
+            Vec::new(),
+            vec![source],
+            projected,
+        );
     }
 
+    /// [`Self::defer_tuple_projection`] for a record field.
     pub(super) fn defer_record_field(&mut self, source: Type, field: String, projected: Type) {
-        self.deferred_type_derivations
-            .push(DeferredTypeDerivation::RecordField {
-                source,
-                field,
-                projected,
-            });
-    }
-
-    fn resolve_deferred_type_derivations(
-        &mut self,
-        vg: &mut VarGen,
-        subst: &mut Subst,
-        adt_reg: &AdtRegistry,
-        errors: &mut DiagnosticSink<'_>,
-    ) {
-        let derivations = std::mem::take(&mut self.deferred_type_derivations);
-        for derivation in derivations {
-            match derivation {
-                DeferredTypeDerivation::TupleProjection {
-                    source,
-                    index,
-                    projected,
-                } => match subst.apply(&source) {
-                    Type::Var(_) => self.deferred_type_derivations.push(
-                        DeferredTypeDerivation::TupleProjection {
-                            source,
-                            index,
-                            projected,
-                        },
-                    ),
-                    Type::Tuple(elements) if index < elements.len() => {
-                        if let Err(error) = unify(&projected, &elements[index], subst) {
-                            errors.push(error.into());
-                        }
-                    }
-                    Type::Tuple(elements) => errors.push(CheckError::new(
-                        CheckErrorKind::TupleIndexOutOfBounds,
-                        format!(
-                            "tuple index {index} out of bounds for tuple of size {}",
-                            elements.len()
-                        ),
-                        vec![],
-                    )),
-                    Type::Error(_) => {}
-                    other => errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!("expected tuple type, got {other}"),
-                        vec![],
-                    )),
-                },
-                // chelis#1836. The diagnostics here are deliberately silent
-                // for every shape `infer_access` already rejects on its own
-                // once the target is known: this pass runs on a target that
-                // was a variable at the access, and the ordinary access rule
-                // is not re-entered, so a wrong field name or a non-record
-                // binding must be reported from here or nowhere.
-                //
-                // Round 1 P3-1: every failing shape BINDS `projected` to the
-                // reported error's witness. The eager arm gets this for free
-                // by returning `report(...)`'s `Type::Error` as the access
-                // type (chelis#731 §C3 cascade suppression); this pass has to
-                // do it by unification, because the route waiting on
-                // `projected` is suspended on the other ledger and reads the
-                // variable rather than a return value. Leaving it free made
-                // every field defect reported here arrive with the route's
-                // declaration-boundary obligation behind it: two diagnostics
-                // for one mistake.
-                DeferredTypeDerivation::RecordField {
-                    source,
-                    field,
-                    projected,
-                } => {
-                    let target = subst.apply(&source);
-                    // One `match` with an explicit `Type::Var` arm, not an
-                    // `if matches!` guard: `unresolved_operand_census.rs`
-                    // enumerates this site by that arm's pattern, and a guard
-                    // naming only `Type::Var` is a spelling its recognizer
-                    // cannot see. Keeping the site enumerable is the point of
-                    // the census, so the shape is deliberate.
-                    let resolved_field: Result<Type, CheckError> = match &target {
-                        // Still unbound: carry the derivation to the next
-                        // pass. `replay_ready_shape_checks` repeats until a
-                        // pass settles nothing new, and an entry that never
-                        // settles costs nothing: the route waiting on
-                        // `projected` reports the declaration-boundary
-                        // obligation instead.
-                        Type::Var(_) => {
-                            self.deferred_type_derivations.push(
-                                DeferredTypeDerivation::RecordField {
-                                    source,
-                                    field,
-                                    projected,
-                                },
-                            );
-                            continue;
-                        }
-                        // The target's own rejection was already reported; the
-                        // field inherits its witness and stays silent (§C3).
-                        Type::Error(witness) => {
-                            let _ = unify(&projected, &propagate(witness), subst);
-                            continue;
-                        }
-                        Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) => {
-                            match single_record_variant(adt_reg, adt_name) {
-                                None => Err(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "field access `.{field}` is only defined on a \
-                                         single-record-variant type; `{adt_name}` is a \
-                                         multi-variant or positional-field type (chelis#755)"
-                                    ),
-                                    vec![
-                                        "pattern-match on the variants with `match` to read \
-                                         their fields"
-                                            .to_string(),
-                                    ],
-                                )),
-                                Some(variant) => {
-                                    let position = variant.fields.iter().position(|(name, _)| {
-                                        name.as_deref() == Some(field.as_str())
-                                    });
-                                    match position {
-                                        None => Err(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            format!("unknown record field '{field}' on {adt_name}"),
-                                            vec![format!(
-                                                "known fields: {:?}",
-                                                variant
-                                                    .fields
-                                                    .iter()
-                                                    .filter_map(|(name, _)| name.as_deref())
-                                                    .collect::<Vec<_>>()
-                                            )],
-                                        )),
-                                        Some(position) => {
-                                            let field_types = instantiated_field_types(
-                                                adt_name, variant, &target, adt_reg, vg, subst,
-                                            );
-                                            match field_types.get(position) {
-                                                Some(ty) => Ok(ty.clone()),
-                                                // `position` came from a
-                                                // validated hit, so a shorter
-                                                // list is an internal
-                                                // inconsistency: loud, never
-                                                // silent (chelis#731 §C3).
-                                                None => Err(CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    format!(
-                                                        "internal: field `{field}` of \
-                                                         `{adt_name}` resolved to position \
-                                                         {position} but no instantiated field \
-                                                         type is available (chelis#731 \
-                                                         [04-TOT-2])"
-                                                    ),
-                                                    vec![],
-                                                )),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        other => Err(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            format!(
-                                "field access `.{field}` expects a record value, got a \
-                                 value of type `{other}` (chelis#755)"
-                            ),
-                            vec![],
-                        )),
-                    };
-                    match resolved_field {
-                        Ok(field_ty) => {
-                            if let Err(error) = unify(&projected, &field_ty, subst) {
-                                errors.push(error.into());
-                            }
-                        }
-                        Err(error) => {
-                            let witness = report(errors, error);
-                            let _ = unify(&projected, &witness, subst);
-                        }
-                    }
-                }
-            }
-        }
+        self.defer_shape_check(
+            DeferredShapeRule::Derivation(TypeDerivation::RecordField { field }),
+            Vec::new(),
+            vec![source],
+            projected,
+        );
     }
 
     pub(super) fn has_pending_shape_check_since(&self, checkpoint: u64) -> bool {
@@ -1044,8 +1056,10 @@ impl InferenceProduct {
     ) {
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
+        let owner = self.entry_owner();
         self.deferred_shape_checks.push(DeferredShapeCheck {
             id,
+            owner,
             rule,
             arg_exprs,
             arg_tys,
@@ -1088,8 +1102,8 @@ impl InferenceProduct {
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        self.resolve_deferred_type_derivations(vg, subst, adt_reg, errors);
         let checks = std::mem::take(&mut self.deferred_shape_checks);
+        let prior_owner = self.replaying_owner.take();
         for check in checks {
             if check
                 .arg_tys
@@ -1099,6 +1113,8 @@ impl InferenceProduct {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
+            // An entry the replay registers again belongs to this one's owner.
+            self.replaying_owner.clone_from(&check.owner);
 
             let resolved = match &check.rule {
                 DeferredShapeRule::Matmul => {
@@ -1163,6 +1179,36 @@ impl InferenceProduct {
                         errors,
                     )
                 }
+                DeferredShapeRule::Derivation(derivation) => {
+                    let product: &Self = self;
+                    let step = resolve_type_derivation(
+                        derivation,
+                        &check.arg_tys[0],
+                        &check.result_ty,
+                        &|ty, subst| product.awaits_group_completion(ty, subst),
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                    );
+                    match step {
+                        DerivationStep::Decided => {}
+                        // The readiness test above already waits on a variable
+                        // target, so this keeps an undecided entry only in
+                        // principle; an entry is never dropped undecided.
+                        DerivationStep::Pending => self.deferred_shape_checks.push(check),
+                        DerivationStep::Awaits {
+                            derivation,
+                            operands,
+                        } => {
+                            let mut check = check;
+                            check.rule = DeferredShapeRule::Derivation(derivation);
+                            check.arg_tys = operands;
+                            self.deferred_shape_checks.push(check);
+                        }
+                    }
+                    continue;
+                }
                 DeferredShapeRule::PostApp {
                     replay,
                     site,
@@ -1196,6 +1242,7 @@ impl InferenceProduct {
             };
             let _ = resolved;
         }
+        self.replaying_owner = prior_owner;
     }
 
     /// Re-decide one suspended `PostApp` call against the operand types
@@ -1261,23 +1308,20 @@ impl InferenceProduct {
         }
     }
 
-    /// Acceptance boundary for bind-on-first-use shape lambdas. A remaining
-    /// obligation means no application supplied enough type information; the
-    /// source must state the intended parameter/result shape explicitly.
+    /// Acceptance boundary for bind-on-first-use shape lambdas, and for every
+    /// other obligation still open when the declaration closes. Every ledger
+    /// entry left after the ready replay is decided or reported here; none is
+    /// dropped (chelis#2518, chelis#2523).
     pub(super) fn finish_deferred_shape_checks(
         &mut self,
-        declaration: Option<&str>,
+        env: &Env,
         vg: &mut VarGen,
         subst: &mut Subst,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
-        self.finish_admission_contracts(declaration, subst, errors);
-        // chelis#2216: an operand that an authored binder denotes never binds,
-        // so a call suspended on it is decided here, at the binder's
-        // instantiations, rather than dropped with the unresolved ones below.
-        //
+        self.finish_admission_contracts(subst, errors);
         // Every entry of a shape rule of its own (`sum`, `matmul`, ...) still
         // unresolved here is rejected below, and the dtype replay of the same
         // call waits on the same operand. Deciding that replay too would report
@@ -1285,7 +1329,12 @@ impl InferenceProduct {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         let shape_rule_operands: Vec<TypeVar> = checks
             .iter()
-            .filter(|check| !matches!(check.rule, DeferredShapeRule::PostApp { .. }))
+            .filter(|check| {
+                !matches!(
+                    check.rule,
+                    DeferredShapeRule::PostApp { .. } | DeferredShapeRule::Derivation(_)
+                )
+            })
             .flat_map(|check| &check.arg_tys)
             .filter_map(|ty| match type_for_readonly_check(ty, subst) {
                 Type::Var(var) => Some(var),
@@ -1293,82 +1342,97 @@ impl InferenceProduct {
             })
             .collect();
         for check in checks {
-            if let DeferredShapeRule::PostApp {
-                replay,
-                site,
-                node,
-                kids,
-                func_name,
-                env,
-            } = &check.rule
-            {
-                let call = PostAppCall {
-                    replay: *replay,
-                    site: *site,
-                    node,
-                    kids,
-                    func_name,
-                    env,
-                };
-                if decide_at_rigid_binder_instantiations(
-                    call,
-                    &check.arg_tys,
-                    &check.result_ty,
-                    &shape_rule_operands,
-                    declaration,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                ) {
+            let operation = match check.rule {
+                DeferredShapeRule::Matmul => "matmul".to_string(),
+                DeferredShapeRule::Reduction { name } => name,
+                DeferredShapeRule::Expand { builtin, .. } => builtin.to_string(),
+                DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
+                DeferredShapeRule::Conv => "conv".to_string(),
+                DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
+                DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
+                // chelis#2216, chelis#2518, chelis#2523: a suspended call or a
+                // deferred access is decided at the instantiations of the
+                // operand types that never bound: an authored binder's
+                // ([04-INF-6]), or a flexible variable's that the declaration
+                // never determined ([04-INF-1], [04-INF-9]).
+                DeferredShapeRule::PostApp {
+                    replay,
+                    site,
+                    ref node,
+                    ref kids,
+                    ref func_name,
+                    env: ref call_env,
+                } => {
+                    let call = PostAppCall {
+                        replay,
+                        site,
+                        node,
+                        kids,
+                        func_name,
+                        env: call_env,
+                    };
+                    decide_at_boundary(
+                        BoundaryObligation::Call(call),
+                        &check.arg_tys,
+                        &check.result_ty,
+                        &shape_rule_operands,
+                        check.owner.as_deref(),
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                    );
                     continue;
                 }
-            }
-            let (operation, names_declaration) = match check.rule {
-                DeferredShapeRule::Matmul => ("matmul".to_string(), false),
-                DeferredShapeRule::Reduction { name } => (name, false),
-                DeferredShapeRule::Expand { builtin, .. } => ((*builtin).to_string(), false),
-                DeferredShapeRule::LayerNorm => ("layer_norm".to_string(), false),
-                DeferredShapeRule::Conv => ("conv".to_string(), false),
-                DeferredShapeRule::ScatterElements { .. } => {
-                    ("scatter_elements".to_string(), false)
+                DeferredShapeRule::Derivation(ref derivation) => {
+                    // chelis#2626: a `grad` waits only on types its recursive
+                    // group determines, and the group is complete here, so
+                    // nothing waits: it is decided on the types the group
+                    // left, as the call decides them. Replaying it at every
+                    // instantiation of a variable left would admit `grad` of a
+                    // generic function, which the compiled lanes do not
+                    // implement. Only an operand that is still a variable goes
+                    // to the boundary's instantiations, where it is rejected.
+                    if matches!(derivation, TypeDerivation::Grad { .. })
+                        && matches!(
+                            resolve_type_derivation(
+                                derivation,
+                                &check.arg_tys[0],
+                                &check.result_ty,
+                                &|_, _| false,
+                                vg,
+                                subst,
+                                adt_reg,
+                                errors,
+                            ),
+                            DerivationStep::Decided
+                        )
+                    {
+                        continue;
+                    }
+                    decide_at_boundary(
+                        BoundaryObligation::Derivation(derivation),
+                        &check.arg_tys,
+                        &check.result_ty,
+                        &shape_rule_operands,
+                        check.owner.as_deref(),
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                    );
+                    continue;
                 }
-                DeferredShapeRule::ShapeRoute { route, .. } => (route.builtin(), false),
-                // A deferred PostApp route that binds at a local monomorphic
-                // application is replayed and validated before this boundary,
-                // and one whose operand is an authored binder was decided
-                // above. Still-unresolved non-contract PostApp routes retain
-                // their existing non-tensor disposition below.
-                //
-                // [04-INF-9] is narrower: an authored generic wrapper may not
-                // publish a body-inferred collection operation contract. A
-                // still-unresolved `len`, `index`, `append`, or `concat`
-                // obligation therefore falls through to the declaration-
-                // boundary rejection rather than being discharged silently.
-                DeferredShapeRule::PostApp { func_name, .. }
-                    if matches!(func_name.as_str(), "len" | "index" | "append" | "concat") =>
-                {
-                    (func_name, true)
-                }
-                DeferredShapeRule::PostApp { .. } => continue,
             };
-            let message = if names_declaration {
-                format!(
-                    "unresolved `{operation}` shape obligation in `{}` at declaration boundary: \
-                     add an outer-constructor parameter annotation or apply the lambda before \
-                     the declaration boundary",
-                    declaration.unwrap_or("<anonymous>")
-                )
-            } else {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
                 format!(
                     "unresolved `{operation}` shape obligation at declaration boundary: \
                      add an outer-constructor parameter annotation or apply the lambda before \
                      the declaration boundary"
-                )
-            };
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                message,
+                ),
                 vec![
                     "A result annotation does not determine an unresolved parameter constructor; top-level declarations do not borrow binding sites from later declarations"
                         .to_string(),

@@ -487,18 +487,32 @@ pub(super) fn reject_non_int32_axis(
     op: &str,
     axis_ty: &Type,
     node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
-    match axis_ty {
-        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => Ok(()),
-        other => Err(report(
+    let rejection = |other: &Type, errors: &mut DiagnosticSink<'_>| {
+        report(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 with_node_provenance(node, format!("{op} expects i32 axis, got {other}")),
                 vec![],
             ),
-        )),
+        )
+    };
+    match subst.apply(axis_ty) {
+        Type::Prim(Prim::Int32) | Type::Error(_) => Ok(()),
+        // chelis#2523, [05-DIM-3]: an axis-domain argument IS `i32`, so an
+        // axis whose type is still a variable is constrained to `i32` rather
+        // than admitted. Admitting it skipped the gate for good: an authored
+        // binder never binds, and a lambda parameter bound to `i64` later was
+        // never revisited. The constraint pins an authored binder, which its
+        // declaration's rigidity check reports ([04-INF-6]).
+        Type::Var(var) => match unify(&Type::Var(var), &Type::Prim(Prim::Int32), subst) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(rejection(&Type::Var(var), errors)),
+        },
+        other => Err(rejection(&other, errors)),
     }
 }
 
@@ -510,6 +524,7 @@ pub(super) fn enforce_registered_axis_dtypes(
     op: &str,
     arg_tys: &[Type],
     node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
     let Some(layout) = builtins::axis_argument_layout(op) else {
@@ -520,13 +535,13 @@ pub(super) fn enforce_registered_axis_dtypes(
         builtins::AxisArgumentLayout::Fixed(slots) => {
             for &slot in slots {
                 if let Some(axis_ty) = arg_tys.get(slot) {
-                    reject_non_int32_axis(op, axis_ty, node, errors)?;
+                    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
                 }
             }
         }
         builtins::AxisArgumentLayout::VariadicFrom(first) => {
             for axis_ty in arg_tys.iter().skip(first) {
-                reject_non_int32_axis(op, axis_ty, node, errors)?;
+                reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
             }
         }
     }
@@ -547,6 +562,7 @@ pub(super) fn enforce_registered_axis_dtypes(
 /// extracts to `None` and silently becomes `default`, so
 /// `diagonal(m, 9.0, 0)` reported "axes 0 and 0" for an axis the
 /// caller never wrote, and a string axis checked clean.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_axis_pair_member(
     op: &str,
     axis_expr: Option<&deep::Expr>,
@@ -554,9 +570,10 @@ pub(super) fn resolve_axis_pair_member(
     tensor_ty: &Type,
     default: usize,
     node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
-    reject_non_int32_axis(op, axis_ty, node, errors)?;
+    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
     // Issue #216: use the cast-aware extractor so `cast(N, i32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
@@ -614,9 +631,10 @@ pub(super) fn resolve_builtin_axis(
     axis_ty: &Type,
     tensor_ty: &Type,
     node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
-    reject_non_int32_axis(op, axis_ty, node, errors)?;
+    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {

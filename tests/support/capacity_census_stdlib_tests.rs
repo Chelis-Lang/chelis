@@ -211,7 +211,7 @@ fn unresolved_nominals_and_wrong_nominal_arguments_fail_closed() {
 fn nested_alias_fields_and_precision_variables_are_capacity() {
     let rows = sources(&[(
         "nested",
-        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Result[List[i64], bool]])\ndef read(x: Hidden) -> Hidden = x\nsig generic[n, p]: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary[p]: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
+        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Option[(List[i64], bool)]])\ndef read(x: Hidden) -> Hidden = x\nsig generic[n, p]: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary[p]: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
     )]);
     for name in ["read", "generic", "bounded"] {
         assert!(
@@ -397,8 +397,6 @@ fn every_structural_payload_edge_has_numeric_and_boolean_parity() {
         "Option[DTYPE]",
         "Dict[DTYPE, bool]",
         "Dict[bool, DTYPE]",
-        "Result[DTYPE, bool]",
-        "Result[bool, DTYPE]",
     ] {
         for (dtype, expected) in [("i32", true), ("bool", false)] {
             let ty = shape.replace("DTYPE", dtype);

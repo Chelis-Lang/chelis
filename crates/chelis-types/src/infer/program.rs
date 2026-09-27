@@ -132,6 +132,7 @@ impl ComponentLevelScope {
     /// bindings: completed generalized member schemes replace them below.
     fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
         self.remove_temporary_bindings(env);
+        env.end_holed_group();
         let _finished_component = env
             .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
         subst.leave_level(self.level, var_gen);
@@ -142,6 +143,7 @@ impl ComponentLevelScope {
         let prior_members = self.members.clone();
         super::recursion::abort_group();
         self.remove_temporary_bindings(env);
+        env.end_holed_group();
         for (name, prior) in self.members {
             if let Some(scheme) = prior {
                 env.bind(name, scheme);
@@ -294,12 +296,15 @@ fn sweep_recursive_collection_contracts(
             ) {
                 deferred_bindings.push(binding);
             }
-            scratch.finish_deferred_shape_checks(Some(name), var_gen, subst, adt_reg, errors);
-            scratch.finish_deferred_literal_patterns(Some(name), env, subst, adt_reg, errors);
-            scratch.finish_root(subst, errors);
-            validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
-            validate_deferred_tensor_operands(subst, env.active_declared_type_names(), errors);
-            validate_deferred_opaque_uses(subst, adt_reg, errors);
+            close_declaration(
+                &mut scratch,
+                CloseScope::Declaration,
+                env,
+                var_gen,
+                subst,
+                adt_reg,
+                errors,
+            );
             if errors.iter_since(sweep_checkpoint).next().is_some() {
                 diagnosed = true;
                 break;
@@ -545,10 +550,19 @@ pub(super) fn infer_program_with_product_in_session(
                 &metadata_prebound_names,
                 &mut env,
                 &mut vg,
+                &subst,
             )
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
@@ -621,25 +635,18 @@ pub(super) fn infer_program_with_product_in_session(
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
-            product.finish_deferred_literal_patterns(decl_name, &env, &subst, &adt_reg, errors);
-            product.finish_root(&subst, errors);
-            // Issue #256 round 2: re-check each deferred borrow against the
-            // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(
-                &subst,
+            // chelis#1489: one close per declaration. An earlier revision had
+            // a second, whole-program phase that three library lanes never
+            // reached.
+            close_declaration(
+                &mut product,
+                close_scope(cyclic),
+                &env,
+                &mut vg,
+                &mut subst,
                 &adt_reg,
-                env.active_declared_type_names(),
                 errors,
             );
-            // chelis#1489: decide this def's deferred operands against the
-            // final substitution (see `validate_deferred_tensor_operands`).
-            // One pass, per def — an earlier revision had a second,
-            // whole-program phase that three library lanes never reached.
-            validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
             #[cfg(test)]
             if cyclic {
                 primary_recursive_member_finished_for_test();
@@ -652,6 +659,14 @@ pub(super) fn infer_program_with_product_in_session(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -1604,10 +1619,19 @@ pub(super) fn infer_ir_program_with_state(
                 &metadata_prebound_names,
                 &mut state.env,
                 &mut state.var_gen,
+                &state.subst,
             )
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
@@ -1687,45 +1711,20 @@ pub(super) fn infer_ir_program_with_state(
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(
-                top_level_decl_name(expr),
+            close_declaration(
+                &mut product,
+                close_scope(cyclic),
+                &state.env,
                 &mut state.var_gen,
                 &mut state.subst,
                 &state.adt_reg,
                 errors,
             );
-            product.finish_deferred_literal_patterns(
-                top_level_decl_name(expr),
-                &state.env,
-                &state.subst,
-                &state.adt_reg,
-                errors,
-            );
-            product.finish_root(&state.subst, errors);
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();
                 let name = top_level_decl_name(expr).unwrap_or("<anon>");
                 eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
             }
-            // Issue #256 round 2: drain the deferred-borrow ledger for this
-            // def and re-check each recorded variable against the now-complete
-            // substitution. Draining per-def keeps error attribution local and
-            // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(
-                &state.subst,
-                &state.adt_reg,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // chelis#1489: see `validate_deferred_tensor_operands`.
-            validate_deferred_tensor_operands(
-                &mut state.subst,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {
@@ -1734,6 +1733,14 @@ pub(super) fn infer_ir_program_with_state(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -2221,10 +2228,26 @@ pub(super) fn primary_inference_groups_for_schedule(
     groups
 }
 
+/// A cyclic component's members decide their obligations together, when the
+/// component completes (chelis#2584); every other declaration at its own close.
+fn close_scope(cyclic: bool) -> CloseScope {
+    if cyclic {
+        CloseScope::ComponentMember
+    } else {
+        CloseScope::Declaration
+    }
+}
+
 /// Install monomorphic types for the un-signed members of one cyclic
 /// full-reference component. Functions receive arity-shaped function types;
 /// eager values receive one fresh type variable. The component is removed and
 /// generalized as a unit after every body has unified with its provisional.
+///
+/// A member's body and its own references are typed at its provisional type.
+/// A sibling's reference is typed at a fresh copy of it, which the component's
+/// completion unifies with it (`group_link::sibling_instance`): no reference
+/// observes a member's type before the group has determined it ([04-INF-5]),
+/// so nothing a body infers depends on which sibling was inferred first.
 pub(super) fn prebind_cyclic_component_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
@@ -2232,8 +2255,10 @@ pub(super) fn prebind_cyclic_component_schemes(
     metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
+    subst: &Subst,
 ) -> UnordMap<usize, Type> {
     let mut provisional = UnordMap::new();
+    env.begin_group_level(subst.current_level());
     for index in indices {
         let expr = items[*index].1;
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -2242,7 +2267,14 @@ pub(super) fn prebind_cyclic_component_schemes(
         let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
-        if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
+        if metadata_prebound_names.contains(name) {
+            continue;
+        }
+        // A declared header is the member's scheme already, unless it omits a
+        // type: then the group types the member at its provisional type
+        // ([04-INF-5], [04-INF-2], chelis#2590).
+        if declared_signatures.contains_key(name) {
+            env.bind_holed_group_member(name, vg, subst);
             continue;
         }
         let ty = match tagged_children(body, DeepTag::Fn) {
@@ -2517,6 +2549,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         for (_, ty) in provisional.to_sorted() {
             for var in crate::env::free_tvars(ty) {
@@ -2587,6 +2620,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         super::super::recursion::begin_group(
             ["left", "right"].into_iter().map(|name| (name, false)),

@@ -196,6 +196,12 @@ struct MemberSnapshot {
     /// inference-introduced variables additionally admit fully concrete
     /// arguments, which cannot grow the instantiation set (spec/04 §3.1.1).
     authored_generic: bool,
+    /// The member's header omits a type, so its in-group references share its
+    /// authored binders and instantiate only its holes, and the component's
+    /// completion decides each reference against the body
+    /// (`super::group_link`, chelis#2590). Its references are pinned here but
+    /// not validated by [`finish_group`].
+    holed: bool,
 }
 
 struct Caller {
@@ -252,6 +258,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
                 constraints: scheme.constraints.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
+                holed: env.is_holed_group_member(name),
             },
         );
     }
@@ -372,10 +379,13 @@ pub(super) fn record_occurrence(
                 c.pinned.insert(*v);
             }
         }
-        let callee_authored_generic = c
-            .members
-            .get(callee)
-            .is_some_and(|member| member.authored_generic);
+        let Some(member) = c.members.get(callee) else {
+            return;
+        };
+        if member.holed {
+            return;
+        }
+        let callee_authored_generic = member.authored_generic;
         c.occurrences.push(Occurrence {
             caller: caller.name.clone(),
             caller_binder_names: caller.binder_names.clone(),
@@ -386,6 +396,17 @@ pub(super) fn record_occurrence(
             span_id,
             span_offset,
         });
+    });
+}
+
+/// Pin `vars`, a sibling reference's copies of a member's variables
+/// (`group_link::sibling_instance`), against generalization for the rest of
+/// the group, as an in-group instantiation's variables are.
+pub(super) fn pin(vars: impl IntoIterator<Item = TypeVar>) {
+    GROUP_CTX.with(|ctx| {
+        if let Some(c) = ctx.borrow_mut().as_mut() {
+            c.pinned.extend(vars);
+        }
     });
 }
 
@@ -466,10 +487,11 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
                     caller = occ.caller,
                     callee = occ.callee,
                 ),
+                // A helper that made the call would itself call into the
+                // group and be called from it, so it would join the group:
+                // no helper escapes the rule.
                 vec![format!(
-                    "hoist the call to `{callee}` into a separate non-recursive helper `def`, \
-                     or give `{caller}` matching type parameters",
-                    callee = occ.callee,
+                    "give `{caller}` matching type parameters",
                     caller = occ.caller,
                 )],
             )
@@ -483,12 +505,7 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
                     caller = occ.caller,
                     callee = occ.callee,
                 ),
-                vec![
-                    "make the recursive call reuse the caller's own type parameters".to_string(),
-                    "hoist the changed-instantiation call into a separate non-recursive helper \
-                     `def`"
-                        .to_string(),
-                ],
+                vec!["make the recursive call reuse the caller's own type parameters".to_string()],
             )
         };
         let mut err = CheckError::new(CheckErrorKind::TypeMismatch, message, suggestions);

@@ -72,6 +72,7 @@ DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/",)
 EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
     {
         "docs/investigations/remediation_status_2026_08_04.md",
+        "docs/manual_gates.md",
         "spec/02-surf-syntax.md",
         "spec/03-deep-syntax.md",
         "spec/04-type-system.md",

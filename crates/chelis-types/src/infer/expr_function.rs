@@ -614,9 +614,10 @@ pub(super) fn infer_let(
                 let scheme = if product.has_pending_shape_check_since(shape_checkpoint)
                     || product.has_pending_literal_pattern_since(literal_pattern_checkpoint, subst)
                     || product.has_pending_admission_contract_since(contract_checkpoint, subst)
+                    || subst.has_generalizable_pending_gate(&final_ty)
                 {
-                    // [04-INF-1]: semantic shape or literal-pattern
-                    // obligations retain the exact inference variables
+                    // [04-INF-1]: semantic shape, literal-pattern and operand
+                    // gate obligations retain the exact inference variables
                     // captured by this lambda until its first application.
                     subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))

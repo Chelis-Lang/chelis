@@ -991,6 +991,58 @@ pub(super) fn infer_cast(
                 )
             };
             return match resolved {
+                // A source that is still a variable. A `cast_trunc` source must
+                // be a float one. An authored binder is held to a family here:
+                // every bound is numeric, and an unbounded binder also denotes
+                // types no cast admits, so it is held to `Numeric`.
+                Type::Var(source) => {
+                    if trunc_pair_rejected(true) {
+                        return report(errors, trunc_pair_rejection());
+                    }
+                    let required = if mode == CastMode::Trunc {
+                        Some(TypeVarRestriction::ActiveFloat)
+                    } else {
+                        env.authored_type_binder(source, subst)
+                            .map(|_| TypeVarRestriction::ActiveNumeric)
+                    };
+                    match required {
+                        Some(required) => {
+                            if let Some(error) =
+                                constrain_cast_source(source, required, mode, env, subst)
+                            {
+                                return report(errors, error);
+                            }
+                            Type::Var(target)
+                        }
+                        // chelis#2534: an inference variable is decided when it
+                        // binds, by the rule a settled source gets below.
+                        // Requiring `Numeric` of it refused a lambda parameter
+                        // bound to `bool` (chelis#2158 round 1), and admitting
+                        // it let a `string` or an unbounded binder through. The
+                        // result is a fresh variable that discharge unifies
+                        // with the settled answer, which is a tensor for a
+                        // tensor source.
+                        None => {
+                            let result = vg.fresh_type();
+                            subst.record_deferred_tensor_operand(
+                                source,
+                                DeferredOperandGate::CastToBinder {
+                                    target,
+                                    result: Box::new(result.clone()),
+                                },
+                            );
+                            result
+                        }
+                    }
+                }
+                // A checked `cast` on a settled source: the one decision the
+                // deferred gate also calls.
+                settled if mode == CastMode::Checked => {
+                    match binder_cast_result_from_settled_source(settled, target, subst) {
+                        Ok(result) => result,
+                        Err(error) => report(errors, *error),
+                    }
+                }
                 Type::Tensor(dims, source) if subst.tvar_restriction(target).is_some() => {
                     // [05-OP-63]: a dtype change preserves every dimension.
                     // The declaration's [04-DTYPE-2] bound is retained on the
@@ -1002,8 +1054,7 @@ pub(super) fn infer_cast(
                     if trunc_pair_rejected(source_is_float) {
                         return report(errors, trunc_pair_rejection());
                     }
-                    if mode == CastMode::Trunc
-                        && let TensorPrec::Var(p) = source
+                    if let TensorPrec::Var(p) = source
                         && let Some(error) = constrain_cast_source(
                             p,
                             TypeVarRestriction::ActiveFloat,
@@ -1016,37 +1067,10 @@ pub(super) fn infer_cast(
                     }
                     Type::Tensor(dims, TensorPrec::Var(target))
                 }
-                // [04-NUM-14] and [05-OP-63] admit a numeric or `bool` scalar
-                // source; [05-OP-6] leaves `cast_trunc` only the float ones.
-                Type::Prim(source) if source.is_numeric() || source == Prim::Bool => {
+                // [05-OP-6] leaves `cast_trunc` only the float scalar sources.
+                Type::Prim(source) if source.is_data_element_dtype() => {
                     if trunc_pair_rejected(source.is_float()) {
                         return report(errors, trunc_pair_rejection());
-                    }
-                    Type::Var(target)
-                }
-                // The arm publishes a scalar at the target. A `cast_trunc`
-                // source must be a float one. A `cast` source may be any
-                // numeric or `bool` scalar, and no dtype family is that set,
-                // so only an authored binder is held to one here: every bound
-                // is numeric, and an unbounded binder also denotes types no
-                // cast admits, so it is held to `Numeric`. An inference
-                // variable is left to what binds it (round 1: requiring
-                // `Numeric` of it refused a lambda parameter bound to `bool`).
-                Type::Var(source) => {
-                    if trunc_pair_rejected(true) {
-                        return report(errors, trunc_pair_rejection());
-                    }
-                    let required = if mode == CastMode::Trunc {
-                        Some(TypeVarRestriction::ActiveFloat)
-                    } else {
-                        env.authored_type_binder(source, subst)
-                            .map(|_| TypeVarRestriction::ActiveNumeric)
-                    };
-                    if let Some(required) = required
-                        && let Some(error) =
-                            constrain_cast_source(source, required, mode, env, subst)
-                    {
-                        return report(errors, error);
                     }
                     Type::Var(target)
                 }
@@ -1199,6 +1223,20 @@ pub(crate) fn cast_result_from_settled_source(
                     new_prec, /* tensor = */ false,
                 )));
             }
+            // chelis#2524, [05-OP-63]: the source domain is [04-NUM-14]'s
+            // active dtypes, the numeric ones and `bool`. A `string` source is
+            // no cast, whether it is written directly or bound later through a
+            // lambda parameter, since both reach this one decision.
+            if !src_prec.is_data_element_dtype() {
+                return Err(Box::new(CheckError::new(
+                    CheckErrorKind::CastNonTensor,
+                    format!(
+                        "cast requires a numeric or bool source, got {} ([05-OP-63])",
+                        src_prec.name()
+                    ),
+                    vec![],
+                )));
+            }
             if mode == CastMode::Trunc
                 && let Some(error) = trunc_pair_error(Some(src_prec), new_prec)
             {
@@ -1210,6 +1248,40 @@ pub(crate) fn cast_result_from_settled_source(
         other => Err(Box::new(CheckError::new(
             CheckErrorKind::CastNonTensor,
             format!("cast requires tensor or prim type, got {other}"),
+            vec![],
+        ))),
+    }
+}
+
+/// chelis#2534: the [05-OP-63] decision for a checked `cast` whose target is
+/// the declaration's dtype binder `target`, on a source whose type is settled.
+///
+/// The eager arm of `infer_cast` calls it for a settled source, and discharge
+/// of a [`DeferredOperandGate::CastToBinder`] calls it once a source that was a
+/// variable at the cast binds, so the two cannot disagree. A tensor source
+/// keeps its dimensions and takes the binder as its precision when the binder
+/// carries a dtype-family bound; a scalar source must be a numeric or `bool`
+/// primitive, and the result is the binder.
+pub(crate) fn binder_cast_result_from_settled_source(
+    resolved: Type,
+    target: TypeVar,
+    subst: &Subst,
+) -> Result<Type, Box<CheckError>> {
+    match resolved {
+        // [05-OP-63]: a dtype change preserves every dimension. The
+        // declaration's [04-DTYPE-2] bound is retained on the precision
+        // variable and checked at each instantiation.
+        Type::Tensor(dims, _) if subst.tvar_restriction(target).is_some() => {
+            Ok(Type::Tensor(dims, TensorPrec::Var(target)))
+        }
+        // [04-NUM-14] and [05-OP-63] admit a numeric or `bool` scalar source.
+        Type::Prim(source) if source.is_data_element_dtype() => Ok(Type::Var(target)),
+        Type::Error(_) => Ok(Type::Var(target)),
+        other => Err(Box::new(CheckError::new(
+            CheckErrorKind::CastNonTensor,
+            format!(
+                "cast to a quantified scalar dtype requires a numeric or bool scalar, got {other}"
+            ),
             vec![],
         ))),
     }

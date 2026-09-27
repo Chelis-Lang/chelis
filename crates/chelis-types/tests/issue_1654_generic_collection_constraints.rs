@@ -169,7 +169,7 @@ fn authored_generic_wrappers_must_declare_collection_constructors() {
         assert!(
             errors
                 .iter()
-                .any(|error| error.message.contains("in `size` at declaration boundary")),
+                .any(|error| error.message.contains("never determined within `size`")),
             "direct declaration diagnostic [{entry}] did not identify `size`:\n{}",
             rendered(&errors).join("\n")
         );

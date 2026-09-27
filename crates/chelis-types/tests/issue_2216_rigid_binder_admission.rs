@@ -25,9 +25,9 @@
 //! dtype-family policy; a `cast` source may also be `bool` ([05-OP-63]), so
 //! only an authored binder is held to a family there.
 //!
-//! What is claimed is the forms below. A flexible inference variable that no
-//! binder denotes keeps its existing suspension (chelis#1489); the last test
-//! records that disposition without changing it.
+//! What is claimed is the forms below. A flexible inference variable that
+//! nothing binds is decided the same way, at an arbitrary type, since
+//! chelis#2518; `issue_731_declaration_close_obligations.rs` owns those forms.
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
@@ -189,11 +189,6 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     // A position that admits one dtype, or one family, rejects a bound that
     // admits more.
-    (
-        "def bad[p: Int](x: tensor[3, f32], ax: p) -> i64 = shape(x, ax)",
-        "shape expects i32 axis, got i8",
-        "`p := i8`",
-    ),
     (
         "def bad[p: Float](xs: List[i32], n: p) -> List[i32] = take(xs, n)",
         "take expects integer count, got f32",
@@ -526,12 +521,4 @@ fn a_scalar_variable_target_cast_applies_the_trunc_pair_rule() {
     ] {
         rejection_containing(program, fragment);
     }
-}
-
-/// DISPOSITION LOCK, not repaired here: an operand that no authored binder
-/// denotes and nothing binds keeps the silent declaration-boundary
-/// disposition this change leaves to chelis#1489's owners.
-#[test]
-fn a_never_bound_inference_variable_keeps_its_existing_disposition() {
-    accepts("def size(k) -> i64 = numel(k)");
 }
