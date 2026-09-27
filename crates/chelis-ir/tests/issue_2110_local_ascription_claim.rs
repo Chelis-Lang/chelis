@@ -684,8 +684,13 @@ fn an_arms_local_claim_is_checked_under_its_carriers_owner_activation() {
     for (row, source) in [("direct", direct), ("grad", spliced)] {
         let (dag, carrier, site) = claim_carrier_and_site(source);
         let carrier = dag.get(carrier).unwrap();
-        assert!(site.activation.is_some(), "{row}: {dag:#?}");
-        assert_eq!(site.activation, carrier.owner.activation, "{row}: {dag:#?}");
+        assert!(site.activation.node().is_some(), "{row}: {dag:#?}");
+        assert_eq!(
+            site.activation.node(),
+            carrier.owner.activation,
+            "{row}: {dag:#?}"
+        );
+        assert_eq!(site.activation.claimed(), carrier.id, "{row}: {dag:#?}");
         assert!(
             carrier.shape_deps.iter().all(|dependency| {
                 let dependency = dag.get(*dependency).unwrap();
