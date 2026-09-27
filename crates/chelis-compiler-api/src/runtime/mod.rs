@@ -23,7 +23,9 @@ mod invariant;
 mod named_axis;
 mod numeric_text;
 mod program_scope;
+mod shared_values;
 use program_scope::ProgramScope;
+pub use shared_values::{Entries, Values};
 #[cfg(test)]
 mod tests;
 mod transforms;
@@ -146,9 +148,7 @@ impl ScalarPayload {
     }
 }
 
-/// `Clone` is written by hand below: it copies nested containers from a
-/// worklist (chelis#2567).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RuntimeValue {
     Tensor(RuntimeTensorValue),
     /// First-class numeric scalar tagged with its source-level dtype.
@@ -165,14 +165,16 @@ pub enum RuntimeValue {
     Key(chelis_types::RandomKey),
     Bool(bool),
     String(String),
-    List(Vec<RuntimeValue>),
-    Dict(Vec<(RuntimeValue, RuntimeValue)>),
-    Tuple(Vec<RuntimeValue>),
+    /// Container elements are shared, so a clone is one count increment and
+    /// a release drains nested values iteratively (chelis#2567).
+    List(Values),
+    Dict(Entries),
+    Tuple(Values),
     Adt {
         ctor: String,
         /// Field values in DECLARED order (the deftype's field order),
         /// not source or alphabetical order.
-        fields: Vec<RuntimeValue>,
+        fields: Values,
         /// When present, aligned index-for-index with `fields`, so it
         /// also follows declared order. `eval_record` enforces this
         /// (chelis#520 fixed a misalignment where kv source order was
@@ -234,185 +236,6 @@ pub enum RuntimeValue {
         invocation_contracts: Box<Vec<Expr>>,
     },
     Unit,
-}
-
-/// One pending step of [`RuntimeValue`]'s iterative clone.
-enum CloneStep<'a> {
-    /// Copy this value: a leaf directly, a container after its children.
-    Visit(&'a RuntimeValue),
-    /// Every child of this container has been copied onto the output stack.
-    Assemble(&'a RuntimeValue),
-}
-
-impl Clone for RuntimeValue {
-    /// A deep copy made from a worklist rather than by recursion, so copying
-    /// a value nested far deeper than the native stack (a data-type chain a
-    /// `fold` builds) uses bounded native depth (chelis#2567). Each copy is
-    /// still proportional to the value; making it a shared, copy-on-write
-    /// payload is chelis#2592.
-    fn clone(&self) -> Self {
-        if let Some(copy) = self.shallow_copy() {
-            return copy;
-        }
-        let mut steps = vec![CloneStep::Visit(self)];
-        let mut copied: Vec<RuntimeValue> = Vec::new();
-        while let Some(step) = steps.pop() {
-            match step {
-                CloneStep::Visit(value) => match value {
-                    value if let Some(copy) = value.shallow_copy() => copied.push(copy),
-                    RuntimeValue::List(items)
-                    | RuntimeValue::Tuple(items)
-                    | RuntimeValue::Adt { fields: items, .. } => {
-                        steps.push(CloneStep::Assemble(value));
-                        steps.extend(items.iter().rev().map(CloneStep::Visit));
-                    }
-                    RuntimeValue::Dict(entries) => {
-                        steps.push(CloneStep::Assemble(value));
-                        for (key, entry) in entries.iter().rev() {
-                            steps.push(CloneStep::Visit(entry));
-                            steps.push(CloneStep::Visit(key));
-                        }
-                    }
-                    leaf => copied.push(leaf.clone_leaf()),
-                },
-                CloneStep::Assemble(value) => {
-                    let assembled = match value {
-                        RuntimeValue::List(items) => {
-                            RuntimeValue::List(copied.split_off(copied.len() - items.len()))
-                        }
-                        RuntimeValue::Tuple(items) => {
-                            RuntimeValue::Tuple(copied.split_off(copied.len() - items.len()))
-                        }
-                        RuntimeValue::Adt {
-                            ctor,
-                            fields,
-                            field_names,
-                        } => RuntimeValue::Adt {
-                            ctor: ctor.clone(),
-                            fields: copied.split_off(copied.len() - fields.len()),
-                            field_names: field_names.clone(),
-                        },
-                        RuntimeValue::Dict(entries) => {
-                            let mut flat = copied
-                                .split_off(copied.len() - 2 * entries.len())
-                                .into_iter();
-                            let mut pairs = Vec::with_capacity(entries.len());
-                            while let (Some(key), Some(entry)) = (flat.next(), flat.next()) {
-                                pairs.push((key, entry));
-                            }
-                            RuntimeValue::Dict(pairs)
-                        }
-                        _ => unreachable!("only containers are assembled"),
-                    };
-                    copied.push(assembled);
-                }
-            }
-        }
-        copied.pop().expect("the clone worklist copies its root")
-    }
-}
-
-impl RuntimeValue {
-    /// Whether this value holds no nested runtime value.
-    fn is_leaf(&self) -> bool {
-        !matches!(
-            self,
-            RuntimeValue::List(_)
-                | RuntimeValue::Tuple(_)
-                | RuntimeValue::Adt { .. }
-                | RuntimeValue::Dict(_)
-        )
-    }
-
-    /// The copy of a leaf, or of a container whose children are all leaves,
-    /// made directly: the common shallow value never touches the worklist.
-    fn shallow_copy(&self) -> Option<Self> {
-        let copy_leaves = |items: &[RuntimeValue]| -> Option<Vec<RuntimeValue>> {
-            let mut copied = Vec::with_capacity(items.len());
-            for item in items {
-                if !item.is_leaf() {
-                    return None;
-                }
-                copied.push(item.clone_leaf());
-            }
-            Some(copied)
-        };
-        match self {
-            RuntimeValue::List(items) => copy_leaves(items).map(RuntimeValue::List),
-            RuntimeValue::Tuple(items) => copy_leaves(items).map(RuntimeValue::Tuple),
-            RuntimeValue::Adt {
-                ctor,
-                fields,
-                field_names,
-            } => copy_leaves(fields).map(|fields| RuntimeValue::Adt {
-                ctor: ctor.clone(),
-                fields,
-                field_names: field_names.clone(),
-            }),
-            RuntimeValue::Dict(entries) => {
-                let mut copied = Vec::with_capacity(entries.len());
-                for (key, value) in entries {
-                    if !key.is_leaf() || !value.is_leaf() {
-                        return None;
-                    }
-                    copied.push((key.clone_leaf(), value.clone_leaf()));
-                }
-                Some(RuntimeValue::Dict(copied))
-            }
-            leaf => Some(leaf.clone_leaf()),
-        }
-    }
-
-    /// The copy of a value that holds no nested runtime value.
-    fn clone_leaf(&self) -> Self {
-        match self {
-            RuntimeValue::Tensor(tensor) => RuntimeValue::Tensor(tensor.clone()),
-            RuntimeValue::Scalar(payload) => RuntimeValue::Scalar(*payload),
-            RuntimeValue::Key(key) => RuntimeValue::Key(*key),
-            RuntimeValue::Bool(value) => RuntimeValue::Bool(*value),
-            RuntimeValue::String(value) => RuntimeValue::String(value.clone()),
-            RuntimeValue::MappedFile(bytes) => RuntimeValue::MappedFile(bytes.clone()),
-            RuntimeValue::Closure {
-                checked_function,
-                params,
-                param_types,
-                return_type,
-                checked_signature,
-                invocation_contracts,
-                body,
-                env,
-                precision_env,
-                def_name,
-            } => RuntimeValue::Closure {
-                checked_function: checked_function.clone(),
-                params: params.clone(),
-                param_types: param_types.clone(),
-                return_type: return_type.clone(),
-                checked_signature: checked_signature.clone(),
-                invocation_contracts: invocation_contracts.clone(),
-                body: body.clone(),
-                env: env.clone(),
-                precision_env: precision_env.clone(),
-                def_name: def_name.clone(),
-            },
-            RuntimeValue::Transform {
-                kind,
-                transform_expr,
-                captured_env,
-                invocation_contracts,
-            } => RuntimeValue::Transform {
-                kind: kind.clone(),
-                transform_expr: transform_expr.clone(),
-                captured_env: captured_env.clone(),
-                invocation_contracts: invocation_contracts.clone(),
-            },
-            RuntimeValue::Unit => RuntimeValue::Unit,
-            RuntimeValue::List(_)
-            | RuntimeValue::Tuple(_)
-            | RuntimeValue::Adt { .. }
-            | RuntimeValue::Dict(_) => unreachable!("containers are copied by the worklist"),
-        }
-    }
 }
 
 impl RuntimeValue {

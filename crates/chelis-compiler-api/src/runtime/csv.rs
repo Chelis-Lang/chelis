@@ -55,7 +55,7 @@ pub(super) fn parse_csv_text(text: &str) -> Result<RuntimeValue, String> {
                 .collect(),
         ));
     }
-    Ok(RuntimeValue::List(rows))
+    Ok(RuntimeValue::List(rows.into()))
 }
 
 fn parse_records(text: &str) -> Result<Vec<CsvRecord>, String> {

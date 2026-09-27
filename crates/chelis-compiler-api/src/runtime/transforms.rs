@@ -729,7 +729,7 @@ impl<'a> EvalContext<'a> {
         // a scalar from a genuine rank-zero tensor (spec/06 §2.1).
         if matches!(kind, TransformKind::Grad) && !arg_repacks.is_empty() {
             let flat: Vec<RuntimeValue> = match packed {
-                RuntimeValue::Tuple(items) => items,
+                RuntimeValue::Tuple(items) => items.into_vec(),
                 single => vec![single],
             };
             let mut flat_producers = root_producers.into_iter();
@@ -786,7 +786,7 @@ impl<'a> EvalContext<'a> {
                 // other non-selected args present) returns the bare
                 // gradient value, not a one-element tuple.
                 1 => slots.into_iter().next().expect("non-empty"),
-                _ => RuntimeValue::Tuple(slots),
+                _ => RuntimeValue::Tuple(slots.into()),
             };
             self.result_producer = if slot_producers.len() == 1 {
                 slot_producers.pop().flatten()

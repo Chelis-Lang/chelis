@@ -3,15 +3,13 @@
 //!
 //! A `fold` builds each chain, so no Chelis-level recursion is involved. The
 //! interpreter overflowed its stack between 2,000 and 5,000 links: reading the
-//! accumulator deep-copied it through the derived `Clone`, passing it into the
+//! accumulator deep-copied it, passing it into the
 //! callback walked it to stamp its interface provenance, and printing or
 //! returning it rendered and converted it, each one native frame group per
 //! level. Those walks now run from worklists.
 //!
-//! `DEPTH` is past the old overflow and small enough to run in a debug test:
-//! every read of the accumulator still copies the whole chain, so a fold of n
-//! links costs O(n^2). Copy-on-write container payloads, which remove that
-//! cost, are chelis#2592.
+//! `DEPTH` is past the old overflow. Shared container payloads make each
+//! accumulator copy constant-time (chelis#2592).
 
 use assert_cmd::Command;
 use tempfile::tempdir;
@@ -138,7 +136,7 @@ fn shallow_values_render_exactly() {
     );
 }
 
-/// chelis#2592: doubling a fold-built Chain must no longer copy every
+/// chelis#2592: a fold-built Chain must no longer copy every
 /// preceding link at each step. Four times the input should take under six
 /// times as long, with room for process startup and a busy CI host. The
 /// old owned-Vec payload took 0.39 s at 1,000 links and 4.22 s at 4,000
