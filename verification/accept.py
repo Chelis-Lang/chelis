@@ -24,7 +24,11 @@ Stages, in order:
 6. whole-core plan   fresh call graphs and chunk plans (default and lowering-trace).
 7. whole-core        separately compiled extraction of both chains and compilation
                      of the unmodified generated Lean.
-8. coverage          independent re-validation of each chain's coverage report.
+8. coverage          independent re-validation of each chain's coverage report:
+                     every owned and adopted plan item has exactly one accepted
+                     status, each emitted one names an entry of its own chunk's
+                     manifest (outside the External_Template axioms), and the
+                     per-crate counts are recomputed from the items.
 9. correspondence    the Lean bridge (ChelisBridge + Audit) built against each
                      chain's whole-core model; Audit fails on disallowed axioms.
                      Model-generated bridge modules (Runtime/CloneId.lean) must be
@@ -42,6 +46,7 @@ Stages, in order:
 """
 
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -69,7 +74,12 @@ JUSTIFIED_UNEMITTED = frozenset({
     "generic_template",  # generic items whose instances are emitted instead
     "model_provided",    # items bound to a checked library model
     "native_shell",      # FCIS imperative shell listed in verification/native_shell.json
+    "model_default",     # provided-method copies replaced by their trait model's default
+    "vtable",            # vtable instances (Aeneas translates no vtables)
+    "type_alias",        # type aliases, expanded at every use
+    "trait_method_decl",  # required trait methods: fields of their trait declaration
 })
+COVERAGE_VERSION = 3
 # Kinds of verification/native_shell.json entries. Primitives and shell types are the
 # boundary the extracted core calls, so each must resolve to a Lean model; the other
 # kinds must be unreachable from every extracted (non-shell) item.
@@ -341,11 +351,17 @@ def read_obligations(chain: str, path: Path) -> list[dict]:
     return report["obligations"]
 
 
-def validate_coverage(chain: str, coverage: dict) -> dict:
+def validate_coverage(chain: str, coverage: dict, plan: dict, run: Path) -> dict:
+    if coverage.get("format") != "chelis-wholecore-coverage" or coverage.get("version") != COVERAGE_VERSION:
+        raise AcceptanceFailure(f"{chain}: coverage report is not chelis-wholecore-coverage v{COVERAGE_VERSION}")
     if coverage.get("unknown_externals") != 0:
         raise AcceptanceFailure(f"{chain}: unknown externals: {coverage.get('unknown_externals')}")
     if coverage.get("opaque_local_items") != 0:
         raise AcceptanceFailure(f"{chain}: opaque local items: {coverage.get('opaque_local_items')}")
+    if coverage.get("misplaced_items"):
+        raise AcceptanceFailure(f"{chain}: chunks emit items other chunks own: {coverage['misplaced_items'][:5]}")
+    statuses = validate_items(chain, coverage, plan, run)
+    reject_sorry(chain, plan, run)
     crates = coverage.get("crates", {})
     expected = set(CRATES) if chain == "default" else {"chelis_ir", "chelis_pipeline_core"}
     if not expected <= set(crates):
@@ -357,19 +373,105 @@ def validate_coverage(chain: str, coverage: dict) -> dict:
         unknown = set(unemitted) - JUSTIFIED_UNEMITTED
         if unknown:
             raise AcceptanceFailure(f"{chain}/{crate}: unjustified unemitted categories {sorted(unknown)}")
-        if entry.get("missing", 0) or entry.get("duplicates", 0):
-            raise AcceptanceFailure(
-                f"{chain}/{crate}: {entry.get('missing', 0)} missing and "
-                f"{entry.get('duplicates', 0)} duplicated declarations"
-            )
+        defects = {name: entry.get(name, 0) for name in ("missing", "axioms", "sorry", "duplicates")}
+        if any(defects.values()):
+            raise AcceptanceFailure(f"{chain}/{crate}: defective declarations {defects}")
         accounted = entry.get("emitted", 0) + sum(unemitted.values())
         if entry.get("local_items", -1) != accounted or accounted == 0:
             raise AcceptanceFailure(
                 f"{chain}/{crate}: {entry.get('local_items')} local items but {accounted} accounted for"
             )
+        recomputed = statuses.get(crate, collections.Counter())
+        derived = {"emitted": entry.get("emitted", 0), **unemitted}
+        derived["folded"] = derived.get("folded", 0) - sum(
+            chunk.get("folded", 0) for chunk in plan["chunks"] if chunk["crate"] == crate)
+        derived["native_shell"] = derived.get("native_shell", 0) - sum(
+            len(item["members"]) for item in plan["native_shell"].values() if item["crate"] == crate)
+        if {name: count for name, count in derived.items() if count} != dict(recomputed):
+            raise AcceptanceFailure(
+                f"{chain}/{crate}: reported counts {derived} differ from its items' statuses {dict(recomputed)}"
+            )
         totals[crate] = {"local_items": entry["local_items"], "emitted": entry["emitted"], **unemitted}
     validate_shell(chain, coverage.get("native_shell", {}))
     return totals
+
+
+def validate_items(chain: str, coverage: dict, plan: dict, run: Path) -> dict[str, collections.Counter]:
+    """Fail closed on any owned or adopted plan item without an accepted status. The
+    report must list exactly the plan's items; an emitted item must name an entry of its
+    own chunk's manifest (read here) that no other item claims, outside the
+    External_Template axioms; a justified item must carry the plan evidence its category
+    needs. Returns the status counts per crate."""
+    expected = [(chunk["name"], crate, item["kind"], item["name"])
+                for chunk in plan["chunks"]
+                for crate, item in ([(chunk["crate"], item) for item in chunk["owned"]]
+                                    + [(item["crate"], item) for item in chunk.get("adopted", [])])]
+    rows = coverage.get("items")
+    if not isinstance(rows, list) or [tuple(row[1:5]) for row in rows] != expected:
+        raise AcceptanceFailure(f"{chain}: coverage items differ from the plan's owned and adopted items")
+    plan_items = {(chunk["name"], item["kind"], item["name"]): item
+                  for chunk in plan["chunks"] for item in chunk["owned"] + chunk.get("adopted", [])}
+    manifests: dict[str, dict[str, dict]] = {}
+    for index, chunk in enumerate(plan["chunks"]):
+        path = run / "chunks" / f"{index:02d}-{chunk['name']}" / "manifest.json"
+        manifests[chunk["name"]] = ({entry["key"]: entry for entry in json.loads(path.read_text())["entries"]}
+                                    if path.is_file() else {})
+    trait_fields = {key.partition(" ")[2]: set(entry.get("methods") or ())
+                    for entries in manifests.values() for key, entry in entries.items()
+                    if key.startswith("trait_decl ")}
+    status_of = {(row[3], row[4]): row[0] for row in rows}
+    unaccounted, claimed = [], {}
+    counts: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for status, chunk, crate, kind, name, key in rows:
+        counts[crate][status] += 1
+        item = plan_items[(chunk, kind, name)]
+        source = str(item.get("source", ""))
+        entry = manifests[chunk].get(key) if key else None
+        if status == "emitted":
+            if entry is None or entry["module"].endswith("External_Template") or key.partition(" ")[0] != kind:
+                problem = f"its key {key!r} is no {kind} declaration of {chunk}'s manifest"
+            elif key in claimed:
+                problem = f"its key {key!r} is also claimed by {claimed[key]}"
+            else:
+                claimed[key] = name
+                continue
+        elif status not in JUSTIFIED_UNEMITTED - {"folded", "native_shell"}:
+            problem = f"status {status}"
+        elif status == "removed_by_passes" and not item.get("removed_by_passes"):
+            problem = "not removed by Charon's passes"
+        elif status == "synthetic" and source != "synthetic":
+            problem = "not synthetic"
+        elif status == "vtable" and not (kind == "global" and source.startswith("VTableInstance")):
+            problem = "not a vtable instance"
+        elif status == "model_default" and not (
+                source.startswith("defaulted_method(")
+                and status_of.get(("trait_impl", name.rpartition("::")[0])) == "emitted"):
+            problem = "not a provided-method copy of an emitted implementation"
+        elif status == "trait_method_decl" and name.rpartition("::")[2] not in trait_fields.get(
+                name.rpartition("::")[0], ()):
+            problem = "not a field of an emitted trait declaration"
+        else:
+            continue
+        unaccounted.append(f"{chunk}: {kind} {name}: {problem}")
+    if unaccounted:
+        raise AcceptanceFailure(f"{chain}: {len(unaccounted)} owned items unaccounted for, e.g. {unaccounted[:5]}")
+    return counts
+
+
+def reject_sorry(chain: str, plan: dict, run: Path) -> None:
+    """An emitted declaration is only translated if no generated module uses `sorry`
+    (outside comments): Aeneas writes `sorry` for a body or part it could not translate."""
+    import re
+    found = []
+    for chunk in plan["chunks"]:
+        for path in sorted((run / "lean" / chunk["module"]).glob("*.lean")):
+            text = re.sub(r"/-.*?-/", lambda match: "\n" * match.group(0).count("\n"),
+                          path.read_text(errors="replace"), flags=re.S)
+            for number, line in enumerate(text.splitlines(), 1):
+                if re.search(r"\bsorry\b", line.split("--", 1)[0]):
+                    found.append(f"{path.relative_to(run)}:{number}")
+    if found:
+        raise AcceptanceFailure(f"{chain}: generated Lean uses sorry ({len(found)} lines, e.g. {found[:5]})")
 
 
 def validate_shell(chain: str, shell: dict) -> None:
@@ -394,7 +496,9 @@ def validate_shell(chain: str, shell: dict) -> None:
 
 def stage_coverage(context: Run):
     return {
-        chain: validate_coverage(chain, json.loads((context.whole_core[chain] / "coverage.json").read_text()))
+        chain: validate_coverage(
+            chain, json.loads((context.whole_core[chain] / "coverage.json").read_text()),
+            json.loads(context.whole_core[f"plan:{chain}"].read_text()), context.whole_core[chain])
         for chain in CHAINS
     }
 

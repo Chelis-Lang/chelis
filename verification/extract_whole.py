@@ -37,9 +37,10 @@ Outputs under --out:
                   binary given}, "tools": {"charon"|"aeneas": {"path", "sha256",
                   "files": {path: sha256}, "version"}}, "chunks": [{"name",
                   "module", "crate", "charon": STEP, "aeneas": STEP,
-                  "llbc": {"bytes", "sha256"}, "manifest": {"entries", "sha256",
-                  "complete"} | null}], "declarations", "modules": [Lean module
-                  names], "aeneas_diagnostic_options": [options],
+                  "llbc": {"bytes", "sha256"}, "llbc_facts": {"type_aliases",
+                  "required_trait_methods": [Charon item names]}, "manifest":
+                  {"entries", "sha256", "complete"} | null}], "declarations",
+                  "modules": [Lean module names], "aeneas_diagnostic_options": [options],
                   "lake": {"status", "built", "failed", "blocked", "wall_seconds",
                   "peak_footprint_bytes", "modules": {module: STEP | {"status":
                   "blocked", "missing_imports", "failed_imports"}}} | null}
@@ -48,18 +49,27 @@ Outputs under --out:
                   wait4), "peak_tree_footprint_bytes" (sampled sum over the process
                   group of the physical footprint: resident plus compressed and
                   swapped pages), "memory_cap_killed", "log"}
-  coverage.json  schema "chelis-wholecore-coverage" version 2 (re-validated by
+  coverage.json  schema "chelis-wholecore-coverage" version 3 (re-validated by
                  verification/accept.py; keep stable):
                  {"crates": {crate: {"local_items", "emitted", "unemitted":
-                  {category: count}, "missing": count, "duplicates": count,
-                  "chunks": [names]}}         local_items = emitted + unemitted
-                                              when missing = 0,
+                  {category: count}, "axioms": count, "sorry": count,
+                  "missing": count, "duplicates": count, "chunks": [names]}}
+                            local_items = emitted + unemitted + axioms + sorry + missing,
                   "owners": {chunk: owned local item count},
                   "categories": {category: {"justification", "count",
                   "examples": [names]}}, categories: removed_by_passes,
                   synthetic, generic_template, model_provided, folded,
-                  native_shell,
+                  native_shell, model_default, vtable, type_alias,
+                  trait_method_decl,
+                  "item_defects": {"axiom"|"sorry"|"missing": meaning},
+                  "items": [[status, chunk, crate, kind, name, manifest key |
+                  null]]: every owned and adopted plan item in plan order,
+                  status "emitted", a category or an item defect,
                   "missing_items": [{"crate", "name", "kind", "owner"}],
+                  "axiom_items", "sorry_items": [{"crate", "name", "kind",
+                  "owner", "key"}],
+                  "misplaced_items": [{"chunk", "key", "module", "owner"}]
+                  (a chunk emitting an item another chunk owns),
                   "duplicate_items": [{"key", "modules"}],
                   "unknown_externals": count, "unknown_external_items":
                   [{"chunk", "name"}], "opaque_local_items": count,
@@ -76,8 +86,12 @@ Outputs under --out:
                   "emitted_declarations", "ok": bool}
                  A local item is an item of the 8 workspace crates in the
                  planner's callgraph dumps (plus the items folded into them).
-                 It is emitted when an Aeneas manifest entry has its key (kind
-                 + canonical name).
+                 It is emitted when its own chunk's manifest has an entry for
+                 it outside the *External_Template modules: the same key (kind
+                 + canonical name, `normalize_name`) or, where Aeneas' printer
+                 spells the name differently (closure impls, lifted associated
+                 types, default type arguments), the only entry with its
+                 structural name (`pair_structurally`).
   obligations.json {"version": 1, "obligations": [{"kind": "iterator_size_hint_total",
                  "impl", "proposition" (Lean name `<Impl>.size_hint_total` in the
                  owner chunk), "chunk"}]}: always written (possibly with an empty
@@ -800,6 +814,14 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
                 tag = "UNKNOWN_EXTERNAL definition without model or manifest"
             record["errors"].append({"stage": "aeneas", "level": "error", "message": f"{tag}: {name}",
                                      "source": None, "compiler": "External_Template"})
+        # Coverage justifies unemitted type aliases and required trait methods from the LLBC.
+        try:
+            record["llbc_facts"] = llbc_item_facts(llbc, work / "callgraph.json")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            if not args.diagnostic:
+                raise ExtractionFailure(f"chunk {chunk['name']}: unreadable LLBC: {error}") from None
+            record["errors"].append({"stage": "charon", "level": "error", "message": f"unreadable LLBC: {error}",
+                                     "source": None, "compiler": "extract_whole"})
         compress(llbc)
         if step["status"] != "ok" and not args.diagnostic:
             raise ExtractionFailure(f"Aeneas failed on chunk {chunk['name']}; log: {step['log']}")
@@ -968,7 +990,8 @@ def lean_build(lean: Path, runner: Runner, diagnostic: bool, modules: list[str],
 
 def normalize_name(name: str) -> str:
     """Charon's pretty name and Aeneas' key print the same path with different
-    region and tuple spellings; compare them modulo those."""
+    impl-block, region and tuple spellings; compare them modulo those."""
+    name = name.replace("{impl ", "{")
     name = re.sub(r"'\w+\b|'_\d*", "", name)
     name = re.sub(r"&\s*(mut\s*)?", lambda m: "&mut " if m.group(1) else "&", name)
     name = re.sub(r"<\s*>", "", name)
@@ -987,6 +1010,156 @@ def normalize_pattern(pattern: str) -> str:
         previous = pattern
         pattern = re.sub(r"<[^<>]*>", "", pattern)
     return re.sub(r"\s+", "", pattern)
+
+
+# Structural identity. Aeneas prints manifest keys with charon-ml's printer, the plan
+# spells names with Charon's: besides `normalize_name`'s differences, Aeneas adds the
+# lifted associated types to trait arguments (`Visitor<'de, __Field>`), drops default
+# type arguments (`Arc<T>` for `Arc<T, Global>`), numbers regions and type variables,
+# and prints a mut-monomorphized closure impl as a trait instance whose self type is
+# the argument tuple (`{FnOnce::<f::closure<0, 1>, T0, T1><0, 1, ()> for (&(A), B)}`
+# for `{impl FnOnce<(&A, B)> for f::closure<'_0, '_1>}`).
+OPENERS, CLOSERS = "<{([", ">})]"
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:#\d+)?")
+CLOSURE_SEGMENT = re.compile(r"(?<![A-Za-z0-9_])closure(?:#\d+)?(?![A-Za-z0-9_#])")
+
+
+def split_top(text: str, separator: str = "::") -> list[str]:
+    """`text` split at the occurrences of `separator` outside brackets."""
+    parts, depth, start, index = [], 0, 0, 0
+    while index < len(text):
+        char = text[index]
+        if char in OPENERS:
+            depth += 1
+        elif char in CLOSERS:
+            depth -= 1
+        elif depth == 0 and text.startswith(separator, index):
+            parts.append(text[start:index])
+            index += len(separator)
+            start = index
+            continue
+        index += 1
+    parts.append(text[start:])
+    return parts
+
+
+def group_end(text: str, start: int) -> int:
+    """The index after the bracket group opened at `text[start]`."""
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] in OPENERS:
+            depth += 1
+        elif text[index] in CLOSERS:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(text)
+
+
+def type_head(text: str) -> tuple[str, str]:
+    """The structural path of a type's head constructor and the text of its first
+    generic argument list."""
+    text = text.strip()
+    while True:
+        # References, regions (Charon `'a`, Aeneas `&0`), mut, dyn, pointers, tuples.
+        stripped = re.sub(r"^(?:&\s*(?:\d+\s+)?|'\w+\s*|mut\s+|dyn\s+|\*const\s+|\*mut\s+|\(\s*)", "", text)
+        if stripped == text:
+            break
+        text = stripped
+    index, segments, arguments = 0, [], ""
+    while index < len(text):
+        if text[index] == "{":
+            end = group_end(text, index)
+            segments.append(text[index:end])
+            index = end
+        else:
+            match = IDENT.match(text, index)
+            if not match:
+                break
+            segments.append(match.group(0))
+            index = match.end()
+        opener = index + 2 if text.startswith("::<", index) else index
+        if opener < len(text) and text[opener] == "<":
+            end = group_end(text, opener)
+            arguments = arguments or text[opener + 1:end - 1]
+            index = end
+        if text.startswith("::", index) and not text.startswith("::<", index):
+            index += 2
+            continue
+        break
+    return structural_name("::".join(segments))[0], arguments
+
+
+def argument_heads(arguments: str) -> frozenset:
+    """Head constructors of the type arguments (regions and type variables dropped)."""
+    heads = set()
+    for argument in split_top(arguments, ","):
+        argument = argument.strip()
+        if not argument or argument.startswith("'") or re.fullmatch(r"\d+|_", argument):
+            continue
+        head = type_head(argument)[0]
+        # Type variables (`T`, `Q`, Aeneas' `T0`) are bare capitalized identifiers.
+        if head and not re.fullmatch(r"[A-Z][A-Za-z0-9_]*", head):
+            heads.add(head)
+    return frozenset(heads)
+
+
+def impl_identity(body: str) -> tuple[str, frozenset]:
+    """An impl block path element: `{trait for self head}` (closure impls: `{trait
+    closure <closure segments>}`) and the head constructors of the trait arguments."""
+    body = body[5:] if body.startswith("impl ") else body
+    sides = split_top(body, " for ")
+    if len(sides) == 1:
+        return "{" + type_head(sides[0])[0] + "}", frozenset()
+    trait, self_type = sides[0], " for ".join(sides[1:])
+    trait_path, arguments = type_head(trait)
+    closures = sorted({match.group(0) for match in CLOSURE_SEGMENT.finditer(f"{self_type} {arguments}")})
+    if trait_path.startswith("core::ops::function::Fn") and closures:
+        return "{" + trait_path + " closure " + ",".join(closures) + "}", frozenset()
+    return "{" + trait_path + " for " + type_head(self_type)[0] + "}", argument_heads(arguments)
+
+
+def structural_name(name: str) -> tuple[str, tuple]:
+    """The identity of an item name common to both printers (generic arguments
+    dropped, instantiated path elements kept as `<inst>`), and the trait argument
+    heads of each impl element (the key's are a superset of the plan's)."""
+    path, arguments = [], []
+    for part in split_top(name):
+        if part.startswith("{"):
+            identity, heads = impl_identity(part[1:-1] if part.endswith("}") else part[1:])
+            path.append(identity)
+            arguments.append(heads)
+        elif part.startswith("<"):
+            path.append("<inst>")
+        else:
+            path.append(re.sub(r"[<\[].*", "", part))
+    return "::".join(path), tuple(arguments)
+
+
+def pair_structurally(items: list[str], keys: list[str]) -> dict[int, str]:
+    """Pair plan items ("kind name") with manifest keys ("kind name") of the same kind
+    and structural name whose trait arguments cover the item's, when the pairing is
+    unambiguous in both directions. Anything else stays unpaired (fails closed)."""
+    def group(texts):
+        groups = collections.defaultdict(list)
+        for position, text in enumerate(texts):
+            kind, _, name = text.partition(" ")
+            identity, arguments = structural_name(name)
+            groups[(kind, identity)].append((position, arguments))
+        return groups
+
+    def covers(item: tuple, key: tuple) -> bool:
+        return len(item) == len(key) and all(mine <= theirs for mine, theirs in zip(item, key))
+
+    key_groups = group(keys)
+    pairs = {}
+    for identity, members in group(items).items():
+        candidates = key_groups.get(identity, [])
+        for position, arguments in members:
+            fits = [(key, key_arguments) for key, key_arguments in candidates if covers(arguments, key_arguments)]
+            if len(fits) == 1 and sum(1 for _, mine in members if covers(mine, fits[0][1])) == 1:
+                pairs[position] = keys[fits[0][0]]
+    return pairs
 
 
 MODEL_ATTRIBUTE = re.compile(r'@\[rust_(?:fun|type|global|trait|trait_impl)\s+"([^"]+)"[^\]]*\]')
@@ -1022,6 +1195,58 @@ def lean_models(aeneas_lean: Path) -> dict[str, str]:
     return models
 
 
+def lean_trait_defaults(aeneas_lean: Path) -> dict[str, frozenset]:
+    """Normalized trait pattern -> the `defaultMethods` of its `rust_trait` model in the
+    Aeneas Lean library (the methods whose Lean structure field has a default)."""
+    defaults: dict[str, frozenset] = {}
+    for path in sorted((aeneas_lean / "Aeneas").rglob("*.lean")):
+        text = path.read_text(errors="replace")
+        for match in re.finditer(r'@\[(?:[\w,\s]*,\s*)?rust_trait\s+"([^"]+)"', text):
+            end = group_end(text, match.start() + 1)
+            listed = re.search(r"defaultMethods\s*:=\s*\[([^\]]*)\]", text[match.start():end])
+            methods = frozenset(re.findall(r'"([^"]+)"', listed.group(1))) if listed else frozenset()
+            defaults[normalize_pattern(match.group(1))] = defaults.get(normalize_pattern(match.group(1)),
+                                                                       frozenset()) | methods
+    return defaults
+
+
+def read_json(path: Path):
+    """A JSON artifact, or its gzipped copy (`compress`) once the plain file is gone."""
+    if not path.is_file() and Path(f"{path}.gz").is_file():
+        path = Path(f"{path}.gz")
+    with (gzip.open(path, "rt") if path.suffix == ".gz" else open(path)) as handle:
+        return json.load(handle)
+
+
+def llbc_item_facts(llbc: Path, callgraph: Path) -> dict:
+    """The chunk's LLBC facts coverage needs, by Charon item name (the callgraph's,
+    which is the plan's spelling): type aliases and required trait methods (methods
+    without a default body, which are only fields of their trait declaration)."""
+    names = {item["id"]: item["name"] for item in read_json(callgraph)["items"]}
+    translated = read_json(llbc)["translated"]
+    aliases = sorted(names[f"@Adt{decl['def_id']}"] for decl in translated["type_decls"]
+                     if decl and isinstance(decl.get("kind"), dict) and "Alias" in decl["kind"]
+                     and f"@Adt{decl['def_id']}" in names)
+    required = sorted(names[f"@Fun{decl['def_id']}"] for decl in translated["fun_decls"]
+                      if decl and decl.get("body") == "TraitMethodWithoutDefault"
+                      and f"@Fun{decl['def_id']}" in names)
+    return {"type_aliases": aliases, "required_trait_methods": required}
+
+
+def chunk_item_facts(record: dict) -> dict | None:
+    """`llbc_item_facts` of a chunk record: recorded by `extract`, else (records of runs
+    made before it was recorded, reused chunks) read from the chunk's LLBC."""
+    if record.get("llbc_facts") is not None:
+        return record["llbc_facts"]
+    if not record.get("llbc"):
+        return None
+    llbc = Path(record["llbc"]["path"])
+    try:
+        return llbc_item_facts(llbc, llbc.parent / "callgraph.json")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 UNEMITTED_CATEGORIES = {
     "removed_by_passes": "impl of a hidden marker trait (e.g. Destruct); Charon's passes remove it",
     "synthetic": "synthetic item without a Rust definition (e.g. UNIT_METADATA)",
@@ -1030,10 +1255,161 @@ UNEMITTED_CATEGORIES = {
     "folded": "constructor, global initializer or promoted constant folded into its owner item",
     "native_shell": "FCIS imperative shell (verification/native_shell.json): opaque in every "
                     "chunk, never extracted",
+    "model_default": "provided-method copy (Charon defaulted_method) of a trait whose Lean model "
+                     "declares the method with a default (defaultMethods): Aeneas "
+                     "(PrePasses.resolve_modeled_defaults) drops the copy, and the emitted "
+                     "implementation's dictionary uses the model default",
+    "vtable": "vtable instance of a dyn-compatible trait implementation (Charon VTableInstance): "
+              "Aeneas (PrePasses.remove_vtables) translates no vtables",
+    "type_alias": "type alias (LLBC kind Alias): Aeneas (PrePasses.filter_type_aliases) expands it "
+                  "at every use",
+    "trait_method_decl": "required method of a local trait (LLBC TraitMethodWithoutDefault): only a "
+                         "field of the trait declaration, whose manifest entry lists it",
 }
+# Per-item statuses (coverage.json "items"): emitted, a category above, or a defect.
+ITEM_DEFECTS = {
+    "axiom": "only an *External_Template axiom (no translated body): an unknown external",
+    "sorry": "emitted, but its Lean declaration uses `sorry` (a body or part of one Aeneas could "
+             "not translate; only diagnostic runs emit these)",
+    "missing": "no manifest entry and no justification",
+}
+LEAN_DECLARATION_START = re.compile(
+    r"^(?:@\[[^\]]*\]\s*)?(?:(?:noncomputable|private|protected|partial|unsafe)\s+)*"
+    r"(?:def|abbrev|theorem|instance|opaque|axiom|structure|inductive)\b\s*([^\s:({\[]*)")
 
 
-def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
+def sorry_declarations(module_dir: Path) -> set[str]:
+    """Lean names of the declarations of a chunk's generated modules (templates aside)
+    whose text, doc comments aside, uses `sorry`."""
+    names: set[str] = set()
+    for path in sorted(module_dir.glob("*.lean")):
+        if path.stem.endswith("_Template"):
+            continue
+        current, pending, in_doc = None, False, False
+        for line in path.read_text(errors="replace").splitlines():
+            if in_doc or line.startswith("/-"):
+                in_doc = "-/" not in line
+                current = None if line.startswith("/-") else current
+                continue
+            start = LEAN_DECLARATION_START.match(line)
+            if start:
+                current, pending = start.group(1) or None, not start.group(1)
+            elif pending and line.strip():
+                current, pending = line.split()[0], False
+            elif line and not line[0].isspace():
+                current = None
+            if current and re.search(r"\bsorry\b", line):
+                names.add(current.removeprefix("_root_."))
+    return names
+
+
+def item_statuses(plan: dict, results: list[dict], models: dict[str, str],
+                  trait_defaults: dict[str, frozenset], lean_root: Path) -> tuple[list[list], list[dict]]:
+    """The status of every owned and adopted item of the plan, looked up in its own
+    chunk's manifest: [status, chunk, crate, kind, name, manifest key | None] in plan
+    order, and the manifest entries a chunk emitted for items another chunk owns."""
+    records = {record["name"]: record for record in results}
+    entries_of: dict[str, list[dict]] = {}
+    for record in results:
+        if record.get("manifest"):
+            entries_of[record["name"]] = json.loads(Path(record["manifest"]["path"]).read_text())["entries"]
+    all_keys = {f"{entry['key'].partition(' ')[0]} {normalize_name(entry['key'].partition(' ')[2])}": entry
+                for entries in entries_of.values() for entry in entries}
+    owner_of = {f"{item['kind']} {normalize_name(item['name'])}": chunk["name"]
+                for chunk in plan["chunks"] for item in chunk["owned"] + chunk.get("adopted", [])}
+    sorry_names = {chunk["module"]: sorry_declarations(lean_root / chunk["module"])
+                   for chunk in plan["chunks"] if chunk["name"] in entries_of}
+
+    rows: list[list] = []
+    deferred: list[tuple[list, dict]] = []
+    for chunk in plan["chunks"]:
+        entries = entries_of.get(chunk["name"], [])
+        by_key: dict[str, dict] = {}
+        for entry in entries:
+            kind, _, name = entry["key"].partition(" ")
+            by_key.setdefault(f"{kind} {normalize_name(name)}", entry)
+        # Adopted items belong to an earlier crate but only this chunk translates them.
+        items = ([(chunk["crate"], item) for item in chunk["owned"]]
+                 + [(item["crate"], item) for item in chunk.get("adopted", [])])
+        found = {position: by_key[f"{item['kind']} {normalize_name(item['name'])}"]
+                 for position, (_, item) in enumerate(items)
+                 if f"{item['kind']} {normalize_name(item['name'])}" in by_key}
+        claimed = {entry["key"] for entry in found.values()}
+        free = {entry["key"]: entry for entry in entries if entry["key"] not in claimed
+                and entry["key"].partition(" ")[2].startswith(WORKSPACE_CRATES)}
+        unpaired = [position for position in range(len(items)) if position not in found]
+        pairs = pair_structurally([f"{items[p][1]['kind']} {items[p][1]['name']}" for p in unpaired], list(free))
+        for index, key in pairs.items():
+            found[unpaired[index]] = free[key]
+        facts: list = []  # read from the LLBC at the first item that needs them
+
+        def llbc_fact(name: str) -> set:
+            if not facts:
+                found_facts = chunk_item_facts(records[chunk["name"]]) if chunk["name"] in entries_of else None
+                facts.append({kind: set(names) for kind, names in (found_facts or {}).items()})
+            return facts[0].get(name, set())
+
+        for position, (crate, item) in enumerate(items):
+            row = [None, chunk["name"], crate, item["kind"], item["name"], None]
+            rows.append(row)
+            entry = found.get(position)
+            if entry is not None:
+                if entry["module"].endswith("External_Template"):
+                    row[0] = "axiom"
+                elif sorry_names[chunk["module"]] & set(entry.get("names") or ()):
+                    row[0] = "sorry"
+                else:
+                    row[0] = "emitted"
+                row[5] = entry["key"]
+                continue
+            key = f"{item['kind']} {normalize_name(item['name'])}"
+            parent, _, last = item["name"].rpartition("::")
+            if item.get("removed_by_passes"):
+                row[0] = "removed_by_passes"
+            elif item.get("source") == "synthetic":
+                row[0] = "synthetic"
+            elif item.get("pattern") and normalize_pattern(item["pattern"]) in models:
+                row[0] = "model_provided"
+            elif item.get("generic") and chunk["name"] in entries_of and any(
+                    other.startswith(key + "::<") or other.startswith(key + "<") for other in all_keys):
+                row[0] = "generic_template"
+            elif (str(item.get("source", "")).startswith("VTableInstance") and item["kind"] == "global"
+                  and chunk["name"] in entries_of):
+                row[0] = "vtable"
+            elif item["kind"] == "type" and item["name"] in llbc_fact("type_aliases"):
+                row[0] = "type_alias"
+            elif (item["kind"] == "fun" and item["name"] in llbc_fact("required_trait_methods")
+                  and last in (all_keys.get(f"trait_decl {normalize_name(parent)}", {}).get("methods") or ())):
+                row[0] = "trait_method_decl"
+            elif str(item.get("source", "")).startswith("defaulted_method("):
+                deferred.append((row, item))
+            else:
+                row[0] = "missing"
+    # A provided-method copy is dropped for its model's default only in an emitted
+    # implementation (whose dictionary then takes the default).
+    impl_status = {(row[3], row[4]): row[0] for row in rows}
+    for row, item in deferred:
+        path = split_top(item["name"])
+        method = re.fullmatch(r"defaulted_method\((\w+)\)", item["source"])
+        trait = None
+        if len(path) > 1 and path[-2].startswith("{"):
+            body = path[-2][1:-1]
+            trait = type_head(split_top(body[5:] if body.startswith("impl ") else body, " for ")[0])[0]
+        modeled = bool(method and trait and method.group(1) in trait_defaults.get(normalize_pattern(trait), ()))
+        impl_emitted = impl_status.get(("trait_impl", "::".join(path[:-1]))) == "emitted"
+        row[0] = "model_default" if modeled and impl_emitted else "missing"
+    misplaced = []
+    for chunk, entries in entries_of.items():
+        for entry in entries:
+            kind, _, name = entry["key"].partition(" ")
+            owner = owner_of.get(f"{kind} {normalize_name(name)}")
+            if owner is not None and owner != chunk and not entry["module"].endswith("External_Template"):
+                misplaced.append({"chunk": chunk, "key": entry["key"], "module": entry["module"], "owner": owner})
+    return rows, misplaced
+
+
+def coverage(plan: dict, results: list[dict], models: dict[str, str],
+             trait_defaults: dict[str, frozenset], lean_root: Path) -> dict:
     emitted: dict[str, list[str]] = {}
     emitted_raw: dict[str, str] = {}
     for record in results:
@@ -1045,10 +1421,13 @@ def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
             emitted.setdefault(key, []).append(record["module"])
             emitted_raw[key] = entry["key"]
 
+    def new_crate() -> dict:
+        return {"local_items": 0, "emitted": 0, "unemitted": {}, "axioms": 0, "sorry": 0, "missing": 0,
+                "duplicates": 0, "chunks": []}
+
     crates: dict[str, dict] = {}
     for chunk in plan["chunks"]:
-        crates.setdefault(chunk["crate"], {"local_items": 0, "emitted": 0, "unemitted": {},
-                                           "missing": 0, "duplicates": 0, "chunks": []})
+        crates.setdefault(chunk["crate"], new_crate())
     categories = {name: {"justification": text, "count": 0, "examples": []}
                   for name, text in UNEMITTED_CATEGORIES.items()}
 
@@ -1059,42 +1438,31 @@ def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
         if len(categories[category]["examples"]) < 5:
             categories[category]["examples"].append(example)
 
-    missing = []
+    rows, misplaced = item_statuses(plan, results, models, trait_defaults, lean_root)
+    missing, axioms, sorry = [], [], []
+    for status, owner, crate, kind, name, key in rows:
+        stats = crates.setdefault(crate, new_crate())
+        stats["local_items"] += 1
+        if status == "emitted":
+            stats["emitted"] += 1
+        elif status in UNEMITTED_CATEGORIES:
+            account(crate, status, name)
+        elif status == "axiom":
+            stats["axioms"] += 1
+            axioms.append({"crate": crate, "name": name, "kind": kind, "owner": owner, "key": key})
+        elif status == "sorry":
+            stats["sorry"] += 1
+            sorry.append({"crate": crate, "name": name, "kind": kind, "owner": owner, "key": key})
+        else:
+            stats["missing"] += 1
+            missing.append({"crate": crate, "name": name, "kind": kind, "owner": owner})
     owners: dict[str, int] = {}
     for chunk in plan["chunks"]:
-        stats = crates[chunk["crate"]]
-        stats["chunks"].append(chunk["name"])
+        crates[chunk["crate"]]["chunks"].append(chunk["name"])
         owners[chunk["name"]] = len(chunk["owned"])
-        # Adopted items belong to an earlier crate but only this chunk translates them.
-        for crate, item in ([(chunk["crate"], item) for item in chunk["owned"]]
-                            + [(item["crate"], item) for item in chunk.get("adopted", [])]):
-            stats = crates.setdefault(crate, {"local_items": 0, "emitted": 0, "unemitted": {},
-                                              "missing": 0, "duplicates": 0, "chunks": []})
-            stats["local_items"] += 1
-            key = f"{item['kind']} {normalize_name(item['name'])}"
-            if key in emitted:
-                stats["emitted"] += 1
-                continue
-            category = None
-            if item.get("removed_by_passes"):
-                category = "removed_by_passes"
-            elif item.get("source") == "synthetic":
-                category = "synthetic"
-            elif item.get("pattern") and normalize_pattern(item["pattern"]) in models:
-                category = "model_provided"
-            elif item.get("generic") and any(
-                    other.startswith(key + "::<") or other.startswith(key + "<") for other in emitted):
-                category = "generic_template"
-            if category:
-                account(crate, category, item["name"])
-            else:
-                stats["missing"] += 1
-                missing.append({"crate": crate, "name": item["name"],
-                                "kind": item["kind"], "owner": chunk["name"]})
-        stats = crates[chunk["crate"]]
         if chunk.get("folded"):
             # Folded items are rustc definitions without a Charon item of their own.
-            stats["local_items"] += chunk["folded"]
+            crates[chunk["crate"]]["local_items"] += chunk["folded"]
             account(chunk["crate"], "folded", f"{chunk['folded']} folded into items of {chunk['name']}",
                     chunk["folded"])
 
@@ -1125,14 +1493,18 @@ def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
                for record in results for name in record.get("unknown_externals", [])]
     opaque_local = [{"chunk": record["name"], "name": name}
                     for record in results for name in record.get("opaque_local", [])]
+    ran = {record["name"] for record in results}
     without_manifest = [record["name"] for record in results if not record.get("manifest")]
-    without_manifest += [chunk["name"] for chunk in plan["chunks"][len(results):]]
+    without_manifest += [chunk["name"] for chunk in plan["chunks"] if chunk["name"] not in ran]
     partial = [record["name"] for record in results
                if record.get("manifest") and not record["manifest"].get("complete", True)]
     report = {
-        "format": COVERAGE_FORMAT, "version": 2, "chain": plan["chain"],
+        "format": COVERAGE_FORMAT, "version": 3, "chain": plan["chain"],
         "crates": crates, "owners": owners, "categories": categories,
-        "missing_items": missing, "duplicate_items": duplicates,
+        "item_defects": ITEM_DEFECTS,
+        "items": rows,
+        "missing_items": missing, "axiom_items": axioms, "sorry_items": sorry, "misplaced_items": misplaced,
+        "duplicate_items": duplicates,
         "unknown_externals": len(unknown), "unknown_external_items": unknown,
         "opaque_local_items": len(opaque_local), "opaque_local_item_list": opaque_local,
         "chunks_without_manifest": without_manifest, "chunks_with_partial_manifest": partial,
@@ -1141,20 +1513,27 @@ def coverage(plan: dict, results: list[dict], models: dict[str, str]) -> dict:
         "pipeline_reachable": plan.get("pipeline_reachable", {}),
         "emitted_declarations": len(emitted),
     }
-    report["ok"] = not (missing or duplicates or unknown or opaque_local or without_manifest or partial
-                        or shell_defects)
+    report["ok"] = not (missing or axioms or sorry or misplaced or duplicates or unknown or opaque_local
+                        or without_manifest or partial or shell_defects)
     return report
+
+
+def coverage_json(report: dict) -> str:
+    """coverage.json text: indented, one line per item row (the rows are most of it)."""
+    text = json.dumps(dict(report, items=[]), indent=1)
+    rows = ",\n".join("  " + json.dumps(row) for row in report["items"])
+    return text.replace('"items": []', '"items": [\n' + rows + "\n ]", 1)
 
 
 def write_coverage_summary(report: dict, path: Path) -> None:
     lines = [f"# Whole-core coverage ({report['chain']} chain)", "",
              f"coverage ok: {report['ok']}", "",
-             "| crate | local items | emitted | unemitted (justified) | missing | duplicates |",
-             "|---|---:|---:|---|---:|---:|"]
+             "| crate | local items | emitted | unemitted (justified) | axioms | sorry | missing | duplicates |",
+             "|---|---:|---:|---|---:|---:|---:|---:|"]
     for crate, stats in report["crates"].items():
         unemitted = ", ".join(f"{name} {count}" for name, count in sorted(stats["unemitted"].items()))
         lines.append(f"| {crate} | {stats['local_items']} | {stats['emitted']} | {unemitted or '-'} | "
-                     f"{stats['missing']} | {stats['duplicates']} |")
+                     f"{stats['axioms']} | {stats['sorry']} | {stats['missing']} | {stats['duplicates']} |")
     lines += ["", "## Unemitted categories", ""]
     for name, category in report["categories"].items():
         lines.append(f"- {name} ({category['count']}): {category['justification']}; e.g. "
@@ -1169,7 +1548,9 @@ def write_coverage_summary(report: dict, path: Path) -> None:
     lines += [f"- {chunk}: {count} local items" for chunk, count in report["owners"].items()]
     lines += ["", f"duplicates: {len(report['duplicate_items'])}, unknown externals: "
               f"{report['unknown_externals']}, opaque local items: {report['opaque_local_items']}, "
-              f"missing: {len(report['missing_items'])}, chunks without manifest: "
+              f"axioms: {len(report['axiom_items'])}, sorry: {len(report['sorry_items'])}, "
+              f"missing: {len(report['missing_items'])}, "
+              f"misplaced: {len(report['misplaced_items'])}, chunks without manifest: "
               f"{len(report['chunks_without_manifest'])}, partial manifests: "
               f"{len(report['chunks_with_partial_manifest'])}, shell defects: "
               f"{len(report['native_shell']['defects'])}", "",
@@ -1282,12 +1663,12 @@ def write_blockers(report: dict, results: list[dict], lake: dict | None, lean_er
             lines.append(f"- {chunk} [{example['class']} -> {example['owner']}] `{example['source']}` "
                          f"({example['item'] or '-'}; {example['compiler']}): {example['message'][:400]}")
     lines += ["", "## Coverage per crate", "",
-              "| crate | local items | emitted | unemitted (justified) | missing | duplicates |",
-              "|---|---:|---:|---|---:|---:|"]
+              "| crate | local items | emitted | unemitted (justified) | axioms | sorry | missing | duplicates |",
+              "|---|---:|---:|---|---:|---:|---:|---:|"]
     for crate, stats in coverage_report["crates"].items():
         unemitted = ", ".join(f"{name} {count}" for name, count in sorted(stats["unemitted"].items()))
         lines.append(f"| {crate} | {stats['local_items']} | {stats['emitted']} | {unemitted or '-'} | "
-                     f"{stats['missing']} | {stats['duplicates']} |")
+                     f"{stats['axioms']} | {stats['sorry']} | {stats['missing']} | {stats['duplicates']} |")
     lines += ["", "## Causes", ""]
     for group in report["groups"]:
         lines.append(f"### [{group['class']} -> {group['owner']}] {group['stage']}: {group['pattern']}")
@@ -1376,8 +1757,8 @@ def main() -> None:
     lean = out / "lean"
     modules = generated_modules(lean)
     summary["modules"] = modules
-    report = coverage(plan, results, lean_models(aeneas_lean))
-    (out / "coverage.json").write_text(json.dumps(report, indent=2))
+    report = coverage(plan, results, lean_models(aeneas_lean), lean_trait_defaults(aeneas_lean), lean)
+    (out / "coverage.json").write_text(coverage_json(report))
     write_coverage_summary(report, out / "coverage.md")
     summary["declarations"] = report["emitted_declarations"]
     # Propositions the admitted collections rely on; accept.py requires each to be
