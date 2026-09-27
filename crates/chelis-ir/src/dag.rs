@@ -2231,13 +2231,17 @@ impl DagNode {
     /// | | `Gather` `ScatterAdd` `Scatter` `ScatterElements` `OneHot` | an index out of range |
     /// | `Nothing` | every other operation, and float arithmetic and reductions | |
     ///
-    /// Two checks are not an operation kind's and are listed here for
-    /// completeness. Every same-shape producer's operand agreement (the
+    /// Three checks are not an operation kind's and are listed here for
+    /// completeness. A node restating an input axis under a claim its class
+    /// guards there ([`TrapSeeds::guards_a_restamp`]) is gated whatever its
+    /// class, and where its activation is false it produces zeros of its
+    /// declared type. Every same-shape producer's operand agreement (the
     /// evaluator's "tensor shapes must match" and the C lane's
     /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
-    /// the kernel, not a gated check: a false activation leaves it in place.
-    /// A result's element count and byte size are admitted at every
-    /// allocation ([05-OP-33]) whatever the activation.
+    /// the kernel, not a gated check: a false activation leaves it in place,
+    /// except at a restamping node, which then reads no operand. A result's
+    /// element count and byte size are admitted at every allocation
+    /// ([05-OP-33]) whatever the activation.
     pub fn runtime_check(&self) -> RuntimeCheck {
         let integer = self.output_type.precision.is_integer();
         let value_check = |checks: bool| {
@@ -2407,6 +2411,7 @@ pub struct TrapSeeds<'dag> {
     dag: &'dag Dag,
     literal_result_witness_requirements:
         std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
+    guarded_restamping_nodes: std::cell::OnceCell<std::collections::BTreeSet<NodeId>>,
 }
 
 impl TrapSeeds<'_> {
@@ -2506,9 +2511,10 @@ impl TrapSeeds<'_> {
     }
 
     /// Whether `node` checks nothing where its activation is false (spec/10
-    /// section 3.2): it has an activation, its check can fail
+    /// section 3.2): it has an activation, and either it guards a restamp
+    /// ([`Self::guards_a_restamp`]), or its check can fail
     /// ([`Self::check_may_fail`]; a node whose check no input fails needs
-    /// no gate and computes as usual), and its class is one the lanes gate,
+    /// no gate and computes as usual) and its class is one the lanes gate,
     /// by one of the mechanisms [`RuntimeCheck`] names: every class but
     /// [`RuntimeCheck::Nothing`], [`RuntimeCheck::Random`], whose draw and
     /// key-operation emitters read the owner's activation themselves, and
@@ -2520,16 +2526,36 @@ impl TrapSeeds<'_> {
     /// the gate.
     pub fn is_activation_gated(&self, node: &DagNode) -> bool {
         node.owner.activation.is_some()
-            && self.check_may_fail(node)
-            && match node.runtime_check() {
-                RuntimeCheck::OperandValues
-                | RuntimeCheck::MeanDivisor
-                | RuntimeCheck::EmptyAxis
-                | RuntimeCheck::MovementBounds
-                | RuntimeCheck::ExtentClaims
-                | RuntimeCheck::Abort => true,
-                RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
-            }
+            && ((self.check_may_fail(node)
+                && match node.runtime_check() {
+                    RuntimeCheck::OperandValues
+                    | RuntimeCheck::MeanDivisor
+                    | RuntimeCheck::EmptyAxis
+                    | RuntimeCheck::MovementBounds
+                    | RuntimeCheck::ExtentClaims
+                    | RuntimeCheck::Abort => true,
+                    RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
+                })
+                || self.guards_a_restamp(node))
+    }
+
+    /// Whether `node` restates an input axis under a claim that its class
+    /// guards at the node (chelis#2512, the restamp guard
+    /// [`crate::axis_sources::local_dim_guard_sites`] places), whatever its
+    /// operation's class. Where its activation holds in no row it checks
+    /// nothing and produces zeros of its declared type, as
+    /// [`RuntimeCheck::MovementBounds`] does: its operand's extent need not
+    /// be its own there, so it reads no operand, and its operands'
+    /// agreement, which only its reads need, is not checked either. Where
+    /// some row is active it computes as usual.
+    ///
+    /// A whole-graph derivation, run on the first call and shared by every
+    /// later one; [`Self::is_activation_gated`] asks it only of a node with
+    /// an activation.
+    pub fn guards_a_restamp(&self, node: &DagNode) -> bool {
+        self.guarded_restamping_nodes
+            .get_or_init(|| crate::axis_sources::guarded_restamping_nodes(self.dag))
+            .contains(&node.id)
     }
 }
 
@@ -2828,6 +2854,7 @@ impl Dag {
         TrapSeeds {
             dag: self,
             literal_result_witness_requirements: std::cell::OnceCell::new(),
+            guarded_restamping_nodes: std::cell::OnceCell::new(),
         }
     }
 

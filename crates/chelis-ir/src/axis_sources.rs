@@ -1496,6 +1496,17 @@ fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
         .collect()
 }
 
+/// The nodes owning a guarded restamp ([`guarded_restamp_axes`]). Each is
+/// checked under its own activation, and where that holds in no row it
+/// produces zeros of its declared type rather than reading an operand whose
+/// extent need not be its own ([`crate::dag::TrapSeeds::guards_a_restamp`]).
+pub fn guarded_restamping_nodes(dag: &Dag) -> std::collections::BTreeSet<NodeId> {
+    guarded_restamp_axes(dag)
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect()
+}
+
 /// Whether `(node, axis)` is a guarded restamp or forwards one unchanged
 /// through pass-through axes.
 fn forwards_a_guarded_restamp(
@@ -3892,10 +3903,28 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             }
             if restamps_input_axis(dag, member.node, member.axis) {
                 // The restating operation observes the extent it forwards,
-                // before it allocates, and names itself.
+                // before it allocates, and names itself. It is checked under
+                // its own owner activation (spec/10 section 3.2), as a claim
+                // token's carrier is: a restamp in an untaken arm checks
+                // nothing. A producer a `Copy` restamp attributes the extent
+                // to that runs before that activation is observed through the
+                // restamping node's input instead, which keeps every axis.
                 let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                let activation = claim_carrier_activation(dag, member.node)?;
+                let (producer, observed) =
+                    if activation.is_none_or(|activation| activation.0 < site.producer.0) {
+                        (site.producer, site.observation)
+                    } else {
+                        (
+                            member.node,
+                            LocalGuardObservation::Carrier(RtDim::InputAxis {
+                                tensor: 0,
+                                axis: RtAxis::Lit(member.axis as i32),
+                            }),
+                        )
+                    };
                 sites.push((
-                    (site.producer.0, member.axis),
+                    (producer.0, member.axis),
                     LocalGuardClaim {
                         claim: name.clone(),
                         canonical: match resolved {
@@ -3903,8 +3932,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                             None => CanonicalExtent::Binder(name.clone()),
                         },
                         op: site.operation,
-                        observed: site.observation,
-                        activation: None,
+                        observed,
+                        activation,
                         source: None,
                     },
                 ));

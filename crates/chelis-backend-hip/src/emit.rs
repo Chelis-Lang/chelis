@@ -133,6 +133,10 @@ pub struct HipEmitter {
     /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
+    /// Per node id, whether it guards a restamp
+    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]), which this lane
+    /// has no zero value for.
+    guards_a_restamp: Vec<bool>,
 }
 
 /// How a checking node under an activation (spec/10 section 3.2) reads it:
@@ -261,14 +265,15 @@ impl HipEmitter {
     /// [`DagNode::inactive_operand`]'s value for its slot where the
     /// activation is false. `None` for a node that is not gated, and for a
     /// gated node whose check is not of every operand's values (an extent,
-    /// a bound, an empty axis, an abort's condition beside its fallback),
-    /// which this lane has no gate for: [`Self::begin_node_gate`] refuses it.
+    /// a bound, an empty axis, an abort's condition beside its fallback, a
+    /// restamp's zero value), which this lane has no gate for:
+    /// [`Self::begin_node_gate`] refuses it.
     fn activation_gate(
         &self,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Option<HipActivationGate> {
-        if !self.activation_gated[node.id.0] {
+        if !self.activation_gated[node.id.0] || self.guards_a_restamp[node.id.0] {
             return None;
         }
         let activation = node.owner.activation?;
@@ -574,6 +579,7 @@ impl HipEmitter {
             }
         }
         let dag = storage_plan.emission();
+        let seeds = dag.trap_seeds();
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -589,13 +595,16 @@ impl HipEmitter {
             device_entrypoint_mode: false,
             draw_keys: BTreeMap::new(),
             gate: None,
-            activation_gated: {
-                let seeds = dag.trap_seeds();
-                dag.nodes()
-                    .iter()
-                    .map(|node| seeds.is_activation_gated(node))
-                    .collect()
-            },
+            activation_gated: dag
+                .nodes()
+                .iter()
+                .map(|node| seeds.is_activation_gated(node))
+                .collect(),
+            guards_a_restamp: dag
+                .nodes()
+                .iter()
+                .map(|node| node.owner.activation.is_some() && seeds.guards_a_restamp(node))
+                .collect(),
             kernel_rank: match dag
                 .nodes()
                 .iter()

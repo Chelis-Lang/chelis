@@ -83,6 +83,15 @@ pub struct CEmitter {
     /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
+    /// Per node id, whether it guards a restamp under an activation
+    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]): where no row of
+    /// its activation holds it is zero-filled rather than computed. A
+    /// movement is not, since its own gate already zero-fills
+    /// ([`CEmitter::emit_movement_copy`]).
+    zero_filled_when_inactive: Vec<bool>,
+    /// The restamping node whose operation is being emitted inside its
+    /// activation's branch ([`CEmitter::open_inactive_zeros`]).
+    inactive_zeros: Option<InactiveZeros>,
     /// The literal result claims each witness checks
     /// ([`chelis_ir::dag::TrapSeeds::literal_result_witness_requirements`]),
     /// derived once for the graph.
@@ -101,6 +110,21 @@ pub struct CEmitter {
     /// nothing, so each operand element it reads takes a value its checks
     /// accept ([`chelis_ir::dag::DagNode::inactive_operand`]).
     gate: Option<ActivationGate>,
+}
+
+/// A restamping node emitted inside its activation's branch
+/// ([`CEmitter::open_inactive_zeros`]).
+#[derive(Debug, Clone, Copy)]
+struct InactiveZeros {
+    node: usize,
+    /// Where what both arms need goes: before the branch
+    /// ([`CEmitter::before_restamp_branch`]).
+    before_branch: usize,
+    indent: usize,
+    /// Whether its output was allocated before the branch.
+    allocated: bool,
+    /// How many runtime extent names were declared before the branch.
+    declared_names: usize,
 }
 
 /// How the node being emitted reads its activation.
@@ -440,6 +464,16 @@ impl CEmitter {
                 .iter()
                 .map(|node| seeds.is_activation_gated(node))
                 .collect(),
+            zero_filled_when_inactive: dag
+                .nodes()
+                .iter()
+                .map(|node| {
+                    node.owner.activation.is_some()
+                        && seeds.guards_a_restamp(node)
+                        && node.runtime_check() != chelis_ir::dag::RuntimeCheck::MovementBounds
+                })
+                .collect(),
+            inactive_zeros: None,
             literal_result_witness_requirements: dag
                 .nodes()
                 .iter()
@@ -820,10 +854,12 @@ impl CEmitter {
     }
 
     fn emit_owned_tensor(&mut self, id: usize, ndim: &str, shape: &str, dtype: &str) {
-        self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
-        ));
-        self.emit_tensor_snapshot(id, true);
+        self.restamp_allocation(id, |emitter| {
+            emitter.line(&format!(
+                "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+            ));
+            emitter.emit_tensor_snapshot(id, true);
+        });
     }
 
     /// chelis#1788 shape 2. Two roots in ONE emitted function whose signatures
@@ -1433,10 +1469,13 @@ impl CEmitter {
         // complete positive-rank operand relation before the op emitters index
         // operands through the output's shape. Nonmembers and rank-zero
         // results return immediately inside the shared derivation.
+        let operand_guard = self.lines.len();
         self.emit_elementwise_operand_guard(node, dag);
+        self.gate_restamp_operand_guard(id, operand_guard);
         // chelis#1948: operand agreement precedes the producer-owned result
         // claim, and both precede the operation's allocation or first access.
         self.emit_same_shape_result_guards(node);
+        self.open_inactive_zeros(node);
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, value, &node.output_type)?,
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
@@ -1883,7 +1922,157 @@ impl CEmitter {
                 self.emit_sparse_scatter_elements(id, *axis, &node.inputs, &node.output_type, dag);
             }
         }
+        self.close_inactive_zeros(node)
+    }
+
+    /// The condition under which a restamping node computes
+    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]): some row of its
+    /// activation holds. `None` for every other node.
+    fn restamp_activity(&self, id: usize) -> Option<String> {
+        if !self.zero_filled_when_inactive[id] {
+            return None;
+        }
+        let gate = self
+            .gate
+            .as_ref()
+            .expect("a restamping node under an activation is gated");
+        Some(gate.any.clone())
+    }
+
+    /// Put the operand-agreement lines emitted from `start` under a
+    /// restamping node's activation: the agreement is what its reads need,
+    /// and where no row is active it reads no operand (spec/10 section 3.2),
+    /// as the evaluator's zero value reads none.
+    fn gate_restamp_operand_guard(&mut self, id: usize, start: usize) {
+        let Some(active) = self.restamp_activity(id) else {
+            return;
+        };
+        if self.lines.len() == start {
+            return;
+        }
+        for line in &mut self.lines[start..] {
+            line.insert_str(0, "    ");
+        }
+        let prefix = "    ".repeat(self.indent);
+        self.lines
+            .insert(start, format!("{prefix}if ({active}) {{"));
+        self.line("}");
+    }
+
+    /// Open a restamping node's activation branch before its operation is
+    /// emitted. Where no row of the activation holds, the node checks
+    /// nothing and produces zeros of its declared type instead of reading an
+    /// operand whose extent need not be its own, as the evaluator's
+    /// `inactive_unchecked_value` does and as a movement's
+    /// [`Self::emit_movement_copy`] does for its bounds: the operation, every
+    /// operand-shape check it makes and every guard it places run in the
+    /// branch, its allocation before it ([`Self::before_restamp_branch`]), and
+    /// [`Self::close_inactive_zeros`] zero-fills the other arm. A movement
+    /// is not wrapped: its own gate already reads no bound and zero-fills.
+    fn open_inactive_zeros(&mut self, node: &DagNode) {
+        let Some(active) = self.restamp_activity(node.id.0) else {
+            return;
+        };
+        self.inactive_zeros = Some(InactiveZeros {
+            node: node.id.0,
+            before_branch: self.lines.len(),
+            indent: self.indent,
+            allocated: false,
+            declared_names: self.declared_dim_names.len(),
+        });
+        self.line(&format!("if ({active}) {{"));
+        self.indent += 1;
+    }
+
+    /// Close the branch [`Self::open_inactive_zeros`] opened, zero-filling
+    /// the arm where no row is active. An operation that allocates no output
+    /// of its own, or that declares a runtime extent name from what it
+    /// computes inside the branch, has nothing both arms can define, so it is
+    /// refused.
+    fn close_inactive_zeros(&mut self, node: &DagNode) -> Result<(), Unsupported> {
+        let Some(zeros) = self.inactive_zeros.take() else {
+            return Ok(());
+        };
+        self.indent -= 1;
+        if !zeros.allocated || self.declared_dim_names.len() != zeros.declared_names {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                format!(
+                    "a restamping operation under an activation at C DAG node {} that {}",
+                    node.id.0,
+                    if zeros.allocated {
+                        "declares a runtime extent itself"
+                    } else {
+                        "allocates no output of its own"
+                    }
+                ),
+                Stage::Codegen("c"),
+                chelis_types::unimplemented_rejection!(
+                    2413,
+                    "its untaken arm has no zero value both branches define (spec/10 section 3.2)"
+                ),
+            ));
+        }
+        self.line("} else {");
+        self.indent += 1;
+        self.emit_zero_fill(zeros.node);
+        self.indent -= 1;
+        self.line("}");
         Ok(())
+    }
+
+    /// Emit what both arms of `id`'s restamp branch need (`emit`): its
+    /// output allocation, and runtime extent names it declares from its
+    /// operands' metadata. For a restamping node emitted inside its
+    /// activation's branch ([`Self::open_inactive_zeros`]) it is placed
+    /// before that branch, so both arms define the one tensor every later
+    /// reader sees; elsewhere it is emitted in place. The allocation's slot is
+    /// never one of the node's operands' (only a fused kernel reuses an
+    /// operand in place, and fusion keeps a gated node out), so allocating
+    /// first leaves every operand read in the branch unchanged.
+    fn before_restamp_branch(&mut self, id: usize, emit: impl FnOnce(&mut Self)) {
+        let Some(InactiveZeros {
+            before_branch,
+            indent,
+            ..
+        }) = self.inactive_zeros.filter(|zeros| zeros.node == id)
+        else {
+            emit(self);
+            return;
+        };
+        let branch = self.lines.split_off(before_branch);
+        let inside = std::mem::replace(&mut self.indent, indent);
+        emit(self);
+        self.indent = inside;
+        let before_branch = self.lines.len();
+        self.lines.extend(branch);
+        let declared_names = self.declared_dim_names.len();
+        if let Some(zeros) = self.inactive_zeros.as_mut() {
+            zeros.before_branch = before_branch;
+            zeros.declared_names = declared_names;
+        }
+    }
+
+    /// Allocate `id`'s output ([`Self::before_restamp_branch`]).
+    fn restamp_allocation(&mut self, id: usize, allocate: impl FnOnce(&mut Self)) {
+        self.before_restamp_branch(id, allocate);
+        if let Some(zeros) = self
+            .inactive_zeros
+            .as_mut()
+            .filter(|zeros| zeros.node == id)
+        {
+            zeros.allocated = true;
+        }
+    }
+
+    /// Fill `t{id}` with zero bytes: the value of its declared type that an
+    /// operation where no row of its activation holds produces (spec/10
+    /// section 3.2), positive zeros and at `key` the key whose bits are
+    /// zero, as the evaluator's `inactive_unchecked_value` produces.
+    fn emit_zero_fill(&mut self, id: usize) {
+        self.line(&format!(
+            "if (t{id}_byte_capacity != 0) memset(t{id}_data, 0, (size_t)t{id}_byte_capacity);"
+        ));
     }
 
     fn line(&mut self, s: &str) {
@@ -2740,18 +2929,20 @@ impl CEmitter {
     }
 
     fn emit_reused_slot_wrapper(&mut self, previous: usize, id: usize, ty: &TensorType) {
-        if self.write_nodes.remove(&previous) {
-            self.line(&format!(
-                "chelis_tensor_end_write(t{previous}_write_guard);"
+        self.restamp_allocation(id, |emitter| {
+            if emitter.write_nodes.remove(&previous) {
+                emitter.line(&format!(
+                    "chelis_tensor_end_write(t{previous}_write_guard);"
+                ));
+            }
+            emitter.line(&format!("chelis_tensor *t{id} = t{previous};"));
+            let shape = Self::tagged_shape_literal(ty);
+            emitter.line(&format!(
+                "chelis_tensor_repurpose(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {shape});",
+                Self::ndim(ty)
             ));
-        }
-        self.line(&format!("chelis_tensor *t{id} = t{previous};"));
-        let shape = Self::tagged_shape_literal(ty);
-        self.line(&format!(
-            "chelis_tensor_repurpose(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {shape});",
-            Self::ndim(ty)
-        ));
-        self.emit_tensor_snapshot(id, true);
+            emitter.emit_tensor_snapshot(id, true);
+        });
         self.reused_sources.insert(NodeId(previous));
     }
 
@@ -7783,7 +7974,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             if !extents.iter().any(|(existing, _)| *existing == axis) {
                 extents.push((axis, extent.clone()));
             }
-            self.emit_runtime_dim_sites(id, &extents);
+            // Its operands' metadata and scalars, read before any plan: a
+            // restamping `expand` declares them before its branch.
+            self.before_restamp_branch(id, |emitter| emitter.emit_runtime_dim_sites(id, &extents));
         }
         let operation = match dag.expansion_kind(NodeId(id)) {
             chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
@@ -8233,9 +8426,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.indent -= 1;
             self.line("} else {");
             self.indent += 1;
-            self.line(&format!(
-                "if (t{id}_byte_capacity != 0) memset(t{id}_data, 0, (size_t)t{id}_byte_capacity);"
-            ));
+            self.emit_zero_fill(id);
             self.indent -= 1;
             self.line("}");
         }

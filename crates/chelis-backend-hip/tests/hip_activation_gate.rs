@@ -427,3 +427,57 @@ fn an_untaken_arms_reduction_check_is_refused_and_its_unconditional_twin_compile
             .unwrap_or_else(|error| panic!("{kind}: the unconditional twin: {error}"));
     }
 }
+
+/// A restamp (chelis#2512) under an activation is refused: where no row of
+/// its activation holds, the evaluator and the C lane give it zeros of its
+/// declared type without reading its operand, and this lane has no such
+/// value. `x: [n]` is restamped `[m]` under `a` by `neg(x)` or `add(x, x)`
+/// and added to `z: [m]`, so its class guards the restamp. The float `neg`
+/// checks nothing else; the integer `add` also checks its operand values,
+/// which this lane could otherwise gate.
+///
+/// Evidentiary status: REGRESSION TEST. At c18888f34 both compile: the
+/// float `neg` is not gated, and the integer `add` takes the operand gate.
+#[test]
+fn an_untaken_arms_restamp_is_refused() {
+    for (op, precision) in [(RiscOp::Neg, Prim::F32), (RiscOp::Add, Prim::Int32)] {
+        let named = |name: &str| TensorType {
+            dims: vec![DimInfo::Named(name.into(), None)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let load = |dag: &mut Dag, name: &str, ty: TensorType| {
+            dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
+        };
+        let x = load(&mut dag, "x", named("n"));
+        let z = load(&mut dag, "z", named("m"));
+        let a = load(
+            &mut dag,
+            "a",
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+        );
+        let under_a = chelis_ir::dag::Owner::new(decl, Some(a));
+        let operands = if matches!(op, RiscOp::Neg) {
+            vec![x]
+        } else {
+            vec![x, x]
+        };
+        let restamped = dag.add_node(under_a, op, operands, named("m"), None);
+        let plus = dag.add_node(under_a, RiscOp::Add, vec![restamped, z], named("m"), None);
+        dag.add_root(plus);
+        let message = support::codegen_hip(&dag, "gated")
+            .map(|result| result.c_source)
+            .expect_err("a restamp under an activation")
+            .to_string();
+        assert!(
+            message.contains("a checking operation under an activation")
+                && message.contains(&format!("DAG node {}", restamped.0))
+                && message.contains("2413"),
+            "{precision:?}: {message}"
+        );
+    }
+}

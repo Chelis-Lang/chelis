@@ -3624,6 +3624,10 @@ where
         let gated = dag
             .get(node.id)
             .is_some_and(|source| seeds.is_activation_gated(source));
+        let restamped = gated
+            && dag
+                .get(node.id)
+                .is_some_and(|source| seeds.guards_a_restamp(source));
         let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
         if let Some(failure) = movement_failures.remove(&node.id)
             && !inactive
@@ -3753,7 +3757,7 @@ where
         // from operands its checks accept, and checks nothing.
         let inactive_operands = neutralize_inactive_operands(node, gated, &mut values)?;
         let mut inactive_value = if inactive {
-            inactive_unchecked_value(node, &values, &runtime_dims)?
+            inactive_unchecked_value(node, restamped, dag, &values, &runtime_dims)?
         } else {
             None
         };
@@ -4706,16 +4710,23 @@ where
 
 /// The value a node whose activation holds in no row produces without
 /// checking anything (spec/10 §3.2), for the classes that check an extent or
-/// a bound rather than an operand's values ([`RuntimeCheck`]); `None` for a
-/// node that computes from its operands as usual.
+/// a bound rather than an operand's values ([`RuntimeCheck`]), and for a
+/// node that guards a restamp (`restamped`,
+/// [`crate::dag::TrapSeeds::guards_a_restamp`]); `None` for a node that
+/// computes from its operands as usual.
 ///
 /// A movement node reads no bound and produces zeros of its declared type,
 /// each axis it declares itself taking its operand's extent, so an empty or
 /// out-of-range bound in an untaken arm allocates and traps on nothing. A
-/// reduction over an empty axis reduces to zeros. An extent claim compares
-/// nothing and produces the value it would have checked.
+/// restamping node produces zeros of its declared type the same way, each
+/// axis nothing has bound yet taking the extent its carrier reads, so an
+/// operand whose extent disagrees with the claim is never read. A reduction over an
+/// empty axis reduces to zeros. An extent claim compares nothing and
+/// produces the value it would have checked.
 fn inactive_unchecked_value(
     node: &DagNode,
+    restamped: bool,
+    source: &Dag,
     values: &UnordMap<NodeId, TensorValue>,
     runtime_dims: &UnordMap<String, usize>,
 ) -> Result<Option<TensorValue>, String> {
@@ -4740,31 +4751,64 @@ fn inactive_unchecked_value(
         };
         Ok(TensorValue::from_storage(shape.to_vec(), storage))
     };
+    // The declared type's extents: a literal or a resolved name as stated, a
+    // runtime name as bound, and a name nothing has bound yet as the extent
+    // `unbound` gives its axis (the axis, when it gives none).
+    let declared_shape = |unbound: &dyn Fn(usize) -> Option<usize>| {
+        node.output_type
+            .dims
+            .iter()
+            .enumerate()
+            .map(|(axis, dim)| match dim {
+                DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Ok(*extent),
+                DimInfo::Named(name, None) => runtime_dims
+                    .get(name)
+                    .copied()
+                    .or_else(|| unbound(axis))
+                    .ok_or(axis),
+            })
+            .collect::<Result<Vec<_>, usize>>()
+    };
     match node.runtime_check() {
         RuntimeCheck::MovementBounds => {
             let operand = operand()?;
-            let shape = node
-                .output_type
-                .dims
-                .iter()
-                .enumerate()
-                .map(|(axis, dim)| match dim {
-                    DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Ok(*extent),
-                    // A movement keeps its operand's rank, so the operand
-                    // has every axis the node declares.
-                    DimInfo::Named(name, None) => runtime_dims
-                        .get(name)
-                        .or_else(|| operand.shape.get(axis))
-                        .copied()
-                        .ok_or_else(|| {
-                            format!(
-                                "node {} declares axis {axis}, which its operand of rank {} does not have",
-                                node.id.0,
-                                operand.shape.len()
-                            )
-                        }),
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+            // A movement keeps its operand's rank, so the operand has every
+            // axis the node declares.
+            let shape =
+                declared_shape(&|axis| operand.shape.get(axis).copied()).map_err(|axis| {
+                    format!(
+                        "node {} declares axis {axis}, which its operand of rank {} does not have",
+                        node.id.0,
+                        operand.shape.len()
+                    )
+                })?;
+            zeros(&shape).map(Some)
+        }
+        _ if restamped => {
+            // An unbound name takes what the node's own carrier for its axis
+            // reads, an operand's axis or a scalar operand, as the C lane
+            // declares it before the node's branch.
+            let sources = crate::axis_sources::output_axis_sources(source, node.id);
+            let operand = |input: &usize| node.inputs.get(*input).and_then(|id| values.get(id));
+            let carried = |axis: usize| match sources.get(axis)? {
+                crate::axis_sources::AxisSource::InputAxis {
+                    input,
+                    axis: RtAxis::Lit(read),
+                } => operand(input)?
+                    .shape
+                    .get(usize::try_from(*read).ok()?)
+                    .copied(),
+                crate::axis_sources::AxisSource::ScalarInput { input } => {
+                    usize::try_from(operand(input)?.storage().scalar_at(0).as_i64_exact()?).ok()
+                }
+                _ => None,
+            };
+            let shape = declared_shape(&carried).map_err(|axis| {
+                format!(
+                    "node {} declares axis {axis}, which no bound name or operand sizes",
+                    node.id.0
+                )
+            })?;
             zeros(&shape).map(Some)
         }
         RuntimeCheck::EmptyAxis => {

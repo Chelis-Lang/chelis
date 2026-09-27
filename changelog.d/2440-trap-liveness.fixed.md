@@ -26,8 +26,10 @@ C, while an uncalled function's discarded overflow neither runs nor makes
 its parameters required inputs. A node in an `if` arm that is lowered as a selection checks only when its
 arm is taken. An untaken arm's integer arithmetic, division or cast, integer
 sum, `max_reduce` or `argmax_reduce` over an empty axis, runtime `shrink`, `stride` or
-`pad` bound, call or result extent claim, local tensor ascription, abort, or
-dead value reference checks nothing in the DAG evaluator and in compiled C,
+`pad` bound, call or result extent claim, axis restated under another
+extent name ([#2512](https://github.com/Chelis-Lang/chelis/issues/2512)),
+local tensor ascription, abort, or dead value reference checks nothing in
+the DAG evaluator and in compiled C,
 including under `grad`, per `vmap` row, at a `vmap` call site and in the
 body of a `vmap` of `grad`
 ([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)). Under `grad`

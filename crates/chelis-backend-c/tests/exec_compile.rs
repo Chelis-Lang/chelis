@@ -11507,3 +11507,472 @@ fn issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard() {
     );
 }
 
+/// A restamping operation the untaken-arm tests below build: `op` over
+/// `x: [n]` of `input`, stamped `[m]` of `output`, trapping as `trap`.
+#[derive(Clone)]
+struct RestampUnderActivation {
+    op: RiscOp,
+    input: Prim,
+    output: Prim,
+    trap: &'static str,
+}
+
+/// The restamping operations: a float `neg`, whose class checks nothing
+/// else; an integer `neg`, whose operand values its class also gates; and a
+/// `copy`, whose guard sits at the restamping node itself because the
+/// producer it attributes the extent to, the `Load` of `x`, runs before the
+/// activation. (A `cast` cannot restamp: the verifier refuses a cast whose
+/// dims change.)
+fn restamps_under_activation() -> [RestampUnderActivation; 3] {
+    [
+        RestampUnderActivation {
+            op: RiscOp::Neg,
+            input: Prim::F32,
+            output: Prim::F32,
+            trap: "neg",
+        },
+        RestampUnderActivation {
+            op: RiscOp::Neg,
+            input: Prim::Int64,
+            output: Prim::Int64,
+            trap: "neg",
+        },
+        // A `copy` is administrative, so its guard names the operation
+        // behind it (spec/04 section 4.7), here the `load` of `x`.
+        RestampUnderActivation {
+            op: RiscOp::Copy,
+            input: Prim::F64,
+            output: Prim::F64,
+            trap: "load",
+        },
+    ]
+}
+
+fn restamp_named(name: &str, precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision,
+    }
+}
+
+fn restamp_scalar(precision: Prim) -> TensorType {
+    TensorType {
+        dims: Vec::new(),
+        precision,
+    }
+}
+
+/// The graph around a restamped value `restamped` of type `[m]`, built
+/// under the rank-0 activation `a` by `restamp`: it is added to `z: [m]` and
+/// summed under `a`, and that sum is selected by `a` against the sum of `z`,
+/// so `m`'s class holds the restamp and `z` in one scope. The restamped
+/// value is the second root, so its untaken-arm value is observed directly.
+fn restamp_under_activation_dag(
+    output: Prim,
+    restamp: impl FnOnce(&mut Dag, Owner) -> (chelis_ir::dag::NodeId, chelis_ir::dag::NodeId),
+) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let z = dag.add_node(
+        decl,
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        restamp_named("m", output),
+        None,
+    );
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        restamp_scalar(Prim::Bool),
+        None,
+    );
+    let under_a = Owner::new(decl, Some(a));
+    let (restamped, summand) = restamp(&mut dag, under_a);
+    let sum = |dag: &mut Dag, owner: Owner, input| {
+        dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: output,
+            },
+            vec![input],
+            restamp_scalar(output),
+            None,
+        )
+    };
+    let plus = dag.add_node(
+        under_a,
+        RiscOp::Add,
+        vec![summand, z],
+        restamp_named("m", output),
+        None,
+    );
+    let taken = sum(&mut dag, under_a, plus);
+    let other = sum(&mut dag, Owner::unconditional(decl), z);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![a, taken, other],
+        restamp_scalar(output),
+        None,
+    );
+    dag.set_roots(vec![selected, restamped]);
+    dag
+}
+
+/// chelis#2512's restamp under an activation: `x: [n]` restamped `[m]` by
+/// `case.op` (spec/10 section 3.2), in [`restamp_under_activation_dag`].
+fn restamped_extent_under_activation_dag(case: &RestampUnderActivation) -> Dag {
+    restamp_under_activation_dag(case.output, |dag, under_a| {
+        let decl = under_a.decl;
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            restamp_named("n", case.input),
+            None,
+        );
+        let restamped = dag.add_node(
+            under_a,
+            case.op.clone(),
+            vec![x],
+            restamp_named("m", case.output),
+            None,
+        );
+        (restamped, restamped)
+    })
+}
+
+/// One output as `shape [..] bytes <hex>`, the bytes in memory order: the
+/// form both lanes' outputs are compared in, bit for bit.
+fn restamp_output_text(shape: &[usize], bytes: &[u8]) -> String {
+    let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!("shape {shape:?} bytes {hex}")
+}
+
+fn restamp_storage_bytes(storage: &chelis_types::TensorStorage) -> Vec<u8> {
+    use chelis_types::StorageView;
+    match storage.view() {
+        StorageView::F64(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        StorageView::F32(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        StorageView::I64(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        other => panic!("untested restamp output storage {other:?}"),
+    }
+}
+
+fn restamp_input_storage(prim: Prim, values: &[i32]) -> chelis_types::TensorStorage {
+    let raw = if prim.is_float() {
+        RawTensor::Float(values.iter().copied().map(f64::from).collect())
+    } else {
+        RawTensor::Int(values.iter().copied().map(i64::from).collect())
+    };
+    finalize_tensor("restamp test input", prim, raw).unwrap()
+}
+
+/// One lane's outputs ([`restamp_output_text`]), or its trap text.
+type RestampLane = Result<Vec<String>, String>;
+
+/// Both lanes' outputs for one row of named inputs (`(name, storage,
+/// rank)`), or their trap text: the evaluator's, then compiled C's under
+/// AddressSanitizer and UndefinedBehaviorSanitizer.
+fn restamp_under_activation_lanes(
+    dag: &Dag,
+    generated: &chelis_backend_c::CodegenResult,
+    inputs: &[(&str, chelis_types::TensorStorage, usize)],
+) -> (RestampLane, RestampLane) {
+    let mut values = UnordMap::new();
+    for (name, storage, rank) in inputs {
+        let shape = if *rank == 0 {
+            Vec::new()
+        } else {
+            vec![storage.len()]
+        };
+        values.insert(
+            name.to_string(),
+            typed_value_with_shape(shape, storage.clone()),
+        );
+    }
+    let eval = eval_tensor(dag, &values).map(|results| {
+        dag.roots()
+            .iter()
+            .map(|root| {
+                let value = &results[root];
+                restamp_output_text(&value.shape, &restamp_storage_bytes(value.storage()))
+            })
+            .collect::<Vec<_>>()
+    });
+    let declarations = inputs
+        .iter()
+        .map(|(name, storage, rank)| {
+            let (c_type, c_dtype, data) = c_storage_case(storage);
+            let shape = if *rank == 0 {
+                "NULL".to_string()
+            } else {
+                format!("(int64_t[]){{ {} }}", storage.len())
+            };
+            let slot = generated
+                .input_labels
+                .iter()
+                .position(|label| label == name)
+                .unwrap();
+            format!(
+                "{c_type} {name}_data[] = {{ {data} }};\n    inputs[{slot}] = chelis_tensor_entry_borrow({rank}, {shape}, {c_dtype}, {name}_data, sizeof {name}_data);"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n    ");
+    let n_in = inputs.len();
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static double test_f64(uint64_t bits) {{ double v; memcpy(&v, &bits, sizeof v); return v; }}
+static float test_f32(uint32_t bits) {{ float v; memcpy(&v, &bits, sizeof v); return v; }}
+void restamp_gate(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[{n_in}];
+    {declarations}
+    chelis_tensor *outputs[2] = {{ NULL, NULL }};
+    restamp_gate(inputs, {n_in}, outputs, 2);
+    for (int k = 0; k < 2; ++k) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[k]);
+        printf("shape [");
+        for (int d = 0; d < chelis_tensor_rank(outputs[k]); ++d)
+            printf("%s%lld", d ? ", " : "", (long long)chelis_tensor_shape(outputs[k], d));
+        printf("] bytes ");
+        const unsigned char *bytes = (const unsigned char *)view.data;
+        for (int64_t i = 0; i < chelis_tensor_byte_count(outputs[k]); ++i) printf("%02x", bytes[i]);
+        printf("\n");
+    }}
+    return 0;
+}}
+"#
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let c = if run.status.success() && stderr.is_empty() {
+        Ok(stdout.lines().map(str::to_string).collect())
+    } else {
+        Err(stderr)
+    };
+    (eval, c)
+}
+
+/// Whether both lanes agree with `expected`: its outputs, or its trap
+/// lines.
+fn restamp_lanes_agree(
+    lanes: &(RestampLane, RestampLane),
+    expected: &Result<Vec<String>, Vec<String>>,
+) -> bool {
+    let agrees = |lane: &RestampLane| match (expected, lane) {
+        (Ok(expected), Ok(lane)) => lane == expected,
+        (Err(expected), Err(error)) => extent_trap_lines(error) == *expected,
+        _ => false,
+    };
+    agrees(&lanes.0) && agrees(&lanes.1)
+}
+
+/// spec/10 section 3.2 REGRESSION TEST: the restamp guard of chelis#2512 is
+/// checked under the restamping node's own activation. Where that is false
+/// the node produces zeros of its declared type `[m]`, reading nothing of
+/// its operand of extent `n`; where it holds, the guard traps before the
+/// node allocates, naming the operation that owns it; and agreeing extents
+/// give both lanes the same bits either way. At the merge of #2629 the guard
+/// was ungated, so every untaken row trapped on both lanes; gating the guard
+/// alone left compiled C refusing untyped in
+/// `chelis_tensor_elementwise_index_step_for_shape`, which sized the node by
+/// `m` over an operand of `n` elements.
+#[test]
+fn issue_2512_a_restamp_is_checked_under_its_own_activation_and_untaken_yields_zeros() {
+    let mut failures = Vec::new();
+    for case in restamps_under_activation() {
+        let dag = restamped_extent_under_activation_dag(&case);
+        assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+        let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
+        let bytes =
+            |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(case.output, values));
+        let mut row = |active: bool,
+                       x: &[i32],
+                       z: &[i32],
+                       expected: Result<Vec<String>, Vec<String>>| {
+            let inputs = [
+                ("x", restamp_input_storage(case.input, x), 1),
+                ("z", restamp_input_storage(case.output, z), 1),
+                (
+                    "a",
+                    restamp_input_storage(Prim::Bool, &[i32::from(active)]),
+                    0,
+                ),
+            ];
+            let lanes = restamp_under_activation_lanes(&dag, &generated, &inputs);
+            if !restamp_lanes_agree(&lanes, &expected) {
+                failures.push(format!(
+                    "{:?} {:?}, active {active}, x {}, z {}: expected {expected:?}\n  eval {:?}\n  c {:?}",
+                    case.op,
+                    case.output,
+                    x.len(),
+                    z.len(),
+                    lanes.0,
+                    lanes.1
+                ));
+            }
+        };
+        for (x, z) in [(vec![1, 2], vec![1, 2, 3]), (vec![1, 2, 3], vec![4, 5])] {
+            // Untaken: the other arm's value, and the restamp's zeros of `m`.
+            row(
+                false,
+                &x,
+                &z,
+                Ok(vec![
+                    restamp_output_text(&[], &bytes(&[z.iter().sum()])),
+                    restamp_output_text(&[z.len()], &vec![0u8; bytes(&z).len()]),
+                ]),
+            );
+            // Taken: the guard traps.
+            row(
+                true,
+                &x,
+                &z,
+                Err(vec![
+                    format!(
+                        "extent `m`: claimed = {}, {} axis 0 = {}",
+                        z.len(),
+                        case.trap,
+                        x.len()
+                    ),
+                    format!("numeric trap: domain in {} at i64", case.trap),
+                ]),
+            );
+        }
+        // Agreeing extents: taken computes, untaken still yields zeros.
+        let (x, z) = ([1, 2, 3], [10, 20, 30]);
+        let restamped: Vec<i32> = if matches!(case.op, RiscOp::Neg) {
+            x.iter().map(|v| -v).collect()
+        } else {
+            x.to_vec()
+        };
+        let plus: Vec<i32> = restamped.iter().zip(&z).map(|(r, z)| r + z).collect();
+        row(
+            true,
+            &x,
+            &z,
+            Ok(vec![
+                restamp_output_text(&[], &bytes(&[plus.iter().sum()])),
+                restamp_output_text(&[3], &bytes(&restamped)),
+            ]),
+        );
+        row(
+            false,
+            &x,
+            &z,
+            Ok(vec![
+                restamp_output_text(&[], &bytes(&[z.iter().sum()])),
+                restamp_output_text(&[3], &vec![0u8; bytes(&z).len()]),
+            ]),
+        );
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The restamp Surf lowering reaches (chelis#2512): an `expand` whose kept
+/// axis restates `x: [n]` as `[m]`, inserting an axis `k` sized by the
+/// scalar `s`, which the `expand` declares. Under a false activation it is
+/// zeros of `[m, k]` on both lanes, `k` read from `s`, with nothing trapped;
+/// under a true one the guard traps, naming the rank-increasing `expand` as
+/// the `insert` primitive it is.
+#[test]
+fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yields_zeros() {
+    let dag = restamp_under_activation_dag(Prim::F32, |dag, under_a| {
+        let decl = under_a.decl;
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            restamp_named("n", Prim::F32),
+            None,
+        );
+        let s = dag.add_node(
+            decl,
+            RiscOp::Load { name: "s".into() },
+            vec![],
+            restamp_scalar(Prim::Int64),
+            None,
+        );
+        let expanded = dag.add_node(
+            under_a,
+            RiscOp::Expand {
+                axis: 1,
+                size: chelis_ir::dag::RtDim::Node(1),
+            },
+            vec![x, s],
+            TensorType {
+                dims: vec![
+                    DimInfo::Named("m".into(), None),
+                    DimInfo::Named("k".into(), None),
+                ],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let reduced = dag.add_node(
+            under_a,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![expanded],
+            restamp_named("m", Prim::F32),
+            None,
+        );
+        (expanded, reduced)
+    });
+    assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+    let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
+    let f32_bytes =
+        |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(Prim::F32, values));
+    let mut failures = Vec::new();
+    for (x, z) in [(vec![1, 2], vec![1, 2, 3]), (vec![1, 2, 3], vec![4, 5])] {
+        for active in [false, true] {
+            let inputs = [
+                ("x", restamp_input_storage(Prim::F32, &x), 1),
+                ("z", restamp_input_storage(Prim::F32, &z), 1),
+                (
+                    "a",
+                    restamp_input_storage(Prim::Bool, &[i32::from(active)]),
+                    0,
+                ),
+                ("s", restamp_input_storage(Prim::Int64, &[2]), 0),
+            ];
+            let expected = if active {
+                Err(vec![
+                    format!(
+                        "extent `m`: claimed = {}, insert axis 0 = {}",
+                        z.len(),
+                        x.len()
+                    ),
+                    "numeric trap: domain in insert at i64".to_string(),
+                ])
+            } else {
+                Ok(vec![
+                    restamp_output_text(&[], &f32_bytes(&[z.iter().sum()])),
+                    restamp_output_text(&[z.len(), 2], &vec![0u8; 2 * f32_bytes(&z).len()]),
+                ])
+            };
+            let lanes = restamp_under_activation_lanes(&dag, &generated, &inputs);
+            if !restamp_lanes_agree(&lanes, &expected) {
+                failures.push(format!(
+                    "active {active}, x {}, z {}: expected {expected:?}\n  eval {:?}\n  c {:?}",
+                    x.len(),
+                    z.len(),
+                    lanes.0,
+                    lanes.1
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
