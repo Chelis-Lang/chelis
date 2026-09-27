@@ -10,6 +10,8 @@ pub mod dtype_bounds;
 pub mod effect_kind;
 mod extension_data;
 pub use extension_data::ExtensionData;
+pub mod identity;
+pub use identity::{NodeIdentity, assign_node_identities};
 mod integer_names;
 pub mod lexer;
 pub mod literal_source;

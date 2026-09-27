@@ -984,7 +984,7 @@ fn build_compiled_library_context_in_session_scoped(
     // the lowerer would refuse it. The carrier is deliberately NOT normalized
     // here: chelis#1023 pins that a stamped program stays stamped, and this
     // entry never normalized it.
-    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let folded = fold_checker_input(library_exprs);
     let library_exprs = &folded[..];
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
@@ -1158,7 +1158,7 @@ fn build_compiled_library_context_with_base_in_session_scoped(
     // the lowerer would refuse it. The carrier is deliberately NOT normalized
     // here: chelis#1023 pins that a stamped program stays stamped, and this
     // entry never normalized it.
-    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let folded = fold_checker_input(library_exprs);
     let library_exprs = &folded[..];
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.resume_for_new_check();
@@ -1504,8 +1504,9 @@ fn check_typed_program_in_session_scoped(
     // One tree for inference and annotation: the pipe fold ONLY, not the
     // carrier normalization. chelis#1023 pins that a stamped program stays
     // stamped through the checker's output, and this entry deliberately
-    // passes its input through untouched otherwise.
-    let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
+    // passes its input through untouched otherwise: numbering adds node
+    // identities, which are not content.
+    let exprs = &fold_checker_input(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, origin, errors);
     let stats = product.stats();
     if errors.is_empty() {
@@ -2617,8 +2618,8 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     }
 }
 
-/// Iteratively convert `Expr::Node` → `Expr::List` for the pointer-keyed type
-/// stamp system and existing List-based inference dispatch while preserving
+/// Iteratively convert `Expr::Node` → `Expr::List` for the existing
+/// List-based inference dispatch while preserving
 /// `Expr::BareList` as a structural carrier. The explicit heap worklist is
 /// required because this boundary runs before the guarded inference walkers:
 /// native recursion here would abort on the same deep input those walkers
@@ -2630,7 +2631,7 @@ fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 }
 
 /// The checker's input normalization: carriers to lists, then pipes folded
-/// into the applications they denote.
+/// into the applications they denote, then the nodes numbered.
 ///
 /// chelis#1923: `spec/02-surf-syntax.md` §0.1 makes a pipe notation for
 /// first-argument insertion, and every consumer that reconstructed the
@@ -2640,7 +2641,24 @@ fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 /// is the checker's output and what the lowerer, linearity, the effect pass
 /// and the caches all read, still carrying the `Pipe` node.
 fn normalize_program_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    chelis_deep::pipe::fold_program_pipes(&normalize_nodes_to_lists(exprs))
+    number_checker_input(chelis_deep::pipe::fold_program_pipes(
+        &normalize_nodes_to_lists(exprs),
+    ))
+}
+
+/// The input of an entry that keeps its carriers (chelis#1023): pipes folded
+/// as in [`normalize_program_input`], then the nodes numbered.
+fn fold_checker_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    number_checker_input(chelis_deep::pipe::fold_program_pipes(exprs))
+}
+
+/// Owner stamps and the deferred call ledger are keyed by node identity, so
+/// every entry numbers the one tree its inference and annotation share before
+/// either reads it. The tree is the entry's own copy: numbering overwrites
+/// whatever identities an earlier check left on the nodes it was copied from.
+fn number_checker_input(mut exprs: Vec<deep::Expr>) -> Vec<deep::Expr> {
+    chelis_deep::assign_node_identities(&mut exprs);
+    exprs
 }
 
 fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {

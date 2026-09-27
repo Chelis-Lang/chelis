@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::context::LibraryProofId;
+use chelis_deep::NodeIdentity;
 
 #[derive(Clone)]
 pub(super) struct DeclaredSigMetadata {
@@ -23,7 +24,7 @@ pub(super) struct InferenceProduct {
     pub(super) total_nodes: usize,
     pub(super) next_epoch: u64,
     pub(super) active_epoch: Option<TypeStampEpoch>,
-    pub(super) owner_types: UnordMap<usize, FinalOwnerType>,
+    pub(super) owner_types: UnordMap<NodeIdentity, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
     pub(super) function_inference_plan: FunctionInferencePlan,
@@ -36,15 +37,6 @@ pub(super) struct InferenceProduct {
     /// this function again; without the flag that recursion is unbounded.
     /// The outer pass runs to a fixpoint, so a nested call has nothing to add.
     replaying_shape_checks: bool,
-    /// chelis#1512: while a `PostApp` entry is being replayed, the ledger's
-    /// own CLONE of the call stands in for the live Deep node, and that clone
-    /// is dropped at the end of the replay iteration. A route that
-    /// re-registers during the replay would otherwise key its new entry by an
-    /// address that is freed moments later. This pair carries the translation
-    /// `(clone address, original site)`, and it is what makes
-    /// [`Self::post_app_key`]'s documented lifetime invariant true rather
-    /// than merely asserted.
-    replaying_post_app: Option<(usize, usize)>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
@@ -156,11 +148,9 @@ pub(super) enum DeferredShapeRule {
         /// declaration boundary; they differ only in how much of the call is
         /// re-decided.
         replay: PostAppReplay,
-        /// Address of the `deep::List` this call was registered from, the
-        /// same identity `expr_key` uses for owner stamps. The rule owns a
-        /// CLONE of that node, so the address has to be recorded rather than
-        /// read back off the copy.
-        site: usize,
+        /// The suspended call. A clone keeps the node identity of the call it
+        /// copies, so the ledger key is read off this clone and a replay that
+        /// re-registers the call keys it by the same site.
         list: deep::List,
         kids: Vec<deep::Expr>,
         func_name: String,
@@ -223,15 +213,8 @@ enum DeferredTypeDerivation {
 
 pub(super) struct TypeStampEpoch {
     id: u64,
-    owners: UnordMap<usize, StampRequirement>,
-    writes: UnordMap<usize, Vec<OwnerTypeWrite>>,
-    /// Transitional per-node bridge identities. A `Node::to_list` reader
-    /// clones children, so pointer-keyed owner writes from that temporary
-    /// view must resolve back to the original stamped child registered by
-    /// `begin_root`. The whole-tree normalization boundary is gone; this map
-    /// remains only until the individual inference readers consume Nodes
-    /// directly.
-    bridge_aliases: UnordMap<usize, usize>,
+    owners: UnordMap<NodeIdentity, StampRequirement>,
+    writes: UnordMap<NodeIdentity, Vec<OwnerTypeWrite>>,
 }
 
 #[derive(Clone, Copy)]
@@ -331,7 +314,6 @@ impl InferenceProduct {
             id,
             owners: UnordMap::new(),
             writes: UnordMap::new(),
-            bridge_aliases: UnordMap::new(),
         };
         register_annotation_owners(root, &mut epoch, stack);
         self.active_epoch = Some(epoch);
@@ -734,22 +716,19 @@ impl InferenceProduct {
 
     /// chelis#1512: the ledger identity of one call.
     ///
-    /// Identity is the address of the `deep::List` node in the tree the
-    /// traversal is walking, the same identity `expr_key` uses for owner
-    /// stamps. One case is not that tree: during a `PostApp` replay the
-    /// caller holds the ledger's own clone, which is dropped when the replay
-    /// iteration ends, so this translates that clone back to the original
-    /// site. Every key this returns therefore names a node that outlives the
-    /// entry, which is the invariant the old spelling documented without
-    /// holding: a route that re-registered during a replay stored a freed
-    /// address, and a later allocation reusing it would make
-    /// [`Self::has_post_app_check_for`] answer for an unrelated live call
-    /// (round 2 P2-1, latent: 0 collisions in 2,000 runs, never observed).
-    pub(super) fn post_app_key(&self, list: &deep::List) -> usize {
-        let addr = std::ptr::from_ref(list).addr();
-        match self.replaying_post_app {
-            Some((clone_addr, original_site)) if clone_addr == addr => original_site,
-            _ => addr,
+    /// Identity is the node identity of the call's `app`, assigned when the
+    /// checker numbered its copy of the program. The `Node::to_list` view the
+    /// traversal dispatches on and the clone a `PostApp` entry keeps both copy
+    /// the call's metadata, so both name the call they were taken from: a
+    /// route that re-registers while its entry is being replayed keys the new
+    /// entry by the original site (round 2 P2-1). A call without an identity
+    /// was synthesized after numbering and matches no entry, not even its own.
+    fn post_app_site(check: &DeferredShapeCheck) -> Option<(PostAppReplay, NodeIdentity)> {
+        match &check.rule {
+            DeferredShapeRule::PostApp { replay, list, .. } => {
+                list.node_identity().map(|site| (*replay, site))
+            }
+            _ => None,
         }
     }
 
@@ -762,22 +741,25 @@ impl InferenceProduct {
     /// the first callee that does.
     #[cfg(test)]
     pub(super) fn post_app_replays_for(&self, list: &deep::List) -> Vec<PostAppReplay> {
-        let key = self.post_app_key(list);
+        let Some(key) = list.node_identity() else {
+            return Vec::new();
+        };
         self.deferred_shape_checks
             .iter()
-            .filter_map(|check| match &check.rule {
-                DeferredShapeRule::PostApp { replay, site, .. } if *site == key => Some(*replay),
-                _ => None,
-            })
+            .filter_map(Self::post_app_site)
+            .filter_map(|(replay, site)| (site == key).then_some(replay))
             .collect()
     }
 
     /// Is this call already suspended, under either replay kind?
     pub(super) fn has_post_app_check_for(&self, list: &deep::List) -> bool {
-        let key = self.post_app_key(list);
-        self.deferred_shape_checks.iter().any(
-            |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
-        )
+        let Some(key) = list.node_identity() else {
+            return false;
+        };
+        self.deferred_shape_checks
+            .iter()
+            .filter_map(Self::post_app_site)
+            .any(|(_, site)| site == key)
     }
 
     /// Is this call already suspended for a FULL route replay?
@@ -786,17 +768,13 @@ impl InferenceProduct {
     /// replaces it rather than standing down for it, because re-entering
     /// `finish_unified_app` runs those same validators on its way to the route.
     pub(super) fn has_route_check_for(&self, list: &deep::List) -> bool {
-        let key = self.post_app_key(list);
-        self.deferred_shape_checks.iter().any(|check| {
-            matches!(
-                &check.rule,
-                DeferredShapeRule::PostApp {
-                    replay: PostAppReplay::Route,
-                    site,
-                    ..
-                } if *site == key
-            )
-        })
+        let Some(key) = list.node_identity() else {
+            return false;
+        };
+        self.deferred_shape_checks
+            .iter()
+            .filter_map(Self::post_app_site)
+            .any(|(replay, site)| replay == PostAppReplay::Route && site == key)
     }
 
     /// chelis#1512: drop a suspended `PostApp` decision for this call.
@@ -810,10 +788,11 @@ impl InferenceProduct {
     /// cannot tell a re-report from a second call that legitimately fails the
     /// same way, and these diagnostics carry no span to tell them apart.
     pub(super) fn cancel_post_app_check_for(&mut self, list: &deep::List) {
-        let key = self.post_app_key(list);
-        self.deferred_shape_checks.retain(
-            |check| !matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
-        );
+        let Some(key) = list.node_identity() else {
+            return;
+        };
+        self.deferred_shape_checks
+            .retain(|check| Self::post_app_site(check).is_none_or(|(_, site)| site != key));
     }
 
     /// A rejected application supplied an operand, but its checked family
@@ -959,8 +938,8 @@ impl InferenceProduct {
         result_ty: Type,
     ) {
         #[cfg(test)]
-        if let DeferredShapeRule::PostApp { site, .. } = &rule {
-            record_post_app_key(*site, self.replaying_post_app.is_some());
+        if let DeferredShapeRule::PostApp { list, .. } = &rule {
+            record_post_app_key(list.node_identity(), self.replaying_shape_checks);
         }
         self.push_deferred_shape_check(rule, arg_exprs, arg_tys, result_ty);
     }
@@ -1110,7 +1089,6 @@ impl InferenceProduct {
                 }
                 DeferredShapeRule::PostApp {
                     replay: PostAppReplay::Route,
-                    site,
                     list,
                     kids,
                     func_name,
@@ -1120,10 +1098,9 @@ impl InferenceProduct {
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
                     let mut replay_env = (**env).clone();
                     // chelis#1512 round 2 P2-1: `list` is the ledger's own
-                    // clone and dies with this iteration. Carry the original
-                    // site so a route that re-registers inside the replay
-                    // keys its entry by the live node, not by this clone.
-                    self.replaying_post_app = Some((std::ptr::from_ref(list).addr(), *site));
+                    // clone and carries the call's node identity, so a route
+                    // that re-registers inside the replay keys its entry by the
+                    // original site rather than by this clone.
                     let replayed = finish_unified_app(
                         list,
                         kids,
@@ -1138,7 +1115,6 @@ impl InferenceProduct {
                         self,
                         None,
                     );
-                    self.replaying_post_app = None;
                     reconcile_replayed_result(func_name, &check.result_ty, replayed, subst, errors)
                 }
             };
@@ -1224,7 +1200,9 @@ impl InferenceProduct {
         let Some(epoch) = self.active_epoch.as_mut() else {
             return;
         };
-        let key = epoch.canonical_key(expr_key(expr));
+        let Some(key) = expr.node_identity() else {
+            return;
+        };
         if !epoch.owners.contains_key(&key) {
             return;
         }
@@ -1233,70 +1211,6 @@ impl InferenceProduct {
             .entry(key)
             .or_default()
             .push(OwnerTypeWrite { ty, source });
-    }
-
-    pub(super) fn register_bridge_children(
-        &mut self,
-        stamped_children: &[deep::Expr],
-        bridged_children: &[deep::Expr],
-    ) {
-        let Some(epoch) = self.active_epoch.as_mut() else {
-            return;
-        };
-        debug_assert_eq!(stamped_children.len(), bridged_children.len());
-        let mut pending = stamped_children
-            .iter()
-            .zip(bridged_children)
-            .collect::<Vec<_>>();
-        while let Some((stamped, bridged)) = pending.pop() {
-            let stamped_key = epoch.canonical_key(expr_key(stamped));
-            epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
-            // PP7/E5e justified symmetric site: this walk compares the two
-            // already-paired representations created by the root adapter.
-            // Every arm requires the same carrier on both sides; a mismatch
-            // takes the explicit no-recursion arm rather than masquerading
-            // as a successful semantic read.
-            match (stamped, bridged) {
-                (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
-                    pending.extend(left.children_slice().iter().zip(right.children_slice()));
-                    pending.extend(
-                        metadata_expression_leaves(left.meta())
-                            .into_iter()
-                            .zip(metadata_expression_leaves(right.meta())),
-                    );
-                }
-                (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
-                    pending.extend(left.elements.iter().zip(&right.elements));
-                }
-                (deep::Expr::BareList(left, _), deep::Expr::BareList(right, _)) => {
-                    pending.extend(left.iter().zip(right));
-                }
-                (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => {
-                    pending.extend(
-                        metadata_expression_leaves(left)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(right)),
-                    );
-                }
-                (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
-                    pending.push((&left.expr, &right.expr));
-                    pending.extend(
-                        metadata_expression_leaves(&left.metadata)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(&right.metadata)),
-                    );
-                }
-                (deep::Expr::UnknownForm(left), deep::Expr::UnknownForm(right)) => {
-                    pending.extend(left.children.iter().zip(&right.children));
-                    pending.extend(
-                        metadata_expression_leaves(&left.meta)
-                            .into_iter()
-                            .zip(metadata_expression_leaves(&right.meta)),
-                    );
-                }
-                _ => {}
-            }
-        }
     }
 
     pub(super) fn record_builtin_selection(
@@ -1412,7 +1326,10 @@ impl InferenceProduct {
         role: &'static str,
         errors: &mut DiagnosticSink<'_>,
     ) -> Option<Type> {
-        match self.owner_types.get(&expr_key(expr)) {
+        match expr
+            .node_identity()
+            .and_then(|key| self.owner_types.get(&key))
+        {
             Some(owner) => {
                 let _owning_epoch = owner.epoch;
                 Some(owner.ty.clone())
@@ -1454,8 +1371,7 @@ impl InferenceProduct {
             ));
             return None;
         };
-        let key = epoch.canonical_key(expr_key(expr));
-        let Some(writes) = epoch.writes.get(&key) else {
+        let Some(writes) = expr.node_identity().and_then(|key| epoch.writes.get(&key)) else {
             errors.push(internal_owner_stamp_error(
                 "canonical inference could not find an already-inferred child stamp".to_string(),
             ));
@@ -1483,18 +1399,18 @@ impl InferenceProduct {
 // macro invocation and go nowhere, which `unused_doc_comments` rejects.
 #[cfg(test)]
 thread_local! {
-    static POST_APP_KEY_LOG: std::cell::RefCell<Vec<(usize, bool)>> =
+    static POST_APP_KEY_LOG: std::cell::RefCell<Vec<(Option<NodeIdentity>, bool)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
-fn record_post_app_key(site: usize, during_replay: bool) {
+fn record_post_app_key(site: Option<NodeIdentity>, during_replay: bool) {
     POST_APP_KEY_LOG.with(|log| log.borrow_mut().push((site, during_replay)));
 }
 
 /// Drain the log. Returns `(key, minted during a replay)` in mint order.
 #[cfg(test)]
-pub(crate) fn take_post_app_key_log() -> Vec<(usize, bool)> {
+pub(crate) fn take_post_app_key_log() -> Vec<(Option<NodeIdentity>, bool)> {
     POST_APP_KEY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
@@ -1562,22 +1478,6 @@ pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &mut Subst) -> bool
         Type::Ref(inner) => shape_operand_awaits_binding(&inner, subst),
         _ => false,
     }
-}
-
-impl TypeStampEpoch {
-    fn canonical_key(&self, mut key: usize) -> usize {
-        while let Some(next) = self.bridge_aliases.get(&key).copied() {
-            if next == key {
-                break;
-            }
-            key = next;
-        }
-        key
-    }
-}
-
-pub(super) fn expr_key(expr: &deep::Expr) -> usize {
-    std::ptr::from_ref(expr).addr()
 }
 
 pub(super) fn owner_types_compatible(left: &Type, right: &Type) -> bool {
@@ -1669,19 +1569,22 @@ fn register_annotation_owners_frame(
     }
 }
 
+/// Registers `expr` under its node identity. Every checker entry numbers its
+/// program before inference, so an owner without one is a tree that bypassed
+/// the entry; it registers nothing, and annotation reports its missing stamp.
 pub(super) fn register_owner(
     epoch: &mut TypeStampEpoch,
     expr: &deep::Expr,
     role: &'static str,
     stamp_required: bool,
 ) {
-    epoch
-        .owners
-        .entry(expr_key(expr))
-        .or_insert(StampRequirement {
-            role,
-            stamp_required,
-        });
+    let Some(key) = expr.node_identity() else {
+        return;
+    };
+    epoch.owners.entry(key).or_insert(StampRequirement {
+        role,
+        stamp_required,
+    });
 }
 
 #[cfg(test)]
@@ -1741,12 +1644,19 @@ pub(crate) fn run_reconcile_mutation_case(
     (produced.to_string(), bound)
 }
 
+/// A hand-built tree numbered the way every checker entry numbers its input.
+#[cfg(test)]
+pub(crate) fn numbered(mut expr: deep::Expr) -> deep::Expr {
+    chelis_deep::assign_node_identities(std::slice::from_mut(&mut expr));
+    expr
+}
+
 #[cfg(test)]
 pub(crate) fn run_type_stamp_mutation_case(
     case: TypeStampMutationCase,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let owner = node_expr(DeepTag::App, vec![]);
+    let owner = numbered(node_expr(DeepTag::App, vec![]));
     let mut product = InferenceProduct::default();
     product.begin_root(&owner, &mut errors.stack());
     match case {
@@ -1768,6 +1678,7 @@ pub(crate) fn run_type_stamp_mutation_case(
             true
         }
         TypeStampMutationCase::UnregisteredSynthesized => {
+            // Synthesized after numbering, so it carries no identity.
             let synthesized = node_expr(DeepTag::Var, vec![symbol_expr("temporary")]);
             product.record_bypass(
                 &synthesized,
@@ -1782,7 +1693,7 @@ pub(crate) fn run_type_stamp_mutation_case(
         }
         TypeStampMutationCase::RuntimeNonStampOwnerLookup => {
             let runtime_child = node_expr(DeepTag::Var, vec![symbol_expr("x")]);
-            let root = node_expr(DeepTag::App, vec![runtime_child]);
+            let root = numbered(node_expr(DeepTag::App, vec![runtime_child]));
             let mut product = InferenceProduct::default();
             product.begin_root(&root, &mut errors.stack());
             // chelis#1107 amendment (justified-safe, not routed): `root` is
@@ -1813,7 +1724,7 @@ pub(crate) fn run_finalization_mutation_case(
     case: FinalizationMutationCase,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let runtime = node_expr(DeepTag::App, vec![]);
+    let runtime = numbered(node_expr(DeepTag::App, vec![]));
     let mut signature_context = SignatureInferenceMetadata::default();
     let annotated = match case {
         FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
@@ -2804,9 +2715,4 @@ fn expression_without_derived_effects_frame(
             span: data.span,
         })),
     })
-}
-fn metadata_expression_leaves(meta: &deep::Metadata) -> Vec<&deep::Expr> {
-    let mut leaves = Vec::new();
-    meta.visit_expressions(&mut |value, _| leaves.push(value));
-    leaves
 }
