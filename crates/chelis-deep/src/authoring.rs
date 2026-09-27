@@ -337,7 +337,8 @@ pub fn rename_function(
     let module = single_module_mut(&mut rewritten)?;
     let module_name = module_name(module).unwrap_or_default().to_string();
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         if let Some(list) = tagged_list_mut(decl, DeepTag::Def) {
             if decl_name(list) == Some(old_name.as_str()) {
                 set_decl_name(list, new_name);
@@ -351,7 +352,8 @@ pub fn rename_function(
     }
 
     let mut renamed_references = 0;
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };
@@ -496,7 +498,8 @@ pub fn change_signature(
     let mut replaced_defsig = false;
     let mut rewritten_calls = 0;
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         if let Some(list) = tagged_list(decl, DeepTag::Defsig)
             && decl_name(list) == Some(target_name.as_str())
         {
@@ -524,7 +527,8 @@ pub fn change_signature(
         )));
     }
 
-    for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
+    for index in MODULE_DECLS_START..module.elements.len() {
+        let decl = &mut module.elements[index];
         let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };

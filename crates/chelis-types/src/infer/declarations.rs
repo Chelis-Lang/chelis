@@ -1366,7 +1366,9 @@ impl FunctionInferencePlan {
                     name: definition.name.clone(),
                 });
         }
-        for (component, vertices) in components.iter_mut().zip(&vertex_components) {
+        for index in 0..components.len().min(vertex_components.len()) {
+            let component = &mut components[index];
+            let vertices = &vertex_components[index];
             component.recursive = component.members.len() > 1
                 || vertices
                     .iter()

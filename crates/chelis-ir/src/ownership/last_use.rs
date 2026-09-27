@@ -110,7 +110,8 @@ pub(super) fn schedule(
         .collect::<Result<BTreeMap<_, _>, OwnershipError>>()?;
     let mut cfgs = BTreeMap::new();
     let mut placed_by_unit = Vec::new();
-    for (unit_index, unit) in program.units.iter_mut().enumerate() {
+    for unit_index in 0..program.units.len() {
+        let unit = &mut program.units[unit_index];
         let cfg = pending_cfgs
             .remove(&unit.id)
             .ok_or_else(|| invariant(unit, "preflight lost the unit CFG"))?;
