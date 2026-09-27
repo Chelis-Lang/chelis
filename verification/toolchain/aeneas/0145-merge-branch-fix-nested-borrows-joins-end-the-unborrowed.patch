@@ -1,0 +1,675 @@
+# aeneas integration step 145 after cba11f3beb: commit 93dc8595c6a77d4d05b72263d02dc93218cda12e
+# first parent 21151937782fe969f6452e853a3f9313b3463100, merged bc87d27b4c59a964d0230e596f87e8d346045cd1
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (joins end the unborrowed concrete loans of frozen-abstraction payloads the other context lacks: verify_materialized_roots, the last Aeneas blocker of verify_ownership)
+
+diff --git a/src/interp/InterpJoin.ml b/src/interp/InterpJoin.ml
+index 77b0240..2cf0c4f 100644
+--- a/src/interp/InterpJoin.ml
++++ b/src/interp/InterpJoin.ml
+@@ -1134,12 +1134,72 @@ let join_ctxs (span : Meta.span) ?(loop : bool = false)
+             value
+   end in
+   let module PayloadM = MakeMatcher (PayloadJM) in
++  (* A shared reborrow of a place inside the payload retained by a frozen
++     abstraction (e.g., the field [f] of [* *x] for an input [x : &&T]) puts a
++     concrete shared loan in the payload, which stays once its borrows ended:
++     frozen abstractions are never simplified. A branch where the place was not
++     borrowed has no such loan, and joining the payloads would introduce a
++     fresh loan, so that the frozen abstraction of the joined context differs
++     from the one of the source context of a match (e.g., after
++     [a || matches!(&binding.value.kind, ..)] in the body of a closure called
++     on [&&T]). Such a loan has no counterpart: it is ended in a payload when
++     no borrow of its context refers to it and the payloads of the other
++     context do not hold it. A loan which both contexts hold is kept, like the
++     rest of the fixed abstraction (e.g., at a loop entry where it is still
++     borrowed, and in the continue context where it is not anymore). *)
++  let end_unborrowed_frozen_payload_loans env0 env1 =
++    let payload_loans env =
++      let ids = ref BorrowId.Set.empty in
++      let visitor =
++        object
++          inherit [_] iter_abs as super
++          method! visit_ty _ _ = ()
++          method! visit_abs_cont _ _ = ()
++
++          method! visit_VSharedLoan env lid sv =
++            ids := BorrowId.Set.add lid !ids;
++            super#visit_VSharedLoan env lid sv
++        end
++      in
++      List.iter
++        (function
++          | EAbs abs when not abs.can_end -> visitor#visit_abs () abs
++          | _ -> ())
++        env;
++      !ids
++    in
++    let end_loans (ctx : eval_ctx) env other =
++      let borrowed = InterpBorrowsCore.shared_reserved_loan_ids ctx in
++      let kept = BorrowId.Set.union borrowed (payload_loans other) in
++      let visitor =
++        object
++          inherit [_] map_abs as super
++          method! visit_ty _ ty = ty
++          method! visit_abs_cont _ cont = cont
++
++          method! visit_VLoan () lc =
++            match lc with
++            | VSharedLoan (lid, sv) when not (BorrowId.Set.mem lid kept) ->
++                super#visit_value () sv.value
++            | _ -> super#visit_VLoan () lc
++        end
++      in
++      List.map
++        (function
++          | EAbs abs when not abs.can_end -> EAbs (visitor#visit_abs () abs)
++          | e -> e)
++        env
++    in
++    ( end_loans { ctx0 with env = env0 } env0 env1,
++      end_loans { ctx1 with env = env1 } env1 env0 )
++  in
+   (* Retained payloads belong to the join, not merely to marker collapse.
+      Match them with the same state as ordinary values, so every new symbolic
+      value and ownership abstraction is available when projecting and replaying
+      the join for a particular branch. Abstract children and continuations
+      remain branch-specific and are reconciled by the ordinary collapse. *)
+   let join_retained_payloads env0 env1 =
++    let env0, env1 = end_unborrowed_frozen_payload_loans env0 env1 in
+     let collect env =
+       let payloads = ref [] in
+       let visitor =
+diff --git a/tests/lean/NestedBorrowsFrozenPayloadLoans.lean b/tests/lean/NestedBorrowsFrozenPayloadLoans.lean
+new file mode 100644
+index 0000000..97e415e
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFrozenPayloadLoans.lean
+@@ -0,0 +1 @@
++import NestedBorrowsFrozenPayloadLoans.Checks
+diff --git a/tests/lean/NestedBorrowsFrozenPayloadLoans/Checks.lean b/tests/lean/NestedBorrowsFrozenPayloadLoans/Checks.lean
+new file mode 100644
+index 0000000..05ddffb
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFrozenPayloadLoans/Checks.lean
+@@ -0,0 +1,46 @@
++import NestedBorrowsFrozenPayloadLoans.NestedBorrowsFrozenPayloadLoans
++
++/-! Evaluate the model of `tests/src/nested-borrows-frozen-payload-loans.rs`
++    on the inputs of its `native` test module and compare with the native
++    results. -/
++
++namespace nested_borrows_frozen_payload_loans.checks
++open Aeneas Aeneas.Std Result
++open nested_borrows_frozen_payload_loans
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++/-- `mk nm f call nargs r0 r1` -/
++def b (nm f : String) (call : Bool) (nargs r0 r1 : Nat) : Result Binding :=
++  mk nm f call (u nargs) (u r0) (u r1)
++
++def count (x0 x1 x2 : Result Binding) (def_name : String) (expected : Nat) :
++    Option Nat :=
++  match (do
++      let b0 ← x0
++      let b1 ← x1
++      let b2 ← x2
++      run_count b0 b1 b2 def_name (u expected)) with
++  | ok r => some r.val
++  | _ => none
++
++def sel (x : Result Binding) (def_name : String) : Option Bool :=
++  match (do run_selected (← x) def_name) with
++  | ok r => some r
++  | _ => none
++
++-- count_selected_native
++#guard count (b "f" "g" false 0 7 8) (b "a" "f" true 0 7 7) (b "b" "f" true 0 8 7) "f" 7 == some 2
++#guard count (b "f" "g" false 0 7 8) (b "a" "f" true 0 7 7) (b "b" "f" true 0 8 7) "f" 8 == some 2
++#guard count (b "f" "g" false 0 7 8) (b "a" "f" true 0 7 7) (b "b" "f" true 0 8 7) "a" 7 == some 0
++#guard count (b "f" "g" false 0 7 8) (b "a" "f" true 0 7 7) (b "b" "f" true 0 8 7) "g" 7 == some 0
++#guard count (b "f" "f" true 2 7 1) (b "c" "f" true 1 7 1) (b "c" "g" true 0 7 1) "f" 7 == some 1
++
++-- selected_native
++#guard sel (b "f" "g" false 0 1 2) "f" == some true
++#guard sel (b "a" "f" true 0 1 2) "f" == some true
++#guard sel (b "a" "f" true 3 1 2) "f" == some false
++#guard sel (b "a" "g" true 0 1 2) "f" == some false
++#guard sel (b "a" "f" false 0 1 2) "f" == some false
++
++end nested_borrows_frozen_payload_loans.checks
+diff --git a/tests/lean/NestedBorrowsFrozenPayloadLoans/NestedBorrowsFrozenPayloadLoans.lean b/tests/lean/NestedBorrowsFrozenPayloadLoans/NestedBorrowsFrozenPayloadLoans.lean
+new file mode 100644
+index 0000000..0769968
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFrozenPayloadLoans/NestedBorrowsFrozenPayloadLoans.lean
+@@ -0,0 +1,375 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_frozen_payload_loans]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_frozen_payload_loans
++
++/-- [nested_borrows_frozen_payload_loans::Kind]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 16:0-19:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Kind where
++| Call :
++  _root_.String →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 →
++  Kind
++| Other : Kind
++
++/-- [nested_borrows_frozen_payload_loans::Expr]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 21:0-23:1
++    Visibility: public -/
++structure Expr where
++  kind : _root_.nested_borrows_frozen_payload_loans.Kind
++
++/-- [nested_borrows_frozen_payload_loans::Binding]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 25:0-29:1
++    Visibility: public -/
++structure Binding where
++  «name» : _root_.String
++  value : _root_.nested_borrows_frozen_payload_loans.Expr
++  roots : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_frozen_payload_loans::Entry]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 31:0-33:1
++    Visibility: public -/
++structure Entry where
++  def_name : _root_.String
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::closure::closure]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 46:52-46:77 -/
++@[reducible]
++def count_selected.closure.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::closure::{core::ops::function::FnMut<(&'_ (&'_ (u32))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 46:52-46:77 -/
++def
++  count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++  (c :
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure)
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args = c, c)
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::closure::{core::ops::function::FnOnce<(&'_ (&'_ (u32))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 46:52-46:77 -/
++def
++  count_selected.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool.call_once
++  (c :
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [nested_borrows_frozen_payload_loans::count_selected::closure::{core::ops::function::FnOnce<(&'_ (&'_ (u32))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure::closure<0>}]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 46:52-46:77 -/
++@[reducible]
++def
++  count_selected.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure
++  _root_.Aeneas.Std.U32 _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [nested_borrows_frozen_payload_loans::count_selected::closure::{core::ops::function::FnMut<(&'_ (&'_ (u32))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure::closure<0>}]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 46:52-46:77 -/
++@[reducible]
++def
++  count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure
++  _root_.Aeneas.Std.U32 _root_.Bool := {
++  FnOnceInst :=
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::closure]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 40:16-47:9 -/
++def count_selected.closure :=
++  _root_.nested_borrows_frozen_payload_loans.Entry × _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::{core::ops::function::FnMut<(&'_ (&'_ (nested_borrows_frozen_payload_loans::Binding))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 40:16-47:9 -/
++def
++  count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool.call_mut
++  (c : _root_.nested_borrows_frozen_payload_loans.count_selected.closure)
++  (tupled_args : _root_.nested_borrows_frozen_payload_loans.Binding) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure)
++  := do
++  let (e, i) := c
++  let b ←
++    _root_.Aeneas.Std.alloc.string.PartialEqString.eq tupled_args.«name»
++      e.def_name
++  let selected1 ←
++    if b
++    then _root_.Aeneas.Std.Result.ok true
++    else
++      match tupled_args.value.kind with
++      | _root_.nested_borrows_frozen_payload_loans.Kind.Call function args =>
++        do
++        let b1 ←
++          _root_.Aeneas.Std.alloc.string.PartialEqString.eq function e.def_name
++        if b1
++        then
++          let b2 := _root_.Aeneas.Std.alloc.vec.Vec.is_empty args
++          if b2
++          then _root_.Aeneas.Std.Result.ok true
++          else _root_.Aeneas.Std.Result.ok false
++        else _root_.Aeneas.Std.Result.ok false
++      | _root_.nested_borrows_frozen_payload_loans.Kind.Other =>
++        _root_.Aeneas.Std.Result.ok false
++  if selected1
++  then
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref tupled_args.roots
++    let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.Aeneas.Std.U32)
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool
++        i1 i
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.adapters.filter.IteratorFilter.count
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.Aeneas.Std.U32)
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool
++        model_state
++    _root_.Aeneas.Std.Result.ok (model_state1 = 1#usize, c)
++  else _root_.Aeneas.Std.Result.ok (false, c)
++
++/-- [nested_borrows_frozen_payload_loans::count_selected::{core::ops::function::FnOnce<(&'_ (&'_ (nested_borrows_frozen_payload_loans::Binding))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 40:16-47:9 -/
++def
++  count_selected.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedBindingBool.call_once
++  (c : _root_.nested_borrows_frozen_payload_loans.count_selected.closure)
++  (b : _root_.nested_borrows_frozen_payload_loans.Binding) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b1, _) ←
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool.call_mut
++      c b
++  _root_.Aeneas.Std.Result.ok b1
++
++/-- Trait implementation: [nested_borrows_frozen_payload_loans::count_selected::{core::ops::function::FnOnce<(&'_ (&'_ (nested_borrows_frozen_payload_loans::Binding))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 40:16-47:9 -/
++@[reducible]
++def
++  count_selected.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedBindingBool
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure
++  _root_.nested_borrows_frozen_payload_loans.Binding _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedBindingBool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [nested_borrows_frozen_payload_loans::count_selected::{core::ops::function::FnMut<(&'_ (&'_ (nested_borrows_frozen_payload_loans::Binding))), bool> for nested_borrows_frozen_payload_loans::count_selected::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 40:16-47:9 -/
++@[reducible]
++def
++  count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_frozen_payload_loans.count_selected.closure
++  _root_.nested_borrows_frozen_payload_loans.Binding _root_.Bool := {
++  FnOnceInst :=
++    _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedBindingBool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [nested_borrows_frozen_payload_loans::count_selected]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 37:0-49:1
++    Visibility: public -/
++def count_selected
++  (bindings : _root_.Aeneas.Std.Slice
++  _root_.nested_borrows_frozen_payload_loans.Binding)
++  (entry : _root_.nested_borrows_frozen_payload_loans.Entry)
++  (expected : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter bindings
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_frozen_payload_loans.Binding)
++      _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool
++      i (entry, expected)
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.adapters.filter.IteratorFilter.count
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.nested_borrows_frozen_payload_loans.Binding)
++      _root_.nested_borrows_frozen_payload_loans.count_selected.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedBindingBool
++      model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [nested_borrows_frozen_payload_loans::selected]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 52:0-59:1
++    Visibility: public -/
++def selected
++  (binding : _root_.nested_borrows_frozen_payload_loans.Binding)
++  (entry : _root_.nested_borrows_frozen_payload_loans.Entry) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let b ←
++    _root_.Aeneas.Std.alloc.string.PartialEqString.eq binding.«name»
++      entry.def_name
++  let selected1 ←
++    if b
++    then _root_.Aeneas.Std.Result.ok true
++    else
++      match binding.value.kind with
++      | _root_.nested_borrows_frozen_payload_loans.Kind.Call function args =>
++        do
++        let b1 ←
++          _root_.Aeneas.Std.alloc.string.PartialEqString.eq function
++            entry.def_name
++        if b1
++        then
++          let b2 := _root_.Aeneas.Std.alloc.vec.Vec.is_empty args
++          if b2
++          then _root_.Aeneas.Std.Result.ok true
++          else _root_.Aeneas.Std.Result.ok false
++        else _root_.Aeneas.Std.Result.ok false
++      | _root_.nested_borrows_frozen_payload_loans.Kind.Other =>
++        _root_.Aeneas.Std.Result.ok false
++  if selected1
++  then
++    let i := _root_.Aeneas.Std.alloc.vec.Vec.len binding.roots
++    _root_.Aeneas.Std.Result.ok (i = 2#usize)
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- [nested_borrows_frozen_payload_loans::mk]: loop body 0:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 64:4-67:5
++    Visibility: public -/
++@[rust_loop_body]
++def mk_loop.body
++  (nargs : _root_.Aeneas.Std.U32)
++  (args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  if i < nargs
++  then
++    let args1 ← _root_.Aeneas.Std.alloc.vec.Vec.push args i
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (args1,
++      i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done args)
++
++/-- [nested_borrows_frozen_payload_loans::mk]: loop 0:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 64:4-67:5
++    Visibility: public -/
++@[rust_loop]
++def mk_loop
++  (nargs : _root_.Aeneas.Std.U32)
++  (args : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (args1, i1) => _root_.nested_borrows_frozen_payload_loans.mk_loop.body
++       nargs args1 i1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)))
++    (args, i)
++
++/-- [nested_borrows_frozen_payload_loans::mk]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 61:0-73:1
++    Visibility: public -/
++def mk
++  (name1 : _root_.String) (function : _root_.String) (call : _root_.Bool)
++  (nargs : _root_.Aeneas.Std.U32) (r0 : _root_.Aeneas.Std.U32)
++  (r1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_frozen_payload_loans.Binding
++  := do
++  let args ←
++    _root_.nested_borrows_frozen_payload_loans.mk_loop nargs
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#u32
++  let kind ←
++    if call
++    then
++      _root_.Aeneas.Std.Result.ok
++        (_root_.nested_borrows_frozen_payload_loans.Kind.Call function args)
++    else
++      _root_.Aeneas.Std.Result.ok
++        _root_.nested_borrows_frozen_payload_loans.Kind.Other
++  let roots ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) r0
++  let roots1 ← _root_.Aeneas.Std.alloc.vec.Vec.push roots r1
++  _root_.Aeneas.Std.Result.ok
++    { «name» := name1, value := { kind }, roots := roots1 }
++
++/-- [nested_borrows_frozen_payload_loans::run_count]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 75:0-81:1
++    Visibility: public -/
++def run_count
++  (b0 : _root_.nested_borrows_frozen_payload_loans.Binding)
++  (b1 : _root_.nested_borrows_frozen_payload_loans.Binding)
++  (b2 : _root_.nested_borrows_frozen_payload_loans.Binding)
++  (def_name : _root_.String) (expected : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let bindings ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.nested_borrows_frozen_payload_loans.Binding) b0
++  let bindings1 ← _root_.Aeneas.Std.alloc.vec.Vec.push bindings b1
++  let bindings2 ← _root_.Aeneas.Std.alloc.vec.Vec.push bindings1 b2
++  let s ← _root_.Aeneas.Std.alloc.vec.Vec.as_slice bindings2
++  _root_.nested_borrows_frozen_payload_loans.count_selected s { def_name }
++    expected
++
++/-- [nested_borrows_frozen_payload_loans::run_selected]:
++    Source: 'tests/src/nested-borrows-frozen-payload-loans.rs', lines 83:0-85:1
++    Visibility: public -/
++def run_selected
++  (b : _root_.nested_borrows_frozen_payload_loans.Binding)
++  (def_name : _root_.String) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.nested_borrows_frozen_payload_loans.selected b { def_name }
++
++end nested_borrows_frozen_payload_loans
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 8063447..90160a0 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -67,6 +67,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsClosureSharedClosureArms
+ @[default_target] lean_lib NestedBorrowsClosureVisitorCalls
+ @[default_target] lean_lib NestedBorrowsCallThenLoop
++@[default_target] lean_lib NestedBorrowsFrozenPayloadLoans
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+ @[default_target] lean_lib BtreeEntry
+diff --git a/tests/src/nested-borrows-frozen-payload-loans.rs b/tests/src/nested-borrows-frozen-payload-loans.rs
+new file mode 100644
+index 0000000..020dadd
+--- /dev/null
++++ b/tests/src/nested-borrows-frozen-payload-loans.rs
+@@ -0,0 +1,134 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsFrozenPayloadLoans
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A shared reborrow of a place of `**x`, for an input `x : &&T`, puts a
++//! shared loan in the payload retained by the frozen input abstraction of the
++//! inner region, and the loan stays once the reborrow ended. When only one
++//! branch borrowed the place, the join must end this loan (no borrow refers
++//! to it, the other branch does not hold it) instead of giving the joined
++//! payload a fresh loan: otherwise the frozen abstraction of the joined
++//! context no longer matches the source context of the join (production:
++//! chelis_ir `verify_materialized_roots`, whose filter closure called on
++//! `&&HostBinding` tests `a || matches!(&binding.value.kind, ..)`, then reads
++//! the binding again).
++
++pub enum Kind {
++    Call { function: String, args: Vec<u32> },
++    Other,
++}
++
++pub struct Expr {
++    pub kind: Kind,
++}
++
++pub struct Binding {
++    pub name: String,
++    pub value: Expr,
++    pub roots: Vec<u32>,
++}
++
++pub struct Entry {
++    pub def_name: String,
++}
++
++/// The production shape: the closure is called on `&&Binding`; the
++/// right-hand side of `||` borrows a place of the binding in one branch only
++pub fn count_selected(bindings: &[Binding], entry: &Entry, expected: u32) -> usize {
++    bindings
++        .iter()
++        .filter(|binding| {
++            let selected = binding.name == entry.def_name
++                || matches!(
++                    &binding.value.kind,
++                    Kind::Call { function, args } if function == &entry.def_name && args.is_empty()
++                );
++            selected && binding.roots.iter().filter(|root| **root == expected).count() == 1
++        })
++        .count()
++}
++
++/// The same test in a function taking `&&Binding`
++pub fn selected(binding: &&Binding, entry: &Entry) -> bool {
++    let selected = binding.name == entry.def_name
++        || matches!(
++            &binding.value.kind,
++            Kind::Call { function, args } if function == &entry.def_name && args.is_empty()
++        );
++    selected && binding.roots.len() == 2
++}
++
++pub fn mk(name: String, function: String, call: bool, nargs: u32, r0: u32, r1: u32) -> Binding {
++    let mut args = Vec::new();
++    let mut i = 0;
++    while i < nargs {
++        args.push(i);
++        i += 1;
++    }
++    let kind = if call { Kind::Call { function, args } } else { Kind::Other };
++    let mut roots = Vec::new();
++    roots.push(r0);
++    roots.push(r1);
++    Binding { name, value: Expr { kind }, roots }
++}
++
++pub fn run_count(b0: Binding, b1: Binding, b2: Binding, def_name: String, expected: u32) -> usize {
++    let mut bindings = Vec::new();
++    bindings.push(b0);
++    bindings.push(b1);
++    bindings.push(b2);
++    count_selected(bindings.as_slice(), &Entry { def_name }, expected)
++}
++
++pub fn run_selected(b: Binding, def_name: String) -> bool {
++    selected(&&b, &Entry { def_name })
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn s(x: &str) -> String {
++        String::from(x)
++    }
++
++    #[test]
++    fn count_selected_native() {
++        // selected by name, by a call without arguments; a call with arguments
++        // and a call of another function are not selected
++        let bs = || {
++            (
++                mk(s("f"), s("g"), false, 0, 7, 8),
++                mk(s("a"), s("f"), true, 0, 7, 7),
++                mk(s("b"), s("f"), true, 0, 8, 7),
++            )
++        };
++        let (b0, b1, b2) = bs();
++        assert_eq!(run_count(b0, b1, b2, s("f"), 7), 2);
++        let (b0, b1, b2) = bs();
++        assert_eq!(run_count(b0, b1, b2, s("f"), 8), 2);
++        let (b0, b1, b2) = bs();
++        assert_eq!(run_count(b0, b1, b2, s("a"), 7), 0);
++        let (b0, b1, b2) = bs();
++        assert_eq!(run_count(b0, b1, b2, s("g"), 7), 0);
++        assert_eq!(
++            run_count(
++                mk(s("f"), s("f"), true, 2, 7, 1),
++                mk(s("c"), s("f"), true, 1, 7, 1),
++                mk(s("c"), s("g"), true, 0, 7, 1),
++                s("f"),
++                7
++            ),
++            1
++        );
++    }
++
++    #[test]
++    fn selected_native() {
++        assert!(run_selected(mk(s("f"), s("g"), false, 0, 1, 2), s("f")));
++        assert!(run_selected(mk(s("a"), s("f"), true, 0, 1, 2), s("f")));
++        assert!(!run_selected(mk(s("a"), s("f"), true, 3, 1, 2), s("f")));
++        assert!(!run_selected(mk(s("a"), s("g"), true, 0, 1, 2), s("f")));
++        assert!(!run_selected(mk(s("a"), s("f"), false, 0, 1, 2), s("f")));
++    }
++}

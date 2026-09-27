@@ -1,0 +1,1275 @@
+# aeneas integration step 128 after cba11f3beb: commit 13402ec8b7de04a3aa82fabeddc236d7c77734d7
+# first parent 716c40c7d1da99d35a90851b304beb8b35685b49, merged f333f6fc48ce91509cbeb1801beac44dd5fc35db
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (model constructor recovery names its input, output and opaque types; test: a recursive function's adapter closure capturing a mutable borrow)
+
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 1bb6780..f18d68a 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -982,6 +982,9 @@ let rec without_outer_ref = function
+     required: model field names and erased type equality are not evidence. *)
+ let constructor_input span (ctx : Contexts.decls_ctx) input_ty output_ty output
+     =
++  (* The declarations of the opaque types met on the way: their fields are
++     unknown *)
++  let opaque = ref [] in
+   let rec find seen ty e =
+     if ty = input_ty then [ e ]
+     else if List.mem ty seen then []
+@@ -1000,6 +1003,9 @@ let constructor_input span (ctx : Contexts.decls_ctx) input_ty output_ty output
+                 | T.Struct _ ->
+                     Substitute.type_decl_get_instantiated_field_types decl None
+                       generics
++                | T.Opaque ->
++                    if not (List.mem id !opaque) then opaque := id :: !opaque;
++                    []
+                 | _ -> [])
+             | _ -> []
+           in
+@@ -1019,10 +1025,30 @@ let constructor_input span (ctx : Contexts.decls_ctx) input_ty output_ty output
+   in
+   match find [] output_ty output with
+   | [ value ] -> value
+-  | _ ->
++  | found ->
++      let fmt = Print.Contexts.decls_ctx_to_fmt_env ctx in
++      let opaque =
++        List.rev_map
++          (fun id ->
++            Print.name_to_string fmt
++              (T.TypeDeclId.Map.find id ctx.type_ctx.type_decls).item_meta.name)
++          !opaque
++      in
+       [%craise] span
+-        "Model constructor recovery requires one structurally identified \
+-         source input"
++        ("Model constructor recovery requires one structurally identified \
++          source input: the input of type "
++        ^ Print.ty_to_string fmt input_ty
++        ^ " is found at "
++        ^ string_of_int (List.length found)
++        ^ " positions of the output of type "
++        ^ Print.ty_to_string fmt output_ty
++        ^
++        if opaque = [] then ""
++        else
++          " (the fields of the opaque types "
++          ^ String.concat ", " opaque
++          ^ " are unknown: extract their declarations with Charon's --include)"
++        )
+ 
+ (** Nested borrows: rebuild the output of a constructor in which the inputs
+     [updates] (input index, new value) moved into the output are replaced by
+diff --git a/tests/lean/RecursiveAdapterClosures/Checks.lean b/tests/lean/RecursiveAdapterClosures/Checks.lean
+index 37c257b..f6e76bd 100644
+--- a/tests/lean/RecursiveAdapterClosures/Checks.lean
++++ b/tests/lean/RecursiveAdapterClosures/Checks.lean
+@@ -5,7 +5,8 @@ import RecursiveAdapterClosures.RecursiveAdapterClosures
+     `partial_fixpoint`s which recurse through `map` (with the function item or a closure)
+     consumed by `collect` into a `Vec` or an `Option<Vec<_>>` or by `sum`, and through a
+     visitor monomorphized to a closure capturing mutable borrows (`weight`: the closure's
+-    state, `total` and `visits`, is given back by the visitor). -/
++    state, `total` and `visits`, is given back by the visitor), or through a closure
++    capturing a mutable borrow (`number`: the counter given back after `collect`). -/
+ 
+ namespace recursive_adapter_closures.checks
+ open Aeneas Aeneas.Std Result
+@@ -32,6 +33,16 @@ def okOptUsize : Result (Option Usize) → Option (Option Nat)
+ #guard okU64 (sample_score 2#u32 5#u32 3#u64) == some 229015
+ #guard okU64 (sample_score 1#u32 1#u32 7#u64) == some 220527
+ 
++def okNumber : Result (U64 × U32) → Option (Nat × Nat)
++  | ok (d, n) => some (d.val, n.val)
++  | _ => none
++
++#guard okNumber (sample_number 2#u32 5#u32 10#u32) == some (14083997, 2804)
++#guard okNumber (sample_number 0#u32 1#u32 0#u32) == some (11038465, 46)
++#guard okNumber (sample_number 1#u32 1#u32 1000#u32) == some (291399167, 243136)
++#guard okNumber (sample_number 3#u32 4#u32 1000000000#u32) == some (176439471949168, 2481831851)
++#guard okNumber (sample_number 4294967290#u32 1#u32 0#u32) == none
++
+ /-! The recursive functions are definitions, not axioms. -/
+ 
+ /-- info: 'recursive_adapter_closures.Tree.to_wire' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+@@ -49,4 +60,7 @@ def okOptUsize : Result (Option Usize) → Option (Option Nat)
+ /-- info: 'recursive_adapter_closures.Scale.score' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+ #guard_msgs in #print axioms Scale.score
+ 
++/-- info: 'recursive_adapter_closures.number' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms number
++
+ end recursive_adapter_closures.checks
+diff --git a/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+index a5bebe4..5c754dc 100644
+--- a/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
++++ b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+@@ -11,8 +11,18 @@ set_option maxHeartbeats 1000000
+ 
+ namespace recursive_adapter_closures
+ 
++/-- [recursive_adapter_closures::number::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 211:49-211:68 -/
++@[reducible]
++def number.closure := _root_.Aeneas.Std.U32
++
++/-- [recursive_adapter_closures::number::closure#1]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 212:49-212:87 -/
++@[reducible]
++def number.closure_1 := _root_.Aeneas.Std.U32
++
+ /-- [recursive_adapter_closures::weight::closure]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 111:26-114:5 -/
+ def weight.closure := _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
+ 
+ /-- [core::option::{core::ops::try_trait::Try<T, core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::branch]:
+@@ -48,7 +58,7 @@ def
+   _root_.Aeneas.Std.Result.ok none
+ 
+ /-- [recursive_adapter_closures::Tree]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 16:0-20:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 18:0-22:1
+     Visibility: public -/
+ @[discriminant isize]
+ inductive Tree where
+@@ -57,7 +67,7 @@ inductive Tree where
+ | Named : _root_.Aeneas.Std.NestedVec (_root_.Aeneas.Std.U32 × Tree) → Tree
+ 
+ /-- [recursive_adapter_closures::Wire]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 22:0-26:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 24:0-28:1
+     Visibility: public -/
+ @[discriminant isize]
+ inductive Wire where
+@@ -66,14 +76,14 @@ inductive Wire where
+ | Map : _root_.Aeneas.Std.NestedVec (_root_.Aeneas.Std.U32 × Wire) → Wire
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 37:53-37:79 -/
+ @[reducible]
+ def Tree.to_wire.closure := _root_.Unit
+ 
+ mutual
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 31:4-37:5
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 33:4-39:5
+     Visibility: public -/
+ def Tree.to_wire
+   (self : _root_.recursive_adapter_closures.Tree) :
+@@ -177,7 +187,7 @@ def Tree.to_wire
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 37:53-37:79 -/
+ def
+   Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
+   (c : _root_.recursive_adapter_closures.Tree.to_wire.closure)
+@@ -192,7 +202,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 37:53-37:79 -/
+ def
+   Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
+   (c : _root_.recursive_adapter_closures.Tree.to_wire.closure)
+@@ -210,7 +220,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 37:53-37:79 -/
+ @[reducible]
+ def
+   Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire
+@@ -228,7 +238,7 @@ def
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 37:53-37:79 -/
+ @[reducible]
+ def
+   Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire
+@@ -259,7 +269,7 @@ def
+ }
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop body 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 48:16-50:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Tree.visit_children_loop0.body
+@@ -283,7 +293,7 @@ def Tree.visit_children_loop0.body
+       (model_state1, model_state2))
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 48:16-50:17
+     Visibility: public -/
+ @[rust_loop]
+ def Tree.visit_children_loop0
+@@ -307,7 +317,7 @@ def Tree.visit_children_loop0
+ mutual
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 53:16-56:17
+     Visibility: public -/
+ @[rust_loop]
+ def Tree.visit_children_loop1
+@@ -330,7 +340,7 @@ def Tree.visit_children_loop1
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop body 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 53:16-56:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Tree.visit_children_loop1.body
+@@ -359,7 +369,7 @@ def Tree.visit_children_loop1.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 42:4-57:5
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 44:4-59:5
+     Visibility: public -/
+ def Tree.visit_children
+   {F : Type} (coreopsfunctionFnMutFTupleShared0TreeTupleInst :
+@@ -388,11 +398,11 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop body 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 48:16-50:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def
+-  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0.body
++  Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop0.body
+   (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+   _root_.recursive_adapter_closures.weight.closure
+@@ -428,11 +438,11 @@ def
+                 back1 i5, i2, i3))
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 48:16-50:17
+     Visibility: public -/
+ @[rust_loop]
+ def
+-  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0
++  Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop0
+   (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+   _root_.recursive_adapter_closures.weight.closure
+@@ -448,7 +458,7 @@ def
+   := do
+   loop
+     (fun (iter1, back2, back3, i2, i3) =>
+-       _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0.body
++       _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop0.body
+        coreopsfunctionFnMutclosureTupleSharedTreeTupleInst iter1 back2 back3 i2
+        i3 : ((_root_.Aeneas.Std.core.slice.iter.Iter
+       _root_.recursive_adapter_closures.Tree) × (_root_.Aeneas.Std.Usize →
+@@ -468,11 +478,11 @@ def
+ mutual
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 53:16-56:17
+     Visibility: public -/
+ @[rust_loop]
+ def
+-  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1
++  Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop1
+   (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+   _root_.recursive_adapter_closures.weight.closure
+@@ -488,7 +498,7 @@ def
+   := do
+   loop
+     (fun (iter1, back2, back3, i2, i3) =>
+-       Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1.body
++       Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop1.body
+        coreopsfunctionFnMutclosureTupleSharedTreeTupleInst iter1 back2 back3 i2
+        i3 : ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
+       _root_.recursive_adapter_closures.Tree)) × (_root_.Aeneas.Std.Usize →
+@@ -507,11 +517,11 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop body 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 53:16-56:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def
+-  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1.body
++  Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop1.body
+   (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+   _root_.recursive_adapter_closures.weight.closure
+@@ -542,7 +552,7 @@ def
+       coreopsfunctionFnMutclosureTupleSharedTreeTupleInst.call_mut (i, i1) c
+     let (i2, i3) := model_state2
+     let (f, visit_children_back, visit_children_back1) ←
+-      Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++      Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca
+         coreopsfunctionFnMutclosureTupleSharedTreeTupleInst c model_state2
+     let (i4, i5) := f
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
+@@ -558,9 +568,9 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 42:4-57:5
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 44:4-59:5
+     Visibility: public -/
+-def Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++def Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca
+   (coreopsfunctionFnMutclosureTupleShared0TreeTupleInst :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+   _root_.recursive_adapter_closures.weight.closure
+@@ -590,7 +600,7 @@ def Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
+     let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
+     let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
+     let (i2, i3, back, back1) ←
+-      _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0
++      _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop0
+         coreopsfunctionFnMutclosureTupleShared0TreeTupleInst iter
+         (fun i4 => i4) (fun i4 => i4) i i1
+     let back2 :=
+@@ -609,7 +619,7 @@ def Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
+     let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
+     let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
+     let (i2, i3, back, back1) ←
+-      Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1
++      Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca_loop1
+         coreopsfunctionFnMutclosureTupleShared0TreeTupleInst iter
+         (fun i4 => i4) (fun i4 => i4) i i1
+     let back2 :=
+@@ -630,7 +640,7 @@ end
+ mutual
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 67:16-69:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 69:16-71:17
+     Visibility: public -/
+ @[rust_loop]
+ def Wire.digest_loop0
+@@ -650,7 +660,7 @@ def Wire.digest_loop0
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 74:16-80:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 76:16-82:17
+     Visibility: public -/
+ @[rust_loop]
+ def Wire.digest_loop1
+@@ -670,7 +680,7 @@ def Wire.digest_loop1
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop body 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 67:16-69:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 69:16-71:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Wire.digest_loop0.body
+@@ -694,7 +704,7 @@ def Wire.digest_loop0.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop body 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 74:16-80:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 76:16-82:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Wire.digest_loop1.body
+@@ -722,7 +732,7 @@ def Wire.digest_loop1.body
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 62:4-84:5
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 64:4-86:5
+     Visibility: public -/
+ def Wire.digest
+   (self : _root_.recursive_adapter_closures.Wire) :
+@@ -747,14 +757,14 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- [recursive_adapter_closures::size::closure]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 95:39-95:55 -/
+ @[reducible]
+ def size.closure := _root_.Unit
+ 
+ mutual
+ 
+ /-- [recursive_adapter_closures::size]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 89:0-95:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 91:0-97:1
+     Visibility: public -/
+ def size
+   (t : _root_.recursive_adapter_closures.Tree) :
+@@ -855,7 +865,7 @@ def size
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::size::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 95:39-95:55 -/
+ def
+   size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
+   (c : _root_.recursive_adapter_closures.size.closure)
+@@ -869,7 +879,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::size::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 95:39-95:55 -/
+ def size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
+   (c : _root_.recursive_adapter_closures.size.closure)
+   (tupled_args : (_root_.Aeneas.Std.U32 ×
+@@ -885,7 +895,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- Trait implementation: [recursive_adapter_closures::size::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 95:39-95:55 -/
+ @[reducible]
+ def size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize :
+   _root_.Aeneas.Std.core.ops.function.FnOnce
+@@ -901,7 +911,7 @@ def size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize :
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::size::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 95:39-95:55 -/
+ @[reducible]
+ def size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+@@ -929,7 +939,7 @@ def size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize :
+ }
+ 
+ /-- [recursive_adapter_closures::own_weight]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 97:0-102:1 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 99:0-104:1 -/
+ def own_weight
+   (t : _root_.recursive_adapter_closures.Tree) :
+   _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
+@@ -954,7 +964,7 @@ def own_weight
+ mutual
+ 
+ /-- [recursive_adapter_closures::weight]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 106:0-114:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 108:0-116:1
+     Visibility: public -/
+ def weight
+   (t : _root_.recursive_adapter_closures.Tree) :
+@@ -962,7 +972,7 @@ def weight
+   := do
+   let total ← _root_.recursive_adapter_closures.own_weight t
+   let (c, visit_children_back, visit_children_back1) ←
+-    _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++    _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_871b95b00651b6da7b47480c32de75ca
+       ({
+           FnOnceInst :=
+             ({
+@@ -1001,7 +1011,7 @@ def weight
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::weight::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 111:26-114:5 -/
+ def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
+   (c : _root_.recursive_adapter_closures.weight.closure)
+   (t : _root_.recursive_adapter_closures.Tree) :
+@@ -1020,7 +1030,7 @@ def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::weight::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 111:26-114:5 -/
+ def weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple.call_mut
+   (c : _root_.recursive_adapter_closures.weight.closure)
+   (tupled_args : _root_.recursive_adapter_closures.Tree) :
+@@ -1049,7 +1059,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- Trait implementation: [recursive_adapter_closures::weight::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 111:26-114:5 -/
+ @[reducible]
+ def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple :
+   _root_.Aeneas.Std.core.ops.function.FnOnce
+@@ -1068,7 +1078,7 @@ def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple :
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::weight::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 111:26-114:5 -/
+ @[reducible]
+ def weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+@@ -1102,19 +1112,19 @@ def weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple :
+ }
+ 
+ /-- [recursive_adapter_closures::positive_leaves::closure#1]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 134:21-134:48 -/
+ @[reducible]
+ def positive_leaves.closure_1 := _root_.Unit
+ 
+ /-- [recursive_adapter_closures::positive_leaves::closure]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 127:21-127:43 -/
+ @[reducible]
+ def positive_leaves.closure := _root_.Unit
+ 
+ mutual
+ 
+ /-- [recursive_adapter_closures::positive_leaves]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 118:0-137:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 120:0-139:1
+     Visibility: public -/
+ def positive_leaves
+   (t : _root_.recursive_adapter_closures.Tree) :
+@@ -1296,7 +1306,7 @@ def positive_leaves
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 127:21-127:43 -/
+ def
+   positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
+   (c : _root_.recursive_adapter_closures.positive_leaves.closure)
+@@ -1310,7 +1320,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 127:21-127:43 -/
+ def
+   positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
+   (c : _root_.recursive_adapter_closures.positive_leaves.closure)
+@@ -1323,7 +1333,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 134:21-134:48 -/
+ def
+   positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
+   (c : _root_.recursive_adapter_closures.positive_leaves.closure_1)
+@@ -1337,7 +1347,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 134:21-134:48 -/
+ def
+   positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
+   (c : _root_.recursive_adapter_closures.positive_leaves.closure_1)
+@@ -1354,7 +1364,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 127:21-127:43 -/
+ @[reducible]
+ def
+   positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize
+@@ -1372,7 +1382,7 @@ def
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 127:21-127:43 -/
+ @[reducible]
+ def
+   positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize
+@@ -1403,7 +1413,7 @@ def
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 134:21-134:48 -/
+ @[reducible]
+ def
+   positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize
+@@ -1421,7 +1431,7 @@ def
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 134:21-134:48 -/
+ @[reducible]
+ def
+   positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize
+@@ -1452,23 +1462,23 @@ def
+ }
+ 
+ /-- [recursive_adapter_closures::Scale]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 139:0-141:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 141:0-143:1
+     Visibility: public -/
+ structure Scale where
+   factor : _root_.Aeneas.Std.U64
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:51-159:85 -/
+ @[reducible]
+ def Scale.score.closure_1 := _root_.recursive_adapter_closures.Scale
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:51-151:68 -/
+ @[reducible]
+ def Scale.score.closure := _root_.recursive_adapter_closures.Scale
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop body 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:16-153:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 153:16-155:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Scale.score_loop0.body
+@@ -1489,7 +1499,7 @@ def Scale.score_loop0.body
+       (model_state1, s1))
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop 0:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:16-153:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 153:16-155:17
+     Visibility: public -/
+ @[rust_loop]
+ def Scale.score_loop0
+@@ -1507,7 +1517,7 @@ def Scale.score_loop0
+     (iter, s)
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop body 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:16-161:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 161:16-163:17
+     Visibility: public -/
+ @[rust_loop_body]
+ def Scale.score_loop1.body
+@@ -1528,7 +1538,7 @@ def Scale.score_loop1.body
+       (model_state1, s1))
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop 1:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:16-161:17
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 161:16-163:17
+     Visibility: public -/
+ @[rust_loop]
+ def Scale.score_loop1
+@@ -1548,7 +1558,7 @@ def Scale.score_loop1
+ mutual
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 145:4-165:5
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 147:4-167:5
+     Visibility: public -/
+ def Scale.score
+   (self : _root_.recursive_adapter_closures.Scale)
+@@ -1694,7 +1704,7 @@ def Scale.score
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:51-151:68 -/
+ def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
+   (c : _root_.recursive_adapter_closures.Scale.score.closure)
+   (t : _root_.recursive_adapter_closures.Tree) :
+@@ -1707,7 +1717,7 @@ def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:51-151:68 -/
+ def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
+   (c : _root_.recursive_adapter_closures.Scale.score.closure)
+   (tupled_args : _root_.recursive_adapter_closures.Tree) :
+@@ -1719,7 +1729,7 @@ def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}::call_once]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:51-159:85 -/
+ def
+   Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
+   (c : _root_.recursive_adapter_closures.Scale.score.closure_1)
+@@ -1733,7 +1743,7 @@ def
+ partial_fixpoint monotonicity by aeneas_monotonicity
+ 
+ /-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}::call_mut]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:51-159:85 -/
+ def
+   Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
+   (c : _root_.recursive_adapter_closures.Scale.score.closure_1)
+@@ -1752,7 +1762,7 @@ partial_fixpoint monotonicity by aeneas_monotonicity
+ end
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:51-151:68 -/
+ @[reducible]
+ def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64 :
+   _root_.Aeneas.Std.core.ops.function.FnOnce
+@@ -1768,7 +1778,7 @@ def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64 :
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:51-151:68 -/
+ @[reducible]
+ def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64 :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+@@ -1796,7 +1806,7 @@ def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64 :
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:51-159:85 -/
+ @[reducible]
+ def Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64
+   : _root_.Aeneas.Std.core.ops.function.FnOnce
+@@ -1813,7 +1823,7 @@ def Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64
+ }
+ 
+ /-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}]
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:51-159:85 -/
+ @[reducible]
+ def Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64 :
+   _root_.Aeneas.Std.core.ops.function.FnMut
+@@ -1843,7 +1853,7 @@ def Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64 :
+ }
+ 
+ /-- [recursive_adapter_closures::sample]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 168:0-177:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 170:0-179:1
+     Visibility: public -/
+ def sample
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1901,7 +1911,7 @@ def sample
+     (_root_.Aeneas.Std.alloc.vec.Vec.toNested v4))
+ 
+ /-- [recursive_adapter_closures::wire_digest]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 179:0-181:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 181:0-183:1
+     Visibility: public -/
+ def wire_digest
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1912,7 +1922,7 @@ def wire_digest
+   _root_.recursive_adapter_closures.Wire.digest w
+ 
+ /-- [recursive_adapter_closures::sample_size]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 183:0-185:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 185:0-187:1
+     Visibility: public -/
+ def sample_size
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1922,7 +1932,7 @@ def sample_size
+   _root_.recursive_adapter_closures.size t
+ 
+ /-- [recursive_adapter_closures::sample_weight]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 187:0-189:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 189:0-191:1
+     Visibility: public -/
+ def sample_weight
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1932,7 +1942,7 @@ def sample_weight
+   _root_.recursive_adapter_closures.weight t
+ 
+ /-- [recursive_adapter_closures::sample_positive]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 191:0-193:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 193:0-195:1
+     Visibility: public -/
+ def sample_positive
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
+@@ -1942,7 +1952,7 @@ def sample_positive
+   _root_.recursive_adapter_closures.positive_leaves t
+ 
+ /-- [recursive_adapter_closures::sample_score]:
+-    Source: 'tests/src/recursive-adapter-closures.rs', lines 195:0-197:1
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 197:0-199:1
+     Visibility: public -/
+ def sample_score
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
+@@ -1952,4 +1962,371 @@ def sample_score
+   let t ← _root_.recursive_adapter_closures.sample a b
+   _root_.recursive_adapter_closures.Scale.score { factor } t
+ 
++mutual
++
++/-- [recursive_adapter_closures::number]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 205:0-214:1
++    Visibility: public -/
++def number
++  (t : _root_.recursive_adapter_closures.Tree) (next : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.recursive_adapter_closures.Wire ×
++    _root_.Aeneas.Std.U32)
++  := do
++  match t with
++  | _root_.recursive_adapter_closures.Tree.Leaf n =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul next 3#u32)
++    let next1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i n)
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.Leaf
++      next1, next1)
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let (output, captured) ←
++                        number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire.call_once
++                          arg arg1
++                      let capture_state := captured
++                      _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.number.closure
++                _root_.recursive_adapter_closures.Tree
++                _root_.recursive_adapter_closures.Wire)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured, captured1) ←
++                  number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire.call_mut
++                    arg arg1
++                let capture_state := captured1 captured
++                _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.number.closure
++          _root_.recursive_adapter_closures.Tree
++          _root_.recursive_adapter_closures.Wire) i next
++    let map_back :=
++      (fun state_back => state_back.f :
++        _root_.Aeneas.Std.core.iter.adapters.map.Map
++        (_root_.Aeneas.Std.core.slice.iter.Iter
++        _root_.recursive_adapter_closures.Tree)
++        _root_.recursive_adapter_closures.number.closure →
++        _root_.recursive_adapter_closures.number.closure)
++    let (model_state1, model_state2) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let (output, captured) ←
++                        number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire.call_once
++                          arg arg1
++                      let capture_state := captured
++                      _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.number.closure
++                _root_.recursive_adapter_closures.Tree
++                _root_.recursive_adapter_closures.Wire)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured, captured1) ←
++                  number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire.call_mut
++                    arg arg1
++                let capture_state := captured1 captured
++                _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.number.closure
++          _root_.recursive_adapter_closures.Tree
++          _root_.recursive_adapter_closures.Wire))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.recursive_adapter_closures.Wire) model_state
++    let c := map_back { model_state with f := model_state2.f }
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.List
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested model_state1), c)
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let (output, captured) ←
++                        number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                          arg arg1
++                      let capture_state := captured
++                      _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.number.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32
++                × _root_.recursive_adapter_closures.Wire))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured, captured1) ←
++                  number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++                    arg arg1
++                let capture_state := captured1 captured
++                _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.number.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire)) i
++        next
++    let map_back :=
++      (fun state_back => state_back.f :
++        _root_.Aeneas.Std.core.iter.adapters.map.Map
++        (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++        _root_.recursive_adapter_closures.Tree))
++        _root_.recursive_adapter_closures.number.closure_1 →
++        _root_.recursive_adapter_closures.number.closure_1)
++    let (model_state1, model_state2) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let (output, captured) ←
++                        number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                          arg arg1
++                      let capture_state := captured
++                      _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.number.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32
++                × _root_.recursive_adapter_closures.Wire))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured, captured1) ←
++                  number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++                    arg arg1
++                let capture_state := captured1 captured
++                _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.number.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire)))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire))
++        model_state
++    let c := map_back { model_state with f := model_state2.f }
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.Map
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested model_state1), c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::number::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), recursive_adapter_closures::Wire> for recursive_adapter_closures::number::closure<0>}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 211:49-211:68 -/
++def number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire.call_once
++  (c : _root_.recursive_adapter_closures.number.closure)
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.recursive_adapter_closures.Wire ×
++    _root_.recursive_adapter_closures.number.closure)
++  := do
++  let (w, c1, call_mut_back) ←
++    number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire.call_mut c t
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (w, c2)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::number::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), recursive_adapter_closures::Wire> for recursive_adapter_closures::number::closure<0>}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 211:49-211:68 -/
++def number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire.call_mut
++  (c : _root_.recursive_adapter_closures.number.closure)
++  (tupled_args : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.recursive_adapter_closures.Wire ×
++    _root_.recursive_adapter_closures.number.closure ×
++    (_root_.recursive_adapter_closures.number.closure →
++    _root_.recursive_adapter_closures.number.closure))
++  := do
++  let (w, i) ← number tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.recursive_adapter_closures.number.closure →
++      _root_.recursive_adapter_closures.number.closure)
++  _root_.Aeneas.Std.Result.ok (w, i, back)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::number::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::number::closure#1<0>}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 212:49-212:87 -/
++def
++  number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++  (c : _root_.recursive_adapter_closures.number.closure_1)
++  (p : (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Wire) ×
++    _root_.recursive_adapter_closures.number.closure_1)
++  := do
++  let (p1, c1, call_mut_back) ←
++    number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++      c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (p1, c2)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::number::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::number::closure#1<0>}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 212:49-212:87 -/
++def
++  number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++  (c : _root_.recursive_adapter_closures.number.closure_1)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Wire) ×
++    _root_.recursive_adapter_closures.number.closure_1 ×
++    (_root_.recursive_adapter_closures.number.closure_1 →
++    _root_.recursive_adapter_closures.number.closure_1))
++  := do
++  let (k, c1) := tupled_args
++  let i ← k + c
++  let (w, i1) ← number c1 c
++  let back :=
++    (fun c2 => c2 : _root_.recursive_adapter_closures.number.closure_1 →
++      _root_.recursive_adapter_closures.number.closure_1)
++  _root_.Aeneas.Std.Result.ok ((i, w), i1, back)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::number::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), recursive_adapter_closures::Wire> for recursive_adapter_closures::number::closure<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 211:49-211:68 -/
++@[reducible]
++def number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.number.closure
++  _root_.recursive_adapter_closures.Tree _root_.recursive_adapter_closures.Wire
++  := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::number::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), recursive_adapter_closures::Wire> for recursive_adapter_closures::number::closure<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 211:49-211:68 -/
++@[reducible]
++def number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.number.closure
++  _root_.recursive_adapter_closures.Tree _root_.recursive_adapter_closures.Wire
++  := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let (output, captured) ←
++              _root_.recursive_adapter_closures.number.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeWire.call_once
++                arg arg1
++            let capture_state := captured
++            _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.number.closure
++      _root_.recursive_adapter_closures.Tree
++      _root_.recursive_adapter_closures.Wire)
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.recursive_adapter_closures.number.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeWire.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::number::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::number::closure#1<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 212:49-212:87 -/
++@[reducible]
++def
++  number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.number.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::number::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::number::closure#1<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 212:49-212:87 -/
++@[reducible]
++def
++  number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.number.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire) := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let (output, captured) ←
++              _root_.recursive_adapter_closures.number.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                arg arg1
++            let capture_state := captured
++            _root_.Aeneas.Std.Result.ok (output, capture_state) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.number.closure_1 (_root_.Aeneas.Std.U32
++      × _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Wire))
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.recursive_adapter_closures.number.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [recursive_adapter_closures::sample_number]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 217:0-221:1
++    Visibility: public -/
++def sample_number
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U32)
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  let (w, next) ← _root_.recursive_adapter_closures.number t start
++  let i ← _root_.recursive_adapter_closures.Wire.digest w
++  _root_.Aeneas.Std.Result.ok (i, next)
++
+ end recursive_adapter_closures
+diff --git a/tests/src/model-constructor-opaque-adapter.lean.out b/tests/src/model-constructor-opaque-adapter.lean.out
+new file mode 100644
+index 0000000..63de389
+--- /dev/null
++++ b/tests/src/model-constructor-opaque-adapter.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/model_constructor_opaque_adapter.llbc
++[[91mError[39m] Model constructor recovery requires one structurally identified source input: the input of type model_constructor_opaque_adapter::prefix_sums::closure<'5> is found at 0 positions of the output of type core::iter::adapters::map::Map<core::slice::iter::Iter<'4, u32>, model_constructor_opaque_adapter::prefix_sums::closure<'5>> (the fields of the opaque types core::iter::adapters::map::Map are unknown: extract their declarations with Charon's --include)
++Source: 'tests/src/model-constructor-opaque-adapter.rs', lines 21:0-23:1
++Compiler source: symbolic/ModelStateABI.ml, line 1037
++
+diff --git a/tests/src/model-constructor-opaque-adapter.rs b/tests/src/model-constructor-opaque-adapter.rs
+new file mode 100644
+index 0000000..d96f7b6
+--- /dev/null
++++ b/tests/src/model-constructor-opaque-adapter.rs
+@@ -0,0 +1,23 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A closure capturing a mutable borrow, moved into `map` and consumed by
++//! `collect`. The value given back to the borrow is the closure's final state,
++//! which the model of the adapter constructor carries in its output: Aeneas
++//! identifies the closure's position in the output from the declaration of
++//! `Map`. Without `--include core::iter::adapters::map::Map`, `Map` is opaque
++//! and the model's field names are not evidence, so the function is rejected
++//! with an error naming the opaque declaration. The production extraction
++//! includes the adapters (`ITERATOR_ADAPTERS` of `verification/extract.py`);
++//! `number` of `recursive-adapter-closures.rs` is the same closure with `Map`
++//! included, inside a recursive function.
++
++pub fn step(x: u32, next: &mut u32) -> u32 {
++    *next = next.wrapping_add(x);
++    *next
++}
++
++pub fn prefix_sums(v: &Vec<u32>, next: &mut u32) -> Vec<u32> {
++    v.iter().map(|x| step(*x, next)).collect()
++}
+diff --git a/tests/src/recursive-adapter-closures.rs b/tests/src/recursive-adapter-closures.rs
+index c7045c9..7236fc2 100644
+--- a/tests/src/recursive-adapter-closures.rs
++++ b/tests/src/recursive-adapter-closures.rs
+@@ -6,7 +6,9 @@
+ //! being defined, either as the function item itself (`map(Tree::to_wire)`) or
+ //! inside a closure (`map(|c| c.to_wire())`), consumed by `collect` into a
+ //! `Vec` or an `Option<Vec<_>>`, or by `sum`; and recursion through a visitor
+-//! which takes the closure by `&mut` (monomorphized per closure). The Lean
++//! which takes the closure by `&mut` (monomorphized per closure), or through a
++//! closure which captures a mutable borrow (`number`: the value given back to
++//! the borrow is the closure's state after `collect`). The Lean
+ //! definitions are `partial_fixpoint`s, whose monotonicity goes through the
+ //! models of the adapters, of their consumers (themselves fixpoints, taking the
+ //! closure's instance as a parameter) and of the monomorphized visitor.
+@@ -196,6 +198,28 @@ pub fn sample_score(a: u32, b: u32, factor: u64) -> u64 {
+     Scale { factor }.score(&sample(a, b))
+ }
+ 
++/// A closure capturing a mutable borrow, moved into `map` and consumed by
++/// `collect`: the counter is given back to the caller by the closure's final
++/// state (identified in the `Map` of the model by the declaration of `Map`,
++/// which is extracted)
++pub fn number(t: &Tree, next: &mut u32) -> Wire {
++    match t {
++        Tree::Leaf(n) => {
++            *next = next.wrapping_mul(3).wrapping_add(*n);
++            Wire::Leaf(*next)
++        }
++        Tree::Node(v) => Wire::List(v.iter().map(|c| number(c, next)).collect()),
++        Tree::Named(v) => Wire::Map(v.iter().map(|(k, c)| (*k + *next, number(c, next))).collect()),
++    }
++}
++
++/// The digest of the numbered tree and the counter given back
++pub fn sample_number(a: u32, b: u32, start: u32) -> (u64, u32) {
++    let mut next = start;
++    let w = number(&sample(a, b), &mut next);
++    (w.digest(), next)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -211,5 +235,16 @@ mod native {
+         assert_eq!(sample_positive(0, 5), None);
+         assert_eq!(sample_score(2, 5, 3), 229015);
+         assert_eq!(sample_score(1, 1, 7), 220527);
++        assert_eq!(sample_number(2, 5, 10), (14083997, 2804));
++        assert_eq!(sample_number(0, 1, 0), (11038465, 46));
++        assert_eq!(sample_number(1, 1, 1000), (291399167, 243136));
++        assert_eq!(sample_number(3, 4, 1000000000), (176439471949168, 2481831851));
++    }
++
++    #[test]
++    #[should_panic]
++    fn number_overflow() {
++        // `*k + *next` overflows below the `Named`
++        sample_number(u32::MAX - 5, 1, 0);
+     }
+ }

@@ -1,0 +1,1208 @@
+# aeneas integration step 131 after cba11f3beb: commit 1895b7323d076ab86ea4aedf28a59cc7afe7a6af
+# first parent 2189539104b9ae42001c5898d14a79832197fea8, merged b5394da326b9e3e85ffea426370e9e91e390d09d
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (joins simplify until eliminating the ended shared loans changes nothing: the eval root's InterpJoin :2074, &'static str fields of loop elements)
+
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index 70f9da9..5cdeb82 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -3183,8 +3183,21 @@ let simplify_dummy_values_useless_abs (config : config)
+       [%ldebug "Not finished:\n" ^ eval_ctx_to_string ctx];
+       comp cc (simplify ctx))
+   in
+-  let ctx, cc = simplify ctx0 in
+-  let ctx = eliminate_ended_shared_loans span ctx in
++  (* Eliminating the ended shared loans drops the shared borrows of their
++     payloads (see [eliminate_ended_shared_loans]), which may leave the loans
++     they borrow from without borrowers: simplify again until neither step
++     changes the context. Otherwise the result depends on the number of calls
++     (e.g., a first call keeps the unborrowed dummy loan of the ['static str]
++     field of a slice element whose shared loan ended, a second call removes
++     it), and a join whose contexts were simplified once does not match the
++     same contexts simplified twice. *)
++  let rec simplify_eliminate ctx0 =
++    let ctx, cc = simplify ctx0 in
++    let ctx' = eliminate_ended_shared_loans span ctx in
++    if Stdlib.compare ctx'.env ctx.env = 0 then (ctx, cc)
++    else comp cc (simplify_eliminate ctx')
++  in
++  let ctx, cc = simplify_eliminate ctx0 in
+   [%ltrace
+     "- ctx0:\n" ^ eval_ctx_to_string ctx0 ^ "\n- ctx1:\n"
+     ^
+diff --git a/src/interp/InterpBorrows.mli b/src/interp/InterpBorrows.mli
+index bf1697e..22e77ea 100644
+--- a/src/interp/InterpBorrows.mli
++++ b/src/interp/InterpBorrows.mli
+@@ -210,6 +210,10 @@ val eliminate_ended_shared_loans : Meta.span -> eval_ctx -> eval_ctx
+     - end the loan projectors which can be ended because the corresponding
+       symbolic value doesn't appear anywhere else in the context We ignore the
+       abstractions which are specified by the set of abstraction ids (we do not
+-      end them, nor their loans). *)
++      end them, nor their loans).
++    - eliminate the ended shared loans (see [eliminate_ended_shared_loans])
++
++    until none of these steps changes the context: simplifying the result
++    again changes nothing. *)
+ val simplify_dummy_values_useless_abs :
+   config -> ?snapshots:bool -> Meta.span -> cm_fun
+diff --git a/tests/lean/LoopStaticStrElementContinue.lean b/tests/lean/LoopStaticStrElementContinue.lean
+new file mode 100644
+index 0000000..f78dddc
+--- /dev/null
++++ b/tests/lean/LoopStaticStrElementContinue.lean
+@@ -0,0 +1 @@
++import LoopStaticStrElementContinue.Checks
+diff --git a/tests/lean/LoopStaticStrElementContinue/Checks.lean b/tests/lean/LoopStaticStrElementContinue/Checks.lean
+new file mode 100644
+index 0000000..a39900a
+--- /dev/null
++++ b/tests/lean/LoopStaticStrElementContinue/Checks.lean
+@@ -0,0 +1,70 @@
++import LoopStaticStrElementContinue.LoopStaticStrElementContinue
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/loop-static-str-element-continue.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.98.0), including the dimensions given back through the mutable
++    borrow of `run_dims`, before and after the caller of `drive` writes through
++    it (adds 100 to the first, appends 7). -/
++
++namespace loop_static_str_element_continue.checks
++
++def u32' (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u32', by simpa using h⟩
++
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def res (r : core.result.Result U32 U32) : Except Nat Nat :=
++  match r with
++  | .Ok n => .ok n.val
++  | .Err e => .error e.val
++
++/-- `run` on the claims of `which` -/
++def runOn (which : U8) (values : List Nat) (h : values.length ≤ Usize.max := by scalar_tac) :
++    Option (Except Nat Nat) :=
++  match (do
++    let c ← claims which
++    run c (vec values h) : Result (core.result.Result U32 U32)) with
++  | ok r => some (res r)
++  | _ => none
++
++/-- `run_dims` on the sites of `which`: the result and the dimensions given
++    back -/
++def runDims (which : U8) (values dims : List Nat)
++    (hv : values.length ≤ Usize.max := by scalar_tac)
++    (hd : dims.length ≤ Usize.max := by scalar_tac) :
++    Option (Except Nat Nat × List Nat) :=
++  match (do
++    let s ← sites which
++    run_dims s (vec values hv) (vec dims hd) :
++      Result (core.result.Result U32 U32 × alloc.vec.Vec U32)) with
++  | ok (r, d) => some (res r, nats d)
++  | _ => none
++
++def driven (r : Result (U32 × alloc.vec.Vec U32 × alloc.vec.Vec U32)) :
++    Option (Nat × List Nat × List Nat) :=
++  match r with
++  | ok (x, b, a) => some (x.val, nats b, nats a)
++  | _ => none
++
++-- native::run_native
++#guard runOn 0#u8 [0, 1] == some (.ok 14)
++#guard runOn 1#u8 [] == some (.ok 13)
++#guard runOn 2#u8 [0] == some (.ok 0)
++#guard runOn 0#u8 [0, 1, 2, 3, 4] == some (.error 1)
++
++-- native::run_dims_native
++#guard runDims 0#u8 [0] [1, 1] == some (.ok 3, [3, 5, 6])
++#guard runDims 1#u8 [0] [1, 1] == some (.error 8, [1, 9])
++#guard runDims 2#u8 [0] [2] == some (.ok 0, [2])
++#guard runDims 0#u8 [0, 1, 2, 3, 4] [1, 1] == some (.error 1, [1, 1])
++
++-- native::drive_native
++#guard driven (drive 0#u8 (u32' 2)) == some (3, [3, 5, 6], [103, 5, 6, 7])
++#guard driven (drive 1#u8 (u32' 0)) == some (1008, [1, 9], [101, 9, 7])
++#guard driven (drive 2#u8 (u32' 3)) == some (0, [1, 1], [101, 1, 7])
++#guard driven (drive 0#u8 (u32' 5)) == some (1001, [1, 1], [101, 1, 7])
++
++end loop_static_str_element_continue.checks
+diff --git a/tests/lean/LoopStaticStrElementContinue/LoopStaticStrElementContinue.lean b/tests/lean/LoopStaticStrElementContinue/LoopStaticStrElementContinue.lean
+new file mode 100644
+index 0000000..2b281c8
+--- /dev/null
++++ b/tests/lean/LoopStaticStrElementContinue/LoopStaticStrElementContinue.lean
+@@ -0,0 +1,847 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_static_str_element_continue]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_static_str_element_continue
++
++/-- [loop_static_str_element_continue::Obs]
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 28:0-32:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Obs where
++| Carrier : _root_.Aeneas.Std.U32 → Obs
++| Computed : _root_.Aeneas.Std.U32 → Obs
++| Realized : Obs
++
++/-- [loop_static_str_element_continue::Claim]
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 34:0-38:1
++    Visibility: public -/
++structure Claim where
++  claim : _root_.Aeneas.Std.U32
++  op : _root_.Aeneas.Std.Str
++  observed : _root_.loop_static_str_element_continue.Obs
++
++/-- [loop_static_str_element_continue::is_active]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 41:0-47:1 -/
++def is_active
++  (claim1 : _root_.loop_static_str_element_continue.Claim)
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Bool
++    _root_.Aeneas.Std.U32)
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len values
++  if i > 4#usize
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      claim1.claim)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      (claim1.claim != 0#u32))
++
++/-- [loop_static_str_element_continue::run]: loop body 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 1:0-69:1
++    Visibility: public -/
++@[rust_loop_body]
++def run_loop.body
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_static_str_element_continue.Claim) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_static_str_element_continue.Claim) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n))
++  | some c =>
++    let r ← _root_.loop_static_str_element_continue.is_active c values
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let (n1, iter1) ←
++        if val
++        then
++          do
++          let joined ←
++            match c.observed with
++            | _root_.loop_static_str_element_continue.Obs.Carrier c1 =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (model_state1,
++                c.observed, c1) : _root_.Sum
++                ((_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim) ×
++                _root_.loop_static_str_element_continue.Obs ×
++                _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim))
++            | _root_.loop_static_str_element_continue.Obs.Computed c1 =>
++              if c1 = 0#u32
++              then
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr model_state1 :
++                  _root_.Sum ((_root_.Aeneas.Std.core.slice.iter.Iter
++                  _root_.loop_static_str_element_continue.Claim) ×
++                  _root_.loop_static_str_element_continue.Obs ×
++                  _root_.Aeneas.Std.U32)
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  _root_.loop_static_str_element_continue.Claim))
++              else
++                do
++                let observed ← c1 + 1#u32
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (model_state1,
++                  c.observed, observed) : _root_.Sum
++                  ((_root_.Aeneas.Std.core.slice.iter.Iter
++                  _root_.loop_static_str_element_continue.Claim) ×
++                  _root_.loop_static_str_element_continue.Obs ×
++                  _root_.Aeneas.Std.U32)
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  _root_.loop_static_str_element_continue.Claim))
++            | _root_.loop_static_str_element_continue.Obs.Realized =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr model_state1 :
++                _root_.Sum ((_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim) ×
++                _root_.loop_static_str_element_continue.Obs ×
++                _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim))
++          let joined1 ←
++            match joined with
++            | _root_.Sum.inl (iter2, _, observed) =>
++              do
++              let n2 ← n + observed
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (n2, iter2) :
++                _root_.Sum (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim)
++                (_root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim)))
++            | _root_.Sum.inr exit =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim)
++                (_root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.loop_static_str_element_continue.Claim)))
++          match joined1 with
++          | _root_.Sum.inl i => _root_.Aeneas.Std.Result.ok (n, i)
++          | _root_.Sum.inr (exit, exit1) =>
++            _root_.Aeneas.Std.Result.ok (exit, exit1)
++        else _root_.Aeneas.Std.Result.ok (n, model_state1)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        n1))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++          _root_.Aeneas.Std.U32) residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++
++/-- [loop_static_str_element_continue::run]: loop 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 1:0-69:1
++    Visibility: public -/
++@[rust_loop]
++def run_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_static_str_element_continue.Claim)
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, n1) => _root_.loop_static_str_element_continue.run_loop.body
++       values iter1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_static_str_element_continue.Claim) × _root_.Aeneas.Std.U32)
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_static_str_element_continue.Claim) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)))
++    (iter, n)
++
++/-- [loop_static_str_element_continue::run]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 50:0-69:1
++    Visibility: public -/
++def run
++  (sites1 : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.loop_static_str_element_continue.Claim)
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter sites1
++  _root_.loop_static_str_element_continue.run_loop model_state values 0#u32
++
++/-- [loop_static_str_element_continue::verdict]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 73:0-83:1 -/
++def verdict
++  (axis : _root_.Aeneas.Std.Usize)
++  (claim1 : _root_.loop_static_str_element_continue.Claim)
++  (observed : _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len dims
++  if axis < i
++  then
++    let (_, index_mut_back) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) dims axis
++    let dims1 := index_mut_back observed
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      dims1)
++  else
++    let i1 ← _root_.Aeneas.Std.core.str.Str.len claim1.op
++    if i1 > 2#usize
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++        claim1.claim, dims)
++    else
++      let dims1 ← _root_.Aeneas.Std.alloc.vec.Vec.push dims observed
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++        dims1)
++
++/-- [loop_static_str_element_continue::run_dims]: loop body 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 1:0-107:1
++    Visibility: public -/
++@[rust_loop_body]
++def run_dims_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Usize ×
++  _root_.loop_static_str_element_continue.Claim))
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Usize ×
++    _root_.loop_static_str_element_continue.Claim)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n, dims))
++  | some p =>
++    let (axis, c) := p
++    let r ← _root_.loop_static_str_element_continue.is_active c values
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let joined ←
++        if val
++        then
++          do
++          let joined1 ←
++            match c.observed with
++            | _root_.loop_static_str_element_continue.Obs.Carrier c1 =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (c.observed,
++                model_state1, c1) : _root_.Sum
++                (_root_.loop_static_str_element_continue.Obs ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)) ×
++                _root_.Aeneas.Std.U32) (_root_.Sum
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)))))
++            | _root_.loop_static_str_element_continue.Obs.Computed c1 =>
++              if c1 = 0#u32
++              then
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inr model_state1)) : _root_.Sum
++                  (_root_.loop_static_str_element_continue.Obs ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)) ×
++                  _root_.Aeneas.Std.U32) (_root_.Sum
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)))))
++              else
++                do
++                let observed ← c1 + 1#u32
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (c.observed,
++                  model_state1, observed) : _root_.Sum
++                  (_root_.loop_static_str_element_continue.Obs ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)) ×
++                  _root_.Aeneas.Std.U32) (_root_.Sum
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)))))
++            | _root_.loop_static_str_element_continue.Obs.Realized =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Sum.inr model_state1)) : _root_.Sum
++                (_root_.loop_static_str_element_continue.Obs ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)) ×
++                _root_.Aeneas.Std.U32) (_root_.Sum
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)))))
++          let joined2 ←
++            match joined1 with
++            | _root_.Sum.inl (o, iter1, observed) =>
++              do
++              let (r1, dims1) ←
++                _root_.loop_static_str_element_continue.verdict axis
++                  { c with observed := o } observed dims
++              let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++              match cf1 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _
++                =>
++                let n1 ← n + 1#u32
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inr (dims1, n1, iter1))) : _root_.Sum
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)) (_root_.Sum
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))))))
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                let r2 ←
++                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                    _root_.Aeneas.Std.U32
++                    (_root_.Aeneas.Std.core.convert.FromSame
++                    _root_.Aeneas.Std.U32) residual
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inl (r2, values, dims1, (), ()))) : _root_.Sum
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim)) (_root_.Sum
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                  ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                  _root_.Aeneas.Std.U32 ×
++                  (_root_.Aeneas.Std.core.slice.iter.Iter
++                  (_root_.Aeneas.Std.Usize ×
++                  _root_.loop_static_str_element_continue.Claim))))))
++            | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++                (exit, exit1, exit2, exit3)) : _root_.Sum
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)) (_root_.Sum
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))))))
++            | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1,
++              exit2, (), ()))) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Sum.inl (exit, exit1, exit2, (), ()))) : _root_.Sum
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)) (_root_.Sum
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))))))
++            | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr exit)) =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl exit : _root_.Sum
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim)) (_root_.Sum
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)
++                ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++                _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                (_root_.Aeneas.Std.Usize ×
++                _root_.loop_static_str_element_continue.Claim))))))
++          match joined2 with
++          | _root_.Sum.inl i =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (dims, n, i) :
++              _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Usize
++              × _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim)))
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++              exit1, exit2, exit3)) : _root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim)))
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++            (), ()))) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
++              exit1, exit2, (), ())) : _root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim)))
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)))
++          | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit, exit1,
++            exit2))) =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (exit, exit1, exit2) :
++              _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Usize
++              × _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++              ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              (_root_.Aeneas.Std.Usize ×
++              _root_.loop_static_str_element_continue.Claim)))
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)))
++        else
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (dims, n, model_state1) :
++            _root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++            × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++            (_root_.Aeneas.Std.Usize ×
++            _root_.loop_static_str_element_continue.Claim))) (_root_.Sum
++            ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++            (_root_.Aeneas.Std.Usize ×
++            _root_.loop_static_str_element_continue.Claim)))
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit)))
++      match joined with
++      | _root_.Sum.inl (dims1, n1, iter1) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++          values, dims1, n1))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit3,
++          exit, exit1, exit2))
++      | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, (), ())) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++          exit1))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++          _root_.Aeneas.Std.U32) residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r1,
++        dims))
++
++/-- [loop_static_str_element_continue::run_dims]: loop 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 1:0-107:1
++    Visibility: public -/
++@[rust_loop]
++def run_dims_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.Usize ×
++  _root_.loop_static_str_element_continue.Claim))
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, values1, dims1, n1) =>
++       _root_.loop_static_str_element_continue.run_dims_loop.body iter1 values1
++       dims1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.Usize ×
++      _root_.loop_static_str_element_continue.Claim)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.Usize ×
++      _root_.loop_static_str_element_continue.Claim)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, values, dims, n)
++
++/-- [loop_static_str_element_continue::run_dims]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 87:0-107:1
++    Visibility: public -/
++def run_dims
++  (sites1 : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.Usize ×
++  _root_.loop_static_str_element_continue.Claim))
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter sites1
++  _root_.loop_static_str_element_continue.run_dims_loop model_state values dims
++    0#u32
++
++/-- [loop_static_str_element_continue::claim]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 109:0-111:1 -/
++def claim
++  (claim1 : _root_.Aeneas.Std.U32) (op : _root_.Aeneas.Std.Str)
++  (observed : _root_.loop_static_str_element_continue.Obs) :
++  _root_.Aeneas.Std.Result _root_.loop_static_str_element_continue.Claim
++  := do
++  _root_.Aeneas.Std.Result.ok { claim := claim1, op, observed }
++
++/-- [loop_static_str_element_continue::sites]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 115:0-131:1
++    Visibility: public -/
++def sites
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.Usize × _root_.loop_static_str_element_continue.Claim))
++  := do
++  if which = 0#u8
++  then
++    let c ←
++      _root_.loop_static_str_element_continue.claim 1#u32
++        (_root_.Aeneas.Std.toStr "==")
++        (_root_.loop_static_str_element_continue.Obs.Carrier 3#u32)
++    let s ←
++      _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++        (_root_.Aeneas.Std.Usize ×
++        _root_.loop_static_str_element_continue.Claim)) (0#usize, c)
++    let c1 ←
++      _root_.loop_static_str_element_continue.claim 2#u32
++        (_root_.Aeneas.Std.toStr "==")
++        (_root_.loop_static_str_element_continue.Obs.Computed 4#u32)
++    let s1 ← _root_.Aeneas.Std.alloc.vec.Vec.push s (1#usize, c1)
++    let c2 ←
++      _root_.loop_static_str_element_continue.claim 3#u32
++        (_root_.Aeneas.Std.toStr "==")
++        _root_.loop_static_str_element_continue.Obs.Realized
++    let s2 ← _root_.Aeneas.Std.alloc.vec.Vec.push s1 (0#usize, c2)
++    let c3 ←
++      _root_.loop_static_str_element_continue.claim 4#u32
++        (_root_.Aeneas.Std.toStr "<=")
++        (_root_.loop_static_str_element_continue.Obs.Carrier 6#u32)
++    let s3 ← _root_.Aeneas.Std.alloc.vec.Vec.push s2 (2#usize, c3)
++    let c4 ←
++      _root_.loop_static_str_element_continue.claim 5#u32
++        (_root_.Aeneas.Std.toStr "==")
++        (_root_.loop_static_str_element_continue.Obs.Computed 0#u32)
++    _root_.Aeneas.Std.alloc.vec.Vec.push s3 (1#usize, c4)
++  else
++    if which = 1#u8
++    then
++      let c ←
++        _root_.loop_static_str_element_continue.claim 0#u32
++          (_root_.Aeneas.Std.toStr "==")
++          (_root_.loop_static_str_element_continue.Obs.Carrier 8#u32)
++      let s ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Aeneas.Std.Usize ×
++          _root_.loop_static_str_element_continue.Claim)) (0#usize, c)
++      let c1 ←
++        _root_.loop_static_str_element_continue.claim 6#u32
++          (_root_.Aeneas.Std.toStr "==")
++          (_root_.loop_static_str_element_continue.Obs.Computed 0#u32)
++      let s1 ← _root_.Aeneas.Std.alloc.vec.Vec.push s (1#usize, c1)
++      let c2 ←
++        _root_.loop_static_str_element_continue.claim 7#u32
++          (_root_.Aeneas.Std.toStr "==")
++          (_root_.loop_static_str_element_continue.Obs.Carrier 9#u32)
++      let s2 ← _root_.Aeneas.Std.alloc.vec.Vec.push s1 (1#usize, c2)
++      let c3 ←
++        _root_.loop_static_str_element_continue.claim 8#u32
++          (_root_.Aeneas.Std.toStr "less")
++          (_root_.loop_static_str_element_continue.Obs.Computed 2#u32)
++      let s3 ← _root_.Aeneas.Std.alloc.vec.Vec.push s2 (5#usize, c3)
++      let c4 ←
++        _root_.loop_static_str_element_continue.claim 9#u32
++          (_root_.Aeneas.Std.toStr "==")
++          (_root_.loop_static_str_element_continue.Obs.Carrier 1#u32)
++      _root_.Aeneas.Std.alloc.vec.Vec.push s3 (0#usize, c4)
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++        (_root_.Aeneas.Std.Usize ×
++        _root_.loop_static_str_element_continue.Claim))
++
++/-- [loop_static_str_element_continue::claims]: loop body 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 136:4-138:5
++    Visibility: public -/
++@[rust_loop_body]
++def claims_loop.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  (_root_.Aeneas.Std.Usize × _root_.loop_static_str_element_continue.Claim))
++  (c : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.loop_static_str_element_continue.Claim) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.Usize
++    × _root_.loop_static_str_element_continue.Claim)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_static_str_element_continue.Claim))
++    (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_static_str_element_continue.Claim))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done c)
++  | some p =>
++    let (_, c1) := p
++    let c2 ← _root_.Aeneas.Std.alloc.vec.Vec.push c c1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, c2))
++
++/-- [loop_static_str_element_continue::claims]: loop 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 136:4-138:5
++    Visibility: public -/
++@[rust_loop]
++def claims_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter
++  (_root_.Aeneas.Std.Usize × _root_.loop_static_str_element_continue.Claim))
++  (c : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.loop_static_str_element_continue.Claim) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_static_str_element_continue.Claim)
++  := do
++  loop
++    (fun (iter1, c1) =>
++       _root_.loop_static_str_element_continue.claims_loop.body iter1 c1 :
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.Usize
++      × _root_.loop_static_str_element_continue.Claim)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_static_str_element_continue.Claim)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.Usize
++      × _root_.loop_static_str_element_continue.Claim)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_static_str_element_continue.Claim))
++      (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_static_str_element_continue.Claim)))
++    (iter, c)
++
++/-- [loop_static_str_element_continue::claims]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 134:0-140:1
++    Visibility: public -/
++def claims
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_static_str_element_continue.Claim)
++  := do
++  let v ← _root_.loop_static_str_element_continue.sites which
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter v
++  _root_.loop_static_str_element_continue.claims_loop model_state
++    (_root_.Aeneas.Std.alloc.vec.Vec.new
++    _root_.loop_static_str_element_continue.Claim)
++
++/-- [loop_static_str_element_continue::code]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 142:0-147:1 -/
++def code
++  (r : _root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok n => _root_.Aeneas.Std.Result.ok n
++  | _root_.Aeneas.Std.core.result.Result.Err e => 1000#u32 + e
++
++/-- [loop_static_str_element_continue::drive]: loop body 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 156:4-159:5
++    Visibility: public -/
++@[rust_loop_body]
++def drive_loop.body
++  (nvalues : _root_.Aeneas.Std.U32)
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  if i < nvalues
++  then
++    let values1 ← _root_.Aeneas.Std.alloc.vec.Vec.push values i
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (values1,
++      i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done values)
++
++/-- [loop_static_str_element_continue::drive]: loop 0:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 156:4-159:5
++    Visibility: public -/
++@[rust_loop]
++def drive_loop
++  (nvalues : _root_.Aeneas.Std.U32)
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (values1, i1) =>
++       _root_.loop_static_str_element_continue.drive_loop.body nvalues values1
++       i1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (values, i)
++
++/-- [loop_static_str_element_continue::drive]:
++    Source: 'tests/src/loop-static-str-element-continue.rs', lines 153:0-167:1
++    Visibility: public -/
++def drive
++  (which : _root_.Aeneas.Std.U8) (nvalues : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let values ←
++    _root_.loop_static_str_element_continue.drive_loop nvalues
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#u32
++  let a := Array.repeat 2#usize 1#u32
++  let s ← lift (Std.Array.to_slice a)
++  let dims := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let v ← _root_.loop_static_str_element_continue.sites which
++  let (r, dims1) ←
++    _root_.loop_static_str_element_continue.run_dims v values dims
++  let before ←
++    _root_.Aeneas.Std.alloc.vec.CloneVec.clone core.clone.CloneU32 dims1
++  let (i, index_mut_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) dims1 0#usize
++  let i1 ← i + 100#u32
++  let d := index_mut_back i1
++  let dims2 ← _root_.Aeneas.Std.alloc.vec.Vec.push d 7#u32
++  let i2 ← _root_.loop_static_str_element_continue.code r
++  _root_.Aeneas.Std.Result.ok (i2, before, dims2)
++
++end loop_static_str_element_continue
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index e468d0d..09be321 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -142,6 +142,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopReturnOptionMutArg
+ @[default_target] lean_lib LoopSharedComponents
++@[default_target] lean_lib LoopStaticStrElementContinue
+ @[default_target] lean_lib LoopUntouchedSharedReborrows
+ @[default_target] lean_lib JoinDistinctOwnedRegion
+ @[default_target] lean_lib JoinFrozenInputLoan
+diff --git a/tests/src/loop-static-str-element-continue.rs b/tests/src/loop-static-str-element-continue.rs
+new file mode 100644
+index 0000000..923720d
+--- /dev/null
++++ b/tests/src/loop-static-str-element-continue.rs
+@@ -0,0 +1,204 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopStaticStrElementContinue
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop over the shared elements of a vector whose items hold a `&'static
++//! str` (the loop over the local guard sites of a node in
++//! `chelis_ir::eval::eval_tensor_internal_with_result_claims`), where a call
++//! taking the element (`is_active(claim, ..)?`) can `continue` before a match on
++//! a field of the element whose arms `continue` too.
++//!
++//! Reading the element expands its `op` field into a shared borrow of a `str`
++//! whose loan sits in a dummy value. Where the shared loan of the element has
++//! already ended, its released payload is either transferred to the
++//! abstraction of the loop's region (the `str` borrow stays alive) or dropped by
++//! [eliminate_ended_shared_loans] (the `str` loan is left without borrowers).
++//! The simplification of the contexts of a join dropped the payloads after its
++//! fixed point, so the unborrowed `str` loan stayed in the contexts joined at
++//! the `continue`s, while matching those contexts with the join simplified
++//! them again and removed it: "Could not match the contexts". The
++//! simplification now iterates until eliminating the ended shared loans
++//! changes nothing.
++//!
++//! LoopStaticStrElementContinue/Checks.lean compares the model with the native
++//! results asserted in the native test module, including the dimensions given
++//! back through the mutable borrow, before and after the caller writes through
++//! it.
++
++pub enum Obs {
++    Carrier(u32),
++    Computed(u32),
++    Realized,
++}
++
++pub struct Claim {
++    pub claim: u32,
++    pub op: &'static str,
++    pub observed: Obs,
++}
++
++/// Err once there are more than 4 values; active when the claim is not 0
++fn is_active(claim: &Claim, values: &Vec<u32>) -> Result<bool, u32> {
++    if values.len() > 4 {
++        Err(claim.claim)
++    } else {
++        Ok(claim.claim != 0)
++    }
++}
++
++/// The sum of the observed extents of the active sites
++pub fn run(sites: &Vec<Claim>, values: &Vec<u32>) -> Result<u32, u32> {
++    let mut n = 0u32;
++    for claim in sites {
++        if !is_active(claim, values)? {
++            continue;
++        }
++        let observed = match &claim.observed {
++            Obs::Carrier(c) => *c,
++            Obs::Computed(c) => {
++                if *c == 0 {
++                    continue;
++                }
++                *c + 1
++            }
++            Obs::Realized => continue,
++        };
++        n += observed;
++    }
++    Ok(n)
++}
++
++/// Record the observed extent at `axis`, or append it; a claim whose
++/// operator is longer than 2 rejects an axis past the dimensions
++fn verdict(axis: usize, claim: &Claim, observed: u32, dims: &mut Vec<u32>) -> Result<(), u32> {
++    if axis < dims.len() {
++        dims[axis] = observed;
++        Ok(())
++    } else if claim.op.len() > 2 {
++        Err(claim.claim)
++    } else {
++        dims.push(observed);
++        Ok(())
++    }
++}
++
++/// The node loop's shape: pairs `(axis, claim)`, and a verdict which writes
++/// through `dims`; the number of verdicts
++pub fn run_dims(sites: &Vec<(usize, Claim)>, values: &Vec<u32>, dims: &mut Vec<u32>) -> Result<u32, u32> {
++    let mut n = 0u32;
++    for (axis, claim) in sites {
++        if !is_active(claim, values)? {
++            continue;
++        }
++        let observed = match &claim.observed {
++            Obs::Carrier(c) => *c,
++            Obs::Computed(c) => {
++                if *c == 0 {
++                    continue;
++                }
++                *c + 1
++            }
++            Obs::Realized => continue,
++        };
++        verdict(*axis, claim, observed, dims)?;
++        n += 1;
++    }
++    Ok(n)
++}
++
++fn claim(claim: u32, op: &'static str, observed: Obs) -> Claim {
++    Claim { claim, op, observed }
++}
++
++/// 0: every observation kind; 1: an inactive site, a zero computed extent,
++/// then a strict claim past the dimensions; 2: no site
++pub fn sites(which: u8) -> Vec<(usize, Claim)> {
++    let mut s = Vec::new();
++    if which == 0 {
++        s.push((0, claim(1, "==", Obs::Carrier(3))));
++        s.push((1, claim(2, "==", Obs::Computed(4))));
++        s.push((0, claim(3, "==", Obs::Realized)));
++        s.push((2, claim(4, "<=", Obs::Carrier(6))));
++        s.push((1, claim(5, "==", Obs::Computed(0))));
++    } else if which == 1 {
++        s.push((0, claim(0, "==", Obs::Carrier(8))));
++        s.push((1, claim(6, "==", Obs::Computed(0))));
++        s.push((1, claim(7, "==", Obs::Carrier(9))));
++        s.push((5, claim(8, "less", Obs::Computed(2))));
++        s.push((0, claim(9, "==", Obs::Carrier(1))));
++    }
++    s
++}
++
++/// The claims of [sites]
++pub fn claims(which: u8) -> Vec<Claim> {
++    let mut c = Vec::new();
++    for (_, cl) in sites(which) {
++        c.push(cl);
++    }
++    c
++}
++
++fn code(r: Result<u32, u32>) -> u32 {
++    match r {
++        Ok(n) => n,
++        Err(e) => 1000 + e,
++    }
++}
++
++/// Checks the sites of `which` against `nvalues` values with the dimensions
++/// `[1, 1]`, then writes through the borrow of the dimensions given back (adds
++/// 100 to the first, appends 7): the result, and the dimensions before and
++/// after the write
++pub fn drive(which: u8, nvalues: u32) -> (u32, Vec<u32>, Vec<u32>) {
++    let mut values = Vec::new();
++    let mut i = 0;
++    while i < nvalues {
++        values.push(i);
++        i += 1;
++    }
++    let mut dims = vec![1, 1];
++    let r = run_dims(&sites(which), &values, &mut dims);
++    let before = dims.clone();
++    let d = &mut dims;
++    d[0] += 100;
++    d.push(7);
++    (code(r), before, dims)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn run_native() {
++        assert_eq!(run(&claims(0), &vec![0, 1]), Ok(3 + 5 + 6));
++        assert_eq!(run(&claims(1), &vec![]), Ok(9 + 3 + 1));
++        assert_eq!(run(&claims(2), &vec![0]), Ok(0));
++        assert_eq!(run(&claims(0), &vec![0, 1, 2, 3, 4]), Err(1));
++    }
++
++    #[test]
++    fn run_dims_native() {
++        let mut dims = vec![1, 1];
++        assert_eq!(run_dims(&sites(0), &vec![0], &mut dims), Ok(3));
++        assert_eq!(dims, vec![3, 5, 6]);
++        let mut dims = vec![1, 1];
++        assert_eq!(run_dims(&sites(1), &vec![0], &mut dims), Err(8));
++        assert_eq!(dims, vec![1, 9]);
++        let mut dims = vec![2];
++        assert_eq!(run_dims(&sites(2), &vec![0], &mut dims), Ok(0));
++        assert_eq!(dims, vec![2]);
++        let mut dims = vec![1, 1];
++        assert_eq!(run_dims(&sites(0), &vec![0, 1, 2, 3, 4], &mut dims), Err(1));
++        assert_eq!(dims, vec![1, 1]);
++    }
++
++    #[test]
++    fn drive_native() {
++        assert_eq!(drive(0, 2), (3, vec![3, 5, 6], vec![103, 5, 6, 7]));
++        assert_eq!(drive(1, 0), (1008, vec![1, 9], vec![101, 9, 7]));
++        assert_eq!(drive(2, 3), (0, vec![1, 1], vec![101, 1, 7]));
++        assert_eq!(drive(0, 5), (1001, vec![1, 1], vec![101, 1, 7]));
++    }
++}

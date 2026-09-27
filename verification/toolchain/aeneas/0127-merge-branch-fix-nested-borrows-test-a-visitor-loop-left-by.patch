@@ -1,0 +1,647 @@
+# aeneas integration step 127 after cba11f3beb: commit 716c40c7d1da99d35a90851b304beb8b35685b49
+# first parent 189ce2a6d96dad5c18fdf03c525f1ef014536f58, merged b9cfb5709ff93d94e106a327d4fdf1a0da6a829a
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (test: a visitor loop left by break while the closures live)
+
+diff --git a/tests/lean/NestedBorrowsClosureVisitorLoop/Checks.lean b/tests/lean/NestedBorrowsClosureVisitorLoop/Checks.lean
+index d28252c..dc93aad 100644
+--- a/tests/lean/NestedBorrowsClosureVisitorLoop/Checks.lean
++++ b/tests/lean/NestedBorrowsClosureVisitorLoop/Checks.lean
+@@ -26,6 +26,12 @@ def runVisitLoopIndex (a : Nat) (ea : Bool) (b : Nat) (eb : Bool) (c : Nat)
+   | ok (calls, acc', flag) => some (calls.val, acc'.val, flag)
+   | _ => none
+ 
++def runVisitLoopUntil (a : Nat) (ea : Bool) (b : Nat) (eb : Bool) (c : Nat)
++    (ec : Bool) (acc : Nat) : Option (Nat × Nat × Bool) :=
++  match run_visit_loop_until (u a) ea (u b) eb (u c) ec (u acc) with
++  | ok (calls, acc', flag) => some (calls.val, acc'.val, flag)
++  | _ => none
++
+ #guard runVisitLoop 1 true 2 true 3 true 10 == some (3, 18, false)
+ #guard runVisitLoop 5 true 2 false 9 true 10 == some (2, 26, true)
+ #guard runVisitLoop 5 false 9 false 1 false 7 == some (0, 9, false)
+@@ -37,4 +43,11 @@ def runVisitLoopIndex (a : Nat) (ea : Bool) (b : Nat) (eb : Bool) (c : Nat)
+ #guard runVisitLoopIndex max true 4 true 0 false 0 == some (2, 103, false)
+ #guard runVisitLoopIndex 1 false 2 false 3 false 0 == some (0, 100, true)
+ 
++#guard runVisitLoopUntil 1 true 2 true 3 true 10 == some (3, 116, true)
++#guard runVisitLoopUntil 5 true 2 false 9 true 10 == some (1, 115, false)
++#guard runVisitLoopUntil 5 false 9 true 1 true 7 == some (0, 107, true)
++#guard runVisitLoopUntil max true 4 true 0 false 0 == some (2, 103, false)
++#guard runVisitLoopUntil 7 true 1 true 2 false 3 == some (2, 111, false)
++#guard runVisitLoopUntil 2 true 2 true 5 true max == some (3, 108, false)
++
+ end nested_borrows_closure_visitor_loop.checks
+diff --git a/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean b/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
+index e3e237b..44f66d4 100644
+--- a/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
++++ b/tests/lean/NestedBorrowsClosureVisitorLoop/NestedBorrowsClosureVisitorLoop.lean
+@@ -31,6 +31,16 @@ def visit_loop_index.closure_1 :=
+   _root_.Aeneas.Std.U32 ×
+   _root_.nested_borrows_closure_visitor_loop.visit_loop_index.closure
+ 
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::closure]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 81:20-84:5 -/
++def visit_loop_until.closure := _root_.Aeneas.Std.U32 × _root_.Bool
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::closure#1]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:20-89:5 -/
++def visit_loop_until.closure_1 :=
++  _root_.Aeneas.Std.U32 ×
++  _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++
+ /-- [nested_borrows_closure_visitor_loop::Expr]
+     Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 19:0-21:1
+     Visibility: public -/
+@@ -1001,8 +1011,467 @@ def visit_loop_index.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple :
+         ((capture_state2.#1).#0, (capture_state3.#1).#1)))
+ }
+ 
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 81:20-84:5 -/
++def
++  visit_loop_until.closure.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (tupled_args : _root_.nested_borrows_closure_visitor_loop.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure))
++  := do
++  let (i, b) := c
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i tupled_args.n)
++  let back :=
++    (fun c1 => let (i2, _) := c1
++               (i2, b) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  let back1 :=
++    (fun c1 => let (_, b1) := c1
++               (i, b1) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  _root_.Aeneas.Std.Result.ok ((), (i1, _root_.Aeneas.Std.Bool.bitor b
++    (tupled_args.n > 3#u32)), back, back1)
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure#1<0, 1, 2, 3>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:20-89:5 -/
++def
++  visit_loop_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  (tupled_args : _root_.nested_borrows_closure_visitor_loop.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1))))
++  := do
++  let (i, c1) := c
++  let (i1, b) := c1
++  let i2 ← i + 1#u32
++  let (_, c2, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++      c1 tupled_args
++  let (i3, b1) := c2
++  let back :=
++    (fun c3 => let (i4, _) := c3
++               (i4, c1) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  let back1 :=
++    (fun c3 => let (_, c4) := c3
++               (i, c4) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  let back2 :=
++    (fun c3 =>
++       let (_, c4) := c3
++       ((i2, c4),
++         fun c5 =>
++           let (_, (i4, _)) := c5
++           let c6 := call_mut_back (i4, b1)
++           let (i5, _) := c6
++           (i, (i5, b))) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)))
++  let back3 :=
++    (fun c3 =>
++       let (_, c4) := c3
++       ((i2, c4),
++         fun c5 =>
++           let (_, (_, b2)) := c5
++           let c6 := call_mut_back1 (i3, b2)
++           let (_, b3) := c6
++           (i, (i1, b3))) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)))
++  _root_.Aeneas.Std.Result.ok ((), (i2, c2), back, back1, back2, back3)
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until]: loop body 0:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 1:0-95:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_loop_until_loop.body
++  (back : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  _root_.Aeneas.Std.U32)))
++  (back1 : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  → (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  _root_.Bool))) (back2 : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (back3 : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  → _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (i : _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_visitor_loop.MetaValue) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Aeneas.Std.U32))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Bool))) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure) ×
++    _root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_borrows_closure_visitor_loop.MetaValue))
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    _root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Aeneas.Std.U32))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Bool))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)))
++  := do
++  let (i1, b) := c
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (c, back2
++      i,
++      fun c1 =>
++        let (back4, back5) := back c1
++        (back4, fun c2 => let (i2, _) := c2
++                          back5 (i2, b)),
++      fun c1 =>
++        let (back4, back5) := back1 c1
++        (back4, fun c2 => let (_, b1) := c2
++                          back5 (i1, b1)), back3))
++  | some value1 =>
++    match value1 with
++    | _root_.nested_borrows_closure_visitor_loop.MetaValue.Type e =>
++      let (_, visit, call_mut_back, call_mut_back1, call_mut_back2,
++        call_mut_back3) ←
++        _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++          (i, c) e
++      let (i2, c1) := visit
++      let (i3, b1) := c1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (fun c2 =>
++           let (back4, back5) := back c2
++           let (c3, back6) := call_mut_back2 (i2, back4)
++           (c3.#1,
++             fun c4 =>
++               let (i4, _) := c4
++               let (_, (i5, _)) := back6 (i2, (i4, b1))
++               back5 (i5, b)),
++        fun c2 =>
++          let (back4, back5) := back1 c2
++          let (c3, back6) := call_mut_back3 (i2, back4)
++          (c3.#1,
++            fun c4 =>
++              let (_, b2) := c4
++              let (_, (_, b3)) := back6 (i2, (i3, b2))
++              back5 (i1, b3)),
++        fun i4 => let (i5, _) := call_mut_back (i4, c1)
++                  back2 i5,
++        fun c2 => let (_, c3) := call_mut_back1 (i2, c2)
++                  back3 c3, i2, c1, model_state1))
++    | _root_.nested_borrows_closure_visitor_loop.MetaValue.Other _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (c, back2
++        i,
++        fun c1 =>
++          let (back4, back5) := back c1
++          (back4, fun c2 => let (i2, _) := c2
++                            back5 (i2, b)),
++        fun c1 =>
++          let (back4, back5) := back1 c1
++          (back4, fun c2 => let (_, b1) := c2
++                            back5 (i1, b1)), back3))
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until]: loop 0:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 1:0-95:5
++    Visibility: public -/
++@[rust_loop]
++def visit_loop_until_loop
++  (back : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  _root_.Aeneas.Std.U32)))
++  (back1 : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  → (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++  (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++  _root_.Bool))) (back2 : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (back3 : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  → _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (i : _root_.Aeneas.Std.U32)
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_visitor_loop.MetaValue) :
++  _root_.Aeneas.Std.Result
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    _root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Aeneas.Std.U32))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.Bool))) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure))
++  := do
++  loop
++    (fun (back4, back5, back6, back7, i1, c1, iter1) =>
++       _root_.nested_borrows_closure_visitor_loop.visit_loop_until_loop.body
++       back4 back5 back6 back7 i1 c1 iter1 :
++      ((_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Aeneas.Std.U32))) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Bool))) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure) ×
++      _root_.Aeneas.Std.U32 ×
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_visitor_loop.MetaValue)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Aeneas.Std.U32))) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Bool))) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure) ×
++      _root_.Aeneas.Std.U32 ×
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_visitor_loop.MetaValue))
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      _root_.Aeneas.Std.U32 ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Aeneas.Std.U32))) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.Bool))) ×
++      (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure))))
++    (back, back1, back2, back3, i, c, iter)
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 80:0-97:1
++    Visibility: public -/
++def visit_loop_until
++  (m : _root_.nested_borrows_closure_visitor_loop.Meta)
++  (acc : _root_.Aeneas.Std.U32) (flag : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref m.values
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let (c, back, back1, back2, back3) ←
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until_loop
++      (fun c1 => (c1, fun c2 => let (i, _) := c2
++                                i))
++      (fun c1 => (c1, fun c2 => let (_, b) := c2
++                                b)) (fun i => i) (fun c1 => c1) 0#u32 (acc,
++      flag) iter
++  let (i, b) := c
++  let c1 := back3 c
++  let ((i1, _), back4) := back1 c1
++  let acc1 := back4 (i1, b)
++  let ((_, b1), back5) := back2 c1
++  let flag1 := back5 (i, b1)
++  _root_.Aeneas.Std.Result.ok (back, acc1, flag1)
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 81:20-84:5 -/
++def
++  visit_loop_until.closure.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple.call_once
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  (e : _root_.nested_borrows_closure_visitor_loop.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure)
++  := do
++  let (i, b) := c
++  let (_, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++      c e
++  let c2 := call_mut_back c1
++  let (i1, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, b1) := c3
++  _root_.Aeneas.Std.Result.ok ((), (i1, b), (i, b1))
++
++/-- Trait implementation: [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 81:20-84:5 -/
++@[reducible]
++def visit_loop_until.closure.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  _root_.nested_borrows_closure_visitor_loop.Expr _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 81:20-84:5 -/
++@[reducible]
++def visit_loop_until.closure.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure
++  _root_.nested_borrows_closure_visitor_loop.Expr _root_.Unit := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure#1<0, 1, 2, 3>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:20-89:5 -/
++def
++  visit_loop_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple.call_once
++  (c : _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  (e : _root_.nested_borrows_closure_visitor_loop.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1) ×
++    (_root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1))
++  := do
++  let (i, c1) := c
++  let (i1, b) := c1
++  let (_, c2, call_mut_back, call_mut_back1, call_mut_back2, call_mut_back3) ←
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++      c e
++  let (i2, c3) := c2
++  let (i3, b1) := c3
++  let c4 := call_mut_back c2
++  let (i4, _) := c4
++  let c5 := call_mut_back1 c2
++  let (_, c6) := c5
++  let back :=
++    (fun c7 =>
++       let (_, c8) := c5
++       let (_, c9) := c7
++       let (c10, back1) := call_mut_back2 (i, (c9.#0, c8.#1))
++       let (_, (i5, _)) := c10
++       let c11 := back1 (i2, (i5, b1))
++       let (_, (i6, _)) := c11
++       (i, (i6, b)) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  let back1 :=
++    (fun c7 =>
++       let (_, c8) := c5
++       let (_, c9) := c7
++       let (c10, back2) := call_mut_back3 (i, (c8.#0, c9.#1))
++       let (_, (_, b2)) := c10
++       let c11 := back2 (i2, (i3, b2))
++       let (_, (_, b3)) := c11
++       (i, (i1, b3)) :
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1 →
++      _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1)
++  _root_.Aeneas.Std.Result.ok ((), (i4, c1), (i, c6), back, back1)
++
++/-- Trait implementation: [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure#1<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:20-89:5 -/
++@[reducible]
++def visit_loop_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1
++  _root_.nested_borrows_closure_visitor_loop.Expr _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let capture_state2 := captured2 arg
++      let capture_state3 := captured3 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        ((capture_state2.#1).#0, (capture_state3.#1).#1)))
++}
++
++/-- Trait implementation: [nested_borrows_closure_visitor_loop::visit_loop_until::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_visitor_loop::Expr)), ()> for nested_borrows_closure_visitor_loop::visit_loop_until::closure#1<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:20-89:5 -/
++@[reducible]
++def visit_loop_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1
++  _root_.nested_borrows_closure_visitor_loop.Expr _root_.Unit := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprTuple
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3, captured4) ←
++        _root_.nested_borrows_closure_visitor_loop.visit_loop_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprTuple.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let (c, back) := captured3 captured
++      let capture_state2 := back c
++      let (c1, back1) := captured4 captured
++      let capture_state3 := back1 c1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        ((capture_state2.#1).#0, (capture_state3.#1).#1)))
++}
++
+ /-- [nested_borrows_closure_visitor_loop::value]:
+-    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 77:0-83:1 -/
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 99:0-105:1 -/
+ def value
+   (n : _root_.Aeneas.Std.U32) (expr : _root_.Bool) :
+   _root_.Aeneas.Std.Result _root_.nested_borrows_closure_visitor_loop.MetaValue
+@@ -1016,7 +1485,7 @@ def value
+       (_root_.nested_borrows_closure_visitor_loop.MetaValue.Other n)
+ 
+ /-- [nested_borrows_closure_visitor_loop::sample]:
+-    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 86:0-92:1 -/
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 108:0-114:1 -/
+ def sample
+   (a : _root_.Aeneas.Std.U32) (ea : _root_.Bool) (b : _root_.Aeneas.Std.U32)
+   (eb : _root_.Bool) (c : _root_.Aeneas.Std.U32) (ec : _root_.Bool) :
+@@ -1033,7 +1502,7 @@ def sample
+   _root_.Aeneas.Std.Result.ok { values := values2 }
+ 
+ /-- [nested_borrows_closure_visitor_loop::run_visit_loop]:
+-    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 95:0-101:1
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 117:0-123:1
+     Visibility: public -/
+ def run_visit_loop
+   (a : _root_.Aeneas.Std.U32) (ea : _root_.Bool) (b : _root_.Aeneas.Std.U32)
+@@ -1046,7 +1515,7 @@ def run_visit_loop
+   _root_.nested_borrows_closure_visitor_loop.visit_loop m acc false
+ 
+ /-- [nested_borrows_closure_visitor_loop::run_visit_loop_index]:
+-    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 105:0-118:1
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 127:0-140:1
+     Visibility: public -/
+ def run_visit_loop_index
+   (a : _root_.Aeneas.Std.U32) (ea : _root_.Bool) (b : _root_.Aeneas.Std.U32)
+@@ -1062,4 +1531,21 @@ def run_visit_loop_index
+     lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc_ref 100#u32)
+   _root_.Aeneas.Std.Result.ok (calls, acc_ref1, ¬ flag_ref)
+ 
++/-- [nested_borrows_closure_visitor_loop::run_visit_loop_until]:
++    Source: 'tests/src/nested-borrows-closure-visitor-loop.rs', lines 145:0-158:1
++    Visibility: public -/
++def run_visit_loop_until
++  (a : _root_.Aeneas.Std.U32) (ea : _root_.Bool) (b : _root_.Aeneas.Std.U32)
++  (eb : _root_.Bool) (c : _root_.Aeneas.Std.U32) (ec : _root_.Bool)
++  (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Bool)
++  := do
++  let m ← _root_.nested_borrows_closure_visitor_loop.sample a ea b eb c ec
++  let (calls, acc_ref, flag_ref) ←
++    _root_.nested_borrows_closure_visitor_loop.visit_loop_until m acc false
++  let acc_ref1 ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc_ref 100#u32)
++  _root_.Aeneas.Std.Result.ok (calls, acc_ref1, ¬ flag_ref)
++
+ end nested_borrows_closure_visitor_loop
+diff --git a/tests/src/nested-borrows-closure-visitor-loop.rs b/tests/src/nested-borrows-closure-visitor-loop.rs
+index 7df0480..1e51bbb 100644
+--- a/tests/src/nested-borrows-closure-visitor-loop.rs
++++ b/tests/src/nested-borrows-closure-visitor-loop.rs
+@@ -74,6 +74,28 @@ pub fn visit_loop_index(m: &Meta, acc: &mut u32, flag: &mut bool) -> u32 {
+     calls
+ }
+ 
++/// The same loop, left at the first value which is not an expression while
++/// both closures are live (the context at the `break` is joined with the fixed
++/// point of the loop); the caller writes through both borrows after the call
++pub fn visit_loop_until(m: &Meta, acc: &mut u32, flag: &mut bool) -> u32 {
++    let mut count = |e: &Expr| {
++        *acc = acc.wrapping_add(e.n);
++        *flag |= e.n > 3;
++    };
++    let mut calls = 0u32;
++    let mut visit = |e: &Expr| {
++        calls += 1;
++        count(e);
++    };
++    for value in m.values.iter() {
++        match value {
++            MetaValue::Type(e) => visit(e),
++            MetaValue::Other(_) => break,
++        }
++    }
++    calls
++}
++
+ fn value(n: u32, expr: bool) -> MetaValue {
+     if expr {
+         MetaValue::Type(Expr { n })
+@@ -117,6 +139,24 @@ pub fn run_visit_loop_index(a: u32, ea: bool, b: u32, eb: bool, c: u32, ec: bool
+     (calls, acc, flag)
+ }
+ 
++/// `(calls, acc, flag)` after visiting `[a, b, c]` up to the first value which
++/// is not an expression, then adding 100 to `acc` and negating `flag` through
++/// the borrows given back by the call
++pub fn run_visit_loop_until(a: u32, ea: bool, b: u32, eb: bool, c: u32, ec: bool, acc: u32) -> (u32, u32, bool) {
++    let m = sample(a, ea, b, eb, c, ec);
++    let mut acc = acc;
++    let mut flag = false;
++    let calls = {
++        let acc_ref = &mut acc;
++        let flag_ref = &mut flag;
++        let calls = visit_loop_until(&m, acc_ref, flag_ref);
++        *acc_ref = acc_ref.wrapping_add(100);
++        *flag_ref = !*flag_ref;
++        calls
++    };
++    (calls, acc, flag)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -137,4 +177,14 @@ mod native {
+         assert_eq!(run_visit_loop_index(u32::MAX, true, 4, true, 0, false, 0), (2, 103, false));
+         assert_eq!(run_visit_loop_index(1, false, 2, false, 3, false, 0), (0, 100, true));
+     }
++
++    #[test]
++    fn run_visit_loop_until_native() {
++        assert_eq!(run_visit_loop_until(1, true, 2, true, 3, true, 10), (3, 116, true));
++        assert_eq!(run_visit_loop_until(5, true, 2, false, 9, true, 10), (1, 115, false));
++        assert_eq!(run_visit_loop_until(5, false, 9, true, 1, true, 7), (0, 107, true));
++        assert_eq!(run_visit_loop_until(u32::MAX, true, 4, true, 0, false, 0), (2, 103, false));
++        assert_eq!(run_visit_loop_until(7, true, 1, true, 2, false, 3), (2, 111, false));
++        assert_eq!(run_visit_loop_until(2, true, 2, true, 5, true, u32::MAX), (3, 108, false));
++    }
+ }

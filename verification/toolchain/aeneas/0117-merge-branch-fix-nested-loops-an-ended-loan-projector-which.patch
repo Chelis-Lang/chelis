@@ -1,0 +1,904 @@
+# aeneas integration step 117 after cba11f3beb: commit 1f468287a73dc5bfd3a77db375331e1c21dde380
+# first parent 0162f13bab8190d6fdab460c5f5b9e4626ffc966, merged eb55a01f3100363f9e330fe49a8bdb8e95c5863e
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (an ended loan projector which received values is an input of the merged continuation: the round-20 regression on grad_dag_checked)
+
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index bf56e03..13147c2 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -2062,8 +2062,15 @@ let bind_outputs_from_output_input (span : Meta.span) (ctx : eval_ctx)
+             bound := bound';
+             e
+         | EEndedProjLoans { proj = _; consumed; borrows } ->
++            (* Ending the intersecting borrow projectors gave values back to
++               this loan projector (the [consumed] values, e.g., when a call
++               abstraction whose borrow projector reborrowed the loans ended
++               before a join). Like the given-back value of an ended mutable
++               loan, they are the input of the continuation and must remain
++               intact. *)
+             [%cassert] span
+-              (consumed = [] && borrows = [])
++              (List.for_all (fun (_, child) -> child = EEmpty) consumed
++              && borrows = [])
+               (describe_symbolic_binding ());
+             input
+         | EProjBorrows _ | EEndedProjBorrows _ ->
+diff --git a/tests/lean/LoopReturnOptionMutArg.lean b/tests/lean/LoopReturnOptionMutArg.lean
+new file mode 100644
+index 0000000..5e28b72
+--- /dev/null
++++ b/tests/lean/LoopReturnOptionMutArg.lean
+@@ -0,0 +1 @@
++import LoopReturnOptionMutArg.Checks
+diff --git a/tests/lean/LoopReturnOptionMutArg/Checks.lean b/tests/lean/LoopReturnOptionMutArg/Checks.lean
+new file mode 100644
+index 0000000..ba89115
+--- /dev/null
++++ b/tests/lean/LoopReturnOptionMutArg/Checks.lean
+@@ -0,0 +1,75 @@
++import LoopReturnOptionMutArg.LoopReturnOptionMutArg
++
++/-! Evaluate the model of `tests/src/loop-return-option-mut-arg.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.98.0), including the values given back to the `Option<&mut _>`
++    and `&mut` arguments: written by the callee after the loop, unchanged
++    after an early return. -/
++
++namespace loop_return_option_mut_arg.checks
++open Aeneas Aeneas.Std Result
++
++def u64' (n : Nat) : U64 := ⟨BitVec.ofNat _ n⟩
++
++def slice {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice α := ⟨xs, h⟩
++
++def num (r : Result (U32 × Option U64)) : Option (Nat × Option Nat) :=
++  match r with
++  | ok (x, m) => some (x.val, m.map (·.val))
++  | _ => none
++
++def metaR (r : Result (U32 × Option Meta)) : Option (Nat × Option Nat) :=
++  match r with
++  | ok (x, m) => some (x.val, m.map (·.n.val))
++  | _ => none
++
++def nodesR (r : Result (core.result.Result Usize U32 × Option Meta)) :
++    Option (Sum Nat Nat × Option Nat) :=
++  match r with
++  | ok (.Ok n, m) => some (.inl n.val, m.map (·.n.val))
++  | ok (.Err e, m) => some (.inr e.val, m.map (·.n.val))
++  | _ => none
++
++def plain (r : Result (U32 × U64)) : Option (Nat × Nat) :=
++  match r with
++  | ok (x, m) => some (x.val, m.val)
++  | _ => none
++
++def meta' (n : Nat) : Meta := { n := u64' n }
++
++def nodes : Slice Node :=
++  slice [{ op := .B, id := 0#usize }, { op := .A, id := 1#usize }, { op := .C, id := 2#usize }]
++
++-- native::check_while_native
++#guard num (check_while 2#usize (some (u64' 7))) == some (2, some 0)
++#guard num (check_while 5#usize (some (u64' 7))) == some (1, some 7)
++#guard num (check_while 3#usize (some (u64' 7))) == some (2, some 0)
++#guard num (check_while 2#usize none) == some (0, none)
++#guard num (check_while 4#usize none) == some (1, none)
++
++-- native::check_for_native
++#guard metaR (check_for (slice [false, false]) (some (meta' 9))) == some (0, some 0)
++#guard metaR (check_for (slice [false, true]) (some (meta' 9))) == some (1, some 9)
++#guard metaR (check_for (slice []) none) == some (0, none)
++
++-- native::check_nodes_native
++#guard nodesR (check_nodes nodes (slice [true, false, false]) (some (meta' 4)))
++  == some (.inl 3, some 5)
++#guard nodesR (check_nodes nodes (slice [true, true, false]) (some (meta' 4)))
++  == some (.inr 1, some 4)
++#guard nodesR (check_nodes nodes (slice [false, false, true]) (some (meta' 4)))
++  == some (.inr 3, some 4)
++#guard nodesR (check_nodes (slice [{ op := .B, id := 0#usize }]) (slice [true])
++    (some (meta' 18446744073709551615))) == some (.inl 1, some 0)
++#guard nodesR (check_nodes nodes (slice [false, false, false]) none) == some (.inl 3, none)
++
++-- native::controls_native
++#guard num (check_no_return 5#usize (some (u64' 7))) == some (2, some 0)
++#guard num (check_no_return 5#usize none) == some (0, none)
++#guard num (check_inline 2#usize (some (u64' 7))) == some (2, some 0)
++#guard num (check_inline 5#usize (some (u64' 7))) == some (1, some 7)
++#guard num (check_inline 2#usize none) == some (0, none)
++#guard plain (check_plain 2#usize (u64' 7)) == some (2, 0)
++#guard plain (check_plain 5#usize (u64' 7)) == some (1, 7)
++
++end loop_return_option_mut_arg.checks
+diff --git a/tests/lean/LoopReturnOptionMutArg/LoopReturnOptionMutArg.lean b/tests/lean/LoopReturnOptionMutArg/LoopReturnOptionMutArg.lean
+new file mode 100644
+index 0000000..497f10b
+--- /dev/null
++++ b/tests/lean/LoopReturnOptionMutArg/LoopReturnOptionMutArg.lean
+@@ -0,0 +1,558 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_return_option_mut_arg]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_return_option_mut_arg
++
++/-- [loop_return_option_mut_arg::Meta]
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 22:0-24:1
++    Visibility: public -/
++structure Meta where
++  n : _root_.Aeneas.Std.U64
++
++/-- [loop_return_option_mut_arg::Op]
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 26:0-30:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Op where
++| A : Op
++| B : Op
++| C : Op
++
++/-- [loop_return_option_mut_arg::Node]
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 32:0-35:1
++    Visibility: public -/
++structure Node where
++  op : _root_.loop_return_option_mut_arg.Op
++  id : _root_.Aeneas.Std.Usize
++
++/-- [loop_return_option_mut_arg::finish]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 37:0-43:1 -/
++def finish
++  (m : _root_.Option _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  match m with
++  | none => _root_.Aeneas.Std.Result.ok (0#u32, none)
++  | some _ => _root_.Aeneas.Std.Result.ok (2#u32, some 0#u64)
++
++/-- [loop_return_option_mut_arg::check_while]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 48:4-55:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_while_loop.body
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × (_root_.Option _root_.Aeneas.Std.U64) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64)))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i = 3#usize
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (1#u32, m) : _root_.Sum
++          (_root_.Aeneas.Std.U32 × (_root_.Option _root_.Aeneas.Std.U64))
++          (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64))))
++      else
++        do
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (n, m, i1))
++          : _root_.Sum (_root_.Aeneas.Std.U32 × (_root_.Option
++          _root_.Aeneas.Std.U64)) (_root_.Sum (_root_.Aeneas.Std.Usize ×
++          (_root_.Option _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64))))
++    else
++      do
++      let (i1, o) ← _root_.loop_return_option_mut_arg.finish m
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (i1, o) : _root_.Sum
++        (_root_.Aeneas.Std.U32 × (_root_.Option _root_.Aeneas.Std.U64))
++        (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Option
++        _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++        (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++        _root_.Aeneas.Std.U64))))
++  match joined with
++  | _root_.Sum.inl (i1, back) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i1, back))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit1))
++
++/-- [loop_return_option_mut_arg::check_while]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 48:4-55:1
++    Visibility: public -/
++@[rust_loop]
++def check_while_loop
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  loop
++    (fun (n1, m1, i1) =>
++       _root_.loop_return_option_mut_arg.check_while_loop.body n1 m1 i1 :
++      (_root_.Aeneas.Std.Usize × (_root_.Option _root_.Aeneas.Std.U64) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize × (_root_.Option
++      _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32
++      × (_root_.Option _root_.Aeneas.Std.U64))))
++    (n, m, i)
++
++/-- [loop_return_option_mut_arg::check_while]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 46:0-55:1
++    Visibility: public -/
++@[reducible]
++def check_while
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  _root_.loop_return_option_mut_arg.check_while_loop n m 0#usize
++
++/-- [loop_return_option_mut_arg::finish_meta]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 57:0-62:1 -/
++def finish_meta
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  match m with
++  | none => _root_.Aeneas.Std.Result.ok (0#u32, none)
++  | some _ => _root_.Aeneas.Std.Result.ok (0#u32, some { n := 0#u64 })
++
++/-- [loop_return_option_mut_arg::check_for]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 66:4-72:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_for_loop.body
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool) (_root_.Aeneas.Std.U32
++    × (_root_.Option _root_.loop_return_option_mut_arg.Meta)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    let (i, o) ← _root_.loop_return_option_mut_arg.finish_meta m
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, o))
++  | some x =>
++    if x
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (1#u32,
++        m))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++
++/-- [loop_return_option_mut_arg::check_for]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 66:4-72:1
++    Visibility: public -/
++@[rust_loop]
++def check_for_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  loop
++    (fun iter1 => _root_.loop_return_option_mut_arg.check_for_loop.body m iter1
++      : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool)
++      (_root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.loop_return_option_mut_arg.Meta))))
++    iter
++
++/-- [loop_return_option_mut_arg::check_for]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 65:0-72:1
++    Visibility: public -/
++def check_for
++  (xs : _root_.Aeneas.Std.Slice _root_.Bool)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter xs
++  _root_.loop_return_option_mut_arg.check_for_loop model_state m
++
++/-- [loop_return_option_mut_arg::finish_nodes]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 74:0-79:1 -/
++def finish_nodes
++  (nodes : _root_.Aeneas.Std.Slice _root_.loop_return_option_mut_arg.Node)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  let back ←
++    match m with
++    | none => _root_.Aeneas.Std.Result.ok none
++    | some m1 =>
++      do
++      let i ← lift (core.num.U64.wrapping_add m1.n 1#u64)
++      _root_.Aeneas.Std.Result.ok (some ({ n := i } :
++        _root_.loop_return_option_mut_arg.Meta))
++  let i := _root_.Aeneas.Std.Slice.len nodes
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i, back)
++
++/-- [loop_return_option_mut_arg::check_nodes]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 1:0-95:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_nodes_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_return_option_mut_arg.Node)
++  (nodes : _root_.Aeneas.Std.Slice _root_.loop_return_option_mut_arg.Node)
++  (live : _root_.Aeneas.Std.Slice _root_.Bool)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++    _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++    _root_.Bool) × (_root_.Option _root_.loop_return_option_mut_arg.Meta))
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++    _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    let (r, o) ← _root_.loop_return_option_mut_arg.finish_nodes nodes m
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, o))
++  | some node =>
++    let b ← Slice.index_usize live node.id
++    if b
++    then
++      let joined ←
++        match node.op with
++        | _root_.loop_return_option_mut_arg.Op.A =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 1#u32 : _root_.Sum
++            _root_.Aeneas.Std.U32 (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_return_option_mut_arg.Node))
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × _root_.Unit × _root_.Unit × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta))))
++        | _root_.loop_return_option_mut_arg.Op.B =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (nodes,
++            live, m, model_state1)) : _root_.Sum _root_.Aeneas.Std.U32
++            (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_return_option_mut_arg.Node))
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × _root_.Unit × _root_.Unit × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta))))
++        | _root_.loop_return_option_mut_arg.Op.C =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 3#u32 : _root_.Sum
++            _root_.Aeneas.Std.U32 (_root_.Sum ((_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_return_option_mut_arg.Node))
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × _root_.Unit × _root_.Unit × (_root_.Option
++            _root_.loop_return_option_mut_arg.Meta))))
++      match joined with
++      | _root_.Sum.inl i =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Aeneas.Std.core.result.Result.Err i, m))
++      | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit3,
++          exit, exit1, exit2))
++      | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, (), (), exit1)) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++          exit1))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, nodes, live, m))
++
++/-- [loop_return_option_mut_arg::check_nodes]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 1:0-95:1
++    Visibility: public -/
++@[rust_loop]
++def check_nodes_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_return_option_mut_arg.Node)
++  (nodes : _root_.Aeneas.Std.Slice _root_.loop_return_option_mut_arg.Node)
++  (live : _root_.Aeneas.Std.Slice _root_.Bool)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  loop
++    (fun (iter1, nodes1, live1, m1) =>
++       _root_.loop_return_option_mut_arg.check_nodes_loop.body iter1 nodes1
++       live1 m1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++      _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++      _root_.Bool) × (_root_.Option _root_.loop_return_option_mut_arg.Meta))
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++      _root_.loop_return_option_mut_arg.Node) × (_root_.Aeneas.Std.Slice
++      _root_.Bool) × (_root_.Option _root_.loop_return_option_mut_arg.Meta))
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.Usize
++      _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.loop_return_option_mut_arg.Meta))))
++    (iter, nodes, live, m)
++
++/-- [loop_return_option_mut_arg::check_nodes]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 83:0-95:1
++    Visibility: public -/
++def check_nodes
++  (nodes : _root_.Aeneas.Std.Slice _root_.loop_return_option_mut_arg.Node)
++  (live : _root_.Aeneas.Std.Slice _root_.Bool)
++  (m : _root_.Option _root_.loop_return_option_mut_arg.Meta) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_return_option_mut_arg.Meta))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter nodes
++  _root_.loop_return_option_mut_arg.check_nodes_loop model_state nodes live m
++
++/-- [loop_return_option_mut_arg::check_no_return]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 100:4-102:5
++    Visibility: public -/
++@[rust_loop_body]
++def check_no_return_loop.body
++  (n : _root_.Aeneas.Std.Usize) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Unit)
++  := do
++  if i < n
++  then
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i1)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done ())
++
++/-- [loop_return_option_mut_arg::check_no_return]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 100:4-102:5
++    Visibility: public -/
++@[rust_loop]
++def check_no_return_loop
++  (n : _root_.Aeneas.Std.Usize) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  loop
++    (fun i1 => _root_.loop_return_option_mut_arg.check_no_return_loop.body n i1
++      : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize _root_.Unit))
++    i
++
++/-- [loop_return_option_mut_arg::check_no_return]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 98:0-104:1
++    Visibility: public -/
++def check_no_return
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  _root_.loop_return_option_mut_arg.check_no_return_loop n 0#usize
++  _root_.loop_return_option_mut_arg.finish m
++
++/-- [loop_return_option_mut_arg::check_inline]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 1:0-120:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_inline_loop.body
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × (_root_.Option _root_.Aeneas.Std.U64) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64)))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i = 3#usize
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (1#u32, m) : _root_.Sum
++          (_root_.Aeneas.Std.U32 × (_root_.Option _root_.Aeneas.Std.U64))
++          (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64))))
++      else
++        do
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (n, m, i1))
++          : _root_.Sum (_root_.Aeneas.Std.U32 × (_root_.Option
++          _root_.Aeneas.Std.U64)) (_root_.Sum (_root_.Aeneas.Std.Usize ×
++          (_root_.Option _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++          _root_.Aeneas.Std.U64))))
++    else
++      do
++      let (i1, back) ←
++        match m with
++        | none => _root_.Aeneas.Std.Result.ok (0#u32, none)
++        | some _ => _root_.Aeneas.Std.Result.ok (2#u32, some 0#u64)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (i1, back) : _root_.Sum
++        (_root_.Aeneas.Std.U32 × (_root_.Option _root_.Aeneas.Std.U64))
++        (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Option
++        _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize)
++        (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × (_root_.Option
++        _root_.Aeneas.Std.U64))))
++  match joined with
++  | _root_.Sum.inl (i1, back) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i1, back))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit1))
++
++/-- [loop_return_option_mut_arg::check_inline]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 1:0-120:1
++    Visibility: public -/
++@[rust_loop]
++def check_inline_loop
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  loop
++    (fun (n1, m1, i1) =>
++       _root_.loop_return_option_mut_arg.check_inline_loop.body n1 m1 i1 :
++      (_root_.Aeneas.Std.Usize × (_root_.Option _root_.Aeneas.Std.U64) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize × (_root_.Option
++      _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32
++      × (_root_.Option _root_.Aeneas.Std.U64))))
++    (n, m, i)
++
++/-- [loop_return_option_mut_arg::check_inline]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 107:0-120:1
++    Visibility: public -/
++@[reducible]
++def check_inline
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Option _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U64))
++  := do
++  _root_.loop_return_option_mut_arg.check_inline_loop n m 0#usize
++
++/-- [loop_return_option_mut_arg::finish_plain]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 122:0-125:1 -/
++def finish_plain
++  (m : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)
++  := do
++  _root_.Aeneas.Std.Result.ok (2#u32, 0#u64)
++
++/-- [loop_return_option_mut_arg::check_plain]: loop body 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 130:4-137:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_plain_loop.body
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64 ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i = 3#usize
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (1#u32, m) : _root_.Sum
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64) (_root_.Sum
++          (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64 ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64)))
++      else
++        do
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (n, m, i1))
++          : _root_.Sum (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)
++          (_root_.Sum (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64 ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64)))
++    else
++      do
++      let (i1, m1) ← _root_.loop_return_option_mut_arg.finish_plain m
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (i1, m1) : _root_.Sum
++        (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64) (_root_.Sum
++        (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64 ×
++        _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32 ×
++        _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64)))
++  match joined with
++  | _root_.Sum.inl (i1, i2) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i1, i2))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit1))
++
++/-- [loop_return_option_mut_arg::check_plain]: loop 0:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 130:4-137:1
++    Visibility: public -/
++@[rust_loop]
++def check_plain_loop
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)
++  := do
++  loop
++    (fun (n1, m1, i1) =>
++       _root_.loop_return_option_mut_arg.check_plain_loop.body n1 m1 i1 :
++      (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U64 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.U32
++      × _root_.Aeneas.Std.U64)))
++    (n, m, i)
++
++/-- [loop_return_option_mut_arg::check_plain]:
++    Source: 'tests/src/loop-return-option-mut-arg.rs', lines 128:0-137:1
++    Visibility: public -/
++@[reducible]
++def check_plain
++  (n : _root_.Aeneas.Std.Usize) (m : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)
++  := do
++  _root_.loop_return_option_mut_arg.check_plain_loop n m 0#usize
++
++end loop_return_option_mut_arg
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 1092b61..b359af3 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -138,6 +138,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopOptionNestedBorrow
+ @[default_target] lean_lib LoopReleasedStaticPayload
+ @[default_target] lean_lib LoopReturnedVecIter
++@[default_target] lean_lib LoopReturnOptionMutArg
+ @[default_target] lean_lib LoopSharedComponents
+ @[default_target] lean_lib JoinDistinctOwnedRegion
+ @[default_target] lean_lib JoinFrozenInputLoan
+diff --git a/tests/src/loop-return-option-mut-arg.rs b/tests/src/loop-return-option-mut-arg.rs
+new file mode 100644
+index 0000000..1582d6c
+--- /dev/null
++++ b/tests/src/loop-return-option-mut-arg.rs
+@@ -0,0 +1,207 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopReturnOptionMutArg
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop which can return early, then an `Option<&mut _>` argument, live
++//! across the loop, moved into a callee which writes through it (the shape of
++//! `chelis_ir::grad::grad_dag_checked_impl`, whose `execution:
++//! Option<&mut ExecutionMetadata>` is passed to `grad_dag_result` after the
++//! loop over the forward nodes). At the join of the two returns, the call
++//! abstraction of the callee has ended (it only kept the reborrow of the
++//! argument alive) and gave its value back to the loan projector of the
++//! reborrow introduced at the loop entrance, which is merged with the other
++//! return's reborrow: the value given back by the callee is the input of the
++//! merged continuation, like the given-back value of an ended mutable loan.
++//! The controls (no early return, the option written inline after the loop, a
++//! plain `&mut`) have the same results.
++//!
++//! LoopReturnOptionMutArg/Checks.lean compares the model, including the values
++//! given back to the arguments, with the native results asserted in the
++//! native test module.
++
++pub struct Meta {
++    pub n: u64,
++}
++
++pub enum Op {
++    A,
++    B,
++    C,
++}
++
++pub struct Node {
++    pub op: Op,
++    pub id: usize,
++}
++
++fn finish(m: Option<&mut u64>) -> u32 {
++    if let Some(m) = m {
++        *m = 0;
++        return 2;
++    }
++    0
++}
++
++/// A `while` loop with an early return, then the option given to `finish`
++pub fn check_while(n: usize, m: Option<&mut u64>) -> u32 {
++    let mut i = 0;
++    while i < n {
++        if i == 3 {
++            return 1;
++        }
++        i += 1;
++    }
++    finish(m)
++}
++
++fn finish_meta(m: Option<&mut Meta>) -> u32 {
++    if let Some(m) = m {
++        m.n = 0;
++    }
++    0
++}
++
++/// A `for` loop over a slice with an early return
++pub fn check_for(xs: &[bool], m: Option<&mut Meta>) -> u32 {
++    for x in xs {
++        if *x {
++            return 1;
++        }
++    }
++    finish_meta(m)
++}
++
++fn finish_nodes(nodes: &[Node], m: Option<&mut Meta>) -> Result<usize, u32> {
++    if let Some(m) = m {
++        m.n = m.n.wrapping_add(1);
++    }
++    Ok(nodes.len())
++}
++
++/// A `continue` and two early returns in a match (closer to the production
++/// function)
++pub fn check_nodes(nodes: &[Node], live: &[bool], m: Option<&mut Meta>) -> Result<usize, u32> {
++    for node in nodes {
++        if !live[node.id] {
++            continue;
++        }
++        match node.op {
++            Op::A => return Err(1),
++            Op::B => {}
++            Op::C => return Err(3),
++        }
++    }
++    finish_nodes(nodes, m)
++}
++
++/// Control: no early return
++pub fn check_no_return(n: usize, m: Option<&mut u64>) -> u32 {
++    let mut i = 0;
++    while i < n {
++        i += 1;
++    }
++    finish(m)
++}
++
++/// Control: the option is written after the loop instead of given to a callee
++pub fn check_inline(n: usize, m: Option<&mut u64>) -> u32 {
++    let mut i = 0;
++    while i < n {
++        if i == 3 {
++            return 1;
++        }
++        i += 1;
++    }
++    if let Some(m) = m {
++        *m = 0;
++        return 2;
++    }
++    0
++}
++
++fn finish_plain(m: &mut u64) -> u32 {
++    *m = 0;
++    2
++}
++
++/// Control: a plain mutable borrow given to the callee
++pub fn check_plain(n: usize, m: &mut u64) -> u32 {
++    let mut i = 0;
++    while i < n {
++        if i == 3 {
++            return 1;
++        }
++        i += 1;
++    }
++    finish_plain(m)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn check_while_native() {
++        let mut m = 7u64;
++        assert_eq!(check_while(2, Some(&mut m)), 2);
++        assert_eq!(m, 0);
++        let mut m = 7u64;
++        assert_eq!(check_while(5, Some(&mut m)), 1);
++        assert_eq!(m, 7);
++        let mut m = 7u64;
++        assert_eq!(check_while(3, Some(&mut m)), 2);
++        assert_eq!(m, 0);
++        assert_eq!(check_while(2, None), 0);
++        assert_eq!(check_while(4, None), 1);
++    }
++
++    #[test]
++    fn check_for_native() {
++        let mut m = Meta { n: 9 };
++        assert_eq!(check_for(&[false, false], Some(&mut m)), 0);
++        assert_eq!(m.n, 0);
++        let mut m = Meta { n: 9 };
++        assert_eq!(check_for(&[false, true], Some(&mut m)), 1);
++        assert_eq!(m.n, 9);
++        assert_eq!(check_for(&[], None), 0);
++    }
++
++    #[test]
++    fn check_nodes_native() {
++        let nodes = [Node { op: Op::B, id: 0 }, Node { op: Op::A, id: 1 }, Node { op: Op::C, id: 2 }];
++        let mut m = Meta { n: 4 };
++        assert_eq!(check_nodes(&nodes, &[true, false, false], Some(&mut m)), Ok(3));
++        assert_eq!(m.n, 5);
++        let mut m = Meta { n: 4 };
++        assert_eq!(check_nodes(&nodes, &[true, true, false], Some(&mut m)), Err(1));
++        assert_eq!(m.n, 4);
++        let mut m = Meta { n: 4 };
++        assert_eq!(check_nodes(&nodes, &[false, false, true], Some(&mut m)), Err(3));
++        assert_eq!(m.n, 4);
++        let mut m = Meta { n: u64::MAX };
++        assert_eq!(check_nodes(&nodes[..1], &[true], Some(&mut m)), Ok(1));
++        assert_eq!(m.n, 0);
++        assert_eq!(check_nodes(&nodes, &[false, false, false], None), Ok(3));
++    }
++
++    #[test]
++    fn controls_native() {
++        let mut m = 7u64;
++        assert_eq!(check_no_return(5, Some(&mut m)), 2);
++        assert_eq!(m, 0);
++        assert_eq!(check_no_return(5, None), 0);
++        let mut m = 7u64;
++        assert_eq!(check_inline(2, Some(&mut m)), 2);
++        assert_eq!(m, 0);
++        let mut m = 7u64;
++        assert_eq!(check_inline(5, Some(&mut m)), 1);
++        assert_eq!(m, 7);
++        assert_eq!(check_inline(2, None), 0);
++        let mut m = 7u64;
++        assert_eq!(check_plain(2, &mut m), 2);
++        assert_eq!(m, 0);
++        let mut m = 7u64;
++        assert_eq!(check_plain(5, &mut m), 1);
++        assert_eq!(m, 7);
++    }
++}

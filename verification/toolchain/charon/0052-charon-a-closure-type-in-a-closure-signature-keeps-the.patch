@@ -1,0 +1,812 @@
+# charon integration step 52 after 546078ea5d: commit b947e944415f15a3a726b96a093e5560fb73ff0f
+# first parent e0a15d7a06a89c3609e19e565de7ac3b841c0c13
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: a closure type in a closure signature keeps the lifetimes of its captures
+#
+# A closure returning a closure it creates (`chelis_ir::adt::lookup_variant_terminal_unique`:
+# `flat_map(|(adt, def)| def.variants.iter().filter_map(move |v| ..))`) has the type of the inner
+# closure in its signature. hax gives the regions of that type (the regions of the inner closure's
+# captured types) fresh signature regions, and the borrowck facts relate them to the other signature
+# regions. But translate_closure_type_ref only put the capture regions of a closure type into its
+# upvar region arguments while translating the captured types of the closure item being translated;
+# elsewhere they stayed erased: `-> FilterMap<Iter<'_4, Variant>, closure<'_, '_>>`, which Aeneas
+# rejects ("Expected a runtime region type").
+#
+# The capture regions of another closure's type are now used wherever rustc gives them a region;
+# erased ones (in bodies, where lifetimes are unified later) leave the argument as before. The
+# signature above is now `-> FilterMap<Iter<'_4, Variant>, closure<'_8, '_9>>` with `'_1 : '_8`
+# (`ctor`, captured by the outer closure) and `'_2 : '_9` (the argument `adt`).
+#
+# Test: ui/closure-returns-closure (new; `closure<'_, '_>` before).
+# Other UI outputs: simple/nested-closure and simple/nested-closure-lifetime, lifetimes only (19 lines):
+# closure types returned by closures (and by `foo` in nested-closure-lifetime, `closure<'_, T>` becomes
+# `closure<'a, T>`) get their signature lifetimes instead of `'_`; the return local of the generated
+# `call_mut` shims takes that signature lifetime instead of a fresh body lifetime, which renumbers
+# the other body lifetimes.
+
+diff --git a/src/bin/charon-driver/translate/translate_closures.rs b/src/bin/charon-driver/translate/translate_closures.rs
+index 4d156f6..1b7441a 100644
+--- a/src/bin/charon-driver/translate/translate_closures.rs
++++ b/src/bin/charon-driver/translate/translate_closures.rs
+@@ -145,23 +145,27 @@ impl ItemTransCtx<'_, '_> {
+         closure: &hax::ClosureArgs,
+     ) -> Result<TypeDeclRef, Error> {
+         let mut tref: TypeDeclRef = self.translate_item(span, &closure.item, TransItemSourceKind::Type)?;
+-        if self.outermost_binder().materialize_capture_tags
+-            && &closure.item.def_id != self.item_src.def_id()
+-        {
++        if &closure.item.def_id != self.item_src.def_id() {
+             self.instantiate_captured_closure_regions(span, closure, &mut tref)?;
+         }
+         Ok(tref)
+     }
+ 
+-    /// A closure captured by the closure item being translated has a type whose upvar region
+-    /// arguments `translate_item` leaves erased. Each of them corresponds to one of the captured
+-    /// closure's capture occurrences, which rustc also lists in the captured type (its tupled
+-    /// upvars, here carrying the capture tags of the closure being translated). Use those regions
+-    /// so that the relations borrowck proved about them carry over. This requires the occurrences
+-    /// of this instance to line up with those of the definition: instantiating a type parameter
+-    /// with a type that has lifetimes inserts occurrences, and changes their number. Otherwise,
+-    /// or for upvar regions without rustc occurrence, the argument stays erased: a fresh region
+-    /// without relations (dropping relations is conservative; inventing them is not).
++    /// The type of another closure has upvar region arguments that `translate_item` leaves
++    /// erased. Each of them corresponds to one of that closure's capture occurrences, which rustc
++    /// also lists in the closure type (its tupled upvars). Where rustc gives the occurrence a
++    /// region, use it so that the relations borrowck proved about it carry over:
++    /// - in the captured types of the closure item being translated, the occurrences carry the
++    ///   capture tags of that closure;
++    /// - in a closure signature, e.g. of a closure returning a closure it creates, they are
++    ///   signature regions, like the other regions of the signature.
++    ///
++    /// In bodies they are erased (the body lifetimes are unified later). This requires the
++    /// occurrences of this instance to line up with those of the definition: instantiating a type
++    /// parameter with a type that has lifetimes inserts occurrences, and changes their number.
++    /// Otherwise, or for erased occurrences and upvar regions without rustc occurrence, the
++    /// argument stays as `translate_item` made it: a fresh region without relations (dropping
++    /// relations is conservative; inventing them is not).
+     fn instantiate_captured_closure_regions(
+         &mut self,
+         span: Span,
+@@ -185,6 +189,9 @@ impl ItemTransCtx<'_, '_> {
+         for (param, occurrence) in params.occurrences.iter().enumerate() {
+             if let Some(occurrence) = occurrence {
+                 let region = &closure.capture_regions[*occurrence as usize];
++                if matches!(region.kind, hax::RegionKind::ReErased) {
++                    continue;
++                }
+                 let region = self.translate_region(span, region)?;
+                 tref.generics.regions[RegionId::new(start + param)] = region;
+             }
+diff --git a/tests/ui/closure-returns-closure.out b/tests/ui/closure-returns-closure.out
+new file mode 100644
+index 0000000..9e78820
+--- /dev/null
++++ b/tests/ui/closure-returns-closure.out
+@@ -0,0 +1,544 @@
++# Final LLBC before serialization:
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T> {
++  None,
++  Some(T),
++}
++
++// Full name: core::bool::{bool}::then_some
++pub fn then_some<T>(_1: bool, _2: T) -> Option<T>
++= <opaque>
++
++// Full name: core::convert::Infallible
++pub enum Infallible {
++}
++
++// Full name: core::iter::adapters::filter_map::FilterMap
++pub opaque type FilterMap<I, F>
++
++// Full name: core::ops::function::FnOnce
++#[lang_item("fn_once")]
++pub trait FnOnce<Self, Args, Self_Output>
++{
++    fn call_once = core::ops::function::FnOnce::call_once<Self, Args, Self_Output>[Self]
++    vtable: core::ops::function::FnOnce::{vtable}<Args, Self_Output>
++}
++
++// Full name: core::ops::function::FnMut
++#[lang_item("fn_mut")]
++pub trait FnMut<Self, Args, Self_Clause0_Output>
++{
++    parent_clause0 : [@TraitClause0]: FnOnce<Self, Args, Self_Clause0_Output>
++    fn call_mut<'_0_1> = core::ops::function::FnMut::call_mut<'_0_1, Self, Args, Self_Clause0_Output>[Self]
++    vtable: core::ops::function::FnMut::{vtable}<Args, Self_Clause0_Output>
++}
++
++// Full name: core::iter::adapters::flatten::FlatMap
++pub opaque type FlatMap<I, U, F, Clause0_Item, Clause0_IntoIter>
++
++// Full name: core::iter::traits::collect::IntoIterator
++#[lang_item("IntoIterator")]
++pub trait IntoIterator<Self, Self_Item, Self_IntoIter>
++{
++    parent_clause0 : [@TraitClause0]: Iterator<Self_IntoIter, Self_Item>
++    fn into_iter = core::iter::traits::collect::IntoIterator::into_iter<Self, Self_Item, Self_IntoIter>[Self]
++    vtable: core::iter::traits::collect::IntoIterator::{vtable}<Self_Item, Self_IntoIter>
++}
++
++// Full name: core::iter::traits::iterator::Iterator
++#[lang_item("iterator")]
++pub trait Iterator<Self, Self_Item>
++{
++    fn next<'_0_1> = core::iter::traits::iterator::Iterator::next<'_0_1, Self, Self_Item>[Self]
++    fn filter_map<B, F, [@TraitClause0_1]: FnMut<F, (Self_Item,), Option<B>>> = core::iter::traits::iterator::Iterator::filter_map<Self, B, F, Self_Item>[Self, @TraitClause0_1]
++    fn flat_map<U, F, Clause0_Item, Clause0_IntoIter, [@TraitClause0_1]: IntoIterator<U, Clause0_Item, Clause0_IntoIter>, [@TraitClause1_1]: FnMut<F, (Self_Item,), U>> = core::iter::traits::iterator::Iterator::flat_map<Self, U, F, Self_Item, Clause0_Item, Clause0_IntoIter>[Self, @TraitClause0_1, @TraitClause1_1]
++    vtable: core::iter::traits::iterator::Iterator::{vtable}<Self_Item>
++}
++
++// Full name: core::iter::adapters::filter_map::{impl Iterator<B> for FilterMap<I, F>}::next
++pub fn {impl Iterator<B> for FilterMap<I, F>}::next<'_0, B, I, F, Clause0_Item>(_1: &'_0 mut FilterMap<I, F>) -> Option<B>
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++    [@TraitClause1]: FnMut<F, (Clause0_Item,), Option<B>>,
++= <opaque>
++
++// Full name: core::iter::adapters::filter_map::{impl Iterator<B> for FilterMap<I, F>}::flat_map
++pub fn {impl Iterator<B> for FilterMap<I, F>}::flat_map<B, I, F, U, F, Clause0_Item, Clause2_Item, Clause2_IntoIter>(_1: FilterMap<I, F>, _2: F) -> FlatMap<FilterMap<I, F>, U, F, Clause2_Item, Clause2_IntoIter>
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++    [@TraitClause1]: FnMut<F, (Clause0_Item,), Option<B>>,
++    [@TraitClause2]: IntoIterator<U, Clause2_Item, Clause2_IntoIter>,
++    [@TraitClause3]: FnMut<F, (B,), U>,
++= <opaque>
++
++// Full name: core::iter::adapters::filter_map::{impl Iterator<B> for FilterMap<I, F>}::filter_map
++pub fn {impl Iterator<B> for FilterMap<I, F>}::filter_map<B, I, F, B, F, Clause0_Item>(_1: FilterMap<I, F>, _2: F) -> FilterMap<FilterMap<I, F>, F>
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++    [@TraitClause1]: FnMut<F, (Clause0_Item,), Option<B>>,
++    [@TraitClause2]: FnMut<F, (B,), Option<B>>,
++= <opaque>
++
++// Full name: core::iter::adapters::filter_map::{impl Iterator<B> for FilterMap<I, F>}
++impl<B, I, F, Clause0_Item> Iterator<B> for FilterMap<I, F>
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++    [@TraitClause1]: FnMut<F, (Clause0_Item,), Option<B>>,
++{
++    fn next<'_0_1> = {impl Iterator<B> for FilterMap<I, F>}::next<'_0_1, B, I, F, Clause0_Item>[@TraitClause0, @TraitClause1]
++    fn filter_map<B, F, [@TraitClause0_1]: FnMut<F, (B,), Option<B>>> = {impl Iterator<B> for FilterMap<I, F>}::filter_map<B, I, F, B, F, Clause0_Item>[@TraitClause0, @TraitClause1, @TraitClause0_1]
++    fn flat_map<U, F, Clause0_Item, Clause0_IntoIter, [@TraitClause0_1]: IntoIterator<U, Clause0_Item, Clause0_IntoIter>, [@TraitClause1_1]: FnMut<F, (B,), U>> = {impl Iterator<B> for FilterMap<I, F>}::flat_map<B, I, F, U, F, Clause0_Item, Clause0_Item, Clause0_IntoIter>[@TraitClause0, @TraitClause1, @TraitClause0_1, @TraitClause1_1]
++    vtable: {impl Iterator<B> for FilterMap<I, F>}::{vtable}<B, I, F>[@TraitClause0, @TraitClause1]
++}
++
++// Full name: core::iter::adapters::flatten::{impl Iterator<Clause1_Item> for FlatMap<I, U, F, Clause1_Item, Clause1_IntoIter>}::next
++pub fn {impl Iterator<Clause1_Item> for FlatMap<I, U, F, Clause1_Item, Clause1_IntoIter>}::next<'_0, I, U, F, Clause0_Item, Clause1_Item, Clause1_IntoIter>(_1: &'_0 mut FlatMap<I, U, F, Clause1_Item, Clause1_IntoIter>) -> Option<Clause1_Item>
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++    [@TraitClause1]: IntoIterator<U, Clause1_Item, Clause1_IntoIter>,
++    [@TraitClause2]: FnMut<F, (Clause0_Item,), U>,
++= <opaque>
++
++#[lang_item("into_iter")]
++pub fn core::iter::traits::collect::IntoIterator::into_iter<Self, Clause0_Item, Clause0_IntoIter>(_1: Self) -> Clause0_IntoIter
++where
++    [@TraitClause0]: IntoIterator<Self, Clause0_Item, Clause0_IntoIter>,
++= <opaque>
++
++// Full name: core::iter::traits::collect::{impl IntoIterator<Clause0_Item, I> for I}::into_iter
++pub fn {impl IntoIterator<Clause0_Item, I> for I}::into_iter<I, Clause0_Item>(_1: I) -> I
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++= <opaque>
++
++// Full name: core::iter::traits::collect::{impl IntoIterator<Clause0_Item, I> for I}
++impl<I, Clause0_Item> IntoIterator<Clause0_Item, I> for I
++where
++    [@TraitClause0]: Iterator<I, Clause0_Item>,
++{
++    parent_clause0 = @TraitClause0
++    fn into_iter = {impl IntoIterator<Clause0_Item, I> for I}::into_iter<I, Clause0_Item>[@TraitClause0]
++    vtable: {impl IntoIterator<Clause0_Item, I> for I}::{vtable}<I>[@TraitClause0]
++}
++
++#[lang_item("next")]
++pub fn core::iter::traits::iterator::Iterator::next<'_0, Self, Clause0_Item>(_1: &'_0 mut Self) -> Option<Clause0_Item>
++where
++    [@TraitClause0]: Iterator<Self, Clause0_Item>,
++= <opaque>
++
++pub fn core::iter::traits::iterator::Iterator::filter_map<Self, B, F, Clause0_Item>(_1: Self, _2: F) -> FilterMap<Self, F>
++where
++    [@TraitClause0]: Iterator<Self, Clause0_Item>,
++    [@TraitClause1]: FnMut<F, (Clause0_Item,), Option<B>>,
++= <opaque>
++
++pub fn core::iter::traits::iterator::Iterator::flat_map<Self, U, F, Clause0_Item, Clause1_Item, Clause1_IntoIter>(_1: Self, _2: F) -> FlatMap<Self, U, F, Clause1_Item, Clause1_IntoIter>
++where
++    [@TraitClause0]: Iterator<Self, Clause0_Item>,
++    [@TraitClause1]: IntoIterator<U, Clause1_Item, Clause1_IntoIter>,
++    [@TraitClause2]: FnMut<F, (Clause0_Item,), U>,
++= <opaque>
++
++// Full name: core::ops::control_flow::ControlFlow
++#[lang_item("ControlFlow")]
++pub enum ControlFlow<B, C> {
++  Continue(C),
++  Break(B),
++}
++
++pub fn core::ops::function::FnMut::call_mut<'_0, Self, Args, Clause0_Clause0_Output>(_1: &'_0 mut Self, _2: Args) -> Clause0_Clause0_Output
++where
++    [@TraitClause0]: FnMut<Self, Args, Clause0_Clause0_Output>,
++= <opaque>
++
++pub fn core::ops::function::FnOnce::call_once<Self, Args, Clause0_Output>(_1: Self, _2: Args) -> Clause0_Output
++where
++    [@TraitClause0]: FnOnce<Self, Args, Clause0_Output>,
++= <opaque>
++
++// Full name: core::option::{Option<T>}::is_none
++pub fn is_none<'_0, T>(_1: &'_0 Option<T>) -> bool
++= <opaque>
++
++// Full name: core::option::{impl Try<T, Option<Infallible>> for Option<T>}::branch
++pub fn {impl Try<T, Option<Infallible>> for Option<T>}::branch<T>(_1: Option<T>) -> ControlFlow<Option<Infallible>, T>
++= <opaque>
++
++// Full name: core::option::{impl FromResidual<Option<Infallible>> for Option<T>}::from_residual
++pub fn {impl FromResidual<Option<Infallible>> for Option<T>}::from_residual<T>(_1: Option<Infallible>) -> Option<T>
++= <opaque>
++
++// Full name: core::slice::iter::Iter
++#[lang_item("SliceIter")]
++pub opaque type Iter<'a, T>
++where
++    T : 'a,
++    T : 'a,
++
++// Full name: core::slice::iter::{impl Iterator<&'a T> for Iter<'a, T>}::next
++pub fn {impl Iterator<&'a T> for Iter<'a, T>}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>) -> Option<&'a T>
++= <opaque>
++
++// Full name: core::slice::iter::{impl Iterator<&'a T> for Iter<'a, T>}::flat_map
++pub fn {impl Iterator<&'a T> for Iter<'a, T>}::flat_map<'a, T, U, F, Clause0_Item, Clause0_IntoIter>(_1: Iter<'a, T>, _2: F) -> FlatMap<Iter<'a, T>, U, F, Clause0_Item, Clause0_IntoIter>
++where
++    [@TraitClause0]: IntoIterator<U, Clause0_Item, Clause0_IntoIter>,
++    [@TraitClause1]: FnMut<F, (&'a T,), U>,
++= <opaque>
++
++// Full name: core::slice::iter::{impl Iterator<&'a T> for Iter<'a, T>}::filter_map
++pub fn {impl Iterator<&'a T> for Iter<'a, T>}::filter_map<'a, T, B, F>(_1: Iter<'a, T>, _2: F) -> FilterMap<Iter<'a, T>, F>
++where
++    [@TraitClause0]: FnMut<F, (&'a T,), Option<B>>,
++= <opaque>
++
++// Full name: core::slice::iter::{impl Iterator<&'a T> for Iter<'a, T>}
++impl<'a, T> Iterator<&'a T> for Iter<'a, T> {
++    fn next<'_0_1> = {impl Iterator<&'a T> for Iter<'a, T>}::next<'a, '_0_1, T>
++    fn filter_map<B, F, [@TraitClause0_1]: FnMut<F, (&'a T,), Option<B>>> = {impl Iterator<&'a T> for Iter<'a, T>}::filter_map<'a, T, B, F>[@TraitClause0_1]
++    fn flat_map<U, F, Clause0_Item, Clause0_IntoIter, [@TraitClause0_1]: IntoIterator<U, Clause0_Item, Clause0_IntoIter>, [@TraitClause1_1]: FnMut<F, (&'a T,), U>> = {impl Iterator<&'a T> for Iter<'a, T>}::flat_map<'a, T, U, F, Clause0_Item, Clause0_IntoIter>[@TraitClause0_1, @TraitClause1_1]
++    vtable: {impl Iterator<&'a T> for Iter<'a, T>}::{vtable}<'a, T>
++}
++
++// Full name: core::slice::{[T]}::iter
++#[lang_item("slice_iter")]
++pub fn iter<'_0, T>(_1: &'_0 [T]) -> Iter<'_0, T>
++= <opaque>
++
++// Full name: alloc::alloc::Global
++#[lang_item("global_alloc_ty")]
++pub struct Global {}
++
++// Full name: alloc::vec::Vec
++#[lang_item("Vec")]
++pub opaque type Vec<T>
++
++// Full name: alloc::vec::{impl Deref<[T]> for Vec<T>}::deref
++pub fn {impl Deref<[T]> for Vec<T>}::deref<'_0, T, A>(_1: &'_0 Vec<T>) -> &'_0 [T]
++= <opaque>
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Variant
++pub struct Variant {
++  name: u32,
++}
++
++// Full name: test_crate::Def
++pub struct Def {
++  variants: Vec<Variant>,
++}
++
++struct test_crate::lookup_unique::closure::closure<'_0, '_1> {
++  &'_0 u32,
++  &'_1 u32,
++}
++
++// Full name: test_crate::lookup_unique::closure::{impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_mut
++fn {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '_5>(_1: &'_5 mut test_crate::lookup_unique::closure::closure<'_0, '_1>, tupled_args_2: (&'_2 Variant,)) -> Option<(&'_3 u32, &'_4 Variant)>
++where
++    '_2 : '_4,
++    '_1 : '_3,
++{
++    let _0: Option<(&'5 u32, &'6 Variant)>; // return
++    let _1: &'8 mut test_crate::lookup_unique::closure::closure<'_0, '_1>; // arg #1
++    let tupled_args_2: (&'_2 Variant,); // arg #2
++    let variant_3: &'9 Variant; // local
++    let _4: bool; // anonymous local
++    let _5: u32; // anonymous local
++    let _6: u32; // anonymous local
++    let _7: (&'10 u32, &'11 Variant); // anonymous local
++    let _8: &'12 u32; // anonymous local
++    let _9: &'13 Variant; // anonymous local
++
++    storage_live(variant_3)
++    variant_3 = move tupled_args_2.0
++    storage_live(_4)
++    storage_live(_5)
++    _5 = copy ((*variant_3)).name
++    storage_live(_6)
++    _6 = copy (*((*_1)).0)
++    _4 = move _5 == move _6
++    storage_dead(_6)
++    storage_dead(_5)
++    storage_live(_7)
++    storage_live(_8)
++    _8 = copy ((*_1)).1
++    storage_live(_9)
++    _9 = copy variant_3
++    _7 = (move _8, move _9)
++    storage_dead(_9)
++    storage_dead(_8)
++    _0 = then_some<(&'16 u32, &'17 Variant)>(move _4, move _7)
++    storage_dead(_7)
++    storage_dead(_4)
++    return
++}
++
++// Full name: test_crate::lookup_unique::closure::{impl FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_once
++fn {impl FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_once<'_0, '_1, '_2, '_3, '_4>(_1: test_crate::lookup_unique::closure::closure<'_0, '_1>, _2: (&'_2 Variant,)) -> Option<(&'_3 u32, &'_4 Variant)>
++where
++    '_2 : '_4,
++    '_1 : '_3,
++{
++    let _0: Option<(&'5 u32, &'6 Variant)>; // return
++    let _1: test_crate::lookup_unique::closure::closure<'_0, '_1>; // arg #1
++    let _2: (&'7 Variant,); // arg #2
++    let _3: &'9 mut test_crate::lookup_unique::closure::closure<'_0, '_1>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '21>(move _3, move _2)
++    drop[{impl#10}<'_0, '_1>] _1
++    return
++}
++
++// Full name: test_crate::lookup_unique::closure::{impl FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}
++impl<'_0, '_1, '_2, '_3, '_4> FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>
++where
++    '_2 : '_4,
++    '_1 : '_3,
++{
++    fn call_once = {impl FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_once<'_0, '_1, '_2, '_3, '_4>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::lookup_unique::closure::{impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}
++impl<'_0, '_1, '_2, '_3, '_4> FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>
++where
++    '_2 : '_4,
++    '_1 : '_3,
++{
++    parent_clause0 = {impl FnOnce<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}<'_0, '_1, '_2, '_3, '_4>
++    fn call_mut<'_0_1> = {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '_0_1>
++    non-dyn-compatible
++}
++
++struct test_crate::lookup_unique::closure<'_0, '_1>
++where
++    '_1 : '_0,
++{
++  &'_0 &'_1 u32,
++}
++
++// Full name: test_crate::lookup_unique::{impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_mut
++fn {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_9>(_1: &'_9 mut test_crate::lookup_unique::closure<'_0, '_1>, tupled_args_2: (&'_2 (u32, Def),)) -> FilterMap<Iter<'_3, Variant>, test_crate::lookup_unique::closure::closure<'_7, '_8>>
++where
++    '_2 : '_3,
++    '_2 : '_4,
++    '_2 : '_5,
++    '_2 : '_6,
++    '_2 : '_8,
++    '_4 : '_3,
++    '_4 : '_6,
++    '_8 : '_5,
++    '_1 : '_7,
++    '_1 : '_0,
++{
++    let _0: FilterMap<Iter<'6, Variant>, test_crate::lookup_unique::closure::closure<'7, '8>>; // return
++    let _1: &'10 mut test_crate::lookup_unique::closure<'_0, '_1>; // arg #1
++    let tupled_args_2: (&'_2 (u32, Def),); // arg #2
++    let _3: &'11 (u32, Def); // anonymous local
++    let adt_4: &'13 u32; // local
++    let def_5: &'15 Def; // local
++    let _6: Iter<'16, Variant>; // anonymous local
++    let _7: &'18 [Variant]; // anonymous local
++    let _8: &'19 [Variant]; // anonymous local
++    let _9: &'21 Vec<Variant>; // anonymous local
++    let _10: test_crate::lookup_unique::closure::closure<'22, '23>; // anonymous local
++
++    storage_live(_3)
++    _3 = move tupled_args_2.0
++    storage_live(adt_4)
++    adt_4 = &(*_3).0
++    storage_live(def_5)
++    def_5 = &(*_3).1
++    storage_live(_6)
++    storage_live(_7)
++    storage_live(_8)
++    storage_live(_9)
++    _9 = &((*def_5)).variants
++    _8 = {impl Deref<[T]> for Vec<T>}::deref<'25, Variant, Global>(move _9)
++    _7 = &(*_8) with_metadata(copy _8.metadata)
++    storage_dead(_9)
++    _6 = iter<'27, Variant>(move _7)
++    storage_dead(_7)
++    storage_live(_10)
++    _10 = test_crate::lookup_unique::closure::closure { 0: copy (*((*_1)).0), 1: copy adt_4 }
++    _0 = {impl Iterator<&'a T> for Iter<'a, T>}::filter_map<'56, Variant, (&'38 u32, &'39 Variant), test_crate::lookup_unique::closure::closure<'40, '41>>[{impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}<'40, '41, '51, '52, '53>](move _6, move _10)
++    storage_dead(_10)
++    storage_dead(_6)
++    storage_dead(_8)
++    storage_dead(def_5)
++    storage_dead(adt_4)
++    return
++}
++
++// Full name: test_crate::lookup_unique::{impl FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_once
++fn {impl FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_once<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8>(_1: test_crate::lookup_unique::closure<'_0, '_1>, _2: (&'_2 (u32, Def),)) -> FilterMap<Iter<'_3, Variant>, test_crate::lookup_unique::closure::closure<'_7, '_8>>
++where
++    '_2 : '_3,
++    '_2 : '_4,
++    '_2 : '_5,
++    '_2 : '_6,
++    '_2 : '_8,
++    '_4 : '_3,
++    '_4 : '_6,
++    '_8 : '_5,
++    '_1 : '_7,
++    '_1 : '_0,
++{
++    let _0: FilterMap<Iter<'6, Variant>, test_crate::lookup_unique::closure::closure<'7, '8>>; // return
++    let _1: test_crate::lookup_unique::closure<'_0, '_1>; // arg #1
++    let _2: (&'9 (u32, Def),); // arg #2
++    let _3: &'11 mut test_crate::lookup_unique::closure<'_0, '_1>; // anonymous local
++
++    storage_live(_3)
++    _3 = &mut _1
++    _0 = {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '27>(move _3, move _2)
++    drop[{impl#11}<'_0, '_1>] _1
++    return
++}
++
++// Full name: test_crate::lookup_unique::{impl FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}
++impl<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8> FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>
++where
++    '_2 : '_3,
++    '_2 : '_4,
++    '_2 : '_5,
++    '_2 : '_6,
++    '_2 : '_8,
++    '_4 : '_3,
++    '_4 : '_6,
++    '_8 : '_5,
++    '_1 : '_7,
++    '_1 : '_0,
++{
++    fn call_once = {impl FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_once<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::lookup_unique::{impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}
++impl<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8> FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>
++where
++    '_2 : '_3,
++    '_2 : '_4,
++    '_2 : '_5,
++    '_2 : '_6,
++    '_2 : '_8,
++    '_4 : '_3,
++    '_4 : '_6,
++    '_8 : '_5,
++    '_1 : '_7,
++    '_1 : '_0,
++{
++    parent_clause0 = {impl FnOnce<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8>
++    fn call_mut<'_0_1> = {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}::call_mut<'_0, '_1, '_2, '_3, '_4, '_5, '_6, '_7, '_8, '_0_1>
++    non-dyn-compatible
++}
++
++// Full name: test_crate::lookup_unique
++pub fn lookup_unique<'a, '_1>(defs_1: &'a [(u32, Def)], ctor_2: &'_1 u32) -> Option<(&'a u32, &'a Variant)>
++{
++    let _0: Option<(&'6 u32, &'7 Variant)>; // return
++    let defs_1: &'9 [(u32, Def)]; // arg #1
++    let ctor_2: &'10 u32; // arg #2
++    let matches_3: FlatMap<Iter<'67, (u32, Def)>, FilterMap<Iter<'68, Variant>, test_crate::lookup_unique::closure::closure<'69, '70>>, test_crate::lookup_unique::closure<'71, '72>, (&'76 u32, &'77 Variant), FilterMap<Iter<'68, Variant>, test_crate::lookup_unique::closure::closure<'69, '70>>>; // local
++    let _4: Iter<'97, (u32, Def)>; // anonymous local
++    let _5: &'98 [(u32, Def)]; // anonymous local
++    let _6: test_crate::lookup_unique::closure<'99, '100>; // anonymous local
++    let _7: &'103 &'104 u32; // anonymous local
++    let first_8: (&'105 u32, &'106 Variant); // local
++    let _9: ControlFlow<Option<Infallible>, (&'109 u32, &'110 Variant)>; // anonymous local
++    let _10: Option<(&'111 u32, &'112 Variant)>; // anonymous local
++    let _11: &'144 mut FlatMap<Iter<'145, (u32, Def)>, FilterMap<Iter<'146, Variant>, test_crate::lookup_unique::closure::closure<'147, '148>>, test_crate::lookup_unique::closure<'149, '150>, (&'154 u32, &'155 Variant), FilterMap<Iter<'146, Variant>, test_crate::lookup_unique::closure::closure<'147, '148>>>; // anonymous local
++    let residual_12: Option<Infallible>; // local
++    let _13: Option<Infallible>; // anonymous local
++    let val_14: (&'175 u32, &'176 Variant); // local
++    let _15: bool; // anonymous local
++    let _16: &'180 Option<(&'181 u32, &'182 Variant)>; // anonymous local
++    let _17: Option<(&'183 u32, &'184 Variant)>; // anonymous local
++    let _18: &'185 mut FlatMap<Iter<'186, (u32, Def)>, FilterMap<Iter<'187, Variant>, test_crate::lookup_unique::closure::closure<'188, '189>>, test_crate::lookup_unique::closure<'190, '191>, (&'195 u32, &'196 Variant), FilterMap<Iter<'187, Variant>, test_crate::lookup_unique::closure::closure<'188, '189>>>; // anonymous local
++    let _19: (&'216 u32, &'217 Variant); // anonymous local
++
++    storage_live(matches_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = &(*defs_1) with_metadata(copy defs_1.metadata)
++    _4 = iter<'219, (u32, Def)>(move _5)
++    storage_dead(_5)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = &ctor_2
++    _6 = test_crate::lookup_unique::closure { 0: move _7 }
++    storage_dead(_7)
++    matches_3 = {impl Iterator<&'a T> for Iter<'a, T>}::flat_map<'286, (u32, Def), FilterMap<Iter<'222, Variant>, test_crate::lookup_unique::closure::closure<'223, '224>>, test_crate::lookup_unique::closure<'225, '226>, (&'248 u32, &'249 Variant), FilterMap<Iter<'222, Variant>, test_crate::lookup_unique::closure::closure<'223, '224>>>[{impl IntoIterator<Clause0_Item, I> for I}<FilterMap<Iter<'222, Variant>, test_crate::lookup_unique::closure::closure<'223, '224>>, (&'248 u32, &'249 Variant)>[{impl Iterator<B> for FilterMap<I, F>}<(&'248 u32, &'249 Variant), Iter<'222, Variant>, test_crate::lookup_unique::closure::closure<'223, '224>, &'222 Variant>[{impl Iterator<&'a T> for Iter<'a, T>}<'222, Variant>, {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}<'223, '224, '265, '266, '267>]], {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}<'225, '226, '277, '278, '279, '280, '281, '282, '283>](move _4, move _6)
++    storage_dead(_6)
++    storage_dead(_4)
++    storage_live(first_8)
++    storage_live(_9)
++    storage_live(_10)
++    storage_live(_11)
++    _11 = &two-phase-mut matches_3
++    _10 = {impl Iterator<Clause1_Item> for FlatMap<I, U, F, Clause1_Item, Clause1_IntoIter>}::next<'354, Iter<'287, (u32, Def)>, FilterMap<Iter<'288, Variant>, test_crate::lookup_unique::closure::closure<'289, '290>>, test_crate::lookup_unique::closure<'291, '292>, &'287 (u32, Def), (&'317 u32, &'318 Variant), FilterMap<Iter<'288, Variant>, test_crate::lookup_unique::closure::closure<'289, '290>>>[{impl Iterator<&'a T> for Iter<'a, T>}<'287, (u32, Def)>, {impl IntoIterator<Clause0_Item, I> for I}<FilterMap<Iter<'288, Variant>, test_crate::lookup_unique::closure::closure<'289, '290>>, (&'317 u32, &'318 Variant)>[{impl Iterator<B> for FilterMap<I, F>}<(&'317 u32, &'318 Variant), Iter<'288, Variant>, test_crate::lookup_unique::closure::closure<'289, '290>, &'288 Variant>[{impl Iterator<&'a T> for Iter<'a, T>}<'288, Variant>, {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}<'289, '290, '334, '335, '336>]], {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}<'291, '292, '346, '347, '348, '349, '350, '351, '352>](move _11)
++    storage_dead(_11)
++    _9 = {impl Try<T, Option<Infallible>> for Option<T>}::branch<(&'355 u32, &'356 Variant)>(move _10)
++    storage_dead(_10)
++    match _9 {
++        ControlFlow::Continue => {
++        },
++        ControlFlow::Break => {
++            storage_live(residual_12)
++            residual_12 = copy (_9 as variant ControlFlow::Break).0
++            storage_live(_13)
++            _13 = copy residual_12
++            _0 = {impl FromResidual<Option<Infallible>> for Option<T>}::from_residual<(&'435 u32, &'436 Variant)>(move _13)
++            storage_dead(_13)
++            storage_dead(residual_12)
++            storage_dead(_9)
++            storage_dead(first_8)
++            storage_dead(matches_3)
++            return
++        },
++    }
++    storage_live(val_14)
++    val_14 = copy (_9 as variant ControlFlow::Continue).0
++    first_8 = copy val_14
++    storage_dead(val_14)
++    storage_dead(_9)
++    storage_live(_15)
++    storage_live(_16)
++    storage_live(_17)
++    storage_live(_18)
++    _18 = &two-phase-mut matches_3
++    _17 = {impl Iterator<Clause1_Item> for FlatMap<I, U, F, Clause1_Item, Clause1_IntoIter>}::next<'428, Iter<'361, (u32, Def)>, FilterMap<Iter<'362, Variant>, test_crate::lookup_unique::closure::closure<'363, '364>>, test_crate::lookup_unique::closure<'365, '366>, &'361 (u32, Def), (&'391 u32, &'392 Variant), FilterMap<Iter<'362, Variant>, test_crate::lookup_unique::closure::closure<'363, '364>>>[{impl Iterator<&'a T> for Iter<'a, T>}<'361, (u32, Def)>, {impl IntoIterator<Clause0_Item, I> for I}<FilterMap<Iter<'362, Variant>, test_crate::lookup_unique::closure::closure<'363, '364>>, (&'391 u32, &'392 Variant)>[{impl Iterator<B> for FilterMap<I, F>}<(&'391 u32, &'392 Variant), Iter<'362, Variant>, test_crate::lookup_unique::closure::closure<'363, '364>, &'362 Variant>[{impl Iterator<&'a T> for Iter<'a, T>}<'362, Variant>, {impl FnMut<(&'_ Variant,), Option<(&'_ u32, &'_ Variant)>> for test_crate::lookup_unique::closure::closure<'_0, '_1>}<'363, '364, '408, '409, '410>]], {impl FnMut<(&'_ (u32, Def),), FilterMap<Iter<'_, Variant>, test_crate::lookup_unique::closure::closure<'_, '_>>> for test_crate::lookup_unique::closure<'_0, '_1>}<'365, '366, '420, '421, '422, '423, '424, '425, '426>](move _18)
++    _16 = &_17
++    storage_dead(_18)
++    _15 = is_none<'432, (&'429 u32, &'430 Variant)>(move _16)
++    storage_dead(_16)
++    storage_live(_19)
++    _19 = copy first_8
++    _0 = then_some<(&'437 u32, &'438 Variant)>(move _15, move _19)
++    storage_dead(_19)
++    storage_dead(_15)
++    storage_dead(first_8)
++    storage_dead(matches_3)
++    storage_dead(_17)
++    return
++}
++
++
++
+diff --git a/tests/ui/closure-returns-closure.rs b/tests/ui/closure-returns-closure.rs
+new file mode 100644
+index 0000000..50ff2c6
+--- /dev/null
++++ b/tests/ui/closure-returns-closure.rs
+@@ -0,0 +1,25 @@
++//@ no-default-options
++//@ charon-args=--preset=aeneas
++
++// A closure returning a closure it creates (as `chelis_ir::adt::lookup_variant_terminal_unique`).
++// In the signature of the outer closure's methods, the type of the returned closure keeps the
++// lifetimes of its captures (`ctor`, captured by the outer closure, and the argument `adt`),
++// related to the other signature lifetimes by outlives constraints. They used to be erased
++// (`closure<'_, '_>`), which Aeneas rejects.
++pub struct Variant {
++    name: u32,
++}
++
++pub struct Def {
++    variants: Vec<Variant>,
++}
++
++pub fn lookup_unique<'a>(defs: &'a [(u32, Def)], ctor: &u32) -> Option<(&'a u32, &'a Variant)> {
++    let mut matches = defs.iter().flat_map(|(adt, def)| {
++        def.variants
++            .iter()
++            .filter_map(move |variant| (variant.name == *ctor).then_some((adt, variant)))
++    });
++    let first = matches.next()?;
++    matches.next().is_none().then_some(first)
++}
+diff --git a/tests/ui/simple/nested-closure-lifetime.out b/tests/ui/simple/nested-closure-lifetime.out
+index 169b51c..cd95668 100644
+--- a/tests/ui/simple/nested-closure-lifetime.out
++++ b/tests/ui/simple/nested-closure-lifetime.out
+@@ -128,7 +128,7 @@ where
+ }
+ 
+ // Full name: test_crate::foo::{impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call
+-fn {impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call<'_0, '_1, '_2, '_3, T>(_1: &'_3 test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], tupled_args_2: ()) -> test_crate::foo::closure::closure<'_, T>[@TraitClause0, @TraitClause1]
++fn {impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call<'_0, '_1, '_2, '_3, T>(_1: &'_3 test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], tupled_args_2: ()) -> test_crate::foo::closure::closure<'_2, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -145,7 +145,7 @@ where
+ }
+ 
+ // Full name: test_crate::foo
+-fn foo<'a, T>(x_1: &'a T) -> test_crate::foo::closure::closure<'_, T>[@TraitClause0, @TraitClause1]
++fn foo<'a, T>(x_1: &'a T) -> test_crate::foo::closure::closure<'a, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -170,7 +170,7 @@ where
+ }
+ 
+ // Full name: test_crate::foo::{impl FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_mut
+-fn {impl FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_mut<'_0, '_1, '_2, '_3, T>(state_1: &'_3 mut test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], args_2: ()) -> test_crate::foo::closure::closure<'_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnMut<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_mut<'_0, '_1, '_2, '_3, T>(state_1: &'_3 mut test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], args_2: ()) -> test_crate::foo::closure::closure<'_2, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -178,14 +178,14 @@ where
+     '_0 : '_1,
+     '_0 : '_2,
+ {
+-    let _0: test_crate::foo::closure::closure<'0, T>[@TraitClause0, @TraitClause1]; // return
++    let _0: test_crate::foo::closure::closure<'_2, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_3 mut test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let args_2: (); // arg #2
+-    let _3: &'1 test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // anonymous local
++    let _3: &'0 test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]; // anonymous local
+ 
+     storage_live(_3)
+     _3 = &(*state_1)
+-    _0 = {impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call<'_0, '_1, '_2, '3, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
++    _0 = {impl Fn<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call<'_0, '_1, '_2, '2, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
+     return
+ }
+ 
+@@ -207,7 +207,7 @@ where
+ }
+ 
+ // Full name: test_crate::foo::{impl FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_once
+-fn {impl FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_once<'_0, '_1, '_2, T>(_1: test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], _2: ()) -> test_crate::foo::closure::closure<'_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnOnce<()> for test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1]}::call_once<'_0, '_1, '_2, T>(_1: test_crate::foo::closure<'_0, T>[@TraitClause0, @TraitClause1], _2: ()) -> test_crate::foo::closure::closure<'_2, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+diff --git a/tests/ui/simple/nested-closure.out b/tests/ui/simple/nested-closure.out
+index e1799cf..0bc134b 100644
+--- a/tests/ui/simple/nested-closure.out
++++ b/tests/ui/simple/nested-closure.out
+@@ -158,7 +158,7 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::{impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call
+-fn {impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, T>(_1: &'_5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], tupled_args_2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, T>(_1: &'_5 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], tupled_args_2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_4, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -188,7 +188,7 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::{impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call
+-fn {impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, '_6, T>(_1: &'_6 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], tupled_args_2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, '_6, T>(_1: &'_6 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], tupled_args_2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_5, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -298,7 +298,7 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::{impl FnMut<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut
+-fn {impl FnMut<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut<'a, '_1, '_2, '_3, '_4, '_5, '_6, T>(state_1: &'_6 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], args_2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnMut<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut<'a, '_1, '_2, '_3, '_4, '_5, '_6, T>(state_1: &'_6 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], args_2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_5, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -308,14 +308,14 @@ where
+     '_1 : '_4,
+     '_1 : '_5,
+ {
+-    let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '0, T>[@TraitClause0, @TraitClause1]; // return
++    let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_5, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_6 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let args_2: (); // arg #2
+-    let _3: &'1 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // anonymous local
++    let _3: &'0 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // anonymous local
+ 
+     storage_live(_3)
+     _3 = &(*state_1)
+-    _0 = {impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, '3, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
++    _0 = {impl Fn<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '_5, '2, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
+     return
+ }
+ 
+@@ -337,7 +337,7 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::{impl FnOnce<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once
+-fn {impl FnOnce<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once<'a, '_1, '_2, '_3, '_4, '_5, T>(_1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], _2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnOnce<()> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once<'a, '_1, '_2, '_3, '_4, '_5, T>(_1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], _2: ()) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'_2, '_5, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+@@ -418,20 +418,20 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::{impl FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut
+-fn {impl FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut<'a, '_1, '_2, '_3, '_4, '_5, T>(state_1: &'_5 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], args_2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnMut<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_mut<'a, '_1, '_2, '_3, '_4, '_5, T>(state_1: &'_5 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], args_2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_4, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,
+     '_1 : '_4,
+ {
+-    let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '0, T>[@TraitClause0, @TraitClause1]; // return
++    let _0: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_4, T>[@TraitClause0, @TraitClause1]; // return
+     let state_1: &'_5 mut test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // arg #1
+     let args_2: (&'_2 u32,); // arg #2
+-    let _3: &'1 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // anonymous local
++    let _3: &'0 test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]; // anonymous local
+ 
+     storage_live(_3)
+     _3 = &(*state_1)
+-    _0 = {impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '3, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
++    _0 = {impl Fn<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call<'a, '_1, '_2, '_3, '_4, '2, T>[@TraitClause0, @TraitClause1](move _3, move args_2)
+     return
+ }
+ 
+@@ -453,7 +453,7 @@ where
+ }
+ 
+ // Full name: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::{impl FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once
+-fn {impl FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once<'a, '_1, '_2, '_3, '_4, T>(_1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], _2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_, T>[@TraitClause0, @TraitClause1]
++fn {impl FnOnce<(&'_ u32,)> for test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1]}::call_once<'a, '_1, '_2, '_3, '_4, T>(_1: test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure<'a, '_1, T>[@TraitClause0, @TraitClause1], _2: (&'_2 u32,)) -> test_crate::{Foo<'a, T>[@TraitClause0]}::test_nested_closures::closure::closure::closure<'_3, '_4, T>[@TraitClause0, @TraitClause1]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Clone<T>,

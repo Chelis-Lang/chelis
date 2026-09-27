@@ -1,0 +1,109 @@
+# charon integration step 53 after 546078ea5d: commit d5ba232f0bba63ad7e6a898976399cf8dadf81a6
+# first parent b947e944415f15a3a726b96a093e5560fb73ff0f
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon-ml: the name-matcher lexer reads multi-digit integer literals
+#
+# The lexer produced one INT token per digit, so a pattern with a
+# multi-digit array length, const generic value or disambiguator
+# (`[@T; 32]`, `ArrayToSliceShared<'_, bool, 32>`, `f#12`) failed with
+# "Parse error" (Aeneas: "Could not parse pattern"), although the printer
+# emits such literals with TkPattern. `digit+` lexes the whole literal.
+#
+# Tests: charon-ml int_literal_tests (parse, structure and print round trip
+# of multi-digit literals) and ml-name-matcher-tests.rs cases matching an
+# impl for [T; 32] and an ArrayToSliceShared call with length 32 (the
+# patterns with 3 and 320 fail). The Rust pattern parser already reads
+# multi-digit disambiguators and has no array syntax.
+
+diff --git a/tests/ui/ml-name-matcher-tests.out b/tests/ui/ml-name-matcher-tests.out
+index 1a39c3c..dfd6089 100644
+--- a/tests/ui/ml-name-matcher-tests.out
++++ b/tests/ui/ml-name-matcher-tests.out
+@@ -362,6 +362,55 @@ fn funs_with_disambiguator(b_1: bool) -> u32
+     return
+ }
+ 
++// Full name: test_crate::Len
++trait Len<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    fn len_of<'_0_1> = test_crate::Len::len_of<'_0_1, Self>[Self]
++    vtable: test_crate::Len::{vtable}
++}
++
++fn test_crate::Len::len_of<'_0, Self>(_1: &'_0 Self) -> usize
++where
++    [@TraitClause0]: Len<Self>,
++= <method_without_default_body>
++
++// Full name: test_crate::{impl Len for [T; 32 : usize]}::len_of
++fn {impl Len for [T; 32 : usize]}::len_of<'_0, T>(self_1: &'_0 [T; 32 : usize]) -> usize
++where
++    [@TraitClause0]: Sized<T>,
++{
++    let _0: usize; // return
++    let self_1: &'1 [T; 32 : usize]; // arg #1
++
++    _0 = const 32 : usize
++    return
++}
++
++// Full name: test_crate::{impl Len for [T; 32 : usize]}
++impl<T> Len for [T; 32 : usize]
++where
++    [@TraitClause0]: Sized<T>,
++{
++    parent_clause0 = {built_in impl MetaSized for [T; 32 : usize]}
++    fn len_of<'_0_1> = {impl Len for [T; 32 : usize]}::len_of<'_0_1, T>[@TraitClause0]
++    vtable: {impl Len for [T; 32 : usize]}::{vtable}<T>[@TraitClause0]
++}
++
++// Full name: test_crate::array_32
++fn array_32<'_0>(a_1: &'_0 [bool; 32 : usize]) -> &'_0 [bool]
++{
++    let _0: &'1 [bool]; // return
++    let a_1: &'3 [bool; 32 : usize]; // arg #1
++    let _2: &'4 [bool; 32 : usize]; // anonymous local
++
++    storage_live(_2)
++    _2 = &(*a_1)
++    _0 = @ArrayToSliceShared<'_, bool, 32 : usize>(move _2)
++    storage_dead(_2)
++    return
++}
++
+ // Full name: test_crate::MonoContainer
+ struct MonoContainer<T>
+ where
+diff --git a/tests/ui/ml-name-matcher-tests.rs b/tests/ui/ml-name-matcher-tests.rs
+index bf60bf0..4b076e8 100644
+--- a/tests/ui/ml-name-matcher-tests.rs
++++ b/tests/ui/ml-name-matcher-tests.rs
+@@ -90,6 +90,26 @@ fn funs_with_disambiguator(b: bool) -> u32 {
+     }
+ }
+ 
++// Multi-digit integer literals in patterns (array lengths, const generic values).
++trait Len {
++    fn len_of(&self) -> usize;
++}
++
++impl<T> Len for [T; 32] {
++    #[pattern::pass("test_crate::{test_crate::Len<[@T; 32]>}::len_of<'_, @T>")]
++    #[pattern::fail("test_crate::{test_crate::Len<[@T; 3]>}::len_of<'_, @T>")]
++    #[pattern::fail("test_crate::{test_crate::Len<[@T; 320]>}::len_of<'_, @T>")]
++    fn len_of(&self) -> usize {
++        32
++    }
++}
++
++#[pattern::pass(call[0], "ArrayToSliceShared<'_, bool, 32>")]
++#[pattern::fail(call[0], "ArrayToSliceShared<'_, bool, 3>")]
++fn array_32(a: &[bool; 32]) -> &[bool] {
++    a
++}
++
+ struct MonoContainer<T> {
+     item: T,
+ }

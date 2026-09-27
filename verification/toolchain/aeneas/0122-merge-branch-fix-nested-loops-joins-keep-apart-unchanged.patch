@@ -1,0 +1,1278 @@
+# aeneas integration step 122 after cba11f3beb: commit 884f93762b588cd7ed60b27cecfbc8df37010353
+# first parent f44d2e41aaa47eff61d472125fe97e5dfdd4cabd, merged 8058b305672dac77cd37caa93ea174369e7e43ea
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (joins keep apart unchanged abstractions whose merge would end a variable's borrow; unchanged abstractions keep their shape: mr4f/mr4g, maybe_mark_reusable_app_input)
+
+diff --git a/src/interp/InterpReduceCollapse.ml b/src/interp/InterpReduceCollapse.ml
+index 0e92227..d8563db 100644
+--- a/src/interp/InterpReduceCollapse.ml
++++ b/src/interp/InterpReduceCollapse.ml
+@@ -1066,6 +1066,8 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+     ~(with_abs_conts : bool) (span : Meta.span) ?(loop : bool = false)
+     (fresh_abs_kind : abs_kind)
+     (fixed_abs_ids : AbsId.Set.t) ?(fixed_dids : DummyVarId.Set.t option = None)
++    ?(keep_variable_borrows_apart : AbsId.Set.t = AbsId.Set.empty)
++    ?(restore_unmerged : AbsId.Set.t = AbsId.Set.empty)
+     ?(merge_count : int ref option = None) (ctx0 : eval_ctx) : eval_ctx =
+   (* Debug *)
+   [%ltrace "- ctx0:\n" ^ eval_ctx_to_string ~span:(Some span) ctx0];
+@@ -1086,17 +1088,23 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+   in
+   (* A join and the subsequent match must see the same ownership graph.
+      Returned ignored loans carry independent outputs; expose them before
+-     collecting reduction edges, not only while adding branch markers. *)
++     collecting reduction edges, not only while adding branch markers.
++     The abstractions of [restore_unmerged] which this changes are recorded
++     with their parts (see below). *)
++  let normalized = ref [] in
+   let env =
+     List.concat_map
+       (function
+         | EAbs abs
+           when abs.can_end && not (AbsId.Set.mem abs.abs_id fixed_abs_ids) ->
+-            List.map
+-              (fun abs -> EAbs abs)
+-              (InterpAbs.normalize_abs_for_join
+-                 ~loop_level_outputs:(loop_level_outputs ~loop fresh_abs_kind)
+-                 span ctx abs)
++            let parts =
++              InterpAbs.normalize_abs_for_join
++                ~loop_level_outputs:(loop_level_outputs ~loop fresh_abs_kind)
++                span ctx abs
++            in
++            if AbsId.Set.mem abs.abs_id restore_unmerged && parts <> [ abs ]
++            then normalized := (abs, parts) :: !normalized;
++            List.map (fun abs -> EAbs abs) parts
+         | element -> [ element ])
+       ctx.env
+   in
+@@ -1204,6 +1212,57 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+       with Found -> true
+   in
+ 
++  (* A lender whose loans a program variable still borrows (e.g., the reborrow
++     of a shared argument introduced before a switch, see
++     [InterpStatements.eval_switch_prepare], which the argument now borrows) is
++     not merged with a holder which also borrows a loan held by a program
++     variable (e.g., a call made before a loop which borrows the reborrow and
++     [*self]): writing that variable ends the holder, and would end the loans
++     of the lender with it, while the variable which borrows them is still
++     live (as in Rust, where the lifetime of the holder ends before the write,
++     not the one of the argument). The dummy values are not variables: the
++     program neither reads nor writes them (e.g., the released payload of a
++     shared loan, which lends the ['static] borrow its holder transferred).
++     Only for the final canonicalization of a collapse (see
++     [collapse_ctx_aux]), and only when the join left both abstractions
++     unchanged ([keep_variable_borrows_apart]): they are then apart in every
++     joined context. The abstractions a join introduces are canonicalized as
++     before, since the contexts later matched with the joined one (e.g., the
++     arms of a match, which borrow different variables) must reduce to the
++     same partition. *)
++  let would_end_variable_borrows (ctx : ctx_with_info) lender holder =
++    AbsId.Set.mem lender keep_variable_borrows_apart
++    && AbsId.Set.mem holder keep_variable_borrows_apart
++    &&
++    let lender_loans =
++      MarkedLoanId.Set.fold
++        (fun (_, id) ids -> BorrowId.Set.add id ids)
++        (AbsId.Map.find lender ctx.info.abs_to_loans)
++        BorrowId.Set.empty
++    in
++    let borrows = ref BorrowId.Set.empty in
++    let loans = ref BorrowId.Set.empty in
++    let visitor =
++      object
++        inherit [_] iter_abs
++        method! visit_borrow_id _ id = borrows := BorrowId.Set.add id !borrows
++        method! visit_loan_id _ id = loans := BorrowId.Set.add id !loans
++        method! visit_mvalue _ _ = ()
++      end
++    in
++    List.iter
++      (function
++        | EBinding (BVar _, value) -> visitor#visit_tvalue () value
++        | EBinding (BDummy _, _) | EAbs _ | EFrame -> ())
++      ctx.ctx.env;
++    let value_borrows = !borrows and value_loans = !loans in
++    (not (BorrowId.Set.disjoint lender_loans value_borrows))
++    &&
++    let () = borrows := BorrowId.Set.empty in
++    visitor#visit_abs () { (ctx_lookup_abs ctx.ctx holder) with cont = None };
++    not (BorrowId.Set.disjoint !borrows value_loans)
++  in
++
+   (* Nested borrows: a function-call abstraction whose loan projectors hold
+      level-1 outputs of the call (see [InterpAbs.abs_call_level_output_svs]) is
+      first merged with the abstraction which lends them. That abstraction can
+@@ -1283,7 +1342,8 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+                 && Marked.can_reduce_borrow ctx.ctx aid loan
+                 && (not (would_capture_payload_lifetime ctx abs_id0 aid))
+                 && (not (would_capture_payload_lifetime ctx aid abs_id0))
+-                && not (defers_level_outputs ctx.ctx abs_id0 aid))
++                && (not (defers_level_outputs ctx.ctx abs_id0 aid))
++                && not (would_end_variable_borrows ctx abs_id0 aid))
+               abs_ids1
+           in
+           match AbsId.Set.min_elt_opt candidates with
+@@ -1403,6 +1463,49 @@ let reduce_ctx_with_markers (merge_funs : merge_duplicates_funcs option)
+   in
+   let ctx = merge_all ctx in
+ 
++  (* The abstractions of [restore_unmerged] (those a join kept unchanged, see
++     [collapse_ctx_aux]) whose normalized parts were all left alone get back
++     the shape they have in the joined contexts. Normalized, they would differ
++     from their versions in the contexts which a later join compares with this
++     one (e.g., the call abstraction [{ .., Some (SL l) }] of a call made
++     before a loop, in another context of the loop body), which would no
++     longer keep them unchanged. *)
++  let ctx =
++    if !normalized = [] then ctx
++    else
++      let abs_map = ctx_get_abs ctx in
++      let restored =
++        List.filter
++          (fun (_, parts) ->
++            List.for_all
++              (fun (part : abs) ->
++                AbsId.Map.find_opt part.abs_id abs_map = Some part)
++              parts)
++          !normalized
++      in
++      let originals =
++        AbsId.Map.of_list
++          (List.map (fun ((abs : abs), _) -> (abs.abs_id, abs)) restored)
++      in
++      let parts =
++        AbsId.Set.of_list
++          (List.concat_map
++             (fun (_, parts) -> List.map (fun (part : abs) -> part.abs_id) parts)
++             restored)
++      in
++      let env =
++        List.filter_map
++          (function
++            | EAbs abs when AbsId.Set.mem abs.abs_id parts ->
++                Option.map
++                  (fun abs -> EAbs abs)
++                  (AbsId.Map.find_opt abs.abs_id originals)
++            | element -> Some element)
++          ctx.env
++      in
++      { ctx with env }
++  in
++
+   (* Debugging *)
+   [%ltrace
+     "- after reduce:\n" ^ eval_ctx_to_string ~span:(Some span) ctx ^ "\n"];
+@@ -2154,13 +2257,31 @@ let collapse_ctx_aux config (span : Meta.span)
+      the next arm into this context: the abstraction of the call which consumed
+      the value a staged call returned, normalized here ([(s@1), _, _] into
+      [(s@1)]), would differ from the one of the arm, and be merged into a join
+-     abstraction. *)
++     abstraction. Nor does it merge two abstractions which the join kept
++     unchanged when one borrows a loan held by a variable and a variable
++     borrows a loan of the other: e.g., a call made before a loop which
++     borrows [*self] and the reborrow of an argument read after [self] is
++     written (see [would_end_variable_borrows] in {!reduce_ctx_with_markers}).
++     In the joins of branches (not in the loop joins), the other abstractions
++     which the join kept unchanged, and which are not merged, keep their shape
++     (see [restore_unmerged] there): e.g., the abstraction
++     [{ SB .., Some (SL l) }] of such a call would otherwise become
++     [{ SB .., SL l }], differ from its version in another context of the loop
++     body, and be merged into a join abstraction there. A loop join keeps the
++     normalized form: the fixed point then merges a call made before the loop
++     which the loop body reborrows (e.g., [index_mut] in [get_elem_mut] of the
++     test [loops]) into the loop abstraction, as before. *)
+   let ctx =
+     reduce_ctx_with_markers None sequence span ~with_abs_conts ~loop
+       fresh_abs_kind
+       (AbsId.Set.union
+          (ctx_get_frozen_abs_set ctx)
+          (InterpJoinCore.untouched_staged_call_abs_ids ctx untouched))
++      ~keep_variable_borrows_apart:untouched
++      ~restore_unmerged:
++        (match fresh_abs_kind with
++        | Loop _ -> AbsId.Set.empty
++        | _ -> untouched)
+       ctx
+   in
+   (* Component merging can make a formerly external shared input internal.
+diff --git a/tests/lean/LoopUntouchedSharedReborrows.lean b/tests/lean/LoopUntouchedSharedReborrows.lean
+new file mode 100644
+index 0000000..29f70bf
+--- /dev/null
++++ b/tests/lean/LoopUntouchedSharedReborrows.lean
+@@ -0,0 +1 @@
++import LoopUntouchedSharedReborrows.Checks
+diff --git a/tests/lean/LoopUntouchedSharedReborrows/Checks.lean b/tests/lean/LoopUntouchedSharedReborrows/Checks.lean
+new file mode 100644
+index 0000000..f301a96
+--- /dev/null
++++ b/tests/lean/LoopUntouchedSharedReborrows/Checks.lean
+@@ -0,0 +1,80 @@
++import LoopUntouchedSharedReborrows.LoopUntouchedSharedReborrows
++
++/-! Evaluate the model of `tests/src/loop-untouched-shared-reborrows.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.98.0), including the checker given back (`info` written after the
++    comparisons with the reference returned before the loop; `top`). -/
++
++namespace loop_untouched_shared_reborrows.checks
++open Aeneas Aeneas.Std Result
++
++def u32' (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u32', by simpa using h⟩
++
++def slice (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u32', by simpa using h⟩
++
++def scope : alloc.vec.Vec U32 := vec [10, 20, 10, 30]
++
++def checker : Checker := { info := vec [9], top := vec [] }
++
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def marked (r : Result Checker) : Option (List Nat × List Nat) :=
++  match r with
++  | ok c => some (nats c.info, nats c.top)
++  | _ => none
++
++def markedAll (r : Result (Usize × Checker)) : Option (Nat × List Nat × List Nat) :=
++  match r with
++  | ok (n, c) => some (n.val, nats c.info, nats c.top)
++  | _ => none
++
++def markedLen (r : Result (U32 × Checker)) : Option (Nat × List Nat × List Nat) :=
++  match r with
++  | ok (n, c) => some (n.val, nats c.info, nats c.top)
++  | _ => none
++
++-- native::mark_native
++#guard marked (checker.mark (u32' 0) (slice [1, 3, 2]) scope) == some ([9, 0], [])
++#guard marked (checker.mark (u32' 1) (slice [0, 2, 3]) scope) == some ([9], [])
++#guard marked (checker.mark (u32' 7) (slice [0, 1]) scope) == some ([9], [])
++#guard marked (checker.mark (u32' 2) (slice [0, 2]) scope) == some ([9, 2], [])
++#guard marked (checker.mark (u32' 2) (slice []) scope) == some ([9], [])
++
++-- native::mark_kids_native
++#guard marked (checker.mark_kids (u32' 0) (slice [5, 0, 3, 2, 2]) scope) == some ([9, 2], [])
++#guard marked (checker.mark_kids (u32' 1) (slice [1, 1, 7, 3]) scope) == some ([9, 1], [])
++#guard marked (checker.mark_kids (u32' 2) (slice [0, 9, 0, 1]) scope) == some ([9], [])
++#guard marked (checker.mark_kids (u32' 2) (slice [2, 0, 5, 2]) scope) == some ([9, 4], [])
++#guard marked (checker.mark_kids (u32' 4) (slice [0, 2]) scope) == some ([9], [])
++#guard marked (checker.mark_kids (u32' 3) (slice []) scope) == some ([9], [])
++
++-- native::mark_all_native
++#guard markedAll (checker.mark_all (u32' 0) (slice [0, 2, 1, 2]) scope) == some (3, [9], [3])
++#guard markedAll (checker.mark_all (u32' 3) (slice [0, 1]) scope) == some (0, [9], [])
++#guard markedAll (checker.mark_all (u32' 5) (slice [0]) scope) == some (0, [9], [])
++
++-- native::mark_len_native
++#guard markedLen (checker.mark_len (u32' 0) (slice [2, 0, 1, 2]) scope) == some (10, [9, 6], [])
++#guard markedLen (checker.mark_len (u32' 1) (slice [0, 1]) scope) == some (11, [9], [])
++#guard markedLen (checker.mark_len (u32' 6) (slice [0]) scope) == some (0, [9], [])
++#guard markedLen (checker.mark_len (u32' 3) (slice [3, 3, 3]) scope) == some (13, [9, 10], [])
++#guard markedLen (checker.mark_len (u32' 2) (slice [0, 7]) scope) == some (12, [9, 7], [])
++
++def vars (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec Var :=
++  ⟨xs.map (fun n => ⟨u32' n⟩), by simpa using h⟩
++
++def total (t : Targets) : Option Nat :=
++  match t.total with
++  | ok n => some n.val
++  | _ => none
++
++-- native::total_native
++#guard total (.One ⟨u32' 4⟩) == some 4
++#guard total (.Many ⟨u32' 1⟩ (vars [2, 5])) == some 8
++#guard total (.Many ⟨u32' 3⟩ (vars [])) == some 3
++
++end loop_untouched_shared_reborrows.checks
+diff --git a/tests/lean/LoopUntouchedSharedReborrows/LoopUntouchedSharedReborrows.lean b/tests/lean/LoopUntouchedSharedReborrows/LoopUntouchedSharedReborrows.lean
+new file mode 100644
+index 0000000..179ac79
+--- /dev/null
++++ b/tests/lean/LoopUntouchedSharedReborrows/LoopUntouchedSharedReborrows.lean
+@@ -0,0 +1,711 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_untouched_shared_reborrows]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_untouched_shared_reborrows
++
++/-- [core::option::{core::option::Option<T>}::is_some_and]:
++    Source: '/rustc/library/core/src/option.rs', lines 661:4-661:96
++    Name pattern: [core::option::{core::option::Option<@T>}::is_some_and]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::is_some_and"]
++def core.option.Option.is_some_and
++  {T : Type} {T1 : Type} (opsfunctionFnOnceT1TupleTBoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce T1 T _root_.Bool)
++  (self : _root_.Option T) (f : T1) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok false
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceT1TupleTBoolInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [loop_untouched_shared_reborrows::Checker]
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 41:0-44:1
++    Visibility: public -/
++structure Checker where
++  info : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  top : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::expr_type]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 47:4-49:5 -/
++def Checker.expr_type
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (e : _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref scope
++  let i ← lift (UScalar.cast .Usize e)
++  _root_.Aeneas.Std.core.slice.Slice.get
++    (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++    _root_.Aeneas.Std.U32) s i
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::owned]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 51:4-53:5 -/
++def Checker.owned
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (e : _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let o ←
++    _root_.loop_untouched_shared_reborrows.Checker.expr_type self e scope
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.option.Option.is_some o)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark]: loop body 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-68:9
++    Visibility: public -/
++@[rust_loop_body]
++def Checker.mark_loop.body
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++    _root_.loop_untouched_shared_reborrows.Checker)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done self)
++  | some arg =>
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self arg scope
++    let b ←
++      _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++        (_root_.Aeneas.Std.core.cmp.PartialEqShared core.cmp.PartialEqU32) o
++        (some out)
++    if b
++    then
++      let v ← _root_.Aeneas.Std.alloc.vec.Vec.push self.info expr
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        { self with info := v })
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark]: loop 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-68:9
++    Visibility: public -/
++@[rust_loop]
++def Checker.mark_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_untouched_shared_reborrows.Checker
++  := do
++  loop
++    (fun iter1 => _root_.loop_untouched_shared_reborrows.Checker.mark_loop.body
++       self expr scope out iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) _root_.loop_untouched_shared_reborrows.Checker))
++    iter
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 56:4-69:5
++    Visibility: public -/
++def Checker.mark
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_untouched_shared_reborrows.Checker
++  := do
++  let b ←
++    _root_.loop_untouched_shared_reborrows.Checker.owned self expr scope
++  if b
++  then
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self expr scope
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok self
++    | some out =>
++      let iter ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++      _root_.loop_untouched_shared_reborrows.Checker.mark_loop iter self expr
++        scope out
++  else _root_.Aeneas.Std.Result.ok self
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids::closure]
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 86:54-86:68 -/
++@[reducible]
++def Checker.mark_kids.closure := _root_.Aeneas.Std.U32
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids::{core::ops::function::FnOnce<(&'_ (u32)), bool> for loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids::closure<0>}::call_once]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 86:54-86:68 -/
++def
++  Checker.mark_kids.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  (c : _root_.loop_untouched_shared_reborrows.Checker.mark_kids.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args = c)
++
++/-- Trait implementation: [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids::{core::ops::function::FnOnce<(&'_ (u32)), bool> for loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids::closure<0>}]
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 86:54-86:68 -/
++@[reducible]
++def Checker.mark_kids.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_untouched_shared_reborrows.Checker.mark_kids.closure
++  _root_.Aeneas.Std.U32 _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_untouched_shared_reborrows.Checker.mark_kids.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids]: loop body 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-90:9
++    Visibility: public -/
++@[rust_loop_body]
++def Checker.mark_kids_loop.body
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))) ×
++    _root_.loop_untouched_shared_reborrows.Checker × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) _root_.loop_untouched_shared_reborrows.Checker)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.enumerate.IteratorEnumerate.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)) iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done self)
++  | some p =>
++    let (index, arg) := p
++    let joined ←
++      if arg = 0#u32
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl model_state1 : _root_.Sum
++          (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++          (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++          (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++          (_root_.Sum (_root_.loop_untouched_shared_reborrows.Checker ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++          (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++          (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))) ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++          _root_.Unit × _root_.Unit)
++          (_root_.loop_untouched_shared_reborrows.Checker ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.U32)) ×
++          (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++          (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++          (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))) ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++      else
++        do
++        let b ←
++          _root_.loop_untouched_shared_reborrows.Checker.owned self arg scope
++        let joined1 ←
++          if b
++          then
++            do
++            let o ←
++              _root_.loop_untouched_shared_reborrows.Checker.expr_type self arg
++                scope
++            let b1 ←
++              _root_.loop_untouched_shared_reborrows.core.option.Option.is_some_and
++                _root_.loop_untouched_shared_reborrows.Checker.mark_kids.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++                o out
++            if b1
++            then
++              let i ← lift (UScalar.cast .U32 index)
++              let i1 ← expr + i
++              let v ← _root_.Aeneas.Std.alloc.vec.Vec.push self.info i1
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                ({ self with info := v }, expr, kids, scope, model_state,
++                model_state1, (), (), (), (), (), (), (), ())) : _root_.Sum
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) (_root_.Sum
++                (_root_.loop_untouched_shared_reborrows.Checker ×
++                _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++                (_root_.loop_untouched_shared_reborrows.Checker ×
++                _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Option
++                (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)) ×
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit)))
++            else
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl model_state1 :
++                _root_.Sum
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) (_root_.Sum
++                (_root_.loop_untouched_shared_reborrows.Checker ×
++                _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++                (_root_.loop_untouched_shared_reborrows.Checker ×
++                _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++                _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++                _root_.Aeneas.Std.U32) × (_root_.Option
++                (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)) ×
++                (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++                (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++                (_root_.Aeneas.Std.core.slice.iter.Iter
++                _root_.Aeneas.Std.U32))) × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++                _root_.Unit × _root_.Unit)))
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl model_state1 :
++              _root_.Sum
++              (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++              (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++              (_root_.Sum (_root_.loop_untouched_shared_reborrows.Checker ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++              (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++              × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit × _root_.Unit)
++              (_root_.loop_untouched_shared_reborrows.Checker ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Aeneas.Std.Usize
++              × _root_.Aeneas.Std.U32)) ×
++              (_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++              (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++              (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++              × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++        match joined1 with
++        | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok joined1
++        | _root_.Sum.inr (_root_.Sum.inl (_, _, _, _, _, _, (), (), (), (), (),
++          ())) =>
++          _root_.Aeneas.Std.Result.ok joined1
++        | _root_.Sum.inr (_root_.Sum.inr (_, _, _, _, _, _, (), (), (), (), (),
++          (), (), ())) =>
++          _root_.Aeneas.Std.Result.ok joined1
++    match joined with
++    | _root_.Sum.inl iter1 =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        self, expr, kids, scope, out))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5,
++      (), (), (), (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit5,
++        exit, exit1, exit2, exit3, exit4))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, _, _, _, (), (), (), (), (),
++      (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids]: loop 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-90:9
++    Visibility: public -/
++@[rust_loop]
++def Checker.mark_kids_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++  (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)))
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_untouched_shared_reborrows.Checker
++  := do
++  loop
++    (fun (iter1, self1, expr1, kids1, scope1, out1) =>
++       _root_.loop_untouched_shared_reborrows.Checker.mark_kids_loop.body iter1
++       self1 expr1 kids1 scope1 out1 :
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))) ×
++      _root_.loop_untouched_shared_reborrows.Checker × _root_.Aeneas.Std.U32
++      × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.enumerate.Enumerate
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))) ×
++      _root_.loop_untouched_shared_reborrows.Checker × _root_.Aeneas.Std.U32
++      × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) _root_.loop_untouched_shared_reborrows.Checker))
++    (iter, self, expr, kids, scope, out)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_kids]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 75:4-91:5
++    Visibility: public -/
++def Checker.mark_kids
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_untouched_shared_reborrows.Checker
++  := do
++  let b ←
++    _root_.loop_untouched_shared_reborrows.Checker.owned self expr scope
++  if b
++  then
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self expr scope
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok self
++    | some out =>
++      let i ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++      let (model_state, _) ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.skip.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.Aeneas.Std.U32) i 1#usize
++      let model_state1 ←
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.Aeneas.Std.U32)).enumerate model_state
++      _root_.loop_untouched_shared_reborrows.Checker.mark_kids_loop
++        model_state1 self expr kids scope out
++  else _root_.Aeneas.Std.Result.ok self
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_all]: loop body 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 99:8-103:9
++    Visibility: public -/
++@[rust_loop_body]
++def Checker.mark_all_loop.body
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.Usize)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some arg =>
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self arg scope
++    let b ←
++      _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++        (_root_.Aeneas.Std.core.cmp.PartialEqShared core.cmp.PartialEqU32) o
++        (some out)
++    let n1 ← if b
++               then n + 1#usize
++               else _root_.Aeneas.Std.Result.ok n
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, n1))
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_all]: loop 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 99:8-103:9
++    Visibility: public -/
++@[rust_loop]
++def Checker.mark_all_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  loop
++    (fun (iter1, n1) =>
++       _root_.loop_untouched_shared_reborrows.Checker.mark_all_loop.body self
++       scope out iter1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.Usize))
++    (iter, n)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_all]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 94:4-108:5
++    Visibility: public -/
++def Checker.mark_all
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.loop_untouched_shared_reborrows.Checker)
++  := do
++  let o ←
++    _root_.loop_untouched_shared_reborrows.Checker.expr_type self expr scope
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok (0#usize, self)
++  | some out =>
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++    let n ←
++      _root_.loop_untouched_shared_reborrows.Checker.mark_all_loop iter self
++        scope out 0#usize
++    if n > 0#usize
++    then
++      let i ← lift (UScalar.cast .U32 n)
++      let i1 ← expr + i
++      let v ← _root_.Aeneas.Std.alloc.vec.Vec.push self.top i1
++      _root_.Aeneas.Std.Result.ok (n, { self with top := v })
++    else _root_.Aeneas.Std.Result.ok (n, self)
++
++/-- Trait implementation: [core::option::{core::cmp::PartialEq<core::option::Option<T>> for core::option::Option<T>}]
++    Source: '/rustc/library/core/src/option.rs', lines 2422:0-2422:56
++    Name pattern: [core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>] -/
++@[reducible, rust_trait_impl
++  "core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>"]
++def core.option.Option.Insts.CoreCmpPartialEqOption {T : Type}
++  (cmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq T T) :
++  _root_.Aeneas.Std.core.cmp.PartialEq (_root_.Option T) (_root_.Option T) := {
++  eq := _root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq
++    cmpPartialEqInst
++}
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_len]: loop body 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-126:9
++    Visibility: public -/
++@[rust_loop_body]
++def Checker.mark_len_loop.body
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.Usize)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len kids
++  if i < i1
++  then
++    let i2 ← Slice.index_usize kids i
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self i2 scope
++    let b ←
++      (_root_.loop_untouched_shared_reborrows.core.option.Option.Insts.CoreCmpPartialEqOption
++        (_root_.Aeneas.Std.core.cmp.PartialEqShared core.cmp.PartialEqU32)).ne
++        o (some out)
++    if b
++    then _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done i)
++    else
++      let i3 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i3)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done i)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_len]: loop 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 1:0-126:9
++    Visibility: public -/
++@[rust_loop]
++def Checker.mark_len_loop
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  loop
++    (fun i1 =>
++       _root_.loop_untouched_shared_reborrows.Checker.mark_len_loop.body self
++       kids scope out i1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize
++      _root_.Aeneas.Std.Usize))
++    i
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Checker}::mark_len]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 113:4-131:5
++    Visibility: public -/
++def Checker.mark_len
++  (self : _root_.loop_untouched_shared_reborrows.Checker)
++  (expr : _root_.Aeneas.Std.U32)
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scope : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_untouched_shared_reborrows.Checker)
++  := do
++  let b ←
++    _root_.loop_untouched_shared_reborrows.Checker.owned self expr scope
++  if b
++  then
++    let o ←
++      _root_.loop_untouched_shared_reborrows.Checker.expr_type self expr scope
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok (0#u32, self)
++    | some out =>
++      let i ←
++        _root_.loop_untouched_shared_reborrows.Checker.mark_len_loop self kids
++          scope out 0#usize
++      let self1 ←
++        if i > 0#usize
++        then
++          do
++          let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len scope
++          let i2 ← lift (UScalar.cast .U32 i1)
++          let i3 ← expr + i2
++          let i4 ← lift (UScalar.cast .U32 i)
++          let i5 ← i3 + i4
++          let v ← _root_.Aeneas.Std.alloc.vec.Vec.push self.info i5
++          _root_.Aeneas.Std.Result.ok { self with info := v }
++        else _root_.Aeneas.Std.Result.ok self
++      let i1 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.index
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++          _root_.Aeneas.Std.U32) scope 0#usize
++      let i2 ← expr + i1
++      _root_.Aeneas.Std.Result.ok (i2, self1)
++  else _root_.Aeneas.Std.Result.ok (0#u32, self)
++
++/-- [loop_untouched_shared_reborrows::Var]
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 134:0-136:1
++    Visibility: public -/
++structure Var where
++  «name» : _root_.Aeneas.Std.U32
++
++/-- [loop_untouched_shared_reborrows::Targets]
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 138:0-141:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Targets where
++| One : _root_.loop_untouched_shared_reborrows.Var → Targets
++| Many :
++  _root_.loop_untouched_shared_reborrows.Var →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_untouched_shared_reborrows.Var
++    →
++  Targets
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Targets}::total]: loop body 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 151:8-153:9
++    Visibility: public -/
++@[rust_loop_body]
++def Targets.total_loop.body
++  (iter : _root_.Aeneas.Std.core.iter.adapters.chain.Chain
++  (_root_.Aeneas.Std.core.iter.sources.once.Once
++  _root_.loop_untouched_shared_reborrows.Var)
++  (_root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_untouched_shared_reborrows.Var)) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.chain.Chain
++    (_root_.Aeneas.Std.core.iter.sources.once.Once
++    _root_.loop_untouched_shared_reborrows.Var)
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_untouched_shared_reborrows.Var)) × _root_.Aeneas.Std.U32)
++    _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.chain.IteratorChain.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOnce
++      _root_.loop_untouched_shared_reborrows.Var)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.loop_untouched_shared_reborrows.Var) iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++  | some v =>
++    let n1 ← n + v.«name»
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, n1))
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Targets}::total]: loop 0:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 151:8-153:9
++    Visibility: public -/
++@[rust_loop]
++def Targets.total_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.chain.Chain
++  (_root_.Aeneas.Std.core.iter.sources.once.Once
++  _root_.loop_untouched_shared_reborrows.Var)
++  (_root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_untouched_shared_reborrows.Var)) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, n1) =>
++       _root_.loop_untouched_shared_reborrows.Targets.total_loop.body iter1 n1
++      : ((_root_.Aeneas.Std.core.iter.adapters.chain.Chain
++      (_root_.Aeneas.Std.core.iter.sources.once.Once
++      _root_.loop_untouched_shared_reborrows.Var)
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_untouched_shared_reborrows.Var)) × _root_.Aeneas.Std.U32)
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.chain.Chain
++      (_root_.Aeneas.Std.core.iter.sources.once.Once
++      _root_.loop_untouched_shared_reborrows.Var)
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_untouched_shared_reborrows.Var)) × _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.U32))
++    (iter, n)
++
++/-- [loop_untouched_shared_reborrows::{loop_untouched_shared_reborrows::Targets}::total]:
++    Source: 'tests/src/loop-untouched-shared-reborrows.rs', lines 145:4-155:5
++    Visibility: public -/
++def Targets.total
++  (self : _root_.loop_untouched_shared_reborrows.Targets) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (first, rest) ←
++    match self with
++    | _root_.loop_untouched_shared_reborrows.Targets.One v =>
++      do
++      let s ←
++        _root_.Aeneas.Std.core.array.Array.index
++          (_root_.Aeneas.Std.core.ops.index.IndexSlice
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFullSlice
++          _root_.loop_untouched_shared_reborrows.Var))
++          (Std.Array.empty _root_.loop_untouched_shared_reborrows.Var) ()
++      _root_.Aeneas.Std.Result.ok (v, s)
++    | _root_.loop_untouched_shared_reborrows.Targets.Many f r =>
++      do
++      let s ← _root_.Aeneas.Std.alloc.vec.Vec.as_slice r
++      _root_.Aeneas.Std.Result.ok (f, s)
++  let o ← _root_.Aeneas.Std.core.iter.sources.once.once first
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.chain.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorOnce
++      _root_.loop_untouched_shared_reborrows.Var)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.loop_untouched_shared_reborrows.Var) o rest
++  _root_.loop_untouched_shared_reborrows.Targets.total_loop model_state 0#u32
++
++end loop_untouched_shared_reborrows
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index f3bfd9e..c3c8330 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -140,6 +140,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopReturnOptionMutArg
+ @[default_target] lean_lib LoopSharedComponents
++@[default_target] lean_lib LoopUntouchedSharedReborrows
+ @[default_target] lean_lib JoinDistinctOwnedRegion
+ @[default_target] lean_lib JoinFrozenInputLoan
+ @[default_target] lean_lib JoinDistinctSharedReborrows
+diff --git a/tests/src/loop-untouched-shared-reborrows.rs b/tests/src/loop-untouched-shared-reborrows.rs
+new file mode 100644
+index 0000000..1e6804a
+--- /dev/null
++++ b/tests/src/loop-untouched-shared-reborrows.rs
+@@ -0,0 +1,250 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopUntouchedSharedReborrows
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A shared reference returned by a call made before a loop, which borrows
++//! `*self` and reborrows shared arguments (`out = self.expr_type(expr, scope)`),
++//! compared with in the loop, then `self` written and the arguments read after
++//! the write (the shape of
++//! `chelis_types::linearity::Checker::maybe_mark_reusable_app_input`). A switch
++//! reborrows the shared arguments (an abstraction lends the reborrow `expr`
++//! now holds); the abstraction of the call borrows `*self` and those
++//! reborrows. The join of the loop entrance with the continue context kept
++//! both abstractions unchanged, and its final canonicalization merged the
++//! call into the reborrow: writing `self.info` then ended the merged
++//! abstraction, and with it the reborrow of `expr`, which the push still reads
++//! ("Can not apply a projection to the ⊥ value"). That canonicalization no
++//! longer merges two abstractions the join kept unchanged when one borrows a
++//! loan held by a variable (`*self`) and a variable borrows a loan of the
++//! other (`expr`).
++//!
++//! With `continue` branches in the loop (`mark_kids`), the first join of the
++//! loop body kept the call abstraction `{ SB .., Some (SL l) }` unchanged, but
++//! its final canonicalization normalized it to `{ SB .., SL l }`: it then
++//! differed from its version in the context of the early `continue`, and the
++//! join of the two contexts merged it (and the reborrows it borrows) into a
++//! join abstraction. That canonicalization now gives the abstractions the join
++//! kept unchanged, and which it does not merge, their shape back.
++//!
++//! Control (`Targets::total`, the shape of
++//! `chelis_deep::annotations::WrtTargets::variables`): a match whose arms
++//! borrow different variables (a promoted empty slice in one, a call on the
++//! payload in the other), joined, then iterated. The join's own abstraction
++//! borrows the promoted slice and the reborrow of `self`: it is canonicalized
++//! as before (keeping it apart as well made the arms no longer match the
++//! joined context).
++//!
++//! LoopUntouchedSharedReborrows/Checks.lean compares the model, including the
++//! checker given back, with the native results asserted in the native test
++//! module.
++
++pub struct Checker {
++    pub info: Vec<u32>,
++    pub top: Vec<u32>,
++}
++
++impl Checker {
++    fn expr_type<'a>(&'a self, e: &'a u32, scope: &'a Vec<u32>) -> Option<&'a u32> {
++        scope.get(*e as usize)
++    }
++
++    fn owned(&self, e: &u32, scope: &Vec<u32>) -> bool {
++        self.expr_type(e, scope).is_some()
++    }
++
++    /// Push `expr` when the type of one of the `kids` is the type of `expr`
++    pub fn mark(&mut self, expr: &u32, kids: &[u32], scope: &Vec<u32>) {
++        if !self.owned(expr, scope) {
++            return;
++        }
++        let Some(out) = self.expr_type(expr, scope) else {
++            return;
++        };
++        for arg in kids.iter() {
++            if self.expr_type(arg, scope) == Some(out) {
++                self.info.push(*expr);
++                break;
++            }
++        }
++    }
++
++    /// Push `expr` plus the position (after the head) of the first kid whose
++    /// type is the type of `expr`, skipping the kids `0` and those without a
++    /// type: the loop has `continue` branches (the shape of
++    /// `maybe_mark_reusable_app_input`)
++    pub fn mark_kids(&mut self, expr: &u32, kids: &[u32], scope: &Vec<u32>) {
++        if !self.owned(expr, scope) {
++            return;
++        }
++        let Some(out) = self.expr_type(expr, scope) else {
++            return;
++        };
++        for (index, arg) in kids.iter().skip(1).enumerate() {
++            if *arg == 0 || !self.owned(arg, scope) {
++                continue;
++            }
++            if self.expr_type(arg, scope).is_some_and(|t| *t == *out) {
++                self.info.push(*expr + index as u32);
++                break;
++            }
++        }
++    }
++
++    /// Same, and count the matching kids in `top` (the loop goes on)
++    pub fn mark_all(&mut self, expr: &u32, kids: &[u32], scope: &Vec<u32>) -> usize {
++        let Some(out) = self.expr_type(expr, scope) else {
++            return 0;
++        };
++        let mut n = 0;
++        for arg in kids.iter() {
++            if self.expr_type(arg, scope) == Some(out) {
++                n += 1;
++            }
++        }
++        if n > 0 {
++            self.top.push(*expr + n as u32);
++        }
++        n
++    }
++
++    /// Count the leading kids whose type is the type of `expr`, a `while`
++    /// loop; when there are some, push `expr` plus the length of `scope` and
++    /// the count (both arguments are read after `self` is written)
++    pub fn mark_len(&mut self, expr: &u32, kids: &[u32], scope: &Vec<u32>) -> u32 {
++        if !self.owned(expr, scope) {
++            return 0;
++        }
++        let Some(out) = self.expr_type(expr, scope) else {
++            return 0;
++        };
++        let mut i = 0;
++        while i < kids.len() {
++            if self.expr_type(&kids[i], scope) != Some(out) {
++                break;
++            }
++            i += 1;
++        }
++        if i > 0 {
++            self.info.push(*expr + scope.len() as u32 + i as u32);
++        }
++        *expr + scope[0]
++    }
++}
++
++pub struct Var {
++    pub name: u32,
++}
++
++pub enum Targets {
++    One(Var),
++    Many(Var, Vec<Var>),
++}
++
++impl Targets {
++    /// The sum of the names of the targets
++    pub fn total(&self) -> u32 {
++        let (first, rest) = match self {
++            Self::One(v) => (v, &[][..]),
++            Self::Many(f, r) => (f, r.as_slice()),
++        };
++        let mut n = 0;
++        for v in std::iter::once(first).chain(rest) {
++            n += v.name;
++        }
++        n
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn checker() -> Checker {
++        Checker { info: vec![9], top: vec![] }
++    }
++
++    #[test]
++    fn mark_native() {
++        let scope = vec![10, 20, 10, 30];
++        let mut c = checker();
++        c.mark(&0, &[1, 3, 2], &scope);
++        assert_eq!((c.info, c.top), (vec![9, 0], vec![]));
++        let mut c = checker();
++        c.mark(&1, &[0, 2, 3], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        c.mark(&7, &[0, 1], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        c.mark(&2, &[0, 2], &scope);
++        assert_eq!((c.info, c.top), (vec![9, 2], vec![]));
++        let mut c = checker();
++        c.mark(&2, &[], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++    }
++
++    #[test]
++    fn mark_kids_native() {
++        let scope = vec![10, 20, 10, 30];
++        let mut c = checker();
++        c.mark_kids(&0, &[5, 0, 3, 2, 2], &scope);
++        assert_eq!((c.info, c.top), (vec![9, 2], vec![]));
++        let mut c = checker();
++        c.mark_kids(&1, &[1, 1, 7, 3], &scope);
++        assert_eq!((c.info, c.top), (vec![9, 1], vec![]));
++        let mut c = checker();
++        c.mark_kids(&2, &[0, 9, 0, 1], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        c.mark_kids(&2, &[2, 0, 5, 2], &scope);
++        assert_eq!((c.info, c.top), (vec![9, 4], vec![]));
++        let mut c = checker();
++        c.mark_kids(&4, &[0, 2], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        c.mark_kids(&3, &[], &scope);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++    }
++
++    #[test]
++    fn mark_all_native() {
++        let scope = vec![10, 20, 10, 30];
++        let mut c = checker();
++        assert_eq!(c.mark_all(&0, &[0, 2, 1, 2], &scope), 3);
++        assert_eq!((c.info, c.top), (vec![9], vec![3]));
++        let mut c = checker();
++        assert_eq!(c.mark_all(&3, &[0, 1], &scope), 0);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        assert_eq!(c.mark_all(&5, &[0], &scope), 0);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++    }
++
++    #[test]
++    fn mark_len_native() {
++        let scope = vec![10, 20, 10, 30];
++        let mut c = checker();
++        assert_eq!(c.mark_len(&0, &[2, 0, 1, 2], &scope), 10);
++        assert_eq!((c.info, c.top), (vec![9, 6], vec![]));
++        let mut c = checker();
++        assert_eq!(c.mark_len(&1, &[0, 1], &scope), 11);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        assert_eq!(c.mark_len(&6, &[0], &scope), 0);
++        assert_eq!((c.info, c.top), (vec![9], vec![]));
++        let mut c = checker();
++        assert_eq!(c.mark_len(&3, &[3, 3, 3], &scope), 13);
++        assert_eq!((c.info, c.top), (vec![9, 10], vec![]));
++        let mut c = checker();
++        assert_eq!(c.mark_len(&2, &[0, 7], &scope), 12);
++        assert_eq!((c.info, c.top), (vec![9, 7], vec![]));
++    }
++
++    #[test]
++    fn total_native() {
++        assert_eq!(Targets::One(Var { name: 4 }).total(), 4);
++        let many = Targets::Many(Var { name: 1 }, vec![Var { name: 2 }, Var { name: 5 }]);
++        assert_eq!(many.total(), 8);
++        assert_eq!(Targets::Many(Var { name: 3 }, vec![]).total(), 3);
++    }
++}

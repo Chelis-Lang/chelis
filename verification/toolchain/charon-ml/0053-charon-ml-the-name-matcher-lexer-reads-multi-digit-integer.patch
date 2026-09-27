@@ -1,0 +1,77 @@
+# charon integration step 53 after 546078ea5d: commit d5ba232f0bba63ad7e6a898976399cf8dadf81a6
+# first parent b947e944415f15a3a726b96a093e5560fb73ff0f
+# series charon-ml: patch -p1 in the root of the upstream source
+#
+# charon-ml: the name-matcher lexer reads multi-digit integer literals
+#
+# The lexer produced one INT token per digit, so a pattern with a
+# multi-digit array length, const generic value or disambiguator
+# (`[@T; 32]`, `ArrayToSliceShared<'_, bool, 32>`, `f#12`) failed with
+# "Parse error" (Aeneas: "Could not parse pattern"), although the printer
+# emits such literals with TkPattern. `digit+` lexes the whole literal.
+#
+# Tests: charon-ml int_literal_tests (parse, structure and print round trip
+# of multi-digit literals) and ml-name-matcher-tests.rs cases matching an
+# impl for [T; 32] and an ArrayToSliceShared call with length 32 (the
+# patterns with 3 and 320 fail). The Rust pattern parser already reads
+# multi-digit disambiguators and has no array syntax.
+
+diff --git a/charon-ml/name_matcher_parser/Lexer.mll b/charon-ml/name_matcher_parser/Lexer.mll
+index c2145fb..e4d1dc6 100644
+--- a/charon-ml/name_matcher_parser/Lexer.mll
++++ b/charon-ml/name_matcher_parser/Lexer.mll
+@@ -20,7 +20,7 @@ rule token = parse
+   | "false" { FALSE }
+   | "_" { WILDCARD }
+   | ident { IDENT (Lexing.lexeme lexbuf) }
+-  | digit { INT (Z.of_string (Lexing.lexeme lexbuf)) }
++  | digit+ { INT (Z.of_string (Lexing.lexeme lexbuf)) }
+   | '(' { LEFT_BRACKET }
+   | ')' { RIGHT_BRACKET }
+   | '{' { LEFT_CURLY }
+diff --git a/charon-ml/tests/Test_NameMatcher.ml b/charon-ml/tests/Test_NameMatcher.ml
+index 302f5a0..760f7b6 100644
+--- a/charon-ml/tests/Test_NameMatcher.ml
++++ b/charon-ml/tests/Test_NameMatcher.ml
+@@ -39,6 +39,34 @@ let parse_tests () =
+   let _ = List.map parse_pattern patterns in
+   ()
+ 
++(* Integer literals (array lengths, const generic values, disambiguators) may have
++   several digits: they must be lexed as one token and print back unchanged. *)
++let int_literal_tests () =
++  let round_trip =
++    [
++      "core::array::{[@T; 32]}";
++      "serde::de::Deserialize<'de, [@T; 32]>";
++      "x::{[u8; 1024]}::f";
++      "x::Foo<@T, 12345678901234567890>";
++      "x::f#12";
++      "x::{[@T; 0]}";
++    ]
++  in
++  List.iter
++    (fun s ->
++      let s' = pattern_to_string { tgt = TkPattern } (parse_pattern s) in
++      if s' <> s then (
++        log#error "Pattern %s printed back as %s" s s';
++        assert false))
++    round_trip;
++  (match parse_pattern "{[@T; 32]}" with
++  | [ PImpl (EPrimAdt (TArray, [ GExpr (EVar _); GValue (LInt n) ])) ] ->
++      assert (Z.equal n (Z.of_int 32))
++  | _ -> assert false);
++  match parse_pattern "x::f#12" with
++  | [ _; PIdent ("f", 12, []) ] -> ()
++  | _ -> assert false
++
+ let name_map_tests () =
+   let bindings =
+     [
+@@ -256,5 +284,6 @@ let annotated_rust_tests test_file =
+ 
+ let run_tests test_file =
+   parse_tests ();
++  int_literal_tests ();
+   name_map_tests ();
+   annotated_rust_tests test_file

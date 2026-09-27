@@ -1,0 +1,1477 @@
+# aeneas integration step 143 after cba11f3beb: commit 69ac7207de6dfcb93e83d7d39909ebea7a73d67a
+# first parent 0663198017b3fcd0e594a29ffe15e554c373186f, merged 982d8d35c630fa22177d42166ae830b40841ed64
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/tests-lean' (generated variables avoid the names that are not pattern variables in the opened scope, derived by Lean's own resolution; BuiltinClone/BuiltinCopy printed rooted)
+
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index f34556a..a98060e 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -1460,7 +1460,37 @@ let keywords () =
+ 
+ (** Names which generated variables must not take but which user declarations,
+     fields and methods may take: they parse as plain identifiers, and the
+-    generated code never refers to them unqualified. *)
++    generated code never refers to them unqualified.
++
++    For Lean, the second group is the identifiers that are not plain pattern
++    variables in the scope that the generated files open ([open Aeneas
++    Aeneas.Std Result ControlFlow Error], see [Translate], then the crate
++    namespace, whose declarations are registered names). A variable is printed
++    as a pattern in match arms ([| some x =>], [| Foo.Bar x y =>]) and in
++    [fun]/[let] patterns outside [do] blocks, and Lean's pattern elaboration
++    ([Lean.Elab.PatternVar.processId]) resolves an identifier there before
++    taking it as a variable: an ambiguous resolution is an error (the
++    definition becomes [sorry]), and a constructor or a [@[match_pattern]]
++    function becomes a constructor pattern instead of a variable. The list is
++    exactly the identifiers (last components of the constants of [import
++    Aeneas], Rust-like identifiers) that [Lean.Elab.Term.resolveId?] (kind
++    "pattern") resolves ambiguously, to a constructor or to a match pattern in
++    that scope; [tests/lean/LeanPatternNames/Scope.lean] recomputes it and
++    fails when Aeneas' Lean library changes it:
++    - ambiguous: [bind] ([Aeneas.Std.bind], [Bind.bind]), [panic] ([panic],
++      [Error.panic]), [Array] ([Array], [Aeneas.Std.Array]), [trans]
++      ([trans], [Trans.trans]), [rec], [casesOn], [congr_simp], [_sizeOf_1],
++      [_sizeOf_inst] (the [Result], [ControlFlow] and [Error] ones),
++      [hcongr_1] ([Result], [ControlFlow]), [dite_true] and [dite_false]
++      ([Aeneas.dite_*] and the root ones), [and_or_imp],
++      [imp_and_neg_imp_iff], [imp_iff_right_iff], [not_imp] (the root ones
++      and [Classical]'s), [not_imp_self] (the root one and [Decidable]'s);
++    - constructors: [ok], [fail], [div] ([Result]), [cont], [done]
++      ([ControlFlow]), [arrayOutOfBounds], [assertionFailure],
++      [divisionByZero], [integerOverflow], [maximumSizeExceeded], [undef]
++      ([Error]; [Error.panic] is ambiguous), [some], [none] ([Option]),
++      [isTrue], [isFalse] ([Decidable]), [true], [false] ([Bool]);
++    - match patterns: [rfl], [toLex], [ofLex], [toColex], [ofColex]. *)
+ let var_reserved_names () : string list =
+   match backend () with
+   | Lean ->
+@@ -1491,6 +1521,46 @@ let var_reserved_names () : string list =
+         "toStr";
+         "universes";
+         "using_well_founded";
++        (* Not plain pattern variables in the opened scope (see above) *)
++        "_sizeOf_1";
++        "_sizeOf_inst";
++        "Array";
++        "and_or_imp";
++        "bind";
++        "casesOn";
++        "congr_simp";
++        "dite_false";
++        "dite_true";
++        "hcongr_1";
++        "imp_and_neg_imp_iff";
++        "imp_iff_right_iff";
++        "not_imp";
++        "not_imp_self";
++        "panic";
++        "rec";
++        "trans";
++        "arrayOutOfBounds";
++        "assertionFailure";
++        "cont";
++        "div";
++        "divisionByZero";
++        "done";
++        "fail";
++        "false";
++        "integerOverflow";
++        "isFalse";
++        "isTrue";
++        "maximumSizeExceeded";
++        "none";
++        "ok";
++        "some";
++        "true";
++        "undef";
++        "ofColex";
++        "ofLex";
++        "rfl";
++        "toColex";
++        "toLex";
+       ]
+   | FStar | Coq | HOL4 -> []
+ 
+diff --git a/src/extract/ExtractTypes.ml b/src/extract/ExtractTypes.ml
+index b20db9c..0aad5b2 100644
+--- a/src/extract/ExtractTypes.ml
++++ b/src/extract/ExtractTypes.ml
+@@ -913,26 +913,26 @@ and extract_trait_instance_id (span : Meta.span) (ctx : extraction_ctx)
+         | [ _; input; output ] -> { generics with types = [ input; output ] }
+         | _ -> [%internal_error] span
+       in
+-      let builtin_fn_name (name : string) : string =
++      (* Printed from the root in Lean: a user declaration of the same name
++         in the crate namespace would shadow the bare name *)
++      let builtin_name (name : string) : string =
+         if backend () = Lean then "_root_.Aeneas.Std." ^ name else name
+       in
+       let name, generics =
+         match data with
+-        | BuiltinClone -> ("BuiltinClone", generics)
+-        | BuiltinCopy -> ("BuiltinCopy", generics)
++        | BuiltinClone -> (builtin_name "BuiltinClone", generics)
++        | BuiltinCopy -> (builtin_name "BuiltinCopy", generics)
+         | BuiltinDiscriminantKind ->
+             [%lwarning
+               "Extracted an unexpected builtin clause of kind `Discriminant`: \
+                this will not type-check"];
+             ("BuiltinDiscriminantKind", generics)
+-        (* Printed from the root in Lean: user declarations may take these
+-           names (they are only reserved for the generated variables) *)
+         | BuiltinFn ->
+-            (builtin_fn_name "BuiltinFn", builtin_fn_update_generics generics)
++            (builtin_name "BuiltinFn", builtin_fn_update_generics generics)
+         | BuiltinFnMut ->
+-            (builtin_fn_name "BuiltinFnMut", builtin_fn_update_generics generics)
++            (builtin_name "BuiltinFnMut", builtin_fn_update_generics generics)
+         | BuiltinFnOnce ->
+-            (builtin_fn_name "BuiltinFnOnce", builtin_fn_update_generics generics)
++            (builtin_name "BuiltinFnOnce", builtin_fn_update_generics generics)
+       in
+       if inside then F.pp_print_string fmt "(";
+       F.pp_print_string fmt name;
+diff --git a/tests/lean/BuiltinShadowing/BuiltinShadowing.lean b/tests/lean/BuiltinShadowing/BuiltinShadowing.lean
+index 347f546..6f69417 100644
+--- a/tests/lean/BuiltinShadowing/BuiltinShadowing.lean
++++ b/tests/lean/BuiltinShadowing/BuiltinShadowing.lean
+@@ -198,9 +198,9 @@ def set_then_bump
+     Source: 'tests/src/builtin-shadowing.rs', lines 87:0-89:1
+     Visibility: public -/
+ def array_at
+-  {Array : Type} (a : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
+-  (i : _root_.Aeneas.Std.Usize) (tag : Array) :
+-  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × Array)
++  {Array1 : Type} (a : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) (tag : Array1) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × Array1)
+   := do
+   let i1 ← _root_.Aeneas.Std.Array.index_usize a i
+   _root_.Aeneas.Std.Result.ok (i1, tag)
+diff --git a/tests/lean/Derive.lean b/tests/lean/Derive.lean
+index b3b1a38..3f00414 100644
+--- a/tests/lean/Derive.lean
++++ b/tests/lean/Derive.lean
+@@ -822,7 +822,7 @@ def CopyStruct.Insts.CoreCloneClone.clone
+   (self : _root_.derive.CopyStruct T) :
+   _root_.Aeneas.Std.Result (_root_.derive.CopyStruct T)
+   := do
+-  (BuiltinClone _root_.Unit).clone ()
++  (_root_.Aeneas.Std.BuiltinClone _root_.Unit).clone ()
+   let b ← lift (_root_.Aeneas.Std.core.clone.impls.CloneBool.clone self.f1)
+   let i ← lift (_root_.Aeneas.Std.core.clone.impls.CloneU32.clone self.f2)
+   let t ← corecloneCloneInst.clone self.f3
+diff --git a/tests/lean/Issue789LoopCtxMatch.lean b/tests/lean/Issue789LoopCtxMatch.lean
+index 856d351..8419be2 100644
+--- a/tests/lean/Issue789LoopCtxMatch.lean
++++ b/tests/lean/Issue789LoopCtxMatch.lean
+@@ -45,12 +45,12 @@ def the_loop_loop.body
+   := do
+   let (s1, to_slice_mut_back) ← lift (_root_.Aeneas.Std.Array.to_slice_mut s.y)
+   let (result, i, s2) ← _root_.issue_789_loop_ctx_match.f s.x next_in s1
+-  let (done, n) := result
++  let (done1, n) := result
+   let next_in1 ←
+     _root_.Aeneas.Std.core.slice.index.Slice.index
+       (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
+       _root_.Aeneas.Std.U8) next_in { start := n }
+-  if done
++  if done1
+   then
+     let a := to_slice_mut_back s2
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, a,
+@@ -98,8 +98,8 @@ def the_loop
+   _root_.Aeneas.Std.Result (_root_.Bool × _root_.issue_789_loop_ctx_match.S ×
+     (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8))
+   := do
+-  let (i, a, next_in1, done) ←
++  let (i, a, next_in1, done1) ←
+     _root_.issue_789_loop_ctx_match.the_loop_loop s next_in
+-  _root_.Aeneas.Std.Result.ok (done, { x := i, y := a }, next_in1)
++  _root_.Aeneas.Std.Result.ok (done1, { x := i, y := a }, next_in1)
+ 
+ end issue_789_loop_ctx_match
+diff --git a/tests/lean/LeanPatternNames.lean b/tests/lean/LeanPatternNames.lean
+new file mode 100644
+index 0000000..d755932
+--- /dev/null
++++ b/tests/lean/LeanPatternNames.lean
+@@ -0,0 +1,3 @@
++import LeanPatternNames.Checks
++import LeanPatternNames.LeanPatternNames
++import LeanPatternNames.Scope
+diff --git a/tests/lean/LeanPatternNames/Checks.lean b/tests/lean/LeanPatternNames/Checks.lean
+new file mode 100644
+index 0000000..ab6f26b
+--- /dev/null
++++ b/tests/lean/LeanPatternNames/Checks.lean
+@@ -0,0 +1,93 @@
++import LeanPatternNames.LeanPatternNames
++
++/-! Evaluate the model of `tests/src/lean-pattern-names.rs` on the inputs of
++    its `native` test module and compare with the native results, including
++    the option and the shape that `give_back` gives back through `&mut` (read
++    back with the model's `shape_fields`, as natively). -/
++
++namespace lean_pattern_names.checks
++open Aeneas Aeneas.Std Result
++open lean_pattern_names (Shape Wide)
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def res {α β : Type} (f : α → β) : Result α → Option β
++  | ok v => some (f v)
++  | _ => none
++
++def n : Result U32 → Option Nat := res (·.val)
++
++def n2 : Result (U32 × U32) → Option (Nat × Nat) := res (fun (a, b) => (a.val, b.val))
++
++def get {α : Type} : Result α → Option α := res id
++
++def umax : Nat := 4294967295
++
++-- native `arms`
++#guard n (option_arms (some (u 4)) (some (u 10, u 3))) == some (12 + 7 + (4 ^^^ 0x10) + 30)
++#guard n (option_arms none none) == some (1 + 2 + 7 + 11)
++#guard n (option_arms (some (u 5)) none) == some (15 + 2 + (5 ^^^ 0x10) + 11)
++#guard n (option_arms none (some (u 1, u 2))) == some ((1 + umax + 7 + 2) % 2 ^ 32)
++#guard n (shape_arms (.Pair (u 4) (u 5))) == some 13
++#guard n (shape_arms (.Triple (u 1) (u 2) (u 3))) == some 7
++#guard n (shape_arms (.Named (u 9) (u 4))) == some 5
++#guard n (shape_arms .Nothing) == some 5
++
++-- native `lets`
++#guard n (let_tuples (u 1, u 2, u 3) (u 4, u 5, u 6)) == some ((1 ^^^ 4) + 7 + 18)
++#guard n (closures (u 3) (u 5)) == some (15 + 4 + (3 ^^^ 5))
++#guard n2 (loops (u 0)) == some (0, 1)
++#guard n2 (loops (u 4)) == some (6, 87)
++
++-- native `wide_arms`: `wide`, then `bump_wide` returns the old first payload and gives back the payload
++-- (read back with the model's `wide_fields`)
++/-- The `i`-th variant of `Wide` with the payload `k + 1`, `k + 2`, ... (native `mk`). -/
++def mk (i k : Nat) : Wide :=
++  let v (j : Nat) := u ((k + j) % 2 ^ 32)
++  match i with
++  | 0 => .A (v 1) (v 2) (v 3) (v 4) (v 5) (v 6)
++  | 1 => .B (v 1) (v 2) (v 3) (v 4) (v 5) (v 6)
++  | 2 => .C (v 1) (v 2) (v 3) (v 4) (v 5) (v 6)
++  | 3 => .D (v 1) (v 2) (v 3) (v 4) (v 5) (v 6)
++  | 4 => .E (v 1) (v 2) (v 3) (v 4) (v 5) (v 6)
++  | _ => .F (v 1) (v 2) (v 3) (v 4) (v 5)
++
++def wideCase (i k : Nat) : Option (Nat × Nat × Nat × Nat × Nat × Nat × Nat × Nat) :=
++  get (wide (mk i k)) >>= fun d =>
++    get (bump_wide (mk i k)) >>= fun (old, w) =>
++      get (wide_fields w) >>= fun (a, b, c, e, f, g) =>
++        some (d.val, old.val, a.val, b.val, c.val, e.val, f.val, g.val)
++
++#guard wideCase 0 10 == some (326404131, 11, (25, 1, 13, 14, 15, 11))
++#guard wideCase 1 10 == some (326404131, 11, (156, 12, 13, 15, 15, 27))
++#guard wideCase 2 10 == some (326404131, 11, (12, 4294967295, 13, 14, 16, 16))
++#guard wideCase 3 10 == some (326404131, 11, (25, 12, 13, 31, 15, 16))
++#guard wideCase 4 10 == some (326404131, 11, (156, 12, 13, 15, 15, 11))
++#guard wideCase 5 10 == some (326404122, 11, (25, 12, 13, 15, 15, 0))
++#guard wideCase 0 4294967280 == some (3852201571, 4294967281, (4294967269, 1, 4294967283, 4294967284, 4294967285, 4294967281))
++#guard wideCase 1 4294967280 == some (3852201571, 4294967281, (182, 4294967282, 4294967283, 4294967285, 4294967285, 4294967271))
++#guard wideCase 2 4294967280 == some (3852201571, 4294967281, (4294967282, 4294967295, 4294967283, 4294967284, 4294967286, 4294967286))
++#guard wideCase 3 4294967280 == some (3852201571, 4294967281, (4294967269, 4294967282, 4294967283, 3, 4294967285, 4294967286))
++#guard wideCase 4 4294967280 == some (3852201571, 4294967281, (182, 4294967282, 4294967283, 4294967285, 4294967285, 4294967281))
++#guard wideCase 5 4294967280 == some (3852201588, 4294967281, (4294967269, 4294967282, 4294967283, 4294967285, 4294967285, 0))
++
++-- native `given_back`: `give_back` returns the old payload and gives back the option and the shape
++def gb (o : Option U32) (s : Shape) : Option (Nat × Option Nat × Nat × Nat × Nat) :=
++  get (give_back o s) >>= fun (old, o', s') =>
++    get (shape_fields s') >>= fun (a, b, c) => some (old.val, o'.map (·.val), a.val, b.val, c.val)
++
++#guard gb (some (u 7)) (.Pair (u 4) (u 5)) == some (7, some 107, 9, 0, 0)
++#guard gb none .Nothing == some (0, some 1, 0, 3, 0)
++#guard gb (some (u 1)) (.Triple (u 1) (u 2) (u 3)) == some (1, some 101, 3, 3, 1)
++#guard gb (some (u 101)) (.Named (u 6) (u 1)) == some (101, some 201, 12, 9, 1)
++-- the chained calls of `given_back`, each on the option the previous call gave back
++#guard (get (give_back none .Nothing) >>= fun (_, o, _) =>
++    get (give_back o (.Triple (u 1) (u 2) (u 3))) >>= fun (_, o, _) =>
++    get (give_back o (.Named (u 6) (u 1)))).map (fun (old, o, _) => (old.val, o.map (·.val)))
++  == some (101, some 201)
++
++-- native `builtin_names`
++#guard n2 (clone_all { unit := (), v := u 3 } { unit := (), w := u 4 } ()) == some (7, 4)
++#guard n2 (clone_all { unit := (), v := u 10 } { unit := (), w := u umax } ()) == some (9, umax)
++
++end lean_pattern_names.checks
+diff --git a/tests/lean/LeanPatternNames/LeanPatternNames.lean b/tests/lean/LeanPatternNames/LeanPatternNames.lean
+new file mode 100644
+index 0000000..bdd25ae
+--- /dev/null
++++ b/tests/lean/LeanPatternNames/LeanPatternNames.lean
+@@ -0,0 +1,697 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [lean_pattern_names]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace lean_pattern_names
++
++/-- [lean_pattern_names::Shape]
++    Source: 'tests/src/lean-pattern-names.rs', lines 22:0-27:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Shape where
++| Pair : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32 → Shape
++| Triple :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Shape
++| Named : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32 → Shape
++| Nothing : Shape
++
++/-- [lean_pattern_names::option_arms]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 30:0-45:1
++    Visibility: public -/
++def option_arms
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (p : _root_.Option (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let a ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 1#u32
++    | some bind1 =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul
++        bind1 3#u32)
++  let (p1, b) ←
++    match p with
++    | none => _root_.Aeneas.Std.Result.ok (none, 2#u32)
++    | some p2 =>
++      do
++      let (ok1, fail1) := p2
++      let b1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_sub ok1 fail1)
++      _root_.Aeneas.Std.Result.ok (p, b1)
++  let c ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 7#u32
++    | some some1 => _root_.Aeneas.Std.Result.ok (some1 ^^^ 16#u32)
++  let d ←
++    match p1 with
++    | none => _root_.Aeneas.Std.Result.ok 11#u32
++    | some p2 =>
++      let (none1, panic1) := p2
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul
++        none1 panic1)
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add a b)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i c)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i1
++    d)
++
++/-- [lean_pattern_names::shape_arms]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 48:0-55:1
++    Visibility: public -/
++def shape_arms
++  (s : _root_.lean_pattern_names.Shape) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match s with
++  | _root_.lean_pattern_names.Shape.Pair div1 cont1 =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul div1 2#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++      cont1)
++  | _root_.lean_pattern_names.Shape.Triple done1 Array1 trans1 =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul Array1 trans1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add
++      done1 i)
++  | _root_.lean_pattern_names.Shape.Named casesOn1 congr_simp1 =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_sub
++      casesOn1 congr_simp1)
++  | _root_.lean_pattern_names.Shape.Nothing =>
++    _root_.Aeneas.Std.Result.ok 5#u32
++
++/-- [lean_pattern_names::let_tuples]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 58:0-66:1
++    Visibility: public -/
++def let_tuples
++  (t : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  (u : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (rec1, dite_true1, dite_false1) := t
++  let (hcongr_11, and_or_imp1, not_imp1) := u
++  let not_imp_self1 ← lift (rec1 ^^^ hcongr_11)
++  let imp_iff_right_iff1 ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add dite_true1 and_or_imp1)
++  let imp_and_neg_imp_iff1 ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul dite_false1 not_imp1)
++  let i ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add not_imp_self1
++      imp_iff_right_iff1)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    imp_and_neg_imp_iff1)
++
++/-- [lean_pattern_names::apply2]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 68:0-70:1
++    Visibility: public -/
++def apply2
++  {F : Type} (coreopsfunctionFnFPairU32U32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.Fn F (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32) (f : F)
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  coreopsfunctionFnFPairU32U32U32Inst.call f (x, y)
++
++/-- [lean_pattern_names::closures::closure#1]
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++@[reducible]
++def closures.closure_1 := _root_.Unit
++
++/-- [lean_pattern_names::closures::{core::ops::function::Fn<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}::call]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++def closures.closure_1.Insts.CoreOpsFunctionFnTuplePairU32U32U32.call
++  (c : _root_.lean_pattern_names.closures.closure_1)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (integerOverflow1, maximumSizeExceeded1) := tupled_args
++  _root_.Aeneas.Std.Result.ok (integerOverflow1 ^^^ maximumSizeExceeded1)
++
++/-- [lean_pattern_names::closures::closure]
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++@[reducible]
++def closures.closure := _root_.Aeneas.Std.U32
++
++/-- [lean_pattern_names::closures::{core::ops::function::Fn<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}::call]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++def closures.closure.Insts.CoreOpsFunctionFnPairU32U32U32.call
++  (c : _root_.lean_pattern_names.closures.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (assertionFailure1, divisionByZero1) := tupled_args
++  let i ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul assertionFailure1
++      divisionByZero1)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i c)
++
++/-- [lean_pattern_names::closures::{core::ops::function::FnMut<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}::call_mut]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++def closures.closure.Insts.CoreOpsFunctionFnMutPairU32U32U32.call_mut
++  (state : _root_.lean_pattern_names.closures.closure)
++  (args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_pattern_names.closures.closure)
++  := do
++  let i ←
++    _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnPairU32U32U32.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, state)
++
++/-- [lean_pattern_names::closures::{core::ops::function::FnOnce<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}::call_once]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++def closures.closure.Insts.CoreOpsFunctionFnOncePairU32U32U32.call_once
++  (c : _root_.lean_pattern_names.closures.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnMutPairU32U32U32.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::FnOnce<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++@[reducible]
++def closures.closure.Insts.CoreOpsFunctionFnOncePairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.lean_pattern_names.closures.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnOncePairU32U32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::FnMut<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++@[reducible]
++def closures.closure.Insts.CoreOpsFunctionFnMutPairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.lean_pattern_names.closures.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnOncePairU32U32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnMutPairU32U32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::Fn<(u32, u32), u32> for lean_pattern_names::closures::closure<0>}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 75:12-77:5 -/
++@[reducible]
++def closures.closure.Insts.CoreOpsFunctionFnPairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.lean_pattern_names.closures.closure (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnMutPairU32U32U32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnPairU32U32U32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- [lean_pattern_names::closures]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 73:0-80:1
++    Visibility: public -/
++def closures
++  (x : _root_.Aeneas.Std.U32) (y : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let arrayOutOfBounds1 ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add x 1#u32)
++  let i ←
++    _root_.lean_pattern_names.apply2
++      _root_.lean_pattern_names.closures.closure.Insts.CoreOpsFunctionFnPairU32U32U32
++      arrayOutOfBounds1 x y
++  let i1 ←
++    _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnTuplePairU32U32U32.call
++      () (x, y)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    i1)
++
++/-- [lean_pattern_names::closures::{core::ops::function::FnMut<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}::call_mut]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++def closures.closure_1.Insts.CoreOpsFunctionFnMutTuplePairU32U32U32.call_mut
++  (state : _root_.lean_pattern_names.closures.closure_1)
++  (args : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_pattern_names.closures.closure_1)
++  := do
++  let i ←
++    _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnTuplePairU32U32U32.call
++      state args
++  _root_.Aeneas.Std.Result.ok (i, state)
++
++/-- [lean_pattern_names::closures::{core::ops::function::FnOnce<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}::call_once]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++def closures.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairU32U32U32.call_once
++  (c : _root_.lean_pattern_names.closures.closure_1)
++  (p : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i, _) ←
++    _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnMutTuplePairU32U32U32.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::FnOnce<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++@[reducible]
++def closures.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.lean_pattern_names.closures.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairU32U32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::FnMut<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++@[reducible]
++def closures.closure_1.Insts.CoreOpsFunctionFnMutTuplePairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.lean_pattern_names.closures.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairU32U32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnMutTuplePairU32U32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [lean_pattern_names::closures::{core::ops::function::Fn<((u32, u32)), u32> for lean_pattern_names::closures::closure#1}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 78:12-78:102 -/
++@[reducible]
++def closures.closure_1.Insts.CoreOpsFunctionFnTuplePairU32U32U32 :
++  _root_.Aeneas.Std.core.ops.function.Fn
++  _root_.lean_pattern_names.closures.closure_1 (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32 := {
++  FnMutInst :=
++    _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnMutTuplePairU32U32U32
++  call :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.lean_pattern_names.closures.closure_1.Insts.CoreOpsFunctionFnTuplePairU32U32U32.call
++          arg arg1
++      _root_.Aeneas.Std.Result.ok output
++}
++
++/-- [lean_pattern_names::loops]: loop body 0:
++    Source: 'tests/src/lean-pattern-names.rs', lines 87:4-91:5
++    Visibility: public -/
++@[rust_loop_body]
++def loops_loop.body
++  (n : _root_.Aeneas.Std.U32) (undef1 : _root_.Aeneas.Std.U32)
++  (isTrue1 : _root_.Aeneas.Std.U32) (isFalse1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  if undef1 < n
++  then
++    let isTrue2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_add isTrue1 undef1)
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul isFalse1 3#u32)
++    let isFalse2 ← lift (i ^^^ isTrue2)
++    let undef2 ← undef1 + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (undef2,
++      isTrue2, isFalse2))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (isTrue1,
++      isFalse1))
++
++/-- [lean_pattern_names::loops]: loop 0:
++    Source: 'tests/src/lean-pattern-names.rs', lines 87:4-91:5
++    Visibility: public -/
++@[rust_loop]
++def loops_loop
++  (n : _root_.Aeneas.Std.U32) (undef1 : _root_.Aeneas.Std.U32)
++  (isTrue1 : _root_.Aeneas.Std.U32) (isFalse1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (undef2, isTrue2, isFalse2) =>
++       _root_.lean_pattern_names.loops_loop.body n undef2 isTrue2 isFalse2 :
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++    (undef1, isTrue1, isFalse1)
++
++/-- [lean_pattern_names::loops]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 83:0-93:1
++    Visibility: public -/
++@[reducible]
++def loops
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  _root_.lean_pattern_names.loops_loop n 0#u32 0#u32 1#u32
++
++/-- [lean_pattern_names::Wide]
++    Source: 'tests/src/lean-pattern-names.rs', lines 97:0-104:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Wide where
++| A :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++| B :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++| C :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++| D :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++| E :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++| F :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.U32 →
++  Wide
++
++/-- [lean_pattern_names::mix]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 106:0-108:1 -/
++def mix
++  (acc : _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul acc 31#u32)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i x)
++
++/-- [lean_pattern_names::mix6]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 110:0-112:1 -/
++def mix6
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (d : _root_.Aeneas.Std.U32)
++  (e : _root_.Aeneas.Std.U32) (f : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_pattern_names.mix a b
++  let i1 ← _root_.lean_pattern_names.mix i c
++  let i2 ← _root_.lean_pattern_names.mix i1 d
++  let i3 ← _root_.lean_pattern_names.mix i2 e
++  _root_.lean_pattern_names.mix i3 f
++
++/-- [lean_pattern_names::wide]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 114:0-143:1
++    Visibility: public -/
++def wide
++  (w : _root_.lean_pattern_names.Wide) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match w with
++  | _root_.lean_pattern_names.Wide.A bind1 ok1 fail1 panic1 div1 cont1 =>
++    _root_.lean_pattern_names.mix6 bind1 ok1 fail1 panic1 div1 cont1
++  | _root_.lean_pattern_names.Wide.B done1 Array1 trans1 casesOn1 congr_simp1
++    rec1 =>
++    _root_.lean_pattern_names.mix6 done1 Array1 trans1 casesOn1 congr_simp1
++      rec1
++  | _root_.lean_pattern_names.Wide.C dite_true1 dite_false1 hcongr_11
++    and_or_imp1 not_imp1 not_imp_self1 =>
++    _root_.lean_pattern_names.mix6 dite_true1 dite_false1 hcongr_11 and_or_imp1
++      not_imp1 not_imp_self1
++  | _root_.lean_pattern_names.Wide.D imp_iff_right_iff1 imp_and_neg_imp_iff1
++    arrayOutOfBounds1 assertionFailure1 divisionByZero1 integerOverflow1 =>
++    _root_.lean_pattern_names.mix6 imp_iff_right_iff1 imp_and_neg_imp_iff1
++      arrayOutOfBounds1 assertionFailure1 divisionByZero1 integerOverflow1
++  | _root_.lean_pattern_names.Wide.E maximumSizeExceeded1 undef1 isTrue1
++    isFalse1 toColex1 ofColex1 =>
++    _root_.lean_pattern_names.mix6 maximumSizeExceeded1 undef1 isTrue1 isFalse1
++      toColex1 ofColex1
++  | _root_.lean_pattern_names.Wide.F some1 none1 rfl1 toLex1 ofLex1 =>
++    _root_.lean_pattern_names.mix6 some1 none1 rfl1 toLex1 ofLex1 7#u32
++
++/-- [lean_pattern_names::bump_wide]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 146:0-196:1
++    Visibility: public -/
++def bump_wide
++  (w : _root_.lean_pattern_names.Wide) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_pattern_names.Wide)
++  := do
++  match w with
++  | _root_.lean_pattern_names.Wide.A bind1 ok1 fail1 panic1 div1 _ =>
++    let bind2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add ok1 fail1)
++    let ok2 ← lift (panic1 ^^^ div1)
++    _root_.Aeneas.Std.Result.ok (bind1, _root_.lean_pattern_names.Wide.A bind2
++      ok2 fail1 panic1 div1 bind1)
++  | _root_.lean_pattern_names.Wide.B done1 Array1 trans1 _ congr_simp1 rec1 =>
++    let done2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul Array1 trans1)
++    let rec2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add rec1 done1)
++    _root_.Aeneas.Std.Result.ok (done1, _root_.lean_pattern_names.Wide.B done2
++      Array1 trans1 congr_simp1 congr_simp1 rec2)
++  | _root_.lean_pattern_names.Wide.C dite_true1 dite_false1 hcongr_11
++    and_or_imp1 _ not_imp_self1 =>
++    let dite_false2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_sub hcongr_11 and_or_imp1)
++    _root_.Aeneas.Std.Result.ok (dite_true1, _root_.lean_pattern_names.Wide.C
++      dite_false1 dite_false2 hcongr_11 and_or_imp1 not_imp_self1
++      not_imp_self1)
++  | _root_.lean_pattern_names.Wide.D imp_iff_right_iff1 imp_and_neg_imp_iff1
++    arrayOutOfBounds1 _ divisionByZero1 integerOverflow1 =>
++    let imp_iff_right_iff2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_add imp_and_neg_imp_iff1
++        arrayOutOfBounds1)
++    let assertionFailure1 ← lift (divisionByZero1 ^^^ integerOverflow1)
++    _root_.Aeneas.Std.Result.ok (imp_iff_right_iff1,
++      _root_.lean_pattern_names.Wide.D imp_iff_right_iff2 imp_and_neg_imp_iff1
++      arrayOutOfBounds1 assertionFailure1 divisionByZero1 integerOverflow1)
++  | _root_.lean_pattern_names.Wide.E maximumSizeExceeded1 undef1 isTrue1 _
++    toColex1 _ =>
++    let maximumSizeExceeded2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul undef1 isTrue1)
++    _root_.Aeneas.Std.Result.ok (maximumSizeExceeded1,
++      _root_.lean_pattern_names.Wide.E maximumSizeExceeded2 undef1 isTrue1
++      toColex1 toColex1 maximumSizeExceeded1)
++  | _root_.lean_pattern_names.Wide.F some1 none1 rfl1 _ ofLex1 =>
++    let some2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add none1 rfl1)
++    _root_.Aeneas.Std.Result.ok (some1, _root_.lean_pattern_names.Wide.F some2
++      none1 rfl1 ofLex1 ofLex1)
++
++/-- [lean_pattern_names::wide_fields]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 199:0-208:1
++    Visibility: public -/
++def wide_fields
++  (w : _root_.lean_pattern_names.Wide) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  match w with
++  | _root_.lean_pattern_names.Wide.A a b c d e f =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, f)
++  | _root_.lean_pattern_names.Wide.B a b c d e f =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, f)
++  | _root_.lean_pattern_names.Wide.C a b c d e f =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, f)
++  | _root_.lean_pattern_names.Wide.D a b c d e f =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, f)
++  | _root_.lean_pattern_names.Wide.E a b c d e f =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, f)
++  | _root_.lean_pattern_names.Wide.F a b c d e =>
++    _root_.Aeneas.Std.Result.ok (a, b, c, d, e, 0#u32)
++
++/-- [lean_pattern_names::give_back]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 211:0-241:1
++    Visibility: public -/
++def give_back
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (s : _root_.lean_pattern_names.Shape) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U32) × _root_.lean_pattern_names.Shape)
++  := do
++  let (i, old) ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok (1#u32, 0#u32)
++    | some bind1 =>
++      do
++      let bind2 ←
++        lift (_root_.Aeneas.Std.core.num.U32.wrapping_add bind1 100#u32)
++      _root_.Aeneas.Std.Result.ok (bind2, bind1)
++  match s with
++  | _root_.lean_pattern_names.Shape.Pair div1 cont1 =>
++    let div2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add div1 cont1)
++    _root_.Aeneas.Std.Result.ok (old, some i,
++      _root_.lean_pattern_names.Shape.Pair div2 0#u32)
++  | _root_.lean_pattern_names.Shape.Triple done1 Array1 trans1 =>
++    let Array2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_add Array1 1#u32)
++    _root_.Aeneas.Std.Result.ok (old, some i,
++      _root_.lean_pattern_names.Shape.Triple trans1 Array2 done1)
++  | _root_.lean_pattern_names.Shape.Named casesOn1 _ =>
++    let casesOn2 ←
++      lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul casesOn1 2#u32)
++    _root_.Aeneas.Std.Result.ok (old, some i,
++      _root_.lean_pattern_names.Shape.Named casesOn2 9#u32)
++  | _root_.lean_pattern_names.Shape.Nothing =>
++    _root_.Aeneas.Std.Result.ok (old, some i,
++      _root_.lean_pattern_names.Shape.Pair old 3#u32)
++
++/-- [lean_pattern_names::shape_fields]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 244:0-251:1
++    Visibility: public -/
++def shape_fields
++  (s : _root_.lean_pattern_names.Shape) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  match s with
++  | _root_.lean_pattern_names.Shape.Pair a b =>
++    _root_.Aeneas.Std.Result.ok (a, b, 0#u32)
++  | _root_.lean_pattern_names.Shape.Triple a b c =>
++    _root_.Aeneas.Std.Result.ok (a, b, c)
++  | _root_.lean_pattern_names.Shape.Named casesOn1 congr_simp1 =>
++    _root_.Aeneas.Std.Result.ok (casesOn1, congr_simp1, 1#u32)
++  | _root_.lean_pattern_names.Shape.Nothing =>
++    _root_.Aeneas.Std.Result.ok (0#u32, 0#u32, 2#u32)
++
++/-- [lean_pattern_names::BuiltinClone]
++    Source: 'tests/src/lean-pattern-names.rs', lines 257:0-260:1
++    Visibility: public -/
++structure BuiltinClone where
++  unit : _root_.Unit
++  v : _root_.Aeneas.Std.U32
++
++/-- [lean_pattern_names::{core::clone::Clone for lean_pattern_names::BuiltinClone}::clone]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 256:9-256:14
++    Visibility: public -/
++def BuiltinClone.Insts.CoreCloneClone.clone
++  (self : _root_.lean_pattern_names.BuiltinClone) :
++  _root_.Aeneas.Std.Result _root_.lean_pattern_names.BuiltinClone
++  := do
++  (_root_.Aeneas.Std.BuiltinClone _root_.Unit).clone ()
++  let i ← lift (_root_.Aeneas.Std.core.clone.impls.CloneU32.clone self.v)
++  _root_.Aeneas.Std.Result.ok { unit := (), v := i }
++
++/-- Trait implementation: [lean_pattern_names::{core::clone::Clone for lean_pattern_names::BuiltinClone}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 256:9-256:14 -/
++@[reducible]
++def BuiltinClone.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.lean_pattern_names.BuiltinClone := {
++  clone := _root_.lean_pattern_names.BuiltinClone.Insts.CoreCloneClone.clone
++}
++
++/-- [lean_pattern_names::BuiltinCopy]
++    Source: 'tests/src/lean-pattern-names.rs', lines 263:0-266:1
++    Visibility: public -/
++structure BuiltinCopy where
++  unit : _root_.Unit
++  w : _root_.Aeneas.Std.U32
++
++/-- [lean_pattern_names::{core::clone::Clone for lean_pattern_names::BuiltinCopy}::clone]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 262:9-262:14
++    Visibility: public -/
++def BuiltinCopy.Insts.CoreCloneClone.clone
++  (self : _root_.lean_pattern_names.BuiltinCopy) :
++  _root_.Aeneas.Std.Result _root_.lean_pattern_names.BuiltinCopy
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [lean_pattern_names::{core::clone::Clone for lean_pattern_names::BuiltinCopy}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 262:9-262:14 -/
++@[reducible]
++def BuiltinCopy.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.lean_pattern_names.BuiltinCopy := {
++  clone := _root_.lean_pattern_names.BuiltinCopy.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [lean_pattern_names::{core::marker::Copy for lean_pattern_names::BuiltinCopy}]
++    Source: 'tests/src/lean-pattern-names.rs', lines 262:16-262:20 -/
++@[reducible]
++def BuiltinCopy.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.lean_pattern_names.BuiltinCopy := {
++  cloneInst := _root_.lean_pattern_names.BuiltinCopy.Insts.CoreCloneClone
++}
++
++/-- [lean_pattern_names::dup]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 268:0-270:1
++    Visibility: public -/
++def dup
++  {T : Type} (coremarkerCopyInst : _root_.Aeneas.Std.core.marker.Copy T)
++  (x : T) :
++  _root_.Aeneas.Std.Result (T × T)
++  := do
++  _root_.Aeneas.Std.Result.ok (x, x)
++
++/-- [lean_pattern_names::clone_all]:
++    Source: 'tests/src/lean-pattern-names.rs', lines 272:0-278:1
++    Visibility: public -/
++def clone_all
++  (b : _root_.lean_pattern_names.BuiltinClone)
++  (c : _root_.lean_pattern_names.BuiltinCopy) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let b2 ← _root_.lean_pattern_names.BuiltinClone.Insts.CoreCloneClone.clone b
++  let _ ←
++    _root_.lean_pattern_names.dup (_root_.Aeneas.Std.BuiltinCopy _root_.Unit)
++      ()
++  (_root_.Aeneas.Std.BuiltinClone _root_.Unit).clone ()
++  let (d, e) ←
++    _root_.lean_pattern_names.dup
++      _root_.lean_pattern_names.BuiltinCopy.Insts.CoreMarkerCopy c
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add b2.v d.w)
++  _root_.Aeneas.Std.Result.ok (i, e.w)
++
++end lean_pattern_names
+diff --git a/tests/lean/LeanPatternNames/Scope.lean b/tests/lean/LeanPatternNames/Scope.lean
+new file mode 100644
+index 0000000..c08883e
+--- /dev/null
++++ b/tests/lean/LeanPatternNames/Scope.lean
+@@ -0,0 +1,60 @@
++import Aeneas
++
++/-! The identifiers which are not plain pattern variables in the scope that the
++    generated Lean files open (`open Aeneas Aeneas.Std Result ControlFlow Error`,
++    then the crate namespace): the generated variables must not take them, see
++    the second group of `var_reserved_names` in `src/extract/ExtractBase.ml`.
++
++    For every Rust-like identifier that is the last component of a constant of
++    the environment, run the pattern-identifier resolution of Lean's pattern
++    elaboration (`Lean.Elab.PatternVar.processId`: `Lean.Elab.Term.resolveId?`
++    with kind "pattern"); an identifier is not a plain variable when the
++    resolution is ambiguous (an error: the definition becomes `sorry`), or
++    resolves to a constructor or to a `@[match_pattern]` constant (a constructor
++    pattern instead of a variable). Fails when the result differs from
++    `expected`, i.e. when a change of Aeneas' Lean library adds or removes such
++    an identifier: update `var_reserved_names` and `expected` together. -/
++
++open Aeneas Aeneas.Std Result ControlFlow Error
++
++namespace lean_pattern_names_scope
++
++/-- The second group of `var_reserved_names` (Lean). -/
++def expected : List String := [
++  "_sizeOf_1", "_sizeOf_inst", "Array", "and_or_imp", "bind", "casesOn", "congr_simp", "dite_false",
++  "dite_true", "hcongr_1", "imp_and_neg_imp_iff", "imp_iff_right_iff", "not_imp", "not_imp_self",
++  "panic", "rec", "trans", "arrayOutOfBounds", "assertionFailure", "cont", "div", "divisionByZero",
++  "done", "fail", "false", "integerOverflow", "isFalse", "isTrue", "maximumSizeExceeded", "none", "ok",
++  "some", "true", "undef", "ofColex", "ofLex", "rfl", "toColex", "toLex"]
++
++set_option linter.deprecated false in
++#eval show Lean.Elab.Command.CommandElabM Unit from do
++  let env ← Lean.getEnv
++  let isRustIdent (s : String) : Bool :=
++    match s.toList with
++    | [] => false
++    | c :: cs => (c.isAlpha || c == '_') && cs.all (fun c => c.isAlphanum || c == '_') && s != "_"
++  let mut cands : Std.HashSet String := {}
++  for (n, _) in env.constants.toList do
++    if let .str _ s := n then
++      if isRustIdent s then cands := cands.insert s
++  let mut found : Array String := #[]
++  for s in cands.toArray.qsort (· < ·) do
++    let stx := Lean.mkIdent (Lean.Name.mkSimple s)
++    let notVar ← Lean.Elab.Command.liftTermElabM do
++      try
++        match (← Lean.Elab.Term.resolveId? stx "pattern") with
++        | some (.const f _) =>
++          match (← Lean.getEnv).find? f with
++          | some (.ctorInfo _) => pure true
++          | some _ => pure (Lean.hasMatchPatternAttribute (← Lean.getEnv) f)
++          | none => pure true
++        | _ => pure false
++      catch _ => pure true
++    if notVar then found := found.push s
++  let added := found.filter (!expected.contains ·)
++  let removed := expected.filter (!found.contains ·)
++  unless added.isEmpty && removed.isEmpty do
++    throwError "the identifiers which are not plain pattern variables changed: added {added}, removed {removed}"
++
++end lean_pattern_names_scope
+diff --git a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+index d269470..3d64b95 100644
+--- a/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
++++ b/tests/lean/NestedBorrowsClosureOutlives/NestedBorrowsClosureOutlives.lean
+@@ -1177,13 +1177,13 @@ def bind_node
+     Source: 'tests/src/nested-borrows-closure-outlives.rs', lines 81:0-92:1
+     Visibility: public -/
+ def drive_map
+-  (k : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) (fail : _root_.Bool)
++  (k : _root_.Aeneas.Std.U32) (v : _root_.Aeneas.Std.U32) (fail1 : _root_.Bool)
+   :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
+     _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
+   := do
+   let i ←
+-    if fail
++    if fail1
+     then _root_.Aeneas.Std.Result.ok 0#u32
+     else _root_.Aeneas.Std.Result.ok 4#u32
+   let (r, uses) ←
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index ee98de1..8063447 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -125,6 +125,7 @@ package «tests» {}
+ @[default_target] lean_lib JoinNestedStaged
+ @[default_target] lean_lib JoinObservedLocal
+ @[default_target] lean_lib LeanKeywordNames
++@[default_target] lean_lib LeanPatternNames
+ @[default_target] lean_lib LeanReservedNames
+ @[default_target] lean_lib LiftedAssocRegions
+ @[default_target] lean_lib ListBorrows
+diff --git a/tests/src/lean-pattern-names.rs b/tests/src/lean-pattern-names.rs
+new file mode 100644
+index 0000000..2927998
+--- /dev/null
++++ b/tests/src/lean-pattern-names.rs
+@@ -0,0 +1,367 @@
++//@ [!lean] skip
++//@ [lean] subdir=LeanPatternNames
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Locals named like the identifiers that are not plain pattern variables in
++//! the scope the generated Lean files open (`open Aeneas Aeneas.Std Result
++//! ControlFlow Error`, then the crate namespace): the ambiguous `bind` (as
++//! chelis_deep's `walk_children_mut`: `Some(bind)` printed `some bind` is an
++//! "ambiguous pattern"), `panic`, `Array`, `trans`, `rec`, `casesOn`, ..., the
++//! constructors `ok`, `fail`, `div`, `cont`, `done`, `some`, `none`, the
++//! `Error` constructors, `isTrue`/`isFalse`, and the `@[match_pattern]`
++//! functions `rfl`, `toLex`, ... The locals are bound in match arms, `if let`,
++//! destructuring `let`s, closure parameters, captures and loop states; the
++//! generated variables avoid those names. Also user types named `BuiltinClone`
++//! and `BuiltinCopy` next to derived `Clone`/`Copy` impls whose unit fields use
++//! Aeneas' builtin instances of the same names.
++//! `LeanPatternNames/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module and compares with the native results, including the
++//! values given back through `&mut`.
++#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
++
++pub enum Shape {
++    Pair(u32, u32),
++    Triple(u32, u32, u32),
++    Named { casesOn: u32, congr_simp: u32 },
++    Nothing,
++}
++
++/// Option payloads bound in match arms and `if let`.
++pub fn option_arms(o: Option<u32>, p: Option<(u32, u32)>) -> u32 {
++    let a = match o {
++        Some(bind) => bind.wrapping_mul(3),
++        None => 1,
++    };
++    let b = if let Some((ok, fail)) = p { ok.wrapping_sub(fail) } else { 2 };
++    let c = match o {
++        Some(some) => some ^ 0x10,
++        None => 7,
++    };
++    let d = match p {
++        Some((none, panic)) => none.wrapping_mul(panic),
++        None => 11,
++    };
++    a.wrapping_add(b).wrapping_add(c).wrapping_add(d)
++}
++
++/// Enumeration payloads bound in match arms.
++pub fn shape_arms(s: &Shape) -> u32 {
++    match s {
++        Shape::Pair(div, cont) => div.wrapping_mul(2).wrapping_add(*cont),
++        Shape::Triple(done, Array, trans) => done.wrapping_add(Array.wrapping_mul(*trans)),
++        Shape::Named { casesOn, congr_simp } => casesOn.wrapping_sub(*congr_simp),
++        Shape::Nothing => 5,
++    }
++}
++
++/// Destructuring `let`s of tuples.
++pub fn let_tuples(t: (u32, u32, u32), u: (u32, u32, u32)) -> u32 {
++    let (rec, dite_true, dite_false) = t;
++    let (hcongr_1, and_or_imp, not_imp) = u;
++    let (not_imp_self, imp_iff_right_iff) = (rec ^ hcongr_1, dite_true.wrapping_add(and_or_imp));
++    let imp_and_neg_imp_iff = dite_false.wrapping_mul(not_imp);
++    not_imp_self
++        .wrapping_add(imp_iff_right_iff)
++        .wrapping_add(imp_and_neg_imp_iff)
++}
++
++pub fn apply2<F: Fn(u32, u32) -> u32>(f: F, x: u32, y: u32) -> u32 {
++    f(x, y)
++}
++
++/// Closure parameters and captures.
++pub fn closures(x: u32, y: u32) -> u32 {
++    let arrayOutOfBounds = x.wrapping_add(1);
++    let f = |assertionFailure: u32, divisionByZero: u32| {
++        assertionFailure.wrapping_mul(divisionByZero).wrapping_add(arrayOutOfBounds)
++    };
++    let g = |(integerOverflow, maximumSizeExceeded): (u32, u32)| integerOverflow ^ maximumSizeExceeded;
++    apply2(f, x, y).wrapping_add(g((x, y)))
++}
++
++/// Loop states.
++pub fn loops(n: u32) -> (u32, u32) {
++    let mut undef = 0u32;
++    let mut isTrue = 0u32;
++    let mut isFalse = 1u32;
++    while undef < n {
++        isTrue = isTrue.wrapping_add(undef);
++        isFalse = isFalse.wrapping_mul(3) ^ isTrue;
++        undef += 1;
++    }
++    (isTrue, isFalse)
++}
++
++/// Every name bound in a match arm (the position of `Some(bind)` in
++/// walk_children_mut).
++pub enum Wide {
++    A(u32, u32, u32, u32, u32, u32),
++    B(u32, u32, u32, u32, u32, u32),
++    C(u32, u32, u32, u32, u32, u32),
++    D(u32, u32, u32, u32, u32, u32),
++    E(u32, u32, u32, u32, u32, u32),
++    F { some: u32, none: u32, rfl: u32, toLex: u32, ofLex: u32 },
++}
++
++fn mix(acc: u32, x: u32) -> u32 {
++    acc.wrapping_mul(31).wrapping_add(x)
++}
++
++fn mix6(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 {
++    mix(mix(mix(mix(mix(a, b), c), d), e), f)
++}
++
++pub fn wide(w: &Wide) -> u32 {
++    match w {
++        Wide::A(bind, ok, fail, panic, div, cont) => mix6(*bind, *ok, *fail, *panic, *div, *cont),
++        Wide::B(done, Array, trans, casesOn, congr_simp, rec) => {
++            mix6(*done, *Array, *trans, *casesOn, *congr_simp, *rec)
++        }
++        Wide::C(dite_true, dite_false, hcongr_1, and_or_imp, not_imp, not_imp_self) => {
++            mix6(*dite_true, *dite_false, *hcongr_1, *and_or_imp, *not_imp, *not_imp_self)
++        }
++        Wide::D(
++            imp_iff_right_iff,
++            imp_and_neg_imp_iff,
++            arrayOutOfBounds,
++            assertionFailure,
++            divisionByZero,
++            integerOverflow,
++        ) => mix6(
++            *imp_iff_right_iff,
++            *imp_and_neg_imp_iff,
++            *arrayOutOfBounds,
++            *assertionFailure,
++            *divisionByZero,
++            *integerOverflow,
++        ),
++        Wide::E(maximumSizeExceeded, undef, isTrue, isFalse, toColex, ofColex) => {
++            mix6(*maximumSizeExceeded, *undef, *isTrue, *isFalse, *toColex, *ofColex)
++        }
++        Wide::F { some, none, rfl, toLex, ofLex } => mix6(*some, *none, *rfl, *toLex, *ofLex, 7),
++    }
++}
++
++/// Writes through the arm bindings: the caller sees the updated payload.
++pub fn bump_wide(w: &mut Wide) -> u32 {
++    match w {
++        Wide::A(bind, ok, fail, panic, div, cont) => {
++            let old = *bind;
++            *bind = ok.wrapping_add(*fail);
++            *ok = *panic ^ *div;
++            *cont = old;
++            old
++        }
++        Wide::B(done, Array, trans, casesOn, congr_simp, rec) => {
++            let old = *done;
++            *done = Array.wrapping_mul(*trans);
++            *casesOn = *congr_simp;
++            *rec = rec.wrapping_add(old);
++            old
++        }
++        Wide::C(dite_true, dite_false, hcongr_1, and_or_imp, not_imp, not_imp_self) => {
++            let old = *dite_true;
++            *dite_true = *dite_false;
++            *dite_false = hcongr_1.wrapping_sub(*and_or_imp);
++            *not_imp = *not_imp_self;
++            old
++        }
++        Wide::D(
++            imp_iff_right_iff,
++            imp_and_neg_imp_iff,
++            arrayOutOfBounds,
++            assertionFailure,
++            divisionByZero,
++            integerOverflow,
++        ) => {
++            let old = *imp_iff_right_iff;
++            *imp_iff_right_iff = imp_and_neg_imp_iff.wrapping_add(*arrayOutOfBounds);
++            *assertionFailure = *divisionByZero ^ *integerOverflow;
++            old
++        }
++        Wide::E(maximumSizeExceeded, undef, isTrue, isFalse, toColex, ofColex) => {
++            let old = *maximumSizeExceeded;
++            *maximumSizeExceeded = undef.wrapping_mul(*isTrue);
++            *isFalse = *toColex;
++            *ofColex = old;
++            old
++        }
++        Wide::F { some, none, rfl, toLex, ofLex } => {
++            let old = *some;
++            *some = none.wrapping_add(*rfl);
++            *toLex = *ofLex;
++            old
++        }
++    }
++}
++
++/// Reads back what `bump_wide` wrote.
++pub fn wide_fields(w: &Wide) -> (u32, u32, u32, u32, u32, u32) {
++    match w {
++        Wide::A(a, b, c, d, e, f)
++        | Wide::B(a, b, c, d, e, f)
++        | Wide::C(a, b, c, d, e, f)
++        | Wide::D(a, b, c, d, e, f)
++        | Wide::E(a, b, c, d, e, f) => (*a, *b, *c, *d, *e, *f),
++        Wide::F { some: a, none: b, rfl: c, toLex: d, ofLex: e } => (*a, *b, *c, *d, *e, 0),
++    }
++}
++
++/// Values given back through `&mut`, bound under the reserved names.
++pub fn give_back(o: &mut Option<u32>, s: &mut Shape) -> u32 {
++    let old = match o {
++        Some(bind) => {
++            let ok = *bind;
++            *bind = ok.wrapping_add(100);
++            ok
++        }
++        None => {
++            *o = Some(1);
++            0
++        }
++    };
++    match s {
++        Shape::Pair(div, cont) => {
++            *div = div.wrapping_add(*cont);
++            *cont = 0;
++        }
++        Shape::Triple(done, Array, trans) => {
++            let panic = *done;
++            *done = *trans;
++            *trans = panic;
++            *Array = Array.wrapping_add(1);
++        }
++        Shape::Named { casesOn, congr_simp } => {
++            *casesOn = casesOn.wrapping_mul(2);
++            *congr_simp = 9;
++        }
++        Shape::Nothing => *s = Shape::Pair(old, 3),
++    }
++    old
++}
++
++/// Reads back what `give_back` wrote.
++pub fn shape_fields(s: &Shape) -> (u32, u32, u32) {
++    match s {
++        Shape::Pair(a, b) => (*a, *b, 0),
++        Shape::Triple(a, b, c) => (*a, *b, *c),
++        Shape::Named { casesOn, congr_simp } => (*casesOn, *congr_simp, 1),
++        Shape::Nothing => (0, 0, 2),
++    }
++}
++
++/// User types named like Aeneas' builtin `Clone`/`Copy` instances, which the
++/// derived `Clone` of `BuiltinClone` (for its unit field) and the callers of
++/// `dup` and `clone` on a unit value use.
++#[derive(Clone)]
++pub struct BuiltinClone {
++    pub unit: (),
++    pub v: u32,
++}
++
++#[derive(Clone, Copy)]
++pub struct BuiltinCopy {
++    pub unit: (),
++    pub w: u32,
++}
++
++pub fn dup<T: Copy>(x: T) -> (T, T) {
++    (x, x)
++}
++
++pub fn clone_all(b: &BuiltinClone, c: BuiltinCopy, u: ()) -> (u32, u32) {
++    let b2 = b.clone();
++    let ((), ()) = dup(u);
++    let () = u.clone();
++    let (d, e) = dup(c);
++    (b2.v.wrapping_add(d.w), e.w)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn arms() {
++        assert_eq!(option_arms(Some(4), Some((10, 3))), 12 + 7 + (4 ^ 0x10) + 30);
++        assert_eq!(option_arms(None, None), 1 + 2 + 7 + 11);
++        assert_eq!(option_arms(Some(5), None), 15 + 2 + (5 ^ 0x10) + 11);
++        assert_eq!(option_arms(None, Some((1, 2))), 1u32.wrapping_add(u32::MAX).wrapping_add(7).wrapping_add(2));
++        assert_eq!(shape_arms(&Shape::Pair(4, 5)), 13);
++        assert_eq!(shape_arms(&Shape::Triple(1, 2, 3)), 7);
++        assert_eq!(shape_arms(&Shape::Named { casesOn: 9, congr_simp: 4 }), 5);
++        assert_eq!(shape_arms(&Shape::Nothing), 5);
++    }
++
++    #[test]
++    fn lets() {
++        assert_eq!(let_tuples((1, 2, 3), (4, 5, 6)), (1 ^ 4) + 7 + 18);
++        assert_eq!(closures(3, 5), 15 + 4 + (3 ^ 5));
++        assert_eq!(loops(0), (0, 1));
++        assert_eq!(loops(4), (6, 87));
++    }
++
++    /// The `i`-th variant with the payload `k + 1`, `k + 2`, ...
++    fn mk(i: u32, k: u32) -> Wide {
++        let v = |j: u32| k.wrapping_add(j);
++        match i {
++            0 => Wide::A(v(1), v(2), v(3), v(4), v(5), v(6)),
++            1 => Wide::B(v(1), v(2), v(3), v(4), v(5), v(6)),
++            2 => Wide::C(v(1), v(2), v(3), v(4), v(5), v(6)),
++            3 => Wide::D(v(1), v(2), v(3), v(4), v(5), v(6)),
++            4 => Wide::E(v(1), v(2), v(3), v(4), v(5), v(6)),
++            _ => Wide::F { some: v(1), none: v(2), rfl: v(3), toLex: v(4), ofLex: v(5) },
++        }
++    }
++
++    #[test]
++    fn wide_arms() {
++        // (variant, k, wide, old value returned by bump_wide, payload given back by bump_wide)
++        let cases: [(u32, u32, u32, u32, (u32, u32, u32, u32, u32, u32)); 12] = [
++            (0, 0xa, 326404131, 11, (25, 1, 13, 14, 15, 11)),
++            (1, 0xa, 326404131, 11, (156, 12, 13, 15, 15, 27)),
++            (2, 0xa, 326404131, 11, (12, 4294967295, 13, 14, 16, 16)),
++            (3, 0xa, 326404131, 11, (25, 12, 13, 31, 15, 16)),
++            (4, 0xa, 326404131, 11, (156, 12, 13, 15, 15, 11)),
++            (5, 0xa, 326404122, 11, (25, 12, 13, 15, 15, 0)),
++            (0, 0xfffffff0, 3852201571, 4294967281, (4294967269, 1, 4294967283, 4294967284, 4294967285, 4294967281)),
++            (1, 0xfffffff0, 3852201571, 4294967281, (182, 4294967282, 4294967283, 4294967285, 4294967285, 4294967271)),
++            (2, 0xfffffff0, 3852201571, 4294967281, (4294967282, 4294967295, 4294967283, 4294967284, 4294967286, 4294967286)),
++            (3, 0xfffffff0, 3852201571, 4294967281, (4294967269, 4294967282, 4294967283, 3, 4294967285, 4294967286)),
++            (4, 0xfffffff0, 3852201571, 4294967281, (182, 4294967282, 4294967283, 4294967285, 4294967285, 4294967281)),
++            (5, 0xfffffff0, 3852201588, 4294967281, (4294967269, 4294967282, 4294967283, 4294967285, 4294967285, 0)),
++        ];
++        for (i, k, d, old, after) in cases {
++            let mut w = mk(i, k);
++            assert_eq!(wide(&w), d);
++            assert_eq!(bump_wide(&mut w), old);
++            assert_eq!(wide_fields(&w), after);
++        }
++    }
++
++    #[test]
++    fn given_back() {
++        let mut o = Some(7);
++        let mut s = Shape::Pair(4, 5);
++        assert_eq!(give_back(&mut o, &mut s), 7);
++        assert_eq!((o, shape_fields(&s)), (Some(107), (9, 0, 0)));
++        let mut o = None;
++        let mut s = Shape::Nothing;
++        assert_eq!(give_back(&mut o, &mut s), 0);
++        assert_eq!((o, shape_fields(&s)), (Some(1), (0, 3, 0)));
++        let mut s = Shape::Triple(1, 2, 3);
++        assert_eq!(give_back(&mut o, &mut s), 1);
++        assert_eq!((o, shape_fields(&s)), (Some(101), (3, 3, 1)));
++        let mut s = Shape::Named { casesOn: 6, congr_simp: 1 };
++        assert_eq!(give_back(&mut o, &mut s), 101);
++        assert_eq!((o, shape_fields(&s)), (Some(201), (12, 9, 1)));
++    }
++
++    #[test]
++    fn builtin_names() {
++        let b = BuiltinClone { unit: (), v: 3 };
++        assert_eq!(clone_all(&b, BuiltinCopy { unit: (), w: 4 }, ()), (7, 4));
++        let b = BuiltinClone { unit: (), v: 10 };
++        assert_eq!(clone_all(&b, BuiltinCopy { unit: (), w: u32::MAX }, ()), (9, u32::MAX));
++    }
++}

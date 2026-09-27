@@ -1,0 +1,3227 @@
+# aeneas integration step 97 after cba11f3beb: commit b911bbc4833df27bb5a849a37e2f6124e9108185
+# first parent 1e0e73eb35e6388717a454520643b1cbda656660, merged 9e1b322daf92cfa548432a00152ae54fa914b061
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/collection-contracts' (Vec::drain and RangeBounds; BTreeMap Entry; moving or mutably borrowing a value ends the shared observations of its mutable borrows)
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index 908f6fc..b6fd732 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -19,6 +19,7 @@ import Aeneas.Std.IteratorSources
+ import Aeneas.Std.Nested
+ import Aeneas.Std.Primitives
+ import Aeneas.Std.PrimitivesLemmas
++import Aeneas.Std.RangeBounds
+ import Aeneas.Std.RawPtr
+ import Aeneas.Std.ResultIter
+ import Aeneas.Std.Scalar
+@@ -36,5 +37,6 @@ import Aeneas.Std.StringJoin
+ import Aeneas.Std.Sync
+ import Aeneas.Std.Tuple
+ import Aeneas.Std.Vec
++import Aeneas.Std.VecDrain
+ import Aeneas.Std.VecIter
+ import Aeneas.Data.Tuples
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index e0d2a90..4beeba3 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -38,6 +38,8 @@ structure alloc.collections.btree.map.Values (K V : Type) where
+ structure alloc.collections.btree.map.IntoIter (K V : Type) where
+   remaining : List (K × V)
+ 
++/-- `removed` records that `remove`/`remove_entry` consumed the entry: ending the
++map borrow then drops the pair instead of storing `value` back. -/
+ @[rust_type "alloc::collections::btree::map::entry::OccupiedEntry"
+   (keepParams := [true, true, false]) (mutRegions := #[0]) (body := .opaque)]
+ structure alloc.collections.btree.map.entry.OccupiedEntry (K V : Type) where
+@@ -45,6 +47,7 @@ structure alloc.collections.btree.map.entry.OccupiedEntry (K V : Type) where
+   key : K
+   value : V
+   after : List (K × V)
++  removed : Bool
+ 
+ /-- `value = none` is an uninserted entry. The backward result of insert carries
+ `some finalValue`, so ending the borrow installs the new entry exactly once. -/
+@@ -246,7 +249,7 @@ def DebugBTreeMap {K V : Type} (keyDebug : core.fmt.Debug K) (valueDebug : core.
+   ⟨DebugBTreeMap.fmt keyDebug valueDebug⟩
+ 
+ def entry.Entry.restore {K V : Type} : entry.Entry K V → BTreeMap K V
+-  | .Occupied e => ⟨e.before ++ (e.key, e.value) :: e.after⟩
++  | .Occupied e => ⟨e.before ++ (if e.removed then e.after else (e.key, e.value) :: e.after)⟩
+   | .Vacant e => ⟨e.before ++ (match e.value with
+       | none => e.after
+       | some value => (e.key, value) :: e.after)⟩
+@@ -257,7 +260,7 @@ def entryList {K V : Type} (ord : core.cmp.Ord K) (key : K)
+   | (stored, value) :: rest => do
+     match ← ord.cmp key stored with
+     | .lt => .ok (.Vacant ⟨beforeRev.reverse, key, none, (stored, value) :: rest⟩)
+-    | .eq => .ok (.Occupied ⟨beforeRev.reverse, stored, value, rest⟩)
++    | .eq => .ok (.Occupied ⟨beforeRev.reverse, stored, value, rest, false⟩)
+     | .gt => entryList ord key ((stored, value) :: beforeRev) rest
+ 
+ @[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::entry"
+@@ -279,11 +282,100 @@ def entry.VacantEntry.insert {K V : Type} (_ord : core.cmp.Ord K)
+     (e : entry.VacantEntry K V) (value : V) : Result (V × (V → entry.VacantEntry K V)) :=
+   .ok (value, fun finalValue => { e with value := some finalValue })
+ 
++/-- `Entry::key` (btree/map/entry.rs): the stored key of an occupied entry, the
++probe of a vacant one. The other `Entry` methods that production code calls
++(`or_insert`, `or_insert_with`, `or_default`, `insert_entry`) are translated from
++std's bodies (Charon `--include` of the `Entry` impl), which call the entry
++operations modeled here. std's exported bodies of `key`, `and_modify` and
++`or_insert_with_key` inline the B-tree handle internals: `key` is modeled here;
++the other two take closures and are not supported (their translation stops at
++the node types). -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::key"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.Entry.key {K V : Type} (_ord : core.cmp.Ord K) (e : entry.Entry K V) : Result K :=
++  match e with
++  | .Occupied occupied => .ok occupied.key
++  | .Vacant vacant => .ok vacant.key
++
++/-- `VacantEntry::insert_entry` (btree/map/entry.rs): the occupied entry of the
++inserted pair. Ending it stores its final value into the vacant carrier, or
++nothing if it was removed meanwhile. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert_entry"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.VacantEntry.insert_entry {K V : Type} (_ord : core.cmp.Ord K)
++    (e : entry.VacantEntry K V) (value : V) :
++    Result (entry.OccupiedEntry K V × (entry.OccupiedEntry K V → entry.VacantEntry K V)) :=
++  .ok (⟨e.before, e.key, value, e.after, false⟩,
++    fun occupied => { e with value := if occupied.removed then none else some occupied.value })
++
++/-- `VacantEntry::key`: the key given to `BTreeMap::entry`. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::key"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.VacantEntry.key_ {K V : Type} (_ord : core.cmp.Ord K) (e : entry.VacantEntry K V) :
++    Result K :=
++  .ok e.key
++
++/-- `VacantEntry::into_key`: takes the key back; the map is unchanged. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::into_key"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.VacantEntry.into_key {K V : Type} (_ord : core.cmp.Ord K) (e : entry.VacantEntry K V) :
++    Result (K × entry.VacantEntry K V) :=
++  .ok (e.key, e)
++
++/-- `OccupiedEntry::key`: the stored key, not the one given to `BTreeMap::entry`. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::key"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.key_ {K V : Type} (_ord : core.cmp.Ord K) (e : entry.OccupiedEntry K V) :
++    Result K :=
++  .ok e.key
++
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.get {K V : Type} (_ord : core.cmp.Ord K) (e : entry.OccupiedEntry K V) :
++    Result V :=
++  .ok e.value
++
++/-- `OccupiedEntry::get_mut`: the value borrow writes back into the entry; the
++entry's own borrow of the map is unchanged. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get_mut"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.get_mut {K V : Type} (_ord : core.cmp.Ord K) (e : entry.OccupiedEntry K V) :
++    Result (V × (V → entry.OccupiedEntry K V) × (entry.OccupiedEntry K V → entry.OccupiedEntry K V)) :=
++  .ok (e.value, fun value => { e with value }, fun e => e)
++
++/-- `OccupiedEntry::insert`: `mem::replace(self.get_mut(), value)`, the previous
++value; the stored key stays. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::insert"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.insert {K V : Type} (_ord : core.cmp.Ord K) (e : entry.OccupiedEntry K V)
++    (value : V) :
++    Result (V × entry.OccupiedEntry K V × (entry.OccupiedEntry K V → entry.OccupiedEntry K V)) :=
++  .ok (e.value, { e with value }, fun e => e)
++
++/-- `OccupiedEntry::remove`: `self.remove_kv().1`; ending the map borrow drops the pair. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.remove {K V : Type} (_ord : core.cmp.Ord K) (e : entry.OccupiedEntry K V) :
++    Result (V × entry.OccupiedEntry K V) :=
++  .ok (e.value, { e with removed := true })
++
++/-- `OccupiedEntry::remove_entry`: `self.remove_kv()`, the stored key and the value. -/
++@[rust_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove_entry"
++  (keepParams := [true, true, false]) (keepTraitClauses := [true, false])]
++def entry.OccupiedEntry.remove_entry {K V : Type} (_ord : core.cmp.Ord K)
++    (e : entry.OccupiedEntry K V) : Result ((K × V) × entry.OccupiedEntry K V) :=
++  .ok ((e.key, e.value), { e with removed := true })
++
+ /-- Ending an occupied borrow preserves both surrounding segments and stored key. -/
+ theorem entry.restore_occupied {K V : Type} (e : entry.OccupiedEntry K V) (value : V) :
+-    (entry.Entry.restore (.Occupied {e with value})).entries =
++    (entry.Entry.restore (.Occupied {e with value, removed := false})).entries =
+       e.before ++ (e.key, value) :: e.after := rfl
+ 
++/-- A removed entry leaves exactly the surrounding segments. -/
++theorem entry.restore_removed {K V : Type} (e : entry.OccupiedEntry K V) :
++    (entry.Entry.restore (.Occupied {e with removed := true})).entries =
++      e.before ++ e.after := rfl
++
+ /-- The vacant carrier returned backwards contains the insertion, including edits
+ through the returned mutable reference, without duplicating the captured key. -/
+ theorem entry.restore_inserted {K V : Type} (e : entry.VacantEntry K V) (value : V) :
+diff --git a/backends/lean/Aeneas/Std/RangeBounds.lean b/backends/lean/Aeneas/Std/RangeBounds.lean
+new file mode 100644
+index 0000000..8155f21
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/RangeBounds.lean
+@@ -0,0 +1,139 @@
++import Aeneas.Std.IteratorSources
++
++namespace Aeneas.Std
++
++open Result
++
++/-! `core::ops::range::{Bound, RangeBounds}` (core/src/ops/range.rs, rustc 1.95).
++The bounds are `Bound<&T>`: shared borrows are values in the translation. -/
++
++@[rust_type "core::ops::range::Bound"]
++inductive core.ops.range.Bound (T : Type) where
++  | Included : T → core.ops.range.Bound T
++  | Excluded : T → core.ops.range.Bound T
++  | Unbounded : core.ops.range.Bound T
++
++/-- The provided `contains` has its own generics and is not a dictionary field. -/
++@[rust_trait "core::ops::range::RangeBounds"]
++structure core.ops.range.RangeBounds (Self : Type) (T : Type) where
++  start_bound : Self → Result (core.ops.range.Bound T)
++  end_bound : Self → Result (core.ops.range.Bound T)
++
++/-- `RangeFull` is a unit struct: its translation is `Unit`. -/
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>}::start_bound"]
++def core.ops.range.RangeBoundsRangeFull.start_bound (T : Type) (_ : Unit) :
++    Result (core.ops.range.Bound T) :=
++  ok .Unbounded
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>}::end_bound"]
++def core.ops.range.RangeBoundsRangeFull.end_bound (T : Type) (_ : Unit) :
++    Result (core.ops.range.Bound T) :=
++  ok .Unbounded
++
++@[reducible, rust_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>"]
++def core.ops.range.RangeBoundsRangeFull (T : Type) : core.ops.range.RangeBounds Unit T := {
++  start_bound := core.ops.range.RangeBoundsRangeFull.start_bound T
++  end_bound := core.ops.range.RangeBoundsRangeFull.end_bound T
++}
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>}::start_bound"]
++def core.ops.range.RangeBoundsRangeFrom.start_bound {T : Type} (self : core.ops.range.RangeFrom T) :
++    Result (core.ops.range.Bound T) :=
++  ok (.Included self.start)
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>}::end_bound"]
++def core.ops.range.RangeBoundsRangeFrom.end_bound {T : Type} (_ : core.ops.range.RangeFrom T) :
++    Result (core.ops.range.Bound T) :=
++  ok .Unbounded
++
++@[reducible, rust_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>"]
++def core.ops.range.RangeBoundsRangeFrom (T : Type) :
++    core.ops.range.RangeBounds (core.ops.range.RangeFrom T) T := {
++  start_bound := core.ops.range.RangeBoundsRangeFrom.start_bound
++  end_bound := core.ops.range.RangeBoundsRangeFrom.end_bound
++}
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>}::start_bound"]
++def core.ops.range.RangeBoundsRangeTo.start_bound {T : Type} (_ : core.ops.range.RangeTo T) :
++    Result (core.ops.range.Bound T) :=
++  ok .Unbounded
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>}::end_bound"]
++def core.ops.range.RangeBoundsRangeTo.end_bound {T : Type} (self : core.ops.range.RangeTo T) :
++    Result (core.ops.range.Bound T) :=
++  ok (.Excluded self.end)
++
++@[reducible, rust_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>"]
++def core.ops.range.RangeBoundsRangeTo (T : Type) :
++    core.ops.range.RangeBounds (core.ops.range.RangeTo T) T := {
++  start_bound := core.ops.range.RangeBoundsRangeTo.start_bound
++  end_bound := core.ops.range.RangeBoundsRangeTo.end_bound
++}
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>}::start_bound"]
++def core.ops.range.RangeBoundsRange.start_bound {T : Type} (self : core.ops.range.Range T) :
++    Result (core.ops.range.Bound T) :=
++  ok (.Included self.start)
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>}::end_bound"]
++def core.ops.range.RangeBoundsRange.end_bound {T : Type} (self : core.ops.range.Range T) :
++    Result (core.ops.range.Bound T) :=
++  ok (.Excluded self.end)
++
++@[reducible, rust_trait_impl "core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>"]
++def core.ops.range.RangeBoundsRange (T : Type) :
++    core.ops.range.RangeBounds (core.ops.range.Range T) T := {
++  start_bound := core.ops.range.RangeBoundsRange.start_bound
++  end_bound := core.ops.range.RangeBoundsRange.end_bound
++}
++
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>}::start_bound"]
++def core.ops.range.RangeBoundsRangeInclusive.start_bound {T : Type}
++    (self : core.ops.range.RangeInclusive T) : Result (core.ops.range.Bound T) :=
++  ok (.Included self.start)
++
++/-- An exhausted range is empty: its end is excluded. -/
++@[rust_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>}::end_bound"]
++def core.ops.range.RangeBoundsRangeInclusive.end_bound {T : Type}
++    (self : core.ops.range.RangeInclusive T) : Result (core.ops.range.Bound T) :=
++  ok (if self.exhausted then .Excluded self.end else .Included self.end)
++
++@[reducible, rust_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>"]
++def core.ops.range.RangeBoundsRangeInclusive (T : Type) :
++    core.ops.range.RangeBounds (core.ops.range.RangeInclusive T) T := {
++  start_bound := core.ops.range.RangeBoundsRangeInclusive.start_bound
++  end_bound := core.ops.range.RangeBoundsRangeInclusive.end_bound
++}
++
++/-- `core::slice::index::range(range, ..len)` (core/src/slice/index.rs, rustc 1.95):
++`into_slice_range(len, (range.start_bound().copied(), range.end_bound().copied()))`,
++the start bound read first. The end is resolved before the start; an end past `len`
++or a start past the end panics (`slice_index_fail`). -/
++def core.slice.index.rangeOf {R : Type} (bounds : core.ops.range.RangeBounds R Usize)
++    (range : R) (len : Nat) : Result (Nat × Nat) := do
++  let startBound ← bounds.start_bound range
++  let endBound ← bounds.end_bound range
++  let end_ ← match endBound with
++    | .Included e => if e.val ≥ len then fail .panic else ok (e.val + 1)
++    | .Excluded e => if e.val > len then fail .panic else ok e.val
++    | .Unbounded => ok len
++  let start ← match startBound with
++    | .Excluded s => if s.val ≥ end_ then fail .panic else ok (s.val + 1)
++    | .Included s => if s.val > end_ then fail .panic else ok s.val
++    | .Unbounded => ok 0
++  ok (start, end_)
++
++/-- The resolved range lies within the slice. -/
++theorem core.slice.index.rangeOf_le {R : Type} {bounds : core.ops.range.RangeBounds R Usize}
++    {range : R} {len start end_ : Nat}
++    (h : core.slice.index.rangeOf bounds range len = ok (start, end_)) :
++    start ≤ end_ ∧ end_ ≤ len := by
++  unfold core.slice.index.rangeOf at h
++  cases hs : bounds.start_bound range <;> simp only [hs, bind_tc_ok, bind_tc_fail, bind_tc_div] at h <;>
++    try contradiction
++  cases he : bounds.end_bound range <;> simp only [he, bind_tc_ok, bind_tc_fail, bind_tc_div] at h <;>
++    try contradiction
++  rename_i sb eb
++  cases eb <;> cases sb <;> simp only at h <;> (repeat' split at h) <;> simp_all <;> omega
++
++end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/VecDrain.lean b/backends/lean/Aeneas/Std/VecDrain.lean
+new file mode 100644
+index 0000000..ce79f41
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/VecDrain.lean
+@@ -0,0 +1,100 @@
++import Aeneas.Std.RangeBounds
++import Aeneas.Std.VecIter
++
++namespace Aeneas.Std
++
++open Result
++
++/-- `vec::Drain<'a, T, A>` (alloc/src/vec/drain.rs, rustc 1.95): the unyielded
++elements of the drained range, and the vector that dropping the drain leaves:
++the prefix before the range and the tail after it. `Drop for Drain` drops the
++unyielded elements and moves the tail back, so the range is removed whether or
++not the iterator was exhausted; ending the borrow of the vector gives `kept`
++back. -/
++@[rust_type "alloc::vec::drain::Drain" (keepParams := [true, false]) (mutRegions := #[0])
++  (body := .opaque)]
++structure alloc.vec.drain.Drain (T : Type) where
++  remaining : List T
++  kept : alloc.vec.Vec T
++
++/-- `Vec::drain` (alloc/src/vec/mod.rs): `slice::range(range, ..len)`, then the
++elements `start..end` are drained and `start..` of the vector is closed up when
++the drain is dropped. -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::drain" (keepParams := [true, false, true])]
++def alloc.vec.Vec.drain {T R : Type} (bounds : core.ops.range.RangeBounds R Usize)
++    (v : alloc.vec.Vec T) (range : R) :
++    Result (alloc.vec.drain.Drain T × (alloc.vec.drain.Drain T → alloc.vec.Vec T)) :=
++  match h : core.slice.index.rangeOf bounds range v.length with
++  | ok (start, end_) =>
++    have hr := core.slice.index.rangeOf_le h
++    let kept : alloc.vec.Vec T := ⟨v.val.take start ++ v.val.drop end_, by
++      have := v.len_ineq; simp only [List.length_append, List.length_take, List.length_drop]
++      simp only [alloc.vec.Vec.length] at hr; omega⟩
++    ok (⟨(v.val.take end_).drop start, kept⟩, fun drain => drain.kept)
++  | fail e => fail e
++  | div => div
++
++@[rust_fun
++  "alloc::vec::drain::{core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::next"
++  (keepParams := [true, false])]
++def alloc.vec.drain.IteratorDrain.next {T : Type} (it : alloc.vec.drain.Drain T) :
++    Result (Option T × alloc.vec.drain.Drain T) :=
++  match it.remaining with
++  | [] => ok (none, it)
++  | item :: rest => ok (some item, { it with remaining := rest })
++
++/-- `self.iter.size_hint()`: the slice iterator's exact length. -/
++@[rust_fun
++  "alloc::vec::drain::{core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::size_hint"
++  (keepParams := [true, false])]
++def alloc.vec.drain.IteratorDrain.size_hint {T : Type} (it : alloc.vec.drain.Drain T) :
++    Result (Usize × Option Usize) := do
++  let length ← UScalar.tryMk .Usize it.remaining.length
++  ok (length, some length)
++
++@[rust_fun
++  "alloc::vec::drain::{core::iter::traits::double_ended::DoubleEndedIterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::next_back"
++  (keepParams := [true, false])]
++def alloc.vec.drain.DoubleEndedIteratorDrain.next_back {T : Type} (it : alloc.vec.drain.Drain T) :
++    Result (Option T × alloc.vec.drain.Drain T) :=
++  match it.remaining.getLast? with
++  | none => ok (none, it)
++  | some item => ok (some item, { it with remaining := it.remaining.dropLast })
++
++/-- `impl Iterator for Drain` overrides `next` and `size_hint`; `Drain` is
++`TrustedLen` and `FusedIterator`, not `TrustedRandomAccess`. -/
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>"
++  (keepParams := [true, false])]
++def core.iter.traits.iterator.IteratorVecDrain (T : Type) :
++    core.iter.traits.iterator.Iterator (alloc.vec.drain.Drain T) T := {
++  next := alloc.vec.drain.IteratorDrain.next
++  size_hint := alloc.vec.drain.IteratorDrain.size_hint
++  trusted_len := true
++  fused := true
++}
++
++/-- `impl DoubleEndedIterator for Drain` overrides `next_back` only. -/
++@[reducible, rust_trait_impl
++  "core::iter::traits::double_ended::DoubleEndedIterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>"
++  (keepParams := [true, false])]
++def core.iter.traits.double_ended.DoubleEndedIteratorVecDrain (T : Type) :
++    core.iter.traits.double_ended.DoubleEndedIterator (alloc.vec.drain.Drain T) T := {
++  iteratorInst := core.iter.traits.iterator.IteratorVecDrain T
++  next_back := alloc.vec.drain.DoubleEndedIteratorDrain.next_back
++}
++
++/-- Dropping a drain, exhausted or not, leaves the vector without the range. -/
++theorem alloc.vec.Vec.drain_kept {T R : Type} {bounds : core.ops.range.RangeBounds R Usize}
++    {v : alloc.vec.Vec T} {range : R} {drain : alloc.vec.drain.Drain T}
++    {back : alloc.vec.drain.Drain T → alloc.vec.Vec T} {start end_ : Nat}
++    (hr : core.slice.index.rangeOf bounds range v.length = ok (start, end_))
++    (h : alloc.vec.Vec.drain bounds v range = ok (drain, back)) (final : alloc.vec.drain.Drain T)
++    (hkept : final.kept = drain.kept) :
++    (back final).val = v.val.take start ++ v.val.drop end_ := by
++  unfold alloc.vec.Vec.drain at h
++  split at h <;> simp_all
++  obtain ⟨rfl, rfl⟩ := h
++  simp [hkept]
++
++end Aeneas.Std
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 40d60c9..8abb7c2 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1829,11 +1829,22 @@ let simplify_trait_calls (crate : crate) : crate =
+           visitor#visit_generic_params () f.generics;
+           visitor#visit_fun_sig () f.signature)
+         else visitor#visit_fun_decl () f
+-    | IdType id ->
++    | IdType id -> (
+         let d = TypeDeclId.Map.find id crate.type_decls in
+-        if has_model ExtractBuiltin.builtin_types_map d.item_meta.name then
+-          visitor#visit_generic_params () d.generics
+-        else visitor#visit_type_decl () d
++        (* A model of the representation (the variants or fields of the Rust
++           type, e.g. BTreeMap's Entry) keeps the Rust declaration, whose field
++           types the type analysis and the interpreter use: they are required.
++           A model without a representation only uses the parameters. *)
++        match
++          Config.if_backend
++            (fun () ->
++              ExtractBuiltin.NameMatcherMap.find_opt mctx d.item_meta.name
++                (ExtractBuiltin.builtin_types_map ()))
++            None
++        with
++        | Some ({ body_info = None; _ } : Pure.builtin_type_info) ->
++            visitor#visit_generic_params () d.generics
++        | _ -> visitor#visit_type_decl () d)
+     | IdGlobal id ->
+         let d = GlobalDeclId.Map.find id crate.global_decls in
+         require (IdFun d.init);
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index b6a2c9f..565d7af 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -16,11 +16,11 @@ let lean_builtin_types = [
+   mk_type "alloc::collections::btree::map::Keys" "_root_.Aeneas.Std.alloc.collections.btree.map.Keys";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 32 *)
+   mk_type "alloc::collections::btree::map::Values" "_root_.Aeneas.Std.alloc.collections.btree.map.Values";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 59 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 62 *)
+   mk_type "alloc::collections::btree::map::entry::Entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]) ~kind:(KEnum [("Vacant", Some "Vacant"); ("Occupied", Some "Occupied")]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 41 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 43 *)
+   mk_type "alloc::collections::btree::map::entry::OccupiedEntry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 51 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 54 *)
+   mk_type "alloc::collections::btree::map::entry::VacantEntry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 11 *)
+   mk_type "alloc::collections::btree::set::BTreeSet" "_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet" ~keep_params:(Some [true; false]);
+@@ -36,6 +36,8 @@ let lean_builtin_types = [
+   mk_type "alloc::sync::Arc" "_root_.Aeneas.Std.alloc.sync.Arc";
+   (* file: "Aeneas/Std/Vec.lean", line: 20 *)
+   mk_type "alloc::vec::Vec" "_root_.Aeneas.Std.alloc.vec.Vec";
++  (* file: "Aeneas/Std/VecDrain.lean", line: 14 *)
++  mk_type "alloc::vec::drain::Drain" "_root_.Aeneas.Std.alloc.vec.drain.Drain" ~keep_params:(Some [true; false]) ~mut_regions:([0]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 9 *)
+   mk_type "alloc::vec::into_iter::IntoIter" "_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 29 *)
+@@ -128,6 +130,8 @@ let lean_builtin_types = [
+   mk_type "core::num::nonzero::NonZero" "_root_.Aeneas.Std.core.num.nonzero.NonZero" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 235 *)
+   mk_type "core::ops::control_flow::ControlFlow" "_root_.Aeneas.Std.core.ops.control_flow.ControlFlow" ~kind:(KEnum [("Continue", Some "Continue"); ("Break", Some "Break")]);
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 10 *)
++  mk_type "core::ops::range::Bound" "_root_.Aeneas.Std.core.ops.range.Bound" ~kind:(KEnum [("Included", Some "Included"); ("Excluded", Some "Excluded"); ("Unbounded", Some "Unbounded")]);
+   (* file: "Aeneas/Std/Range.lean", line: 14 *)
+   mk_type "core::ops::range::Range" "_root_.Aeneas.Std.core.ops.range.Range" ~kind:(KStruct [("start", Some "start"); ("end", Some "«end»")]);
+   (* file: "Aeneas/Std/Core/Core.lean", line: 211 *)
+@@ -270,81 +274,101 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::ops::deref::Deref<Box<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.boxed.Box.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Alloc.lean", line: 22 *)
+   mk_fun "alloc::boxed::{core::ops::deref::DerefMut<Box<@T>, @T>}::deref_mut" "_root_.Aeneas.Std.alloc.boxed.Box.deref_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 270 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 293 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.key" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 332 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 340 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 348 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 273 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::into_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 276 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 326 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.key_" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 356 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 363 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove_entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove_entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 279 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 129 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 303 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert_entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 319 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::into_key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.into_key" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 312 *)
++  mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.key_" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 132 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::contains_key" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.contains_key" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 263 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 266 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::entry" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 123 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 126 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 86 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 89 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 173 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 176 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::is_empty" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.is_empty" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 178 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 181 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::iter" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 184 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 187 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::keys" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.keys" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 96 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 99 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::len" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.len" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 147 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 150 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::remove" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.remove" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 190 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 193 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::values" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 72 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 75 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>}::new" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 105 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 108 *)
+   mk_fun "alloc::collections::btree::map::{core::clone::Clone<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::clone" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.clone" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 209 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 212 *)
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::eq" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.eq" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 218 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 221 *)
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::ne" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.ne" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 236 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 239 *)
+   mk_fun "alloc::collections::btree::map::{core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::fmt" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap.fmt" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 159 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 162 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>}::extend" "_root_.Aeneas.Std.alloc.collections.btree.map.ExtendBTreeMap.extend" ~keep_params:(Some [true; true; false; true; true]) ~keep_trait_clauses:(Some [true; false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 487 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 579 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>}::from_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 451 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 543 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 443 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 535 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 433 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 525 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.collect" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 364 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 456 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.enumerate" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 302 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 394 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.next" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 316 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 408 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.size_hint" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 358 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 450 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.step_by" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 369 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 461 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.take" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 427 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 519 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.collect";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 350 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 442 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.enumerate";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 296 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 388 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 310 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 402 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 345 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 437 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.step_by";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 354 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 446 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.take";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 324 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 416 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 330 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 422 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 335 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 427 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 341 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 433 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 535 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 627 *)
+   mk_fun "alloc::collections::btree::map::{core::ops::index::Index<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, &'0 @Q, @V>}::index" "_root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index" ~keep_params:(Some [true; true; true; false]) ~keep_trait_clauses:(Some [false; true; true; true]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 32 *)
+   mk_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, @A>}::contains" "_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.contains" ~keep_params:(Some [true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+@@ -446,6 +470,12 @@ let lean_builtin_funs = [
+   mk_fun "alloc::sync::{core::fmt::Debug<alloc::sync::Arc<@T>>}::fmt" "_root_.Aeneas.Std.alloc.sync.DebugArc.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 63 *)
+   mk_fun "alloc::sync::{core::ops::deref::Deref<alloc::sync::Arc<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.sync.DerefArc.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
++  (* file: "Aeneas/Std/VecDrain.lean", line: 55 *)
++  mk_fun "alloc::vec::drain::{core::iter::traits::double_ended::DoubleEndedIterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::next_back" "_root_.Aeneas.Std.alloc.vec.drain.DoubleEndedIteratorDrain.next_back" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/VecDrain.lean", line: 37 *)
++  mk_fun "alloc::vec::drain::{core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::next" "_root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/VecDrain.lean", line: 47 *)
++  mk_fun "alloc::vec::drain::{core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>}::size_hint" "_root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.size_hint" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 437 *)
+   mk_fun "alloc::vec::from_elem" "_root_.Aeneas.Std.alloc.vec.from_elem";
+   (* file: "Aeneas/Std/VecIter.lean", line: 59 *)
+@@ -480,6 +510,8 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::clear" "_root_.Aeneas.Std.alloc.vec.Vec.clear" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Vec.lean", line: 228 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::dedup" "_root_.Aeneas.Std.alloc.vec.Vec.dedup" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/VecDrain.lean", line: 23 *)
++  mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::drain" "_root_.Aeneas.Std.alloc.vec.Vec.drain" ~keep_params:(Some [true; false; true]);
+   (* file: "Aeneas/Std/Vec.lean", line: 457 *)
+   mk_fun "alloc::vec::{alloc::vec::Vec<@T>}::extend_from_slice" "_root_.Aeneas.Std.alloc.vec.Vec.extend_from_slice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 240 *)
+@@ -1372,6 +1404,26 @@ let lean_builtin_funs = [
+   mk_fun "core::ops::function::impls::{core::ops::function::FnOnce<&'0 mut @F, @A, @Clause0_Clause0_Output>}::call_once" "_root_.Aeneas.Std.core.ops.function.FnOnceMutRef.call_once";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 13 *)
+   mk_fun "core::ops::range::{core::ops::range::Range<@Idx>}::contains" "_root_.Aeneas.Std.core.ops.range.Range.contains";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 78 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>}::end_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRange.end_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 73 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>}::start_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRange.start_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 44 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>}::end_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom.end_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 39 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>}::start_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom.start_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 28 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>}::end_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull.end_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 23 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>}::start_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull.start_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 96 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>}::end_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeInclusive.end_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 90 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>}::start_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeInclusive.start_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 61 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>}::end_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeTo.end_bound";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 56 *)
++  mk_fun "core::ops::range::{core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>}::start_bound" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeTo.start_bound";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 39 *)
+   mk_fun "core::ops::range::{core::ops::range::RangeInclusive<@Idx>}::contains" "_root_.Aeneas.Std.core.ops.range.RangeInclusive.contains";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 27 *)
+@@ -2019,6 +2071,8 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::ops::index::Index" "_root_.Aeneas.Std.core.ops.index.Index" ~methods:[("index", "index")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 14 *)
+   mk_trait_decl "core::ops::index::IndexMut" "_root_.Aeneas.Std.core.ops.index.IndexMut" ~parent_clauses:["indexInst"] ~methods:[("index_mut", "index_mut")];
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 17 *)
++  mk_trait_decl "core::ops::range::RangeBounds" "_root_.Aeneas.Std.core.ops.range.RangeBounds" ~methods:[("start_bound", "start_bound"); ("end_bound", "end_bound")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 231 *)
+   mk_trait_decl "core::ops::try_trait::FromResidual" "_root_.Aeneas.Std.core.ops.try_trait.FromResidual" ~methods:[("from_residual", "from_residual")];
+   (* file: "Aeneas/Std/Core/Ops.lean", line: 246 *)
+@@ -2192,7 +2246,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialEqBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 63 *)
+   mk_trait_impl "core::cmp::PartialEq<[@T], [@U]>" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 225 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 228 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/String.lean", line: 97 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::string::String, &'a str>" "_root_.Aeneas.Std.core.cmp.PartialEqStringSharedStr";
+@@ -2316,7 +2370,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 72 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 242 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 245 *)
+   mk_trait_impl "core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 57 *)
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+@@ -2420,13 +2474,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::range::Step<usize>" "_root_.Aeneas.Std.core.iter.range.StepUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 752 *)
+   mk_trait_impl "core::iter::traits::accum::Product<usize, &'a usize>" "_root_.Aeneas.Std.core.iter.traits.accum.ProductUsizeSharedUsize";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 524 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 616 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 155 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::set::BTreeSet<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 100 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>" "_root_.Aeneas.Std.alloc.vec.ExtendVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 518 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 610 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 149 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet";
+@@ -2440,7 +2494,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T; @N], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedArray";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 334 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 510 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 602 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 203 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -2452,7 +2506,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBoxSlice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 104 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<[@T; @N], @T, core::array::iter::IntoIter<@T, @N>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 502 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 594 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 173 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -2460,6 +2514,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::vec::Vec<@T>, @T, alloc::vec::into_iter::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 461 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<core::option::Option<@T>, @T, core::option::IntoIter<@T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorOption";
++  (* file: "Aeneas/Std/VecDrain.lean", line: 78 *)
++  mk_trait_impl "core::iter::traits::double_ended::DoubleEndedIterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorVecDrain" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 396 *)
+   mk_trait_impl "core::iter::traits::double_ended::DoubleEndedIterator<core::iter::adapters::enumerate::Enumerate<@I>, (usize, @Clause0_Clause0_Item)>" "_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIteratorEnumerate";
+   (* file: "Aeneas/Std/IteratorAdapters.lean", line: 1064 *)
+@@ -2492,18 +2548,20 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::exact_size::ExactSizeIterator<core::slice::iter::Iter<'a, @T>, &'_ @T>" "_root_.Aeneas.Std.core.iter.traits.exact_size.ExactSizeIteratorSliceIter";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 442 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<&'a mut @I, @Item>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 390 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 482 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoIter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 378 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 470 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 405 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 497 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeKeys";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 416 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 508 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeValues";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 164 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::set::IntoIter<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIntoIter" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 184 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::set::Iter<'a, @T>, &'a @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIter";
++  (* file: "Aeneas/Std/VecDrain.lean", line: 66 *)
++  mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::vec::drain::Drain<'a, @T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/VecIter.lean", line: 97 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::vec::into_iter::IntoIter<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 81 *)
+@@ -2676,7 +2734,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexArray";
+   (* file: "Aeneas/Std/Slice.lean", line: 481 *)
+   mk_trait_impl "core::ops::index::Index<[@T], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexSlice";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 544 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 636 *)
+   mk_trait_impl "core::ops::index::Index<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, &'0 @Q, @V>" "_root_.Aeneas.Std.core.ops.index.IndexBTreeMap" ~keep_params:(Some [true; true; true; false]) ~keep_trait_clauses:(Some [false; true; true; true]);
+   (* file: "Aeneas/Std/Vec.lean", line: 314 *)
+   mk_trait_impl "core::ops::index::Index<alloc::vec::Vec<@T>, @T, @O>" "_root_.Aeneas.Std.alloc.vec.Vec.Index" ~keep_params:(Some [true; true; false; true]);
+@@ -2686,6 +2744,16 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::index::IndexMut<[@T], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexMutSlice";
+   (* file: "Aeneas/Std/Vec.lean", line: 322 *)
+   mk_trait_impl "core::ops::index::IndexMut<alloc::vec::Vec<@T>, @T, @O>" "_root_.Aeneas.Std.alloc.vec.Vec.IndexMut" ~keep_params:(Some [true; true; false; true]);
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 83 *)
++  mk_trait_impl "core::ops::range::RangeBounds<core::ops::range::Range<@T>, @T>" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRange";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 49 *)
++  mk_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeFrom<@T>, @T>" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 33 *)
++  mk_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeFull, @T>" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 101 *)
++  mk_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeInclusive<@T>, @T>" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeInclusive";
++  (* file: "Aeneas/Std/RangeBounds.lean", line: 66 *)
++  mk_trait_impl "core::ops::range::RangeBounds<core::ops::range::RangeTo<@T>, @T>" "_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeTo";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 22 *)
+   mk_trait_impl "core::ops::try_trait::FromResidual<core::result::Result<@T, @F>, core::result::Result<core::convert::Infallible, @E>>" "_root_.Aeneas.Std.core.result.FromResidualResult";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 46 *)
+diff --git a/src/interp/InterpBorrows.ml b/src/interp/InterpBorrows.ml
+index ab53e8a..ec2a2b0 100644
+--- a/src/interp/InterpBorrows.ml
++++ b/src/interp/InterpBorrows.ml
+@@ -2189,6 +2189,64 @@ let find_outer_shared_loan_containing_loan (span : Meta.span) (l : BorrowId.id)
+      ^ BorrowId.to_string l)
+   with FoundLoanId lid -> lid
+ 
++(** A call which takes a shared borrow of a value owning mutable borrows (a
++    symbolic value of a model type such as BTreeMap's [OccupiedEntry<'a, ..>])
++    leaves, for the regions of those borrows, an abstraction which observes
++    them through a shared reborrow projector ([AsbProjReborrows]). Through a
++    shared borrow of the value, those borrows can only be reborrowed for the
++    lifetime of that outer borrow: moving the value or borrowing it mutably
++    ends the observations. This ends the abstractions observing mutable borrows
++    of a symbolic value of [v], and returns [None] if there are none.
++    Observations of shared borrows only stay: copies of those borrows may
++    outlive the outer borrow (see [Invariants.check_symbolic_values]). *)
++let end_mut_borrow_observations_in_value_opt (config : config)
++    (span : Meta.span) (v : tvalue) (ctx : eval_ctx) :
++    (eval_ctx * (SymbolicAst.expr -> SymbolicAst.expr)) option =
++  let svs = ref SymbolicValueId.Set.empty in
++  (object
++     inherit [_] iter_tvalue
++
++     method! visit_VSymbolic _ sv =
++       svs := SymbolicValueId.Set.add sv.sv_id !svs
++  end)
++    #visit_tvalue
++    () v;
++  if SymbolicValueId.Set.is_empty !svs then None
++  else
++    let observers = ref AbsIdWithLevelSet.empty in
++    (object
++       inherit [_] iter_eval_ctx_with_abs_levels as super
++
++       method incr_level al =
++         match al with
++         | Some (abs, level) -> Some (abs, level + 1)
++         | None -> [%internal_error] span
++
++       method! visit_abs _ abs = super#visit_abs (Some (abs, 0)) abs
++
++       method! visit_abstract_shared_borrow al asb =
++         match asb with
++         | AsbBorrow _ -> ()
++         | AsbProjReborrows proj ->
++             let abs, level = Option.get al in
++             if
++               SymbolicValueId.Set.mem proj.sv_id !svs
++               && ty_has_mut_borrow_for_region_in_set ctx.type_ctx.type_infos
++                    abs.regions.owned proj.proj_ty
++             then
++               observers :=
++                 AbsIdWithLevelSet.add { abs_id = abs.abs_id; level }
++                   !observers
++    end)
++      #visit_eval_ctx
++      None ctx;
++    if AbsIdWithLevelSet.is_empty !observers then None
++    else (
++      [%ltrace
++        "ending the observations of mutable borrows in "
++        ^ tvalue_to_string ~span:(Some span) ctx v];
++      Some (end_abs_set config span !observers ctx))
++
+ (** Promote a reserved mut borrow to a mut borrow. *)
+ let rec promote_reserved_mut_borrow (config : config) (span : Meta.span)
+     (l : BorrowId.id) (rid : SharedBorrowId.id) : cm_fun =
+@@ -2232,7 +2290,12 @@ let rec promote_reserved_mut_borrow (config : config) (span : Meta.span)
+           in
+           (* Recursive call *)
+           comp cc (promote_reserved_mut_borrow config span l rid ctx)
+-      | None ->
++      | None -> (
++          (* End the observations of the mutable borrows of the value *)
++          match end_mut_borrow_observations_in_value_opt config span sv ctx with
++          | Some (ctx, cc) ->
++              comp cc (promote_reserved_mut_borrow config span l rid ctx)
++          | None ->
+           (* No loan to end inside the value *)
+           (* Some sanity checks *)
+           [%ltrace
+@@ -2261,7 +2324,7 @@ let rec promote_reserved_mut_borrow (config : config) (span : Meta.span)
+           *)
+           let ctx = replace_reserved_borrow_with_mut_borrow span l rid v ctx in
+           (* Return *)
+-          (ctx, cc))
++          (ctx, cc)))
+   | Some (_, Abstract _) ->
+       (* I don't think it is possible to have two-phase borrows involving borrows
+        * returned by abstractions. I'm not sure how we could handle that anyway. *)
+diff --git a/src/interp/InterpBorrows.mli b/src/interp/InterpBorrows.mli
+index 8174238..bf1697e 100644
+--- a/src/interp/InterpBorrows.mli
++++ b/src/interp/InterpBorrows.mli
+@@ -86,6 +86,18 @@ val end_abs_set_no_synth :
+   eval_ctx ->
+   eval_ctx
+ 
++(** End the abstractions which observe, through a shared reborrow projector,
++    mutable borrows owned by a symbolic value of the given value: a call which
++    took a shared borrow of the value leaves such an observation, which moving
++    the value or borrowing it mutably ends. Observations of shared borrows only
++    stay. Returns [None] if there is no such observation. *)
++val end_mut_borrow_observations_in_value_opt :
++  config ->
++  Meta.span ->
++  tvalue ->
++  eval_ctx ->
++  (eval_ctx * (SymbolicAst.expr -> SymbolicAst.expr)) option
++
+ (** Promote a reserved mut borrow to a mut borrow, while preserving the
+     invariants.
+ 
+diff --git a/src/interp/InterpPaths.ml b/src/interp/InterpPaths.ml
+index 81ac897..c424c6d 100644
+--- a/src/interp/InterpPaths.ml
++++ b/src/interp/InterpPaths.ml
+@@ -552,6 +552,20 @@ let rec end_loans_at_place (config : config) (span : Meta.span)
+             (* We always need to end mutable borrows *)
+             let res = end_loan config span lid ctx in
+             raise (UpdateCtx res)
++
++      method! visit_VSymbolic env sv =
++        (* Moving the value or borrowing it mutably ends the observations of
++           its mutable borrows *)
++        match access with
++        | Read -> super#visit_VSymbolic env sv
++        | Write | Move -> (
++            match
++              end_mut_borrow_observations_in_value_opt config span
++                { value = VSymbolic sv; ty = sv.sv_ty }
++                ctx
++            with
++            | Some res -> raise (UpdateCtx res)
++            | None -> super#visit_VSymbolic env sv)
+     end
+   in
+ 
+diff --git a/tests/lean/BtreeEntry.lean b/tests/lean/BtreeEntry.lean
+new file mode 100644
+index 0000000..f0b93d5
+--- /dev/null
++++ b/tests/lean/BtreeEntry.lean
+@@ -0,0 +1 @@
++import BtreeEntry.Checks
+diff --git a/tests/lean/BtreeEntry/BtreeEntry.lean b/tests/lean/BtreeEntry/BtreeEntry.lean
+new file mode 100644
+index 0000000..0aa848e
+--- /dev/null
++++ b/tests/lean/BtreeEntry/BtreeEntry.lean
+@@ -0,0 +1,888 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [btree_entry]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace btree_entry
++
++/-- [btree_entry::inserted_with::closure]
++    Source: 'tests/src/btree-entry.rs', lines 51:39-54:9 -/
++def inserted_with.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32
++
++/-- [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, K, V, A>}::or_insert]:
++    Source: '/rustc/library/alloc/src/collections/btree/map/entry.rs', lines 161:4-161:51
++    Name pattern: [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_insert]
++    Visibility: public -/
++@[rust_fun
++  "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_insert"]
++def alloc.collections.btree.map.entry.Entry.or_insert
++  {K : Type} {V : Type} {A : Type} (corecmpOrdInst :
++  _root_.Aeneas.Std.core.cmp.Ord K) (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone A)
++  (self : _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++  (default : V) :
++  _root_.Aeneas.Std.Result (V × (V →
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V))
++  := do
++  match self with
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++    let (oe, insert_entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry
++        corecmpOrdInst entry default
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst oe
++    let back :=
++      (fun t1 =>
++         let oe1 := into_mut_back t1
++         let ve := insert_entry_back oe1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve :
++        V → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (t, back)
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry =>
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst entry
++    let back :=
++      (fun t1 =>
++         let oe := into_mut_back t1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied oe
++        : V → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (t, back)
++
++/-- [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, K, V, A>}::or_insert_with::<0, T0, T1, T2, btree_entry::inserted_with::closure<1, 2>>]:
++    Source: '/rustc/library/alloc/src/collections/btree/map/entry.rs', lines 184:4-184:74
++    Name pattern: [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_insert_with<'0, @T0, @T1, @T2, btree_entry::inserted_with::closure<'1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_insert_with<'0, @T0, @T1, @T2, btree_entry::inserted_with::closure<'1, '2>>"]
++def
++  alloc.collections.btree.map.entry.Entry.or_insert_with0T0T1T2closure_specialized_3cc332afacbe2ac1dfec0f776ae3f7d1
++  {T0 : Type} {T1 : Type} {T2 : Type} (corecmpOrdInst :
++  _root_.Aeneas.Std.core.cmp.Ord T0) (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone T2)
++  (coreopsfunctionFnOnceclosureTupleT1Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.btree_entry.inserted_with.closure _root_.Unit T1)
++  (self : _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry T0 T1)
++  (default : _root_.btree_entry.inserted_with.closure) :
++  _root_.Aeneas.Std.Result (T1 × (T1 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry T0 T1) ×
++    _root_.btree_entry.inserted_with.closure)
++  := do
++  let (_, i) := default
++  match self with
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnOnceclosureTupleT1Inst.call_once default ()
++    let (oe, insert_entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry
++        corecmpOrdInst entry model_state
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst oe
++    let back :=
++      (fun t1 =>
++         let oe1 := into_mut_back t1
++         let ve := insert_entry_back oe1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve :
++        T1 → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry T0 T1)
++    let (v, _) := model_state1
++    _root_.Aeneas.Std.Result.ok (t, back, (v, i))
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry =>
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst entry
++    let back :=
++      (fun t1 =>
++         let oe := into_mut_back t1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied oe
++        : T1 → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry T0
++        T1)
++    _root_.Aeneas.Std.Result.ok (t, back, default)
++
++/-- [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, K, V, A>}::insert_entry]:
++    Source: '/rustc/library/alloc/src/collections/btree/map/entry.rs', lines 288:4-288:69
++    Name pattern: [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::insert_entry]
++    Visibility: public -/
++@[rust_fun
++  "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::insert_entry"]
++def alloc.collections.btree.map.entry.Entry.insert_entry
++  {K : Type} {V : Type} {A : Type} (corecmpOrdInst :
++  _root_.Aeneas.Std.core.cmp.Ord K) (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone A)
++  (self : _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++  (value : V) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry K V) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry K V →
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V))
++  := do
++  match self with
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++    let (entry1, insert_entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry
++        corecmpOrdInst entry value
++    let back :=
++      (fun oe =>
++         let ve := insert_entry_back oe
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve :
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry K V
++        → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (entry1, back)
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry =>
++    let (_, entry1, insert_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.insert
++        corecmpOrdInst entry value
++    let back :=
++      (fun oe =>
++         let oe1 := insert_back oe
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied oe1
++        : _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry K V
++        → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (entry1, back)
++
++/-- [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, K, V, A>}::or_default]:
++    Source: '/rustc/library/alloc/src/collections/btree/map/entry.rs', lines 314:4-314:40
++    Name pattern: [alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_default]
++    Visibility: public -/
++@[rust_fun
++  "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::or_default"]
++def alloc.collections.btree.map.entry.Entry.or_default
++  {K : Type} {V : Type} {A : Type} (corecmpOrdInst :
++  _root_.Aeneas.Std.core.cmp.Ord K) (coredefaultDefaultInst :
++  _root_.Aeneas.Std.core.default.Default V) (corecloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone A)
++  (self : _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V) :
++  _root_.Aeneas.Std.Result (V × (V →
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V))
++  := do
++  match self with
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++    let value ← coredefaultDefaultInst.default
++    let (oe, insert_entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry
++        corecmpOrdInst entry value
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst oe
++    let back :=
++      (fun t1 =>
++         let oe1 := into_mut_back t1
++         let ve := insert_entry_back oe1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve :
++        V → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (t, back)
++  | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry =>
++    let (t, into_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut
++        corecmpOrdInst entry
++    let back :=
++      (fun t1 =>
++         let oe := into_mut_back t1
++         _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied oe
++        : V → _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry K V)
++    _root_.Aeneas.Std.Result.ok (t, back)
++
++/-- [btree_entry::populated]:
++    Source: 'tests/src/btree-entry.rs', lines 13:0-18:1 -/
++def populated
++  :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let map ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32
++  let (_, map1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 map 2#u32 20#u32
++  let (_, map2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      core.cmp.OrdU32 map1 4#u32 40#u32
++  _root_.Aeneas.Std.Result.ok map2
++
++/-- [btree_entry::snapshot]: loop body 0:
++    Source: 'tests/src/btree-entry.rs', lines 22:4-24:5 -/
++@[rust_loop_body]
++def snapshot_loop.body
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.Iter
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | some p =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out p
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [btree_entry::snapshot]: loop 0:
++    Source: 'tests/src/btree-entry.rs', lines 22:4-24:5 -/
++@[rust_loop]
++def snapshot_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.Iter
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.btree_entry.snapshot_loop.body iter1 out1 :
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.Iter
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32))) (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [btree_entry::snapshot]:
++    Source: 'tests/src/btree-entry.rs', lines 20:0-26:1 -/
++def snapshot
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter
++      map
++  _root_.btree_entry.snapshot_loop model_state
++    (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++
++/-- [btree_entry::counted]: loop body 0:
++    Source: 'tests/src/btree-entry.rs', lines 31:4-33:5
++    Visibility: public -/
++@[rust_loop_body]
++def counted_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done map)
++  | some key =>
++    let (e, entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++        core.cmp.OrdU32 map key
++    let (i, or_default_back) ←
++      _root_.btree_entry.alloc.collections.btree.map.entry.Entry.or_default
++        core.cmp.OrdU32 core.default.DefaultU32
++        _root_.Aeneas.Std.core.core.clone.CloneGlobal e
++    let i1 ← i + 1#u32
++    let e1 := or_default_back i1
++    let map1 := entry_back e1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, map1))
++
++/-- [btree_entry::counted]: loop 0:
++    Source: 'tests/src/btree-entry.rs', lines 31:4-33:5
++    Visibility: public -/
++@[rust_loop]
++def counted_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, map1) => _root_.btree_entry.counted_loop.body iter1 map1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++    (iter, map)
++
++/-- [btree_entry::counted]:
++    Source: 'tests/src/btree-entry.rs', lines 29:0-35:1
++    Visibility: public -/
++def counted
++  (keys1 : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let map ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter keys1
++  let map1 ← _root_.btree_entry.counted_loop model_state map
++  _root_.btree_entry.snapshot map1
++
++/-- [btree_entry::inserted]:
++    Source: 'tests/src/btree-entry.rs', lines 38:0-43:1
++    Visibility: public -/
++def inserted
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 2#u32
++  let (i, or_insert_back) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.or_insert
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e 900#u32
++  let i1 ← i + 7#u32
++  let e1 := or_insert_back i1
++  let map1 := entry_back e1
++  let (e2, entry_back1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map1 3#u32
++  let (i2, or_insert_back1) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.or_insert
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e2 300#u32
++  let i3 ← i2 + 1#u32
++  let e3 := or_insert_back1 i3
++  let map2 := entry_back1 e3
++  _root_.btree_entry.snapshot map2
++
++/-- [btree_entry::inserted_with::{core::ops::function::FnOnce<(), u32> for btree_entry::inserted_with::closure<0, 1>}::call_once]:
++    Source: 'tests/src/btree-entry.rs', lines 51:39-54:9 -/
++def inserted_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++  (c : _root_.btree_entry.inserted_with.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.btree_entry.inserted_with.closure)
++  := do
++  let (v, i) := c
++  let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v i
++  let i1 ← i * 100#u32
++  _root_.Aeneas.Std.Result.ok (i1, (v1, i))
++
++/-- Trait implementation: [btree_entry::inserted_with::{core::ops::function::FnOnce<(), u32> for btree_entry::inserted_with::closure<0, 1>}]
++    Source: 'tests/src/btree-entry.rs', lines 51:39-54:9 -/
++@[reducible]
++def inserted_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.btree_entry.inserted_with.closure _root_.Unit _root_.Aeneas.Std.U32
++  := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.btree_entry.inserted_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1))
++}
++
++/-- [btree_entry::inserted_with]: loop body 0:
++    Source: 'tests/src/btree-entry.rs', lines 50:4-55:5
++    Visibility: public -/
++@[rust_loop_body]
++def inserted_with_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (fresh : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (map,
++      fresh))
++  | some key =>
++    let (e, entry_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++        core.cmp.OrdU32 map key
++    let (i, or_insert_with_back, c) ←
++      _root_.btree_entry.alloc.collections.btree.map.entry.Entry.or_insert_with0T0T1T2closure_specialized_3cc332afacbe2ac1dfec0f776ae3f7d1
++        core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal
++        _root_.btree_entry.inserted_with.closure.Insts.CoreOpsFunctionFnOnceTupleU32
++        e (fresh, key)
++    let (fresh1, _) := c
++    let e1 := or_insert_with_back i
++    let map1 := entry_back e1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, map1, fresh1))
++
++/-- [btree_entry::inserted_with]: loop 0:
++    Source: 'tests/src/btree-entry.rs', lines 50:4-55:5
++    Visibility: public -/
++@[rust_loop]
++def inserted_with_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (fresh : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, map1, fresh1) => _root_.btree_entry.inserted_with_loop.body
++       iter1 map1 fresh1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, map, fresh)
++
++/-- [btree_entry::inserted_with]:
++    Source: 'tests/src/btree-entry.rs', lines 47:0-57:1
++    Visibility: public -/
++def inserted_with
++  (keys1 : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter keys1
++  let (map1, fresh) ←
++    _root_.btree_entry.inserted_with_loop model_state map
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (v, fresh)
++
++/-- [btree_entry::keys]:
++    Source: 'tests/src/btree-entry.rs', lines 60:0-65:1
++    Visibility: public -/
++def keys
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 4#u32
++  let occupied ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.key
++      core.cmp.OrdU32 e
++  let map1 := entry_back e
++  let (e1, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map1 9#u32
++  let vacant ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.key
++      core.cmp.OrdU32 e1
++  _root_.Aeneas.Std.Result.ok (occupied, vacant)
++
++/-- [btree_entry::inserted_entries]:
++    Source: 'tests/src/btree-entry.rs', lines 70:0-78:1
++    Visibility: public -/
++def inserted_entries
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 2#u32
++  let (entry, insert_entry_back) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.insert_entry
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e 21#u32
++  let i ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.key_
++      core.cmp.OrdU32 entry
++  let i1 ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++      core.cmp.OrdU32 entry
++  let e1 := insert_entry_back entry
++  let map1 := entry_back e1
++  let (e2, entry_back1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map1 key
++  let i2 ← key * 10#u32
++  let (oe, insert_entry_back1) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.insert_entry
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e2 i2
++  let (removed1, oe1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove_entry
++      core.cmp.OrdU32 oe
++  let e3 := insert_entry_back1 oe1
++  let map2 := entry_back1 e3
++  let v ← _root_.btree_entry.snapshot map2
++  _root_.Aeneas.Std.Result.ok ((i, i1), removed1, v)
++
++/-- [btree_entry::occupied_updates]:
++    Source: 'tests/src/btree-entry.rs', lines 82:0-92:1
++    Visibility: public -/
++def occupied_updates
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 2#u32
++  let (map1, seen, previous) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, 0#u32, 0#u32)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let seen1 ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++          core.cmp.OrdU32 entry
++      let (i, get_mut_back, get_mut_back1) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut
++          core.cmp.OrdU32 entry
++      let i1 ← i + 5#u32
++      let entry1 := get_mut_back i1
++      let (previous1, oe, insert_back) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.insert
++          core.cmp.OrdU32 entry1 60#u32
++      let oe1 := insert_back oe
++      let oe2 := get_mut_back1 oe1
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++          oe2)
++      _root_.Aeneas.Std.Result.ok (map2, seen1, previous1)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (seen, previous, v)
++
++/-- [btree_entry::removed]:
++    Source: 'tests/src/btree-entry.rs', lines 95:0-102:1
++    Visibility: public -/
++def removed
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let (map1, value) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, none)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let (i, oe) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove
++          core.cmp.OrdU32 entry
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++          oe)
++      _root_.Aeneas.Std.Result.ok (map2, some i)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (value, v)
++
++/-- [btree_entry::removed_entry]:
++    Source: 'tests/src/btree-entry.rs', lines 105:0-112:1
++    Visibility: public -/
++def removed_entry
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let (map1, pair) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, none)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let (p, oe) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove_entry
++          core.cmp.OrdU32 entry
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++          oe)
++      _root_.Aeneas.Std.Result.ok (map2, some p)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (pair, v)
++
++/-- [btree_entry::observed_removal]:
++    Source: 'tests/src/btree-entry.rs', lines 116:0-127:1
++    Visibility: public -/
++def observed_removal
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++    × (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let (map1, observed) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, none)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let stored ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.key_
++          core.cmp.OrdU32 entry
++      let value ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++          core.cmp.OrdU32 entry
++      let (p, oe) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove_entry
++          core.cmp.OrdU32 entry
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++          oe)
++      _root_.Aeneas.Std.Result.ok (map2, some (stored, value, p))
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (observed, v)
++
++/-- [btree_entry::vacant_keys]:
++    Source: 'tests/src/btree-entry.rs', lines 130:0-140:1
++    Visibility: public -/
++def vacant_keys
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let (map1, keys1) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++      do
++      let probe ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.key_
++          core.cmp.OrdU32 entry
++      let (i, ve) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.into_key
++          core.cmp.OrdU32 entry
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve)
++      _root_.Aeneas.Std.Result.ok (map2, some (probe, i))
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, none)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (keys1, v)
++
++/-- [btree_entry::written_back]:
++    Source: 'tests/src/btree-entry.rs', lines 145:0-154:1
++    Visibility: public -/
++def written_back
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 4#u32
++  let map1 ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      _root_.Aeneas.Std.Result.ok (entry_back e)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let (i, get_mut_back, get_mut_back1) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut
++          core.cmp.OrdU32 entry
++      let i1 ← i * 3#u32
++      let oe := get_mut_back i1
++      let oe1 := get_mut_back1 oe
++      _root_.Aeneas.Std.Result.ok (entry_back
++        (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++        oe1))
++  let (e1, entry_back1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map1 key
++  let (entry, insert_entry_back) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.insert_entry
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e1 key
++  let (i, get_mut_back, get_mut_back1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut
++      core.cmp.OrdU32 entry
++  let i1 ← i + 1#u32
++  let entry1 := get_mut_back i1
++  let value ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++      core.cmp.OrdU32 entry1
++  let oe := get_mut_back1 entry1
++  let e2 := insert_entry_back oe
++  let map2 := entry_back1 e2
++  let v ← _root_.btree_entry.snapshot map2
++  _root_.Aeneas.Std.Result.ok (value, v)
++
++/-- [btree_entry::or_insert_written]:
++    Source: 'tests/src/btree-entry.rs', lines 157:0-163:1
++    Visibility: public -/
++def or_insert_written
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let (value, or_insert_back) ←
++    _root_.btree_entry.alloc.collections.btree.map.entry.Entry.or_insert
++      core.cmp.OrdU32 _root_.Aeneas.Std.core.core.clone.CloneGlobal e 1#u32
++  let value1 ← value * 7#u32
++  let value2 ← value1 + key
++  let e1 := or_insert_back value2
++  let map1 := entry_back e1
++  _root_.btree_entry.snapshot map1
++
++/-- [btree_entry::observed_writes]:
++    Source: 'tests/src/btree-entry.rs', lines 168:0-177:1
++    Visibility: public -/
++def observed_writes
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map 4#u32
++  let (map1, previous) ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant _ =>
++      let bm := entry_back e
++      _root_.Aeneas.Std.Result.ok (bm, 0#u32)
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied entry
++      =>
++      do
++      let seen ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++          core.cmp.OrdU32 entry
++      let (i, get_mut_back, get_mut_back1) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut
++          core.cmp.OrdU32 entry
++      let i1 ← i + seen
++      let entry1 := get_mut_back i1
++      let i2 ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get
++          core.cmp.OrdU32 entry1
++      let i3 ← i2 + 1#u32
++      let (previous1, oe, insert_back) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.insert
++          core.cmp.OrdU32 entry1 i3
++      let oe1 := insert_back oe
++      let oe2 := get_mut_back1 oe1
++      let map2 :=
++        entry_back
++          (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied
++          oe2)
++      _root_.Aeneas.Std.Result.ok (map2, previous1)
++  let v ← _root_.btree_entry.snapshot map1
++  _root_.Aeneas.Std.Result.ok (previous, v)
++
++/-- [btree_entry::observed_vacant_insert]:
++    Source: 'tests/src/btree-entry.rs', lines 181:0-189:1
++    Visibility: public -/
++def observed_vacant_insert
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let map ← _root_.btree_entry.populated
++  let (e, entry_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry
++      core.cmp.OrdU32 map key
++  let map1 ←
++    match e with
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant entry =>
++      do
++      let probe ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.key_
++          core.cmp.OrdU32 entry
++      let i ← probe * 2#u32
++      let (value, insert_back) ←
++        _root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert
++          core.cmp.OrdU32 entry i
++      let value1 ← value + 1#u32
++      let ve := insert_back value1
++      _root_.Aeneas.Std.Result.ok (entry_back
++        (_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Vacant ve))
++    | _root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.Occupied _ =>
++      _root_.Aeneas.Std.Result.ok (entry_back e)
++  _root_.btree_entry.snapshot map1
++
++end btree_entry
+diff --git a/tests/lean/BtreeEntry/Checks.lean b/tests/lean/BtreeEntry/Checks.lean
+new file mode 100644
+index 0000000..6d10a95
+--- /dev/null
++++ b/tests/lean/BtreeEntry/Checks.lean
+@@ -0,0 +1,52 @@
++import BtreeEntry.BtreeEntry
++
++/-! Evaluate the model of `tests/src/btree-entry.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace btree_entry.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def pairs (v : alloc.vec.Vec (U32 × U32)) : List (Nat × Nat) :=
++  v.val.map fun (a, b) => (a.val, b.val)
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def pair (p : U32 × U32) : Nat × Nat := (p.1.val, p.2.val)
++def res {α β : Type} (f : α → β) : Result α → Option β
++  | ok v => some (f v)
++  | _ => none
++
++#guard res pairs (counted (sl [3, 1, 3, 3])) == some [(1, 1), (3, 3)]
++#guard res pairs (counted (sl [])) == some []
++#guard res pairs inserted == some [(2, 27), (3, 301), (4, 40)]
++#guard res (fun (m, f) => (pairs m, nats f)) (inserted_with (sl [4, 1, 1, 6])) ==
++  some ([(1, 100), (2, 20), (4, 40), (6, 600)], [1, 6])
++#guard res pair keys == some (4, 9)
++#guard res (fun (r, d, m) => (pair r, pair d, pairs m)) (inserted_entries 3#u32) ==
++  some ((2, 21), (3, 30), [(2, 21), (4, 40)])
++#guard res (fun (r, d, m) => (pair r, pair d, pairs m)) (inserted_entries 4#u32) ==
++  some ((2, 21), (4, 40), [(2, 21)])
++#guard res (fun (s, p, m) => (s.val, p.val, pairs m)) occupied_updates ==
++  some (20, 25, [(2, 60), (4, 40)])
++#guard res (fun (v, m) => (v.map (·.val), pairs m)) (removed 2#u32) == some (some 20, [(4, 40)])
++#guard res (fun (v, m) => (v.map (·.val), pairs m)) (removed 3#u32) ==
++  some (none, [(2, 20), (4, 40)])
++#guard res (fun (p, m) => (p.map pair, pairs m)) (removed_entry 4#u32) ==
++  some (some (4, 40), [(2, 20)])
++#guard res (fun (o, m) => (o.map (fun (k, v, p) => (k.val, v.val, pair p)), pairs m))
++    (observed_removal 4#u32) == some (some (4, 40, (4, 40)), [(2, 20)])
++#guard res (fun (o, m) => (o.map (fun (k, v, p) => (k.val, v.val, pair p)), pairs m))
++    (observed_removal 5#u32) == some (none, [(2, 20), (4, 40)])
++#guard res (fun (p, m) => (p.map pair, pairs m)) (vacant_keys 7#u32) ==
++  some (some (7, 7), [(2, 20), (4, 40)])
++#guard res (fun (p, m) => (p.map pair, pairs m)) (vacant_keys 2#u32) ==
++  some (none, [(2, 20), (4, 40)])
++#guard res (fun (v, m) => (v.val, pairs m)) (written_back 3#u32) ==
++  some (4, [(2, 20), (3, 4), (4, 120)])
++#guard res (fun (v, m) => (v.val, pairs m)) (written_back 2#u32) == some (3, [(2, 3), (4, 120)])
++#guard res pairs (or_insert_written 2#u32) == some [(2, 142), (4, 40)]
++#guard res pairs (or_insert_written 5#u32) == some [(2, 20), (4, 40), (5, 12)]
++#guard res (fun (p, m) => (p.val, pairs m)) observed_writes == some (80, [(2, 20), (4, 81)])
++#guard res pairs (observed_vacant_insert 3#u32) == some [(2, 20), (3, 7), (4, 40)]
++#guard res pairs (observed_vacant_insert 4#u32) == some [(2, 20), (4, 40)]
++
++end btree_entry.checks
+diff --git a/tests/lean/VecDrain.lean b/tests/lean/VecDrain.lean
+new file mode 100644
+index 0000000..b590cd2
+--- /dev/null
++++ b/tests/lean/VecDrain.lean
+@@ -0,0 +1 @@
++import VecDrain.Checks
+diff --git a/tests/lean/VecDrain/Checks.lean b/tests/lean/VecDrain/Checks.lean
+new file mode 100644
+index 0000000..aca1388
+--- /dev/null
++++ b/tests/lean/VecDrain/Checks.lean
+@@ -0,0 +1,48 @@
++import VecDrain.VecDrain
++
++/-! Evaluate the model of `tests/src/vec-drain.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace vec_drain.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def uv (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def res {α β : Type} (f : α → β) : Result α → Option β
++  | ok v => some (f v)
++  | _ => none
++def failed {α : Type} : Result α → Bool
++  | fail _ => true
++  | _ => false
++def both (p : alloc.vec.Vec U32 × alloc.vec.Vec U32) : List Nat × List Nat := (nats p.1, nats p.2)
++def opt (o : Option U32) : Option Nat := o.map (·.val)
++
++#guard res both (drain_all (uv [1, 2, 3])) == some ([1, 2, 3], [])
++#guard res both (drain_until (uv [1, 2, 7, 3]) 7#u32) == some ([1, 2], [])
++#guard res (fun (r, v) => (match r with | .Ok t => Sum.inl t.val | .Err e => Sum.inr e.val, nats v))
++  (drain_checked (uv [9, 1, 2, 3]) 5#u32) == some (Sum.inl 6, [9])
++#guard res (fun (r, v) => (match r with | .Ok t => Sum.inl t.val | .Err e => Sum.inr e.val, nats v))
++  (drain_checked (uv [9, 1, 8, 3]) 5#u32) == some (Sum.inr 8, [9])
++#guard res (fun (s, b) => (nats s, b.val.map nats))
++  (drain_nested ⟨[uv [1, 2, 3], uv [], uv [4, 5]], by simp; scalar_tac⟩) ==
++  some ([2, 4], [[1, 3], [], [5]])
++#guard res (fun ((a, b, c), v) => ((opt a, opt b, opt c), nats v))
++  (drain_ends (uv [1, 2, 3, 4, 5, 6]) 1#usize 5#usize) == some ((some 2, some 5, some 3), [1, 6])
++#guard res (fun ((a, b, c), v) => ((opt a, opt b, opt c), nats v))
++  (drain_ends (uv [1, 2, 3]) 1#usize 2#usize) == some ((some 2, none, none), [1, 3])
++#guard res (fun ((a, b, c), v) => ((opt a, opt b, opt c), nats v))
++  (drain_ends (uv [1, 2, 3]) 3#usize 3#usize) == some ((none, none, none), [1, 2, 3])
++#guard res both (drain_from (uv [1, 2, 3, 4]) 1#usize) == some ([4, 3, 2], [1])
++#guard res both (drain_to (uv [1, 2, 3, 4]) 2#usize) == some ([1, 2], [3, 4])
++#guard res both (drain_inclusive (uv [1, 2, 3, 4]) 0#usize 2#usize) == some ([2, 3], [4])
++#guard res nats (drain_unused (uv [1, 2, 3, 4]) 1#usize 3#usize) == some [1, 4]
++#guard failed (drain_unused (uv [1, 2, 3]) 2#usize 1#usize)
++#guard failed (drain_unused (uv [1, 2, 3]) 1#usize 4#usize)
++#guard failed (drain_inclusive (uv [1, 2, 3]) 0#usize 3#usize)
++#guard failed (drain_from (uv [1, 2, 3]) 4#usize)
++#guard res both (drain_then_reuse (uv [1, 2, 3, 4]) 1#usize) == some ([2, 3, 4], [101, 3])
++#guard res both (drain_then_reuse (uv [5, 6, 7, 8]) 1#usize) == some ([6, 7], [105, 2])
++#guard res (fun (a, b, v) => (a.val, b.val, nats v)) (drain_helper_reuse (uv [1, 2, 3])) ==
++  some (1, 5, [1])
++
++end vec_drain.checks
+diff --git a/tests/lean/VecDrain/VecDrain.lean b/tests/lean/VecDrain/VecDrain.lean
+new file mode 100644
+index 0000000..5ca348f
+--- /dev/null
++++ b/tests/lean/VecDrain/VecDrain.lean
+@@ -0,0 +1,816 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [vec_drain]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace vec_drain
++
++/-- [core::ops::range::RangeFull]
++    Source: '/rustc/library/core/src/ops/range.rs', lines 44:0-44:20
++    Name pattern: [core::ops::range::RangeFull]
++    Visibility: public -/
++@[reducible, rust_type "core::ops::range::RangeFull"]
++def core.ops.range.RangeFull := _root_.Unit
++
++/-- [vec_drain::drain_all]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 12:4-14:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_all_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [vec_drain::drain_all]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 12:4-14:5
++    Visibility: public -/
++@[rust_loop]
++def drain_all_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.vec_drain.drain_all_loop.body back iter1 out1
++      : ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [vec_drain::drain_all]:
++    Source: 'tests/src/vec-drain.rs', lines 10:0-16:1
++    Visibility: public -/
++def drain_all
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull
++      _root_.Aeneas.Std.Usize) v ()
++  _root_.vec_drain.drain_all_loop iter drain_back
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_until]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 1:0-26:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_until_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    if x = stop
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out,
++        back model_state1))
++    else
++      let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, out1))
++
++/-- [vec_drain::drain_until]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 1:0-26:5
++    Visibility: public -/
++@[rust_loop]
++def drain_until_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.vec_drain.drain_until_loop.body back stop
++       iter1 out1 : ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [vec_drain::drain_until]:
++    Source: 'tests/src/vec-drain.rs', lines 19:0-28:1
++    Visibility: public -/
++def drain_until
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull
++      _root_.Aeneas.Std.Usize) v ()
++  _root_.vec_drain.drain_until_loop iter drain_back stop
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_checked]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 33:4-40:1
++    Visibility: public -/
++@[rust_loop_body]
++def drain_checked_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok total, back model_state1))
++  | some x =>
++    if x > limit
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err x, back model_state1))
++    else
++      let total1 ← total + x
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, total1))
++
++/-- [vec_drain::drain_checked]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 33:4-40:1
++    Visibility: public -/
++@[rust_loop]
++def drain_checked_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, total1) => _root_.vec_drain.drain_checked_loop.body back limit
++       iter1 total1 : ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, total)
++
++/-- [vec_drain::drain_checked]:
++    Source: 'tests/src/vec-drain.rs', lines 31:0-40:1
++    Visibility: public -/
++def drain_checked
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start := 1#usize }
++  _root_.vec_drain.drain_checked_loop iter drain_back limit 0#u32
++
++/-- [vec_drain::drain_nested]: loop body 1:
++    Source: 'tests/src/vec-drain.rs', lines 47:8-53:9
++    Visibility: public -/
++@[rust_loop_body]
++def drain_nested_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (kept : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (seen,
++      kept))
++  | some x =>
++    let i ← x % 2#u32
++    let (seen1, kept1, back1) ←
++      if i = 0#u32
++      then
++        do
++        let seen2 ← _root_.Aeneas.Std.alloc.vec.Vec.push seen x
++        _root_.Aeneas.Std.Result.ok (seen2, kept, back)
++      else
++        do
++        let kept2 ← _root_.Aeneas.Std.alloc.vec.Vec.push kept x
++        _root_.Aeneas.Std.Result.ok (seen, kept2, back)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, back1, seen1, kept1))
++
++/-- [vec_drain::drain_nested]: loop 1:
++    Source: 'tests/src/vec-drain.rs', lines 47:8-53:9
++    Visibility: public -/
++@[rust_loop]
++def drain_nested_loop0_loop0
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (kept : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, seen1, kept1) =>
++       _root_.vec_drain.drain_nested_loop0_loop0.body iter1 back1 seen1 kept1 :
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, back, seen, kept)
++
++/-- [vec_drain::drain_nested]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 45:4-55:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_nested_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) →
++  _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))))
++  := do
++  let (o, im, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (seen,
++      let im1 := next_back im none
++      back im1))
++  | some block =>
++    let (iter1, drain_back) ←
++      _root_.Aeneas.Std.alloc.vec.Vec.drain
++        (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFull
++        _root_.Aeneas.Std.Usize) block ()
++    let (seen1, kept) ←
++      _root_.vec_drain.drain_nested_loop0_loop0 iter1 drain_back seen
++        (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++    let back1 :=
++      (fun v im1 => let im2 := next_back im1 (some v)
++                    back im2 : _root_.Aeneas.Std.alloc.vec.Vec
++        _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.core.slice.iter.IterMut
++        (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) →
++        _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.Aeneas.Std.U32))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (im,
++      fun im1 => back1 kept im1, seen1))
++
++/-- [vec_drain::drain_nested]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 45:4-55:5
++    Visibility: public -/
++@[rust_loop]
++def drain_nested_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) →
++  _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  loop
++    (fun (iter1, back1, seen1) => _root_.vec_drain.drain_nested_loop0.body
++       iter1 back1 seen1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))))
++    (iter, back, seen)
++
++/-- [vec_drain::drain_nested]:
++    Source: 'tests/src/vec-drain.rs', lines 43:0-57:1
++    Visibility: public -/
++def drain_nested
++  (blocks : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (iter, into_iter_back) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter blocks
++  _root_.vec_drain.drain_nested_loop0 iter into_iter_back
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_ends]:
++    Source: 'tests/src/vec-drain.rs', lines 60:0-66:1
++    Visibility: public -/
++def drain_ends
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) (end1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (drain, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRange
++      _root_.Aeneas.Std.Usize) v { start, «end» := end1 }
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next drain
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.alloc.vec.drain.DoubleEndedIteratorDrain.next_back
++      model_state1
++  let (model_state4, model_state5) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next model_state3
++  let v1 := drain_back model_state5
++  _root_.Aeneas.Std.Result.ok ((model_state, model_state2, model_state4), v1)
++
++/-- [vec_drain::drain_from]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 72:4-74:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_from_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (drain : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.DoubleEndedIteratorDrain.next_back drain
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [vec_drain::drain_from]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 72:4-74:5
++    Visibility: public -/
++@[rust_loop]
++def drain_from_loop
++  (drain : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (drain1, out1) => _root_.vec_drain.drain_from_loop.body back drain1
++       out1 : ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (drain, out)
++
++/-- [vec_drain::drain_from]:
++    Source: 'tests/src/vec-drain.rs', lines 69:0-76:1
++    Visibility: public -/
++def drain_from
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (drain, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start }
++  _root_.vec_drain.drain_from_loop drain drain_back
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_to]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 80:4-82:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_to_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, out1))
++
++/-- [vec_drain::drain_to]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 80:4-82:5
++    Visibility: public -/
++@[rust_loop]
++def drain_to_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.vec_drain.drain_to_loop.body back iter1 out1 :
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [vec_drain::drain_to]:
++    Source: 'tests/src/vec-drain.rs', lines 78:0-84:1
++    Visibility: public -/
++def drain_to
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (end1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeTo
++      _root_.Aeneas.Std.Usize) v { «end» := end1 }
++  _root_.vec_drain.drain_to_loop iter drain_back
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_inclusive]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 88:4-92:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_inclusive_loop.body
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    let (out1, back1) ←
++      if x > 1#u32
++      then
++        do
++        let out2 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++        _root_.Aeneas.Std.Result.ok (out2, back)
++      else _root_.Aeneas.Std.Result.ok (out, back)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, back1, out1))
++
++/-- [vec_drain::drain_inclusive]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 88:4-92:5
++    Visibility: public -/
++@[rust_loop]
++def drain_inclusive_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, out1) => _root_.vec_drain.drain_inclusive_loop.body
++       iter1 back1 out1 : ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))))
++    (iter, back, out)
++
++/-- [vec_drain::drain_inclusive]:
++    Source: 'tests/src/vec-drain.rs', lines 86:0-94:1
++    Visibility: public -/
++def drain_inclusive
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) (last : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let ri ← _root_.Aeneas.Std.core.ops.range.RangeInclusive.new start last
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeInclusive
++      _root_.Aeneas.Std.Usize) v ri
++  _root_.vec_drain.drain_inclusive_loop iter drain_back
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [vec_drain::drain_unused]:
++    Source: 'tests/src/vec-drain.rs', lines 97:0-99:1
++    Visibility: public -/
++def drain_unused
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) (end1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRange
++      _root_.Aeneas.Std.Usize) v { start, «end» := end1 }
++  _root_.Aeneas.Std.Result.ok (drain_back d)
++
++/-- [vec_drain::drain_then_reuse]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 1:0-110:5
++    Visibility: public -/
++@[rust_loop_body]
++def drain_then_reuse_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out, back
++      model_state1))
++  | some x =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++    if x = 7#u32
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (out1,
++        back model_state1))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, out1))
++
++/-- [vec_drain::drain_then_reuse]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 1:0-110:5
++    Visibility: public -/
++@[rust_loop]
++def drain_then_reuse_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, out1) => _root_.vec_drain.drain_then_reuse_loop.body back
++       iter1 out1 : ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32))))
++    (iter, out)
++
++/-- [vec_drain::drain_then_reuse]:
++    Source: 'tests/src/vec-drain.rs', lines 103:0-114:1
++    Visibility: public -/
++def drain_then_reuse
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start }
++  let (out, back) ←
++    _root_.vec_drain.drain_then_reuse_loop iter drain_back
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len out
++  let i1 ← lift (UScalar.cast .U32 i)
++  let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push back i1
++  let (i2, index_mut_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) v1 0#usize
++  let i3 ← i2 + 100#u32
++  let v2 := index_mut_back i3
++  _root_.Aeneas.Std.Result.ok (out, v2)
++
++/-- [vec_drain::take_front]: loop body 0:
++    Source: 'tests/src/vec-drain.rs', lines 118:4-120:5 -/
++@[rust_loop_body]
++def take_front_loop.body
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum, back
++      model_state1))
++  | some x =>
++    let sum1 ← sum + x
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, sum1))
++
++/-- [vec_drain::take_front]: loop 0:
++    Source: 'tests/src/vec-drain.rs', lines 118:4-120:5 -/
++@[rust_loop]
++def take_front_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, sum1) => _root_.vec_drain.take_front_loop.body back iter1 sum1
++      : ((_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.drain.Drain
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, sum)
++
++/-- [vec_drain::take_front]:
++    Source: 'tests/src/vec-drain.rs', lines 116:0-122:1 -/
++def take_front
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (iter, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeTo
++      _root_.Aeneas.Std.Usize) v { «end» := n }
++  _root_.vec_drain.take_front_loop iter drain_back 0#u32
++
++/-- [vec_drain::drain_helper_reuse]:
++    Source: 'tests/src/vec-drain.rs', lines 126:0-131:1
++    Visibility: public -/
++def drain_helper_reuse
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (a, v1) ← _root_.vec_drain.take_front v 1#usize
++  let v2 ← _root_.Aeneas.Std.alloc.vec.Vec.push v1 a
++  let (b, v3) ← _root_.vec_drain.take_front v2 2#usize
++  _root_.Aeneas.Std.Result.ok (a, b, v3)
++
++end vec_drain
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 11ed2a0..575994e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -54,6 +54,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsLoopReborrow
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
++@[default_target] lean_lib BtreeEntry
+ @[default_target] lean_lib CollectDispatch
+ @[default_target] lean_lib CollectFlatten
+ @[default_target] lean_lib CollectGenericClosure
+@@ -176,6 +177,7 @@ package «tests» {}
+ @[default_target] lean_lib Tutorial
+ @[default_target] lean_lib UnsizeSharedBorrows
+ @[default_target] lean_lib Vec
++@[default_target] lean_lib VecDrain
+ @[default_target] lean_lib VecRetainMut
+ @[default_target] lean_lib PhantomFnTypes
+ @[default_target] lean_lib SerdeVisitors
+diff --git a/tests/src/btree-entry.rs b/tests/src/btree-entry.rs
+new file mode 100644
+index 0000000..405b768
+--- /dev/null
++++ b/tests/src/btree-entry.rs
+@@ -0,0 +1,223 @@
++//@ [!lean] skip
++//@ [lean] subdir=BtreeEntry
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `BTreeMap` entries: the `Entry` methods translated from their Rust bodies
++//! (`or_insert`, `or_insert_with`, `or_default`, `insert_entry`) over the modeled
++//! `OccupiedEntry` and `VacantEntry` operations, the modeled `Entry::key`, and
++//! removal through an occupied entry. A map is observed through `snapshot`.
++
++use std::collections::btree_map::Entry;
++use std::collections::BTreeMap;
++
++fn populated() -> BTreeMap<u32, u32> {
++    let mut map = BTreeMap::new();
++    map.insert(2, 20);
++    map.insert(4, 40);
++    map
++}
++
++fn snapshot(map: &BTreeMap<u32, u32>) -> Vec<(u32, u32)> {
++    let mut out = Vec::new();
++    for (key, value) in map {
++        out.push((*key, *value));
++    }
++    out
++}
++
++/// `or_default` counts (chelis-ir ownership/last_use.rs successors).
++pub fn counted(keys: &[u32]) -> Vec<(u32, u32)> {
++    let mut map = BTreeMap::new();
++    for key in keys {
++        *map.entry(*key).or_default() += 1;
++    }
++    snapshot(&map)
++}
++
++/// `or_insert` on an occupied and a vacant key.
++pub fn inserted() -> Vec<(u32, u32)> {
++    let mut map = populated();
++    *map.entry(2).or_insert(900) += 7;
++    *map.entry(3).or_insert(300) += 1;
++    snapshot(&map)
++}
++
++/// `or_insert_with` runs its closure only for a vacant key, and the closure's
++/// captured mutable state is given back (chelis-ir fuse.rs ext_index).
++pub fn inserted_with(keys: &[u32]) -> (Vec<(u32, u32)>, Vec<u32>) {
++    let mut map = populated();
++    let mut fresh = Vec::new();
++    for key in keys {
++        map.entry(*key).or_insert_with(|| {
++            fresh.push(*key);
++            *key * 100
++        });
++    }
++    (snapshot(&map), fresh)
++}
++
++/// `Entry::key`: the stored key of an occupied entry, the probe of a vacant one.
++pub fn keys() -> (u32, u32) {
++    let mut map = populated();
++    let occupied = *map.entry(4).key();
++    let vacant = *map.entry(9).key();
++    (occupied, vacant)
++}
++
++/// `Entry::insert_entry` replaces an occupied value and inserts a vacant key;
++/// the returned occupied entry reads the stored pair, and removing through it
++/// takes the inserted pair out again.
++pub fn inserted_entries(key: u32) -> ((u32, u32), (u32, u32), Vec<(u32, u32)>) {
++    let mut map = populated();
++    let replaced = {
++        let entry = map.entry(2).insert_entry(21);
++        (*entry.key(), *entry.get())
++    };
++    let removed = map.entry(key).insert_entry(key * 10).remove_entry();
++    (replaced, removed, snapshot(&map))
++}
++
++/// The occupied accessors: `get`, `get_mut`, `insert` (the previous value).
++/// Borrowing the entry mutably ends the shared observation `get` left.
++pub fn occupied_updates() -> (u32, u32, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let mut seen = 0;
++    let mut previous = 0;
++    if let Entry::Occupied(mut entry) = map.entry(2) {
++        seen = *entry.get();
++        *entry.get_mut() += 5;
++        previous = entry.insert(60);
++    }
++    (seen, previous, snapshot(&map))
++}
++
++/// Removal through an occupied entry.
++pub fn removed(key: u32) -> (Option<u32>, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let value = match map.entry(key) {
++        Entry::Occupied(entry) => Some(entry.remove()),
++        Entry::Vacant(_) => None,
++    };
++    (value, snapshot(&map))
++}
++
++/// `remove_entry` returns the stored key.
++pub fn removed_entry(key: u32) -> (Option<(u32, u32)>, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let pair = match map.entry(key) {
++        Entry::Occupied(entry) => Some(entry.remove_entry()),
++        Entry::Vacant(_) => None,
++    };
++    (pair, snapshot(&map))
++}
++
++/// Shared observations of an occupied entry (`key`, `get`), then the entry
++/// consumed by `remove_entry`: moving the entry ends the observations.
++pub fn observed_removal(key: u32) -> (Option<(u32, u32, (u32, u32))>, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let observed = match map.entry(key) {
++        Entry::Occupied(entry) => {
++            let stored = *entry.key();
++            let value = *entry.get();
++            Some((stored, value, entry.remove_entry()))
++        }
++        Entry::Vacant(_) => None,
++    };
++    (observed, snapshot(&map))
++}
++
++/// A vacant entry's key, and `into_key`, which leaves the map unchanged.
++pub fn vacant_keys(key: u32) -> (Option<(u32, u32)>, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let keys = match map.entry(key) {
++        Entry::Occupied(_) => None,
++        Entry::Vacant(entry) => {
++            let probe = *entry.key();
++            Some((probe, entry.into_key()))
++        }
++    };
++    (keys, snapshot(&map))
++}
++
++/// Writes through the value borrows that entries give back, after the call:
++/// `get_mut` of an occupied entry, and `get_mut` of the occupied entry that
++/// `insert_entry` returns. Both writes reach the map.
++pub fn written_back(key: u32) -> (u32, Vec<(u32, u32)>) {
++    let mut map = populated();
++    if let Entry::Occupied(mut entry) = map.entry(4) {
++        *entry.get_mut() *= 3;
++    }
++    let mut entry = map.entry(key).insert_entry(key);
++    *entry.get_mut() += 1;
++    let value = *entry.get();
++    (value, snapshot(&map))
++}
++
++/// The reference `or_insert` gives back, written twice after the call.
++pub fn or_insert_written(key: u32) -> Vec<(u32, u32)> {
++    let mut map = populated();
++    let value = map.entry(key).or_insert(1);
++    *value *= 7;
++    *value += key;
++    snapshot(&map)
++}
++
++/// A shared observation of an occupied entry, then writes through it: `get_mut`
++/// (the observation ends first), and `insert` whose argument reads the entry
++/// (a two-phase borrow of the entry).
++pub fn observed_writes() -> (u32, Vec<(u32, u32)>) {
++    let mut map = populated();
++    let mut previous = 0;
++    if let Entry::Occupied(mut entry) = map.entry(4) {
++        let seen = *entry.get();
++        *entry.get_mut() += seen;
++        previous = entry.insert(*entry.get() + 1);
++    }
++    (previous, snapshot(&map))
++}
++
++/// A vacant entry's key, then the entry consumed by `insert`, and a write
++/// through the reference `insert` gives back.
++pub fn observed_vacant_insert(key: u32) -> Vec<(u32, u32)> {
++    let mut map = populated();
++    if let Entry::Vacant(entry) = map.entry(key) {
++        let probe = *entry.key();
++        let value = entry.insert(probe * 2);
++        *value += 1;
++    }
++    snapshot(&map)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn entries() {
++        assert_eq!(counted(&[3, 1, 3, 3]), vec![(1, 1), (3, 3)]);
++        assert_eq!(counted(&[]), vec![]);
++        assert_eq!(inserted(), vec![(2, 27), (3, 301), (4, 40)]);
++        assert_eq!(
++            inserted_with(&[4, 1, 1, 6]),
++            (vec![(1, 100), (2, 20), (4, 40), (6, 600)], vec![1, 6])
++        );
++        assert_eq!(keys(), (4, 9));
++        assert_eq!(inserted_entries(3), ((2, 21), (3, 30), vec![(2, 21), (4, 40)]));
++        assert_eq!(inserted_entries(4), ((2, 21), (4, 40), vec![(2, 21)]));
++        assert_eq!(occupied_updates(), (20, 25, vec![(2, 60), (4, 40)]));
++        assert_eq!(removed(2), (Some(20), vec![(4, 40)]));
++        assert_eq!(removed(3), (None, vec![(2, 20), (4, 40)]));
++        assert_eq!(removed_entry(4), (Some((4, 40)), vec![(2, 20)]));
++        assert_eq!(observed_removal(4), (Some((4, 40, (4, 40))), vec![(2, 20)]));
++        assert_eq!(observed_removal(5), (None, vec![(2, 20), (4, 40)]));
++        assert_eq!(vacant_keys(7), (Some((7, 7)), vec![(2, 20), (4, 40)]));
++        assert_eq!(vacant_keys(2), (None, vec![(2, 20), (4, 40)]));
++        assert_eq!(written_back(3), (4, vec![(2, 20), (3, 4), (4, 120)]));
++        assert_eq!(written_back(2), (3, vec![(2, 3), (4, 120)]));
++        assert_eq!(or_insert_written(2), vec![(2, 142), (4, 40)]);
++        assert_eq!(or_insert_written(5), vec![(2, 20), (4, 40), (5, 12)]);
++        assert_eq!(observed_writes(), (80, vec![(2, 20), (4, 81)]));
++        assert_eq!(observed_vacant_insert(3), vec![(2, 20), (3, 7), (4, 40)]);
++        assert_eq!(observed_vacant_insert(4), vec![(2, 20), (4, 40)]);
++    }
++}
+diff --git a/tests/src/vec-drain.rs b/tests/src/vec-drain.rs
+new file mode 100644
+index 0000000..de72d58
+--- /dev/null
++++ b/tests/src/vec-drain.rs
+@@ -0,0 +1,195 @@
++//@ [!lean] skip
++//@ [lean] subdir=VecDrain
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Vec::drain` over each std range kind and its `Drain` iterator: dropping the
++//! drain removes the whole range, whether or not it was exhausted (chelis-ir
++//! ownership/last_use.rs drains a vector in a loop that may leave early with
++//! `?`); `next_back`.
++
++pub fn drain_all(v: &mut Vec<u32>) -> Vec<u32> {
++    let mut out = Vec::new();
++    for x in v.drain(..) {
++        out.push(x);
++    }
++    out
++}
++
++/// Stops at the first `stop`: the rest of the range is dropped with the drain.
++pub fn drain_until(v: &mut Vec<u32>, stop: u32) -> Vec<u32> {
++    let mut out = Vec::new();
++    for x in v.drain(..) {
++        if x == stop {
++            break;
++        }
++        out.push(x);
++    }
++    out
++}
++
++/// Leaves with `?` from inside the loop (the shape of `remove_provisionals`).
++pub fn drain_checked(v: &mut Vec<u32>, limit: u32) -> Result<u32, u32> {
++    let mut total = 0;
++    for x in v.drain(1..) {
++        if x > limit {
++            return Err(x);
++        }
++        total += x;
++    }
++    Ok(total)
++}
++
++/// Drains through a mutable borrow taken from a loop over the outer vector.
++pub fn drain_nested(blocks: &mut Vec<Vec<u32>>) -> Vec<u32> {
++    let mut seen = Vec::new();
++    for block in &mut *blocks {
++        let mut kept = Vec::new();
++        for x in block.drain(..) {
++            if x % 2 == 0 {
++                seen.push(x);
++            } else {
++                kept.push(x);
++            }
++        }
++        *block = kept;
++    }
++    seen
++}
++
++/// One element from each end of a bounded range, the drain then dropped.
++pub fn drain_ends(v: &mut Vec<u32>, start: usize, end: usize) -> (Option<u32>, Option<u32>, Option<u32>) {
++    let mut drain = v.drain(start..end);
++    let first = drain.next();
++    let last = drain.next_back();
++    let second = drain.next();
++    (first, last, second)
++}
++
++/// Taken from the back until exhausted.
++pub fn drain_from(v: &mut Vec<u32>, start: usize) -> Vec<u32> {
++    let mut out = Vec::new();
++    let mut drain = v.drain(start..);
++    while let Some(x) = drain.next_back() {
++        out.push(x);
++    }
++    out
++}
++
++pub fn drain_to(v: &mut Vec<u32>, end: usize) -> Vec<u32> {
++    let mut out = Vec::new();
++    for x in v.drain(..end) {
++        out.push(x);
++    }
++    out
++}
++
++pub fn drain_inclusive(v: &mut Vec<u32>, start: usize, last: usize) -> Vec<u32> {
++    let mut out = Vec::new();
++    for x in v.drain(start..=last) {
++        if x > 1 {
++            out.push(x);
++        }
++    }
++    out
++}
++
++/// Nothing is taken from the drain: the range is still removed.
++pub fn drain_unused(v: &mut Vec<u32>, start: usize, end: usize) {
++    v.drain(start..end);
++}
++
++/// The vector is used again after the drain (left early or exhausted) is
++/// dropped: a push, and a write through an index.
++pub fn drain_then_reuse(v: &mut Vec<u32>, start: usize) -> Vec<u32> {
++    let mut out = Vec::new();
++    for x in v.drain(start..) {
++        out.push(x);
++        if x == 7 {
++            break;
++        }
++    }
++    v.push(out.len() as u32);
++    v[0] += 100;
++    out
++}
++
++fn take_front(v: &mut Vec<u32>, n: usize) -> u32 {
++    let mut sum = 0;
++    for x in v.drain(..n) {
++        sum += x;
++    }
++    sum
++}
++
++/// The vector a callee drained through a mutable borrow is given back to the
++/// caller, which pushes to it and drains it again.
++pub fn drain_helper_reuse(mut v: Vec<u32>) -> (u32, u32, Vec<u32>) {
++    let a = take_front(&mut v, 1);
++    v.push(a);
++    let b = take_front(&mut v, 2);
++    (a, b, v)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn panics(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
++        std::panic::catch_unwind(f).is_err()
++    }
++
++    #[test]
++    fn drains() {
++        let mut v = vec![1, 2, 3];
++        assert_eq!(drain_all(&mut v), vec![1, 2, 3]);
++        assert_eq!(v, vec![]);
++        let mut v = vec![1, 2, 7, 3];
++        assert_eq!(drain_until(&mut v, 7), vec![1, 2]);
++        assert_eq!(v, vec![]);
++        let mut v = vec![9, 1, 2, 3];
++        assert_eq!(drain_checked(&mut v, 5), Ok(6));
++        assert_eq!(v, vec![9]);
++        let mut v = vec![9, 1, 8, 3];
++        assert_eq!(drain_checked(&mut v, 5), Err(8));
++        assert_eq!(v, vec![9]);
++        let mut blocks = vec![vec![1, 2, 3], vec![], vec![4, 5]];
++        assert_eq!(drain_nested(&mut blocks), vec![2, 4]);
++        assert_eq!(blocks, vec![vec![1, 3], vec![], vec![5]]);
++        let mut v = vec![1, 2, 3, 4, 5, 6];
++        assert_eq!(drain_ends(&mut v, 1, 5), (Some(2), Some(5), Some(3)));
++        assert_eq!(v, vec![1, 6]);
++        let mut v = vec![1, 2, 3];
++        assert_eq!(drain_ends(&mut v, 1, 2), (Some(2), None, None));
++        assert_eq!(v, vec![1, 3]);
++        let mut v = vec![1, 2, 3];
++        assert_eq!(drain_ends(&mut v, 3, 3), (None, None, None));
++        assert_eq!(v, vec![1, 2, 3]);
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(drain_from(&mut v, 1), vec![4, 3, 2]);
++        assert_eq!(v, vec![1]);
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(drain_to(&mut v, 2), vec![1, 2]);
++        assert_eq!(v, vec![3, 4]);
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(drain_inclusive(&mut v, 0, 2), vec![2, 3]);
++        assert_eq!(v, vec![4]);
++        let mut v = vec![1, 2, 3, 4];
++        drain_unused(&mut v, 1, 3);
++        assert_eq!(v, vec![1, 4]);
++        assert!(panics(|| drain_unused(&mut vec![1, 2, 3], 2, 1)));
++        assert!(panics(|| drain_unused(&mut vec![1, 2, 3], 1, 4)));
++        assert!(panics(|| {
++            drain_inclusive(&mut vec![1, 2, 3], 0, 3);
++        }));
++        assert!(panics(|| {
++            drain_from(&mut vec![1, 2, 3], 4);
++        }));
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(drain_then_reuse(&mut v, 1), vec![2, 3, 4]);
++        assert_eq!(v, vec![101, 3]);
++        let mut v = vec![5, 6, 7, 8];
++        assert_eq!(drain_then_reuse(&mut v, 1), vec![6, 7]);
++        assert_eq!(v, vec![105, 2]);
++        assert_eq!(drain_helper_reuse(vec![1, 2, 3]), (1, 5, vec![1]));
++    }
++}

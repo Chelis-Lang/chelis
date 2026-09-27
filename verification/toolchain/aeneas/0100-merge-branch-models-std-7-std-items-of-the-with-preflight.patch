@@ -1,0 +1,800 @@
+# aeneas integration step 100 after cba11f3beb: commit 0aaea9bfb1f79dc2fc0c5733e3836bee794d3034
+# first parent 237ce1cf7ceb86d85bebdc6cc543485d4cddab53, merged 99a9b80f9dedb4c9375bfc59b34909ba36907663
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-7' (std items of the with_preflight slice; stable sort_by on key comparators; ExtractBuiltinLean.ml regenerated next)
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index b6fd732..54aeff0 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -37,6 +37,7 @@ import Aeneas.Std.StringJoin
+ import Aeneas.Std.Sync
+ import Aeneas.Std.Tuple
+ import Aeneas.Std.Vec
++import Aeneas.Std.VecDeque
+ import Aeneas.Std.VecDrain
+ import Aeneas.Std.VecIter
+ import Aeneas.Data.Tuples
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index 4beeba3..a07b5ce 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -129,6 +129,33 @@ def BTreeMap.get {K V Q : Type} (borrow : core.borrow.Borrow K Q)
+     (_keyOrd : core.cmp.Ord K) (ord : core.cmp.Ord Q) (map : BTreeMap K V)
+     (query : Q) : Result (Option V) := getList borrow ord query map.entries
+ 
++/-- The entries around the value selected by `get`'s search: the entries before it
++    (in order), its key and value, and the entries after it. -/
++def getMutList {K V Q : Type} (borrow : core.borrow.Borrow K Q) (ord : core.cmp.Ord Q)
++    (query : Q) (beforeRev : List (K × V)) :
++    List (K × V) → Result (Option (List (K × V) × K × V × List (K × V)))
++  | [] => .ok none
++  | (key, value) :: rest => do
++    match ← ord.cmp query (← borrow.borrow key) with
++    | .lt => .ok none
++    | .eq => .ok (some (beforeRev.reverse, key, value, rest))
++    | .gt => getMutList borrow ord query ((key, value) :: beforeRev) rest
++
++/-- `BTreeMap::get_mut` (btree/map.rs): `search_tree` as for `get`; the value of the
++    found entry, borrowed mutably. The backward function writes the final value of
++    that borrow in place, keeping the stored key and every other entry. -/
++@[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get_mut"
++  (keepParams := [true, true, false, true]) (keepTraitClauses := [false, true, true, true])]
++def BTreeMap.get_mut {K V Q : Type} (borrow : core.borrow.Borrow K Q)
++    (_keyOrd : core.cmp.Ord K) (ord : core.cmp.Ord Q) (map : BTreeMap K V)
++    (query : Q) : Result (Option V × (Option V → BTreeMap K V)) := do
++  match ← getMutList borrow ord query [] map.entries with
++  | none => .ok (none, fun _ => map)
++  | some (before, key, value, after) =>
++    .ok (some value, fun
++      | some value => ⟨before ++ (key, value) :: after⟩
++      | none => map)
++
+ @[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::contains_key"
+   (keepParams := [true, true, false, true]) (keepTraitClauses := [false, true, true, true])]
+ def BTreeMap.contains_key {K V Q : Type} (borrow : core.borrow.Borrow K Q)
+diff --git a/backends/lean/Aeneas/Std/Core/Core.lean b/backends/lean/Aeneas/Std/Core/Core.lean
+index 8dd56ee..dc86fa2 100644
+--- a/backends/lean/Aeneas/Std/Core/Core.lean
++++ b/backends/lean/Aeneas/Std/Core/Core.lean
+@@ -15,6 +15,10 @@ attribute [rust_type "core::option::Option" -prefixVariantNames] Option
+ def alloc.boxed.AsMutBox.as_mut {T : Type} (x : T) : T × (T → T) :=
+   (x, fun x => x)
+ 
++/-- `AsRef<T> for Box<T, A>` (alloc/src/boxed.rs): `&**self`, the boxed value. -/
++@[rust_fun "alloc::boxed::{core::convert::AsRef<Box<@T>, @T>}::as_ref" -canFail (keepParams := [true,false])]
++def alloc.boxed.AsRefBox.as_ref {T : Type} (x : T) : T := x
++
+ /-! Rust's primitive ordered comparisons of `bool` (MIR `Lt`/`Le`/`Ge`/`Gt`,
+     `impl PartialOrd for bool`): `false < true`. -/
+ def Bool.lt (x y : Bool) : Bool := !x && y
+diff --git a/backends/lean/Aeneas/Std/Core/Iter.lean b/backends/lean/Aeneas/Std/Core/Iter.lean
+index 229c604..8975a00 100644
+--- a/backends/lean/Aeneas/Std/Core/Iter.lean
++++ b/backends/lean/Aeneas/Std/Core/Iter.lean
+@@ -755,6 +755,34 @@ def core.iter.traits.accum.ProductUsizeSharedUsize :
+   product := core.iter.traits.accum.ProductUsizeSharedUsize.product
+ }
+ 
++/-- `Iterator::sum` (core/src/iter/traits/iterator.rs, rustc 1.95): `Sum::sum(self)`.
++    No core iterator overrides it. -/
++@[rust_fun "core::iter::traits::iterator::Iterator::sum"]
++def core.iter.traits.iterator.Iterator.sum.default
++  {Self S Item : Type} (IteratorInst : core.iter.traits.iterator.Iterator Self Item)
++  (sumInst : core.iter.traits.accum.Sum S Item) (self : Self) : Result S :=
++  sumInst.sum IteratorInst self
++
++/-- `impl Sum for usize` (core/src/iter/traits/accum.rs, `integer_sum_product!`,
++    rustc 1.95): `iter.fold(0, |a, b| a + b)` through the iterator's own `fold`. The
++    closure carries `#[rustc_inherit_overflow_checks]`, so a checked caller panics at
++    the first overflowing step, left to right. -/
++@[rust_fun "core::iter::traits::accum::{core::iter::traits::accum::Sum<usize, usize>}::sum"]
++def core.iter.traits.accum.SumUsizeUsize.sum {I : Type}
++  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result Usize := do
++  let addInst : core.ops.function.FnMut Unit (Usize × Usize) Usize := {
++    FnOnceInst := { call_once := fun _ x => do return (← x.1 + x.2, ()) }
++    call_mut := fun _ x => do return (← x.1 + x.2, ())
++  }
++  let (sum, _, _) ← iteratorInst.fold addInst iter 0#usize ()
++  ok sum
++
++@[reducible, rust_trait_impl "core::iter::traits::accum::Sum<usize, usize>"]
++def core.iter.traits.accum.SumUsizeUsize :
++  core.iter.traits.accum.Sum Usize Usize := {
++  sum := core.iter.traits.accum.SumUsizeUsize.sum
++}
++
+ @[rust_trait "core::iter::traits::collect::IntoIterator"
+   (parentClauses := ["iteratorInst"])
+   (auxiliaryFields := ["const_size"])]
+diff --git a/backends/lean/Aeneas/Std/Core/Ops.lean b/backends/lean/Aeneas/Std/Core/Ops.lean
+index e4965a4..bb9406b 100644
+--- a/backends/lean/Aeneas/Std/Core/Ops.lean
++++ b/backends/lean/Aeneas/Std/Core/Ops.lean
+@@ -247,6 +247,16 @@ structure core.ops.try_trait.Try (Self Output Residual : Type) where
+ structure core.ops.try_trait.Residual (Self O TryType: Type) where
+   TryInst : core.ops.try_trait.Try TryType O Self
+ 
++/-- `bool::then` (core/src/bool.rs): `if self { Some(f()) } else { None }`. The closure
++    is called once when the condition holds, else dropped without being called. -/
++@[rust_fun "core::bool::{bool}::then"]
++def core.bool.Bool.then {T F : Type} (fnInst : core.ops.function.FnOnce F Unit T)
++    (condition : Bool) (f : F) : Result (Option T) :=
++  if condition then do
++    let (value, _) ← fnInst.call_once f ()
++    ok (some value)
++  else ok none
++
+ namespace Std
+ 
+ namespace Aeneas
+diff --git a/backends/lean/Aeneas/Std/IteratorAdapters.lean b/backends/lean/Aeneas/Std/IteratorAdapters.lean
+index 5243ca8..0e8d269 100644
+--- a/backends/lean/Aeneas/Std/IteratorAdapters.lean
++++ b/backends/lean/Aeneas/Std/IteratorAdapters.lean
+@@ -570,6 +570,16 @@ def core.iter.traits.iterator.IteratorMap
+   }
+ }
+ 
++/-- `Map`'s inherited `Iterator::sum`: `Sum::sum(self)` over the mapped items. -/
++@[rust_fun
++  "core::iter::adapters::map::{core::iter::traits::iterator::Iterator<core::iter::adapters::map::Map<@I, @F>, @B>}::sum"]
++def core.iter.adapters.map.IteratorMap.sum
++  {B I F S Item : Type} (iterInst : core.iter.traits.iterator.Iterator I Item)
++  (fnInst : core.ops.function.FnMut F Item B)
++  (sumInst : core.iter.traits.accum.Sum S B)
++  (self : core.iter.adapters.map.Map I F) : Result S :=
++  sumInst.sum (core.iter.traits.iterator.IteratorMap iterInst fnInst) self
++
+ /-! `DoubleEndedIterator for Map<I, F>` (core map.rs, rustc 1.95), for
+     `I: DoubleEndedIterator` and `F: FnMut(I::Item) -> B`: `next_back` is
+     `self.iter.next_back().map(&mut self.f)`, and the back folds fold the inner
+diff --git a/backends/lean/Aeneas/Std/Range.lean b/backends/lean/Aeneas/Std/Range.lean
+index 69f4b82..61d61e9 100644
+--- a/backends/lean/Aeneas/Std/Range.lean
++++ b/backends/lean/Aeneas/Std/Range.lean
+@@ -22,6 +22,11 @@ structure core.ops.range.RangeTo (Idx : Type u) where
+   mk ::
+   «end»: Idx
+ 
++/-- `core::ops::RangeFull` (`..`): a struct without fields, as Aeneas extracts one
++    (its value is `()`). -/
++@[reducible, rust_type "core::ops::range::RangeFull"]
++def core.ops.range.RangeFull := Unit
++
+ end Std
+ 
+ end Aeneas
+diff --git a/backends/lean/Aeneas/Std/Slice.lean b/backends/lean/Aeneas/Std/Slice.lean
+index 2a33371..c31daee 100644
+--- a/backends/lean/Aeneas/Std/Slice.lean
++++ b/backends/lean/Aeneas/Std/Slice.lean
+@@ -126,6 +126,26 @@ def core.slice.Slice.first {T : Type} (s : Slice T) : Result (Option T) :=
+ def core.slice.Slice.last {T : Type} (s : Slice T) : Result (Option T) :=
+   ok s.val.getLast?
+ 
++/-- `<[T]>::first_mut` (core/src/slice/mod.rs): `if let [first, ..] = self { Some(first) }
++    else { None }`. The backward function writes the final value of the borrow at
++    index 0. -/
++@[rust_fun "core::slice::{[@T]}::first_mut"]
++def core.slice.Slice.first_mut {T : Type} (s : Slice T) :
++    Result (Option T × (Option T → Slice T)) :=
++  ok (s.get? 0, fun
++    | some x => Slice.setAtNat s 0 x
++    | none => s)
++
++/-- `<[T]>::last_mut` (core/src/slice/mod.rs): `if let [.., last] = self { Some(last) }
++    else { None }`. The backward function writes the final value of the borrow at the
++    last index. -/
++@[rust_fun "core::slice::{[@T]}::last_mut"]
++def core.slice.Slice.last_mut {T : Type} (s : Slice T) :
++    Result (Option T × (Option T → Slice T)) :=
++  ok (s.val.getLast?, fun
++    | some x => Slice.setAtNat s (s.length - 1) x
++    | none => s)
++
+ @[step]
+ theorem Slice.index_usize_spec {α : Type u} [Inhabited α] (v: Slice α) (i: Usize)
+   (hbound : i.val < v.length) :
+@@ -478,6 +498,60 @@ def core.slice.index.SliceIndexRangeToUsizeSlice (T : Type) :
+   index_mut := core.slice.index.SliceIndexRangeToUsizeSlice.index_mut
+ }
+ 
++/-! `SliceIndex<[T]> for RangeFull` (core/src/slice/index.rs): every method returns
++    the slice (or the pointer) it is given. A mutable borrow of the whole slice gives
++    back the whole slice. -/
++
++@[reducible, rust_trait_impl "core::slice::index::private_slice_index::Sealed<core::ops::range::RangeFull>"]
++def core.slice.index.private_slice_index.SealedRangeFull :
++  core.slice.index.private_slice_index.Sealed core.ops.range.RangeFull := {}
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::get"]
++def core.slice.index.SliceIndexRangeFullSlice.get
++  {T : Type} (_ : core.ops.range.RangeFull) (s : Slice T) : Result (Option (Slice T)) :=
++  ok (some s)
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::get_mut"]
++def core.slice.index.SliceIndexRangeFullSlice.get_mut
++  {T : Type} (_ : core.ops.range.RangeFull) (s : Slice T) :
++  Result (Option (Slice T) × (Option (Slice T) → Slice T)) :=
++  ok (some s, fun s' => s'.getD s)
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::get_unchecked"]
++def core.slice.index.SliceIndexRangeFullSlice.get_unchecked
++  {T : Type} (_ : core.ops.range.RangeFull) (s : ConstRawPtr (Slice T)) :
++  Result (ConstRawPtr (Slice T)) :=
++  ok s
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::get_unchecked_mut"]
++def core.slice.index.SliceIndexRangeFullSlice.get_unchecked_mut
++  {T : Type} (_ : core.ops.range.RangeFull) (s : MutRawPtr (Slice T)) :
++  Result (MutRawPtr (Slice T)) :=
++  ok s
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::index"]
++def core.slice.index.SliceIndexRangeFullSlice.index
++  {T : Type} (_ : core.ops.range.RangeFull) (s : Slice T) : Result (Slice T) :=
++  ok s
++
++@[rust_fun "core::slice::index::{core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>}::index_mut"]
++def core.slice.index.SliceIndexRangeFullSlice.index_mut
++  {T : Type} (_ : core.ops.range.RangeFull) (s : Slice T) :
++  Result (Slice T × (Slice T → Slice T)) :=
++  ok (s, fun s' => s')
++
++@[reducible, rust_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>"]
++def core.slice.index.SliceIndexRangeFullSlice (T : Type) :
++  core.slice.index.SliceIndex core.ops.range.RangeFull (Slice T) (Slice T) := {
++  sealedInst := core.slice.index.private_slice_index.SealedRangeFull
++  get := core.slice.index.SliceIndexRangeFullSlice.get
++  get_mut := core.slice.index.SliceIndexRangeFullSlice.get_mut
++  get_unchecked := core.slice.index.SliceIndexRangeFullSlice.get_unchecked
++  get_unchecked_mut := core.slice.index.SliceIndexRangeFullSlice.get_unchecked_mut
++  index := core.slice.index.SliceIndexRangeFullSlice.index
++  index_mut := core.slice.index.SliceIndexRangeFullSlice.index_mut
++}
++
+ @[rust_trait_impl "core::ops::index::Index<[@T], @I, @O>"]
+ def core.ops.index.IndexSlice {T I Output : Type}
+   (inst : core.slice.index.SliceIndex I (Slice T) Output) :
+diff --git a/backends/lean/Aeneas/Std/Sort.lean b/backends/lean/Aeneas/Std/Sort.lean
+index 9a1f9ec..1258a7f 100644
+--- a/backends/lean/Aeneas/Std/Sort.lean
++++ b/backends/lean/Aeneas/Std/Sort.lean
+@@ -80,6 +80,22 @@ def Slice.sort_by_key {T K F : Type}
+     return (← ordInst.partialOrdInst.lt kx ky, f)) self.val f
+   return ((), ⟨out.val, by rw [out.property]; exact self.property⟩, f)
+ 
++/-- `<[T]>::sort_by` (alloc/src/slice.rs): `stable_sort(self, |a, b| compare(a, b) == Less)`
++ (driftsort). Natively, the sequence of comparisons is unspecified, and the result is
++ unspecified (or a panic) when `compare` is not a total order. Aeneas admits a call only
++ where `compare` is a closure returning `Ord::cmp` of the same key of its two arguments, a
++ key projected from the argument without computation (llbc/SortContracts.ml), on a key type
++ as for `sort_unstable`: the comparator is pure and a total preorder, so the stable order
++ is unique and this merge sort returns the native result. -/
++@[rust_fun "alloc::slice::{[@T]}::sort_by"]
++def Slice.sort_by {T F : Type}
++    (fnInst : core.ops.function.FnMut F (T × T) Ordering) (self : Std.Slice T) (compare : F) :
++    Result (Unit × Std.Slice T × F) := do
++  let (out, compare) ← stableSort (fun compare x y => do
++    let (order, compare) ← fnInst.call_mut compare (x, y)
++    return (order matches .lt, compare)) self.val compare
++  return ((), ⟨out.val, by rw [out.property]; exact self.property⟩, compare)
++
+ end alloc.slice
+ 
+ /-- `<[T]>::sort_unstable` (core/src/slice/mod.rs): `sort::unstable::sort(self, &mut T::lt)`
+diff --git a/backends/lean/Aeneas/Std/String.lean b/backends/lean/Aeneas/Std/String.lean
+index 46c95d9..11a3846 100644
+--- a/backends/lean/Aeneas/Std/String.lean
++++ b/backends/lean/Aeneas/Std/String.lean
+@@ -417,6 +417,60 @@ theorem core.str.Str.starts_with_str (s pat : Str) :
+   simp [core.str.Str.starts_with, core.str.pattern.PatternSharedStr.is_prefix_of,
+     List.isPrefixOf_iff_prefix]
+ 
++/-- `str::contains`, str/mod.rs: `pat.is_contained_in(self)`. `Pattern`'s
++    `is_contained_in` is `self.into_searcher(haystack).next_match().is_some()`; the
++    overrides of `char` (a byte `memchr` below 128, else the `&str` of its UTF-8
++    encoding) and `&str` (true for an empty needle, a byte test for a one-byte
++    needle, `self == haystack` when not shorter than the haystack, else the
++    searcher) decide the same: whether the searcher has a first match. A model
++    dictionary without searcher evidence fails, as for `str::split`. -/
++@[rust_fun "core::str::{str}::contains"]
++def core.str.Str.contains {P : Type} (patInst : core.str.pattern.Pattern P)
++    (s : Str) (pat : P) : Result Bool :=
++  match patInst.forward_matches with
++  | none => .fail .panic
++  | some search => do .ok !(← search pat s).isEmpty
++
++/-- `String::len` (string.rs): `self.vec.len()`, the length in UTF-8 bytes. -/
++@[rust_fun "alloc::string::{alloc::string::String}::len"]
++def alloc.string.String.len (value : String) : Result Usize := do
++  .ok (Slice.len (← Str.ofString value))
++
++/-- `String::with_capacity` (string.rs): `String { vec: Vec::with_capacity(capacity) }`,
++    an empty string. The capacity is not part of the model, except that `RawVec` panics
++    with "capacity overflow" when it exceeds `isize::MAX` bytes; allocation failure
++    below that bound is outside the model, as for `Vec`. -/
++@[rust_fun "alloc::string::{alloc::string::String}::with_capacity"]
++def alloc.string.String.with_capacity (capacity : Usize) : Result String :=
++  if (capacity.val : Int) ≤ Isize.max then .ok "" else .fail .panic
++
++/-- `String::push` (string.rs): `self.reserve(ch.len_utf8())`, then the UTF-8 encoding
++    of `ch` is written after the last byte. Reserving past `isize::MAX` bytes (capacity
++    overflow) and allocation failure are outside the model, as for `Vec`. -/
++@[rust_fun "alloc::string::{alloc::string::String}::push"]
++def alloc.string.String.push (value : String) (ch : Char) : Result String :=
++  .ok (value.push ch)
++
++/-- `String::push_str` (string.rs): `self.vec.extend_from_slice(string.as_bytes())`,
++    the bytes of `string` appended (the bounds as for `push`). -/
++@[rust_fun "alloc::string::{alloc::string::String}::push_str"]
++def alloc.string.String.push_str (value : String) (string : Str) : Result String := do
++  .ok (value ++ (← Str.toString string))
++
++/-- `str::repeat` (alloc/src/str.rs): `String::from_utf8_unchecked(self.as_bytes().repeat(n))`.
++    `<[T]>::repeat` (alloc/src/slice.rs) returns an empty vector for `n = 0`; otherwise
++    `self.len().checked_mul(n).expect("capacity overflow")` then `Vec::with_capacity`, so it
++    panics exactly when `len * n` exceeds `isize::MAX` bytes (above `usize::MAX` the
++    multiplication overflows). Allocation failure below that bound is outside the model. -/
++@[rust_fun "alloc::str::{str}::repeat"]
++def alloc.str.Str.repeat (s : Str) (n : Usize) : Result String := do
++  if (s.length * n.val : Int) ≤ Isize.max then
++    if s.val.isEmpty then .ok ""
++    else
++      let text ← Str.toString s
++      .ok (String.join (List.replicate n.val text))
++  else .fail .panic
++
+ @[rust_fun "alloc::string::{core::convert::From<alloc::string::String, &'a str>}::from"]
+ def alloc.string.FromStrString.from_ (value : Str) : Result String := Str.toString value
+ 
+diff --git a/backends/lean/Aeneas/Std/VecDeque.lean b/backends/lean/Aeneas/Std/VecDeque.lean
+new file mode 100644
+index 0000000..af7574c
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/VecDeque.lean
+@@ -0,0 +1,124 @@
++import Aeneas.Std.Array.Array
++import Aeneas.Std.Core.Default
++import Aeneas.Std.Core.Convert
++
++namespace Aeneas.Std
++
++/- `VecDeque<T, A>` (alloc/src/collections/vec_deque/mod.rs, rustc 1.95) is a
++ring buffer over a `RawVec`: `head` is the physical index of the front element
++and `len` the number of elements. The model is its logical sequence, front
++first (the order of `VecDeque::iter`); the physical layout (head, capacity,
++wrap-around) is not observable through the modeled methods. The allocator is
++erased as for `Vec` and `BTreeMap`: allocation failure and destructor effects
++are outside the model. -/
++@[rust_type "alloc::collections::vec_deque::VecDeque"
++  (keepParams := [true, false]) (body := .opaque)]
++structure alloc.collections.vec_deque.VecDeque (T : Type) where
++  items : List T
++
++namespace alloc.collections.vec_deque
++
++/-- `VecDeque::new`: `VecDeque { head: 0, len: 0, buf: RawVec::new() }`. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>}::new"]
++def VecDeque.new (T : Type) : Result (VecDeque T) := .ok ⟨[]⟩
++
++/-- `Default for VecDeque<T>`: `VecDeque::new()`. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{core::default::Default<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>>}::default"]
++def DefaultVecDeque.default (T : Type) : Result (VecDeque T) := VecDeque.new T
++
++@[reducible, rust_trait_impl
++  "core::default::Default<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>>"]
++def DefaultVecDeque (T : Type) : core.default.Default (VecDeque T) := {
++  default := DefaultVecDeque.default T
++}
++
++/-- `From<[T; N]> for VecDeque<T>`: the array's elements, in order
++    (`ptr::copy_nonoverlapping` into a buffer of capacity `N`, `head = 0`). -/
++@[rust_fun
++  "alloc::collections::vec_deque::{core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>}::from"]
++def FromVecDequeArray.from {T : Type} {N : Usize} (a : Array T N) : Result (VecDeque T) :=
++  .ok ⟨a.val⟩
++
++@[reducible, rust_trait_impl
++  "core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>"]
++def FromVecDequeArray (T : Type) (N : Usize) : core.convert.From (VecDeque T) (Array T N) := {
++  from_ := FromVecDequeArray.from
++}
++
++/-- `VecDeque::len`: the element count. A native deque never holds more than
++    `usize::MAX` elements (`push_back`/`push_front` panic with "capacity
++    overflow" first, see `VecDeque.push_back`), so the failing branch is
++    unreachable from modeled operations. -/
++@[rust_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::len"
++  (keepParams := [true, false])]
++def VecDeque.len {T : Type} (self : VecDeque T) : Result Usize :=
++  if h : self.items.length < 2 ^ UScalarTy.Usize.numBits then
++    .ok (Usize.ofNatCore self.items.length h)
++  else .fail .panic
++
++/-- `VecDeque::is_empty`: `self.len == 0`. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::is_empty"
++  (keepParams := [true, false])]
++def VecDeque.is_empty {T : Type} (self : VecDeque T) : Result Bool :=
++  .ok self.items.isEmpty
++
++/-- `VecDeque::clear`: `self.truncate(0)` (dropping every element), then `head = 0`. -/
++@[rust_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::clear"
++  (keepParams := [true, false])]
++def VecDeque.clear {T : Type} (_self : VecDeque T) : Result (VecDeque T) := .ok ⟨[]⟩
++
++/-- `VecDeque::push_back`: when full, `grow` doubles the buffer, which panics with
++    "capacity overflow" when the capacity would exceed `usize::MAX` (reachable only
++    for zero-sized `T`: otherwise the allocation fails first, which is outside the
++    model); then the value is written after the last element. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::push_back"
++  (keepParams := [true, false])]
++def VecDeque.push_back {T : Type} (self : VecDeque T) (value : T) : Result (VecDeque T) :=
++  if self.items.length < Usize.max then .ok ⟨self.items ++ [value]⟩
++  else .fail .maximumSizeExceeded
++
++/-- `VecDeque::push_front`: as `push_back`, the value written before the first element. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::push_front"
++  (keepParams := [true, false])]
++def VecDeque.push_front {T : Type} (self : VecDeque T) (value : T) : Result (VecDeque T) :=
++  if self.items.length < Usize.max then .ok ⟨value :: self.items⟩
++  else .fail .maximumSizeExceeded
++
++/-- `VecDeque::pop_front`: `None` when empty, else the front element, removed. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::pop_front"
++  (keepParams := [true, false])]
++def VecDeque.pop_front {T : Type} (self : VecDeque T) : Result (Option T × VecDeque T) :=
++  match self.items with
++  | [] => .ok (none, self)
++  | item :: rest => .ok (some item, ⟨rest⟩)
++
++/-- `VecDeque::pop_back`: `None` when empty, else the back element, removed. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::pop_back"
++  (keepParams := [true, false])]
++def VecDeque.pop_back {T : Type} (self : VecDeque T) : Result (Option T × VecDeque T) :=
++  match self.items.getLast? with
++  | none => .ok (none, self)
++  | some item => .ok (some item, ⟨self.items.dropLast⟩)
++
++/-- `VecDeque::front`: the first element, `None` when empty. -/
++@[rust_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::front"
++  (keepParams := [true, false])]
++def VecDeque.front {T : Type} (self : VecDeque T) : Result (Option T) :=
++  .ok self.items.head?
++
++/-- `VecDeque::back`: the last element, `None` when empty. -/
++@[rust_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::back"
++  (keepParams := [true, false])]
++def VecDeque.back {T : Type} (self : VecDeque T) : Result (Option T) :=
++  .ok self.items.getLast?
++
++end alloc.collections.vec_deque
++
++end Aeneas.Std
+diff --git a/src/llbc/SortContracts.ml b/src/llbc/SortContracts.ml
+index 3faf355..ac18356 100644
+--- a/src/llbc/SortContracts.ml
++++ b/src/llbc/SortContracts.ml
+@@ -1,5 +1,5 @@
+-(** Admission for the models of [<[T]>::sort_unstable] and
+-    [<[T]>::sort_unstable_by] (Aeneas.Std.Sort).
++(** Admission for the models of [<[T]>::sort_unstable],
++    [<[T]>::sort_unstable_by] and [<[T]>::sort_by] (Aeneas.Std.Sort).
+ 
+     Natively, the order of the elements that compare [Equal], and the sequence of
+     comparisons, are unspecified. The models (a stable sort) return the native
+@@ -20,6 +20,17 @@
+     two arguments, for an element type as above; the model sorts with that
+     comparator. Every other comparator, and every call to [sort_unstable_by_key]
+     (equal keys may hide distinct elements), is rejected with
++    [E_UNSUPPORTED_SORT].
++
++    [sort_by] is stable: natively its result is unique when the comparator is a
++    pure total preorder (only the sequence of comparisons is unspecified), and
++    unspecified, or a panic, otherwise. It is admitted when its comparator is a
++    closure whose body returns [Ord::cmp] of the same key of its two arguments
++    (in either order): a key only reads its argument, as a shared reference to
++    or a copy of a place reached by struct and tuple fields and dereferences of
++    shared references and boxes, a tuple of keys, or a shared reference to a
++    local holding a key; and the key type is one of the types above, whose
++    [Ord] is a total order. Every other comparator is rejected with
+     [E_UNSUPPORTED_SORT]. *)
+ 
+ open Types
+@@ -27,6 +38,23 @@ open Expressions
+ open LlbcAst
+ open Errors
+ 
++(** A step of the path from a [sort_by] comparator's argument to a key place. *)
++type key_step = KDeref | KField of field_proj_kind * FieldId.id
++
++(** The value of a local of a [sort_by] comparator, computed from its arguments
++    (0 and 1) without computation: a shared reference to the place of argument
++    [arg] at [path] ([KRef (arg, [])] is the argument itself), a copy of that
++    place, a tuple, or a shared reference to a local holding a key. *)
++type key =
++  | KRef of int * key_step list
++  | KCopy of int * key_step list
++  | KTuple of key list
++  | KRefLocal of key
++
++(** A place of a [sort_by] comparator: inside argument [arg] at [path], or a
++    local holding a key. *)
++type key_place = InArg of int * key_step list | Owned of key
++
+ let check (crate : crate) : crate =
+   if Config.backend () <> Config.Lean then crate
+   else
+@@ -42,17 +70,28 @@ let check (crate : crate) : crate =
+     let sort_unstable = pattern "core::slice::{[@T]}::sort_unstable" in
+     let sort_by = pattern "core::slice::{[@T]}::sort_unstable_by" in
+     let sort_by_key = pattern "core::slice::{[@T]}::sort_unstable_by_key" in
++    let stable_sort_by = pattern "alloc::slice::{[@T]}::sort_by" in
+     let matches pat (name : name) = NameMatcher.match_name mctx config pat name in
+     let name_of (name : name) = Print.name_to_string env name in
+-    let reject span reason =
+-      [%craise] span
+-        ("E_UNSUPPORTED_SORT: " ^ reason
++    let unstable_message reason =
++        "E_UNSUPPORTED_SORT: " ^ reason
+        ^ ". The sort_unstable models are admitted only where the comparison is \
+           Ord::cmp on a type whose Equal holds exactly for indistinguishable \
+           values (integers, bool, char, str, String, references, boxes, tuples \
+           and #[derive(Ord)] types of those), where every sorted permutation is \
+-          the same list.")
++          the same list."
++    in
++    let reject span reason = [%craise] span (unstable_message reason) in
++    let stable_message reason =
++        "E_UNSUPPORTED_SORT: " ^ reason
++       ^ ". The sort_by model is admitted only where the comparator returns \
++          Ord::cmp of the same key of both elements, projected from each without \
++          computation (fields, dereferences, tuples), on a key type whose Ord is \
++          a total order (integers, bool, char, str, String, references, boxes, \
++          tuples and #[derive(Ord)] types of those): then the comparator is a \
++          total preorder and the stable order is unique."
+     in
++    let reject_stable span reason = [%craise] span (stable_message reason) in
+     let trait_name id =
+       name_of (TraitDeclId.Map.find id crate.trait_decls).item_meta.name
+     in
+@@ -79,9 +118,11 @@ let check (crate : crate) : crate =
+     in
+     (* [visiting]: the crate types under examination (a recursive type is
+        structural if its other fields are). *)
+-    let rec structural span visiting (ty : ty) : unit =
++    let rec structural_with message span visiting (ty : ty) : unit =
++      let structural = structural_with message in
+       let unsupported why =
+-        reject span ("the element type " ^ Print.ty_to_string env ty ^ " " ^ why)
++        [%craise] span
++          (message ("the element type " ^ Print.ty_to_string env ty ^ " " ^ why))
+       in
+       match ty with
+       | TLiteral (TInt _ | TUInt _ | TBool | TChar) -> ()
+@@ -117,6 +158,7 @@ let check (crate : crate) : crate =
+                   fields))
+       | _ -> unsupported "is not a reviewed Ord type"
+     in
++    let structural = structural_with unstable_message in
+     (* Whether a call target is [Ord::cmp] (of any impl: the argument types fix
+        the implementing type). *)
+     let is_ord_cmp (ptr : fn_ptr) =
+@@ -136,10 +178,10 @@ let check (crate : crate) : crate =
+        only moves or reborrows the two arguments (fields 0 and 1 of the tupled
+        arguments) and returns [Ord::cmp] of them, in either order. The closure
+        state is never read. *)
+-    let comparator span (elem : ty) (tr : trait_ref) =
+-      let unsupported why =
+-        reject span ("sort_unstable_by: the comparator " ^ why)
+-      in
++    (* The body of the [call_mut] method of the closure whose [FnMut] impl is
++       [tr]. *)
++    let closure_call_mut span message (tr : trait_ref) =
++      let unsupported why = [%craise] span (message why) in
+       let impl_ref =
+         match tr.kind with
+         | TraitImpl impl_ref -> impl_ref
+@@ -166,6 +208,17 @@ let check (crate : crate) : crate =
+         | StructuredBody body when body.locals.arg_count = 2 -> body
+         | _ -> unsupported "has no body"
+       in
++      body
++    in
++    let comparator span (elem : ty) (tr : trait_ref) =
++      let unsupported why =
++        reject span ("sort_unstable_by: the comparator " ^ why)
++      in
++      let body =
++        closure_call_mut span
++          (fun why -> unstable_message ("sort_unstable_by: the comparator " ^ why))
++          tr
++      in
+       let tupled_args = LocalId.of_int 2 in
+       let return_local = LocalId.of_int 0 in
+       (* The locals holding a reference to argument 0 or 1, and the locals
+@@ -253,6 +306,152 @@ let check (crate : crate) : crate =
+       walk false body.body.statements;
+       structural span [] elem
+     in
++    (* The comparator of [sort_by]: the [FnMut] impl [tr] must be a closure's,
++       whose [call_mut] body, apart from storage markers and references to the
++       unit metadata, only computes keys of its two arguments (fields 0 and 1 of
++       the tupled arguments, see [key]) and returns [Ord::cmp] of a key of one
++       argument and the same key of the other. The closure state is never read. *)
++    let key_comparator span (tr : trait_ref) =
++      let unsupported why =
++        reject_stable span ("sort_by: the comparator " ^ why)
++      in
++      let body =
++        closure_call_mut span
++          (fun why -> stable_message ("sort_by: the comparator " ^ why))
++          tr
++      in
++      let tupled_args = LocalId.of_int 2 in
++      let return_local = LocalId.of_int 0 in
++      let keys = ref LocalId.Map.empty in
++      let unit_refs = ref LocalId.Set.empty in
++      let is_unit_metadata (gref : global_decl_ref) =
++        gref.id = crate.unit_metadata.id
++      in
++      let unit_metadata_operand = function
++        | Copy { kind = PlaceGlobal gref; _ } -> is_unit_metadata gref
++        | Copy { kind = PlaceProjection ({ kind = PlaceLocal id; _ }, Deref); _ }
++          ->
++            LocalId.Set.mem id !unit_refs
++        | _ -> false
++      in
++      (* Reading through a shared reference or a box has no effect. *)
++      let pure_pointer (ty : ty) =
++        match ty with
++        | TRef (_, _, RShared) | TAdt { id = TBuiltin TBox; _ } -> true
++        | _ -> false
++      in
++      let rec place_key (place : place) =
++        match place.kind with
++        | PlaceLocal id ->
++            Option.map (fun key -> Owned key) (LocalId.Map.find_opt id !keys)
++        | PlaceProjection
++            ({ kind = PlaceLocal id; _ }, Field (ProjTuple 2, field))
++          when id = tupled_args ->
++            Some (Owned (KRef (FieldId.to_int field, [])))
++        | PlaceProjection (inner, Deref) when pure_pointer inner.ty -> (
++            match place_key inner with
++            | Some (Owned (KRef (arg, path))) -> Some (InArg (arg, path))
++            | Some (Owned (KCopy (arg, path))) | Some (InArg (arg, path)) ->
++                Some (InArg (arg, path @ [ KDeref ]))
++            | Some (Owned (KRefLocal key)) -> Some (Owned key)
++            | Some (Owned (KTuple _)) | None -> None)
++        | PlaceProjection
++            (inner, Field (((ProjAdt (_, None) | ProjTuple _) as kind), field))
++          -> (
++            match place_key inner with
++            | Some (InArg (arg, path)) ->
++                Some (InArg (arg, path @ [ KField (kind, field) ]))
++            | Some (Owned (KTuple keys)) ->
++                Option.map
++                  (fun key -> Owned key)
++                  (List.nth_opt keys (FieldId.to_int field))
++            | _ -> None)
++        | _ -> None
++      in
++      let operand_key (operand : operand) =
++        match operand with
++        | Move place | Copy place -> (
++            match (place_key place, operand) with
++            | Some (Owned key), _ -> Some key
++            | Some (InArg (arg, path)), Copy _ -> Some (KCopy (arg, path))
++            | _ -> None)
++        | Constant _ -> None
++      in
++      let rvalue_key = function
++        | Use operand -> operand_key operand
++        | RvRef (place, BShared, metadata) when unit_metadata_operand metadata
++          -> (
++            match place_key place with
++            | Some (InArg (arg, path)) -> Some (KRef (arg, path))
++            | Some (Owned key) -> Some (KRefLocal key)
++            | None -> None)
++        | Aggregate (AggregatedAdt ({ id = TTuple; _ }, None, None), operands)
++          ->
++            let fields = List.map operand_key operands in
++            if List.for_all Option.is_some fields then
++              Some (KTuple (List.map Option.get fields))
++            else None
++        | _ -> None
++      in
++      let rec swap = function
++        | KRef (arg, path) -> KRef (1 - arg, path)
++        | KCopy (arg, path) -> KCopy (1 - arg, path)
++        | KTuple keys -> KTuple (List.map swap keys)
++        | KRefLocal key -> KRefLocal (swap key)
++      in
++      let rec arguments found = function
++        | KRef (arg, _) | KCopy (arg, _) ->
++            if List.mem arg found then found else arg :: found
++        | KTuple keys -> List.fold_left arguments found keys
++        | KRefLocal key -> arguments found key
++      in
++      let rec walk compared (statements : statement list) =
++        match (statements, compared) with
++        | [ { kind = Return; _ } ], true -> ()
++        | { kind = StorageLive _ | StorageDead _ | Nop; _ } :: rest, _ ->
++            walk compared rest
++        | {
++            kind =
++              Assign
++                ( { kind = PlaceLocal id; _ },
++                  RvRef ({ kind = PlaceGlobal gref; _ }, BShared, metadata) );
++            _;
++          }
++          :: rest,
++          false
++          when LocalId.to_int id > 2 && is_unit_metadata gref
++               && unit_metadata_operand metadata ->
++            keys := LocalId.Map.remove id !keys;
++            unit_refs := LocalId.Set.add id !unit_refs;
++            walk compared rest
++        | { kind = Assign ({ kind = PlaceLocal id; _ }, rvalue); _ } :: rest, false
++          when LocalId.to_int id > 2 -> (
++            match rvalue_key rvalue with
++            | Some key ->
++                keys := LocalId.Map.add id key !keys;
++                unit_refs := LocalId.Set.remove id !unit_refs;
++                walk compared rest
++            | None -> unsupported "computes more than keys of its arguments")
++        | { kind = Call { func = FnOpRegular ptr; args = [ a; b ]; dest }; _ }
++          :: rest,
++          false
++          when dest.kind = PlaceLocal return_local && is_ord_cmp ptr ->
++            (match (operand_key a, operand_key b, a) with
++            | Some x, Some y, (Move place | Copy place) -> (
++                match (arguments [] x, arguments [] y) with
++                | [ i ], [ j ] when i + j = 1 && swap y = x -> (
++                    match TypesUtils.ty_erase_regions place.ty with
++                    | TRef (_, key_ty, RShared) ->
++                        structural_with stable_message span [] key_ty
++                    | _ -> unsupported "does not compare references to keys")
++                | _ -> unsupported "does not compare the same key of its two arguments")
++            | _ -> unsupported "does not compare keys of its arguments");
++            walk true rest
++        | _ ->
++            unsupported "is not Ord::cmp of the same key of its two arguments"
++      in
++      walk false body.body.statements
++    in
+     (* A partial-monomorphization instance (last name element [PeInstantiated],
+        e.g. [sort_unstable_by] at a closure that captures a mutable borrow) is
+        the generic function at the instantiated arguments, and
+@@ -270,6 +469,10 @@ let check (crate : crate) : crate =
+             match (generics.types, generics.trait_refs) with
+             | [ element; _ ], [ compare ] -> comparator span element compare
+             | _ -> reject span "unexpected generics of sort_unstable_by"
++          else if matches stable_sort_by name then
++            match generics.trait_refs with
++            | [ compare ] -> key_comparator span compare
++            | _ -> reject_stable span "unexpected generics of sort_by"
+           else if matches sort_by_key name then
+             reject span
+               "sort_unstable_by_key: equal keys may hide distinct elements"
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index 5504643..d310e16 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -370,6 +370,7 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+   | "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ->
+       Some (BorrowedStorage 0)
+   | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key"
++  | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by"
+   | "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by"
+   | "_root_.Aeneas.Std.alloc.vec.Vec.retain_mut" ->
+       Some (Canonical (State [ 0; 1 ]))

@@ -1,0 +1,3436 @@
+# aeneas integration step 138 after cba11f3beb: commit 2a0ee6bbdfbe677fa3228ff4b707410d6ca489e6
+# first parent 483eee6a0bdcb19f18818dbe5011dd3e7db46254, merged f6a24391d0fb0a1d07943938ee1848caa5259dac
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (a pre-loop join applied at level 1 of a staged loop: join_then_loop; ignored shared loans matched through their children: with_preflight closure#4)
+
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index a54b31f..f16f91e 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -743,10 +743,16 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+             let child = match_arec child0 child1 in
+             M.match_aignored_mut_loan match_rec ctx0 ctx1
+               (v0.ty, bid0, child0) (v1.ty, bid1, child1) ty child
+-        | AIgnoredSharedLoan _, AIgnoredSharedLoan _ ->
+-            (* Those should have been filtered when destructuring the abstractions -
+-               they are necessary only when there are nested borrows *)
+-            [%craise_recover] M.recover M.span "Unreachable"
++        | AIgnoredSharedLoan child0, AIgnoredSharedLoan child1 ->
++            (* Nested borrows: a destructured abstraction may hold an ignored
++               shared loan nested in another value (e.g., the shared loan of a
++               closure captured by shared reference, which captures a shared
++               reference, in a field of the ignored loan of the reborrow of the
++               visiting closure, see
++               [InterpAbs.merge_abstractions_merge_loan_borrow_pairs]). It has
++               no id: match the children *)
++            let child = match_arec child0 child1 in
++            { value = ALoan (AIgnoredSharedLoan child); ty }
+         | _ -> [%craise_recover] M.recover M.span "Unreachable")
+     | ASymbolic (pm0, proj0), ASymbolic (pm1, proj1) ->
+         [%ldebug "Matching symbolic avalues"];
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 858852c..df0e0ce 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -2326,7 +2326,7 @@ let staged_cont_early_stages (ctx : bs_ctx) (ectx : C.eval_ctx)
+   let ctx, cont_chain =
+     match conts with
+     | [] -> (ctx, [])
+-    | [ (V.ELoop (aid, _) | V.EJoin aid) ] -> (
++    | [ ((V.ELoop (aid, _) | V.EJoin aid) as cont) ] -> (
+         match
+           ( V.AbsId.Map.find_opt aid ctx.staged_conts,
+             V.AbsId.Map.find_opt aid ctx.abs_id_to_info )
+@@ -2346,6 +2346,17 @@ let staged_cont_early_stages (ctx : bs_ctx) (ectx : C.eval_ctx)
+               }
+             in
+             (ctx, [ stage ])
++        | None, Some _ when (match (stage, cont) with
++                             | StageLevel 1, V.EJoin _ -> true
++                             | _ -> false) ->
++            (* The continuation at the loop entry of a loop abstraction staged
++               at level 1 applies the continuation of a join before the loop
++               which is not staged (e.g., a match on [execution.as_deref_mut()]
++               before a loop over it): flattened at level 0, it routes the
++               values at level 1 unchanged (its branches applied the early
++               stages of their calls to the values they give), and the second
++               stage applies it as a whole *)
++            (ctx, [])
+         | _ ->
+             [%craise] span
+               "Nested borrows: the staged continuation of a join or loop \
+diff --git a/tests/lean/NestedBorrowsClosureSharedClosureArms.lean b/tests/lean/NestedBorrowsClosureSharedClosureArms.lean
+new file mode 100644
+index 0000000..ee0560d
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureSharedClosureArms.lean
+@@ -0,0 +1 @@
++import NestedBorrowsClosureSharedClosureArms.Checks
+diff --git a/tests/lean/NestedBorrowsClosureSharedClosureArms/Checks.lean b/tests/lean/NestedBorrowsClosureSharedClosureArms/Checks.lean
+new file mode 100644
+index 0000000..bae25e2
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureSharedClosureArms/Checks.lean
+@@ -0,0 +1,33 @@
++import NestedBorrowsClosureSharedClosureArms.NestedBorrowsClosureSharedClosureArms
++
++/-! Evaluate the model of `tests/src/nested-borrows-closure-shared-closure-arms.rs`
++    on the inputs of its `native` test module and compare with the native
++    results: the result of `analyze`, and the `Out` given back by the call
++    (the facts pushed at every node, then a fact pushed by the caller through
++    the borrow given back, as their number and bit mask, and the sum of the
++    node numbers). -/
++
++namespace nested_borrows_closure_shared_closure_arms.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def u8 (x : Nat) : U8 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def runAnalyze (shape a b c s0 s1 node : Nat) : Option (Bool × Nat × Nat × Nat) :=
++  match run_analyze (u8 shape) (u a) (u b) (u c) (u s0) (u s1) (us node) with
++  | ok (r, facts, mask, nodes) => some (r, facts.val, mask.val, nodes.val)
++  | _ => none
++
++-- run_analyze_native
++#guard runAnalyze 0 5 0 0 5 7 3 == some (true, 2, 3, 3)
++#guard runAnalyze 0 6 0 0 5 7 3 == some (false, 2, 2, 3)
++#guard runAnalyze 1 1 2 3 2 9 0 == some (true, 4, 14, 1)
++#guard runAnalyze 1 1 2 3 8 9 4 == some (false, 4, 8, 13)
++#guard runAnalyze 2 1 2 3 3 9 0 == some (false, 5, 16, 3)
++#guard runAnalyze 2 1 2 3 2 1 10 == some (true, 5, 29, 43)
++#guard runAnalyze 2 4 5 6 7 8 1 == some (false, 5, 16, 7)
++#guard runAnalyze 3 1 2 3 1 2 6 == some (false, 2, 2, 6)
++#guard runAnalyze 3 1 2 3 9 9 0 == some (false, 2, 2, 0)
++
++end nested_borrows_closure_shared_closure_arms.checks
+diff --git a/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean b/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean
+new file mode 100644
+index 0000000..6b0687f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsClosureSharedClosureArms/NestedBorrowsClosureSharedClosureArms.lean
+@@ -0,0 +1,2109 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_closure_shared_closure_arms]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_closure_shared_closure_arms
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) (T5 : Type) where
++  call_once : T0 → (T1 × T2 × T3 × T4) → _root_.Aeneas.Std.Result (T5 × T1 ×
++    T4)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) (T5 : Type) where
++  FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088Inst
++    :
++    _root_.nested_borrows_closure_shared_closure_arms.core.ops.function.FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088
++    T0 T1 T2 T3 T4 T5
++  call_mut : T0 → (T1 × T2 × T3 × T4) → _root_.Aeneas.Std.Result (T5 × T1 × T4
++    × T0)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::Fn<@T0, (&'0 mut @T1, @T2, @T3, &'1 mut @T4), @T5>"
++  (parentClauses := ["FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3Inst"])]
++structure
++  core.ops.function.FnT0TupleMut0T1T2T3Mut1T4T5_specialized_d42bc9e37bab50104689534314a20a71
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) (T5 : Type) where
++  FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3Inst
++    :
++    _root_.nested_borrows_closure_shared_closure_arms.core.ops.function.FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3
++    T0 T1 T2 T3 T4 T5
++  call : T0 → (T1 × T2 × T3 × T4) → _root_.Aeneas.Std.Result (T5 × T1 × T4)
++
++mutual
++
++/-- [nested_borrows_closure_shared_closure_arms::Expr]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 22:0-25:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom : _root_.Aeneas.Std.U32 → Expr
++| Map : Metadata → Expr
++
++/-- [nested_borrows_closure_shared_closure_arms::MetadataValue]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 27:0-31:1
++    Visibility: public -/
++@[discriminant isize]
++inductive MetadataValue where
++| Type : Expr → MetadataValue
++| Doc : _root_.Aeneas.Std.U32 → MetadataValue
++| Loc : _root_.Aeneas.Std.U32 → MetadataValue
++
++/-- [nested_borrows_closure_shared_closure_arms::Metadata]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 33:0-35:1
++    Visibility: public -/
++inductive Metadata where
++| mk : _root_.Aeneas.Std.NestedVec MetadataValue → Metadata
++
++end
++
++def Metadata.values (x :
++  _root_.nested_borrows_closure_shared_closure_arms.Metadata) :=
++  match x with | _root_.nested_borrows_closure_shared_closure_arms.Metadata.mk
++                x1 => x1
++
++@[simp]
++theorem Metadata.values._simpLemma_ (values : _root_.Aeneas.Std.NestedVec
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) :
++  (_root_.nested_borrows_closure_shared_closure_arms.Metadata.mk
++    values).values
++    =
++    values := by rfl
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::closure]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def visit_children.closure {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E)) :=
++  _root_.Aeneas.Std.core.result.Result _root_.Unit E × T1
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::closure]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++@[reducible]
++def analyze.closure := _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_shared_closure_arms::Out]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 64:0-67:1
++    Visibility: public -/
++structure Out where
++  facts : _root_.Aeneas.Std.alloc.vec.Vec _root_.Bool
++  nodes : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::closure#1]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 90:38-94:5 -/
++def analyze.closure_1 :=
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure ×
++  _root_.Bool × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++  _root_.nested_borrows_closure_shared_closure_arms.Out
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::closure::<0, 1, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<2, 3, 4, 5, 6, 7>>]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0)) :=
++  _root_.Aeneas.Std.core.result.Result _root_.Unit T0 ×
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++
++/-- [core::result::{core::result::Result<T, E>}::is_ok]:
++    Source: '/rustc/library/core/src/result.rs', lines 593:4-593:37
++    Name pattern: [core::result::{core::result::Result<@T, @E>}::is_ok]
++    Visibility: public -/
++@[rust_fun "core::result::{core::result::Result<@T, @E>}::is_ok"]
++def core.result.Result.is_ok
++  {T : Type} {E : Type} (self : _root_.Aeneas.Std.core.result.Result T E) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  _root_.Aeneas.Std.Result.ok (self1 = 0#isize)
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions]: loop body 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop_body]
++def Metadata.visit_expressions_loop.body
++  {T1 : Type} (coreopsfunctionFnMutT1PairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) (visit : T1)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) × T1) T1)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done visit)
++  | some value =>
++    let joined ←
++      match value with
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Type v
++        =>
++        do
++        let (_, model_state2) ←
++          coreopsfunctionFnMutT1PairSharedExprU8TupleInst.call_mut visit (v,
++            0#u8)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (model_state2,
++          model_state1) : _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)) (T1
++          × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)) (T1
++          × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)) (T1
++          × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)))
++    let (visit1, iter1) ←
++      match joined with
++      | _root_.Sum.inl (_, iter2) => _root_.Aeneas.Std.Result.ok (visit, iter2)
++      | _root_.Sum.inr (exit, exit1) =>
++        _root_.Aeneas.Std.Result.ok (exit, exit1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      visit1))
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions]: loop 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop]
++def Metadata.visit_expressions_loop
++  {T1 : Type} (coreopsfunctionFnMutT1PairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) (visit : T1)
++  :
++  _root_.Aeneas.Std.Result T1
++  := do
++  loop
++    (fun (iter1, visit1) =>
++       _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions_loop.body
++       coreopsfunctionFnMutT1PairSharedExprU8TupleInst iter1 visit1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) × T1) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) × T1)
++      T1))
++    (iter, visit)
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 38:4-45:5
++    Visibility: public -/
++def Metadata.visit_expressions
++  {T1 : Type} (coreopsfunctionFnMutT1PairSharedAExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (self : _root_.nested_borrows_closure_shared_closure_arms.Metadata)
++  (visit : T1) :
++  _root_.Aeneas.Std.Result T1
++  := do
++  let s :=
++    _root_.Aeneas.Std.alloc.vec.Vec.deref (_root_.Aeneas.Std.NestedVec.toVec
++      self.values)
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions_loop
++    coreopsfunctionFnMutT1PairSharedAExprU8TupleInst iter visit
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure<2, 3, T0, T1>[TraitClause@0]>]: loop body 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop_body]
++def
++  Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304_loop.body
++  {T0 : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosurePairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleSharedExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)
++  (back : _root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++  _root_.Aeneas.Std.core.result.Result _root_.Unit T0) (back1 : T1 → T1)
++  (r : _root_.Aeneas.Std.core.result.Result _root_.Unit T0) (t : T1) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1) ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1 ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, t,
++      back, back1))
++  | some value =>
++    let joined ←
++      match value with
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Type v
++        =>
++        do
++        let (_, model_state2) ←
++          coreopsfunctionFnMutclosurePairSharedExprU8TupleInst.call_mut (r, t)
++            (v, 0#u8)
++        let (r1, t1) := model_state2
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r1, t1, model_state1,
++          fun t2 => let (_, t3) := (r1, t2)
++                    back1 t3, fun r2 => let (r3, _) := (r2, t1)
++                                        back r3) : _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (T1 → T1) × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (T1 → T1) × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (T1 → T1) × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++    let (r1, t1, iter1, back2, back3) ←
++      match joined with
++      | _root_.Sum.inl (_, iter2) =>
++        _root_.Aeneas.Std.Result.ok (r, t, iter2, back1, back)
++      | _root_.Sum.inr (exit, exit1, exit2, exit3, exit4) =>
++        _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3, exit4)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      back3, back2, r1, t1))
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure<2, 3, T0, T1>[TraitClause@0]>]: loop 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop]
++def
++  Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304_loop
++  {T0 : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosurePairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleSharedExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)
++  (back : _root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++  _root_.Aeneas.Std.core.result.Result _root_.Unit T0) (back1 : T1 → T1)
++  (r : _root_.Aeneas.Std.core.result.Result _root_.Unit T0) (t : T1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × T1 × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1))
++  := do
++  loop
++    (fun (iter1, back2, back3, r1, t1) =>
++       _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304_loop.body
++       coreopsfunctionFnMutT1TupleSharedExprResultTupleT0Inst
++       coreopsfunctionFnMutclosurePairSharedExprU8TupleInst iter1 back2 back3
++       r1 t1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1)
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) × T1 ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) × (T1 → T1))))
++    (iter, back, back1, r, t)
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure<2, 3, T0, T1>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 38:4-45:5
++    Visibility: public -/
++def
++  Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304
++  {T0 : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosurePairShared0ExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (self : _root_.nested_borrows_closure_shared_closure_arms.Metadata)
++  (visit :
++  _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst) :
++  _root_.Aeneas.Std.Result
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst))
++  := do
++  let (r, t) := visit
++  let s :=
++    _root_.Aeneas.Std.alloc.vec.Vec.deref (_root_.Aeneas.Std.NestedVec.toVec
++      self.values)
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let (r1, t1, back, back1) ←
++    _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304_loop
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst
++      coreopsfunctionFnMutclosurePairShared0ExprU8TupleInst iter (fun r2 => r2)
++      (fun t2 => t2) r t
++  let back2 :=
++    (fun visit1 => let (r2, _) := visit1
++                   let r3 := back r2
++                   (r3, t) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst)
++  let back3 :=
++    (fun visit1 => let (_, t2) := visit1
++                   let t3 := back1 t2
++                   (r, t3) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleT0Inst)
++  _root_.Aeneas.Std.Result.ok ((r1, t1), back2, back3)
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure::<0, 1, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<2, 3, 4, 5, 6, 7>><2, 3, 4, 5, 6, 7, 8, 9, T0>[TraitClause@0]>]: loop body 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop_body]
++def
++  Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef_loop.body
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosureT0closure_1PairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (r : _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  (b : _root_.Bool) (i : _root_.Aeneas.Std.Usize)
++  (i1 : _root_.Aeneas.Std.Usize)
++  (o : _root_.nested_borrows_closure_shared_closure_arms.Out)
++  (back : _root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++  _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (back1 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (back2 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.Bool)))
++  (back3 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.Aeneas.Std.Usize)))
++  (back4 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.nested_borrows_closure_shared_closure_arms.Out)))
++  (r1 : _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (c1 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.Bool))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.Aeneas.Std.Usize))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++    ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++    _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)))))
++  := do
++  let (c2, b1, i2, i3, o1) := c1
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r1, c2,
++      b1, i2, i3, o1, back, back1,
++      fun visit =>
++        let (_, c3) := visit
++        let (c4, _) := back2 c3
++        ((r1, c4),
++          fun visit1 =>
++            let (_, c5) := visit
++            let (_, (_, b2, _, _, _)) := visit1
++            let (_, back5) := back2 c5
++            let b3 := back5 (c2, b2, i2, i3, o1)
++            (r, (c, b3, i, i1, o))),
++      fun visit =>
++        let (_, c3) := visit
++        let (c4, _) := back3 c3
++        ((r1, c4),
++          fun visit1 =>
++            let (_, c5) := visit
++            let (_, (_, _, _, i4, _)) := visit1
++            let (_, back5) := back3 c5
++            let i5 := back5 (c2, b1, i2, i4, o1)
++            (r, (c, b, i, i5, o))),
++      fun visit =>
++        let (_, c3) := visit
++        let (c4, _) := back4 c3
++        ((r1, c4),
++          fun visit1 =>
++            let (_, c5) := visit
++            let (_, (_, _, _, _, o2)) := visit1
++            let (_, back5) := back4 c5
++            let o3 := back5 (c2, b1, i2, i3, o2)
++            (r, (c, b, i, i1, o3)))))
++  | some value =>
++    let joined ←
++      match value with
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Type v
++        =>
++        do
++        let (_, model_state2) ←
++          coreopsfunctionFnMutclosureT0closure_1PairSharedExprU8TupleInst.call_mut
++            (r1, (c2, b1, i2, i3, o1)) (v, 0#u8)
++        let call_mut_back :=
++          (fun state_back => (state_back, fun state_back1 => state_back1) :
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++            (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)))
++        let call_mut_back1 :=
++          (fun state_back => (state_back, fun state_back1 => state_back1) :
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++            (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)))
++        let call_mut_back2 :=
++          (fun state_back => (state_back, fun state_back1 => state_back1) :
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++            (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++            _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++            coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)))
++        let (r2, c3) := model_state2
++        let (c4, b2, i4, i5, o2) := c3
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (r2, (c4, b2, i4, i5, o2),
++          model_state1,
++          fun c5 =>
++            let (back5, back6) := back4 c5
++            let (c6, back7) := call_mut_back2 (r2, back5)
++            (c6.#1,
++              fun c7 =>
++                let (_, _, _, _, o3) := c7
++                let (_, (_, _, _, _, o4)) := back7 (r2, (c4, b2, i4, i5, o3))
++                back6 (c2, b1, i2, i3, o4)),
++          fun c5 =>
++            let (back5, back6) := back3 c5
++            let (c6, back7) := call_mut_back1 (r2, back5)
++            (c6.#1,
++              fun c7 =>
++                let (_, _, _, i6, _) := c7
++                let (_, (_, _, _, i7, _)) := back7 (r2, (c4, b2, i4, i6, o2))
++                back6 (c2, b1, i2, i7, o1)),
++          fun c5 =>
++            let (back5, back6) := back2 c5
++            let (c6, back7) := call_mut_back (r2, back5)
++            (c6.#1,
++              fun c7 =>
++                let (_, b3, _, _, _) := c7
++                let (_, (_, b4, _, _, _)) := back7 (r2, (c4, b3, i4, i5, o2))
++                back6 (c2, b4, i2, i3, o1)),
++          fun c5 => let (_, c6) := (r2, c5)
++                    back1 c6, fun r3 => let (r4, _) := (r3, c3)
++                                        back r4) : _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Aeneas.Std.Usize))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Bool))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++          × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Aeneas.Std.Usize))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Bool))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++          × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++      | _root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc _
++        =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (value, model_state1) :
++          _root_.Sum
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Aeneas.Std.Usize))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Bool))) ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          →
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++          × (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++          _root_.Aeneas.Std.core.result.Result _root_.Unit T0)))
++    let (r2, c3, iter1, back5, back6, back7, back8, back9) ←
++      match joined with
++      | _root_.Sum.inl (_, iter2) =>
++        _root_.Aeneas.Std.Result.ok (r1, (c2, b1, i2, i3, o1), iter2,
++          (fun c4 =>
++             let (back10, back11) := back4 c4
++             (back10,
++               fun c5 => let (_, _, _, _, o2) := c5
++                         back11 (c2, b1, i2, i3, o2)) :
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.nested_borrows_closure_shared_closure_arms.Out))),
++          (fun c4 =>
++             let (back10, back11) := back3 c4
++             (back10,
++               fun c5 => let (_, _, _, i4, _) := c5
++                         back11 (c2, b1, i2, i4, o1)) :
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Aeneas.Std.Usize))),
++          (fun c4 =>
++             let (back10, back11) := back2 c4
++             (back10,
++               fun c5 => let (_, b2, _, _, _) := c5
++                         back11 (c2, b2, i2, i3, o1)) :
++          _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          ×
++          (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++          → _root_.Bool))), back1, back)
++      | _root_.Sum.inr (exit, exit1, exit2, exit3, exit4, exit5, exit6, exit7)
++        =>
++        _root_.Aeneas.Std.Result.ok (exit, exit1, exit2, exit3, exit4, exit5,
++          exit6, exit7)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (back9,
++      back8, fun c4 => back7 c4, fun c4 => back6 c4, fun c4 => back5 c4, r2,
++      c3, iter1))
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure::<0, 1, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<2, 3, 4, 5, 6, 7>><2, 3, 4, 5, 6, 7, 8, 9, T0>[TraitClause@0]>]: loop 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 39:8-44:9
++    Visibility: public -/
++@[rust_loop]
++def
++  Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef_loop
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosureT0closure_1PairSharedExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (r : _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  (b : _root_.Bool) (i : _root_.Aeneas.Std.Usize)
++  (i1 : _root_.Aeneas.Std.Usize)
++  (o : _root_.nested_borrows_closure_shared_closure_arms.Out)
++  (back : _root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++  _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (back1 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (back2 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.Bool)))
++  (back3 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.Aeneas.Std.Usize)))
++  (back4 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  → (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++  (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++  _root_.nested_borrows_closure_shared_closure_arms.Out)))
++  (r1 : _root_.Aeneas.Std.core.result.Result _root_.Unit T0)
++  (c1 : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool
++    × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++    _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))))
++  := do
++  loop
++    (fun (back5, back6, back7, back8, back9, r2, c2, iter1) =>
++       _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef_loop.body
++       coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst
++       coreopsfunctionFnMutclosureT0closure_1PairSharedExprU8TupleInst r c b i
++       i1 o back5 back6 back7 back8 back9 r2 c2 iter1 :
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.Bool))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.Aeneas.Std.Usize))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.Bool))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.Aeneas.Std.Usize))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.Out))) ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × _root_.Bool ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++      _root_.nested_borrows_closure_shared_closure_arms.Out ×
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit T0 →
++      _root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst) ×
++      (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst))))))
++    (back, back1, back2, back3, back4, r1, c1, iter)
++
++/-- [nested_borrows_closure_shared_closure_arms::{nested_borrows_closure_shared_closure_arms::Metadata}::visit_expressions::<0, 1, nested_borrows_closure_shared_closure_arms::visit_children::closure::<0, 1, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<2, 3, 4, 5, 6, 7>><2, 3, 4, 5, 6, 7, 8, 9, T0>[TraitClause@0]>]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 38:4-45:5
++    Visibility: public -/
++def
++  Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (coreopsfunctionFnMutclosure23T0closure_1PairShared0ExprU8TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit)
++  (self : _root_.nested_borrows_closure_shared_closure_arms.Metadata)
++  (visit :
++  _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) :
++  _root_.Aeneas.Std.Result
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))))
++  := do
++  let (r, c) := visit
++  let (c1, b, i, i1, o) := c
++  let s :=
++    _root_.Aeneas.Std.alloc.vec.Vec.deref (_root_.Aeneas.Std.NestedVec.toVec
++      self.values)
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let (r1, v, b1, i2, i3, o1, back, back1, back2, back3, back4) ←
++    _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef_loop
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst
++      coreopsfunctionFnMutclosure23T0closure_1PairShared0ExprU8TupleInst r c1 b
++      i i1 o (fun r2 => r2) (fun c2 => c2)
++      (fun c2 => (c2, fun c3 => let (_, b2, _, _, _) := c3
++                                b2))
++      (fun c2 => (c2, fun c3 => let (_, _, _, i4, _) := c3
++                                i4))
++      (fun c2 => (c2, fun c3 => let (_, _, _, _, o2) := c3
++                                o2)) r (c1, b, i, i1, o) iter
++  let back5 :=
++    (fun visit1 => let (r2, _) := visit1
++                   let r3 := back r2
++                   (r3, c) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  let back6 :=
++    (fun visit1 => let (_, c2) := visit1
++                   let c3 := back1 c2
++                   (r, c3) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  _root_.Aeneas.Std.Result.ok ((r1, (v, b1, i2, i3, o1)), back5, back6, back2,
++    back3, back4)
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def
++  visit_children.closure.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple.call_mut
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E))
++  (c : _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++  (tupled_args : (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst))
++  := do
++  let (r, t) := c
++  let (value, _) := tupled_args
++  let b ←
++    _root_.nested_borrows_closure_shared_closure_arms.core.result.Result.is_ok
++      r
++  if b
++  then
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst.call_mut t value
++    let back :=
++      (fun c1 => let (r1, _) := c1
++                 (r1, t) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++    let back1 :=
++      (fun c1 => let (_, t1) := c1
++                 (r, t1) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++    _root_.Aeneas.Std.Result.ok ((), (model_state, model_state1), back, back1)
++  else
++    let back :=
++      (fun c1 => let (r1, _) := c1
++                 (r1, t) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++    let back1 :=
++      (fun c1 => let (_, t1) := c1
++                 (r, t1) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++    _root_.Aeneas.Std.Result.ok ((), c, back, back1)
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def
++  visit_children.closure.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple.call_once
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E))
++  (c : _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++  (p : (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst))
++  := do
++  let (r, t) := c
++  let (_, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple.call_mut
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst c p
++  let c2 := call_mut_back c1
++  let (r1, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, t1) := c3
++  _root_.Aeneas.Std.Result.ok ((), (r1, t), (r, t1))
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++@[reducible]
++def visit_children.closure.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple {E
++  : Type} {T1 : Type} (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E)) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple.call_once
++          coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++@[reducible]
++def visit_children.closure.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple {E :
++  Type} {T1 : Type} (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E)) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure
++  coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple
++    coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple.call_mut
++          coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 48:0-62:1 -/
++def visit_children
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit E))
++  (expr : _root_.nested_borrows_closure_shared_closure_arms.Expr) (visit : T1)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit E)
++  := do
++  match expr with
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Atom _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok ())
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Map map =>
++    let (c, visit_expressions_back, _) ←
++      _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure_specialized_98a9c1eabe8beb8c269604dd2a91c304
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple
++        coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst) map
++        (_root_.Aeneas.Std.core.result.Result.Ok (), visit)
++    let c1 := visit_expressions_back c
++    let (outcome, _) := c1
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch outcome
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok ())
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame E) residual
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::call_mut::<0, 1, 2, 9, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<3, 4, 5, 6, 7, 8>>]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def
++  visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple_specialized_9a6f6c05f493a7fc89705fd3d218fc82.call_mut_specialized_56ddfd2319b7f43079b6eabdaa8697b3
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (c :
++  _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  (tupled_args : (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))))
++  := do
++  let (r, c1) := c
++  let (c2, b, i, i1, o) := c1
++  let (value, _) := tupled_args
++  let b1 ←
++    _root_.nested_borrows_closure_shared_closure_arms.core.result.Result.is_ok
++      r
++  if b1
++  then
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst.call_mut
++        (c2, b, i, i1, o) value
++    let back :=
++      (fun c3 => let (r1, _) := c3
++                 (r1, c1) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++    let back1 :=
++      (fun c3 => let (_, c4) := c3
++                 (r, c4) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++    let back2 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((model_state, c4),
++           fun c5 =>
++             let (_, c6) := c5
++             let (_, b2, _, _, _) :=
++               (model_state1.#0, c6.#1, model_state1.#2, model_state1.#3,
++                 model_state1.#4)
++             (r, (c2, b2, i, i1, o))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    let back3 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((model_state, c4),
++           fun c5 =>
++             let (_, c6) := c5
++             let (_, _, _, i2, _) :=
++               (model_state1.#0, model_state1.#1, model_state1.#2, c6.#3,
++                 model_state1.#4)
++             (r, (c2, b, i, i2, o))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    let back4 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((model_state, c4),
++           fun c5 =>
++             let (_, c6) := c5
++             let (_, _, _, _, o1) :=
++               (model_state1.#0, model_state1.#1, model_state1.#2,
++                 model_state1.#3, c6.#4)
++             (r, (c2, b, i, i1, o1))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    _root_.Aeneas.Std.Result.ok ((), (model_state, model_state1), back, back1,
++      back2, back3, back4)
++  else
++    let back :=
++      (fun c3 => let (r1, _) := c3
++                 (r1, c1) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++    let back1 :=
++      (fun c3 => let (_, c4) := c3
++                 (r, c4) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++    let back2 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((r, c4),
++           fun c5 => let (_, (_, b2, _, _, _)) := c5
++                     (r, (c2, b2, i, i1, o))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    let back3 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((r, c4),
++           fun c5 => let (_, (_, _, _, i2, _)) := c5
++                     (r, (c2, b, i, i2, o))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    let back4 :=
++      (fun c3 =>
++         let (_, c4) := c3
++         ((r, c4),
++           fun c5 => let (_, (_, _, _, _, o1)) := c5
++                     (r, (c2, b, i, i1, o1))) :
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        ((_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)))
++    _root_.Aeneas.Std.Result.ok ((), (r, (c2, b, i, i1, o)), back, back1,
++      back2, back3, back4)
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::call_once::<0, 1, 2, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<3, 4, 5, 6, 7, 8>>]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++def
++  visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple_specialized_b4a155b50dde820bb454be160b9ab847.call_once_specialized_5821af1028ca5267451501f191c4154b
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (c :
++  _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  (p : (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8)) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst))
++  := do
++  let (r, c1) := c
++  let (c2, b, i, i1, o) := c1
++  let (_, c3, call_mut_back, call_mut_back1, call_mut_back2, call_mut_back3,
++    call_mut_back4) ←
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple_specialized_9a6f6c05f493a7fc89705fd3d218fc82.call_mut_specialized_56ddfd2319b7f43079b6eabdaa8697b3
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst (r, (c2,
++      b, i, i1, o)) p
++  let (r1, c4) := c3
++  let (c5, b1, i2, i3, o1) := c4
++  let c6 := call_mut_back c3
++  let (r2, _) := c6
++  let c7 := call_mut_back1 (r1, (c5, b1, i2, i3, o1))
++  let (_, c8) := c7
++  let back :=
++    (fun c9 =>
++       let (_, c10) := c7
++       let (_, c11) := c9
++       let (c12, back1) :=
++         call_mut_back2 (r, (c10.#0, c11.#1, c10.#2, c10.#3, c10.#4))
++       let (_, (_, b2, _, _, _)) := c12
++       let c13 := back1 (r1, (c5, b2, i2, i3, o1))
++       let (_, (_, b3, _, _, _)) := c13
++       (r, (c2, b3, i, i1, o)) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  let back1 :=
++    (fun c9 =>
++       let (_, c10) := c7
++       let (_, c11) := c9
++       let (c12, back2) :=
++         call_mut_back3 (r, (c10.#0, c10.#1, c10.#2, c11.#3, c10.#4))
++       let (_, (_, _, _, i4, _)) := c12
++       let c13 := back2 (r1, (c5, b1, i2, i4, o1))
++       let (_, (_, _, _, i5, _)) := c13
++       (r, (c2, b, i, i5, o)) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  let back2 :=
++    (fun c9 =>
++       let (_, c10) := c7
++       let (_, c11) := c9
++       let (c12, back3) :=
++         call_mut_back4 (r, (c10.#0, c10.#1, c10.#2, c10.#3, c11.#4))
++       let (_, (_, _, _, _, o2)) := c12
++       let c13 := back3 (r1, (c5, b1, i2, i3, o2))
++       let (_, (_, _, _, _, o3)) := c13
++       (r, (c2, b, i, i1, o3)) :
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst →
++      _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  _root_.Aeneas.Std.Result.ok ((), (r2, c1), (r, c8), back, back1, back2)
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::<0, 1, 2, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<3, 4, 5, 6, 7, 8>>]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++@[reducible]
++def
++  visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple_specialized_b4a155b50dde820bb454be160b9ab847
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0)) :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3, captured4) ←
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple_specialized_b4a155b50dde820bb454be160b9ab847.call_once_specialized_5821af1028ca5267451501f191c4154b
++          coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst arg
++          arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let capture_state2 := captured2 arg
++      let capture_state3 := captured3 arg
++      let capture_state4 := captured4 arg
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        ((capture_state1.#1).#0, (capture_state2.#1).#1,
++        (capture_state1.#1).#2, (capture_state3.#1).#3,
++        (capture_state4.#1).#4)))
++}
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::visit_children::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr), u8), ()> for nested_borrows_closure_shared_closure_arms::visit_children::closure<0, 1, E, T1>[TraitClause@0]}::<0, 1, 2, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<3, 4, 5, 6, 7, 8>>]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 53:39-57:13 -/
++@[reducible]
++def
++  visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple_specialized_9a6f6c05f493a7fc89705fd3d218fc82
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0)) :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62
++  coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst)
++  (_root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  _root_.Aeneas.Std.U8) _root_.Unit := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnOncePairSharedExprU8Tuple_specialized_b4a155b50dde820bb454be160b9ab847
++    coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3, captured4,
++        captured5) ←
++        _root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple_specialized_9a6f6c05f493a7fc89705fd3d218fc82.call_mut_specialized_56ddfd2319b7f43079b6eabdaa8697b3
++          coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst arg
++          arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let (c, back) := captured3 captured
++      let capture_state2 := back c
++      let (c1, back1) := captured4 captured
++      let capture_state3 := back1 c1
++      let (c2, back2) := captured5 captured
++      let capture_state4 := back2 c2
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        ((capture_state1.#1).#0, (capture_state2.#1).#1,
++        (capture_state1.#1).#2, (capture_state3.#1).#3,
++        (capture_state4.#1).#4)))
++}
++
++/-- [nested_borrows_closure_shared_closure_arms::visit_children::<0, T0, nested_borrows_closure_shared_closure_arms::analyze::closure#1<1, 2, 3, 4, 5, 6>>]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 48:0-62:1 -/
++def visit_children0T0closure_1_specialized_5f363b19bd503a9372064cbe1483fe04
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit T0))
++  (expr : _root_.nested_borrows_closure_shared_closure_arms.Expr)
++  (visit : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  := do
++  let (c, b, i, i1, o) := visit
++  match expr with
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Atom _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      visit, visit, visit)
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Map map =>
++    let (c1, visit_expressions_back, visit_expressions_back1,
++      visit_expressions_back2, visit_expressions_back3,
++      visit_expressions_back4) ←
++      _root_.nested_borrows_closure_shared_closure_arms.Metadata.visit_expressions01closure23T0closure_1_specialized_a8aee30e1b92d49d5d0e4c681f80b3ef
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst
++        (_root_.nested_borrows_closure_shared_closure_arms.visit_children.closure01T0closure_1_specialized_d4f5ee7f73682a41218245b6f2204f62.Insts.CoreOpsFunctionFnMutPairSharedExprU8Tuple_specialized_9a6f6c05f493a7fc89705fd3d218fc82
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst) map
++        (_root_.Aeneas.Std.core.result.Result.Ok (), (c, b, i, i1, o))
++    let (r, c2) := c1
++    let (c3, b1, i2, i3, o1) := c2
++    let c4 := visit_expressions_back c1
++    let (outcome, _) := c4
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch outcome
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      let c5 := visit_expressions_back1 (r, (c3, b1, i2, i3, o1))
++      let (_, c6) := c5
++      let (c7, back) :=
++        visit_expressions_back2 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c6)
++      let (_, (_, b2, _, _, _)) := c7
++      let c8 := back (r, (c3, b2, i2, i3, o1))
++      let (_, (_, b3, _, _, _)) := c8
++      let (_, c9) := c5
++      let (c10, back1) :=
++        visit_expressions_back3 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c9)
++      let (_, (_, _, _, i4, _)) := c10
++      let c11 := back1 (r, (c3, b1, i2, i4, o1))
++      let (_, (_, _, _, i5, _)) := c11
++      let (_, c12) := c5
++      let (c13, back2) :=
++        visit_expressions_back4 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c12)
++      let (_, (_, _, _, _, o2)) := c13
++      let c14 := back2 (r, (c3, b1, i2, i3, o2))
++      let (_, (_, _, _, _, o3)) := c14
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++        (c, b3, i, i1, o), (c, b, i, i5, o), (c, b, i, i1, o3))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let c5 := visit_expressions_back1 (r, (c3, b1, i2, i3, o1))
++      let (_, c6) := c5
++      let (c7, back) :=
++        visit_expressions_back2 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c6)
++      let (_, (_, b2, _, _, _)) := c7
++      let c8 := back (r, (c3, b2, i2, i3, o1))
++      let (_, (_, b3, _, _, _)) := c8
++      let (_, c9) := c5
++      let (c10, back1) :=
++        visit_expressions_back3 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c9)
++      let (_, (_, _, _, i4, _)) := c10
++      let c11 := back1 (r, (c3, b1, i2, i4, o1))
++      let (_, (_, _, _, i5, _)) := c11
++      let (_, c12) := c5
++      let (c13, back2) :=
++        visit_expressions_back4 (_root_.Aeneas.Std.core.result.Result.Ok (),
++          c12)
++      let (_, (_, _, _, _, o2)) := c13
++      let c14 := back2 (r, (c3, b1, i2, i3, o2))
++      let (_, (_, _, _, _, o3)) := c14
++      _root_.Aeneas.Std.Result.ok (r1, (c, b3, i, i1, o), (c, b, i, i5, o), (c,
++        b, i, i1, o3))
++
++/-- [nested_borrows_closure_shared_closure_arms::leaf]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 70:0-75:1 -/
++def leaf
++  (expr : _root_.nested_borrows_closure_shared_closure_arms.Expr)
++  (summaries : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  match expr with
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Atom n =>
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref summaries
++    _root_.Aeneas.Std.core.slice.Slice.contains
++      _root_.Aeneas.Std.core.cmp.PartialEqU32 s n
++  | _root_.nested_borrows_closure_shared_closure_arms.Expr.Map _ =>
++    _root_.Aeneas.Std.Result.ok false
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::Fn::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}::call]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_d42bc9e37bab50104689534314a20a71.call
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  (tupled_args : (_root_.Bool ×
++  _root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize) ×
++  _root_.nested_borrows_closure_shared_closure_arms.Out)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Bool ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out)
++  := do
++  let (facts, child, p, out) := tupled_args
++  let (parent, index) := p
++  let child_facts ←
++    _root_.nested_borrows_closure_shared_closure_arms.leaf child c
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push out.facts child_facts
++  let i ← parent + index
++  let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add out.nodes i1)
++  _root_.Aeneas.Std.Result.ok ((), _root_.Aeneas.Std.Bool.bitor facts
++    child_facts, { facts := v, nodes := i2 })
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_borrows_closure_shared_closure_arms::analyze::closure#1<0, 1, 2, 3, 4, 5>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 90:38-94:5 -/
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (tupled_args : _root_.nested_borrows_closure_shared_closure_arms.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1) ×
++    (_root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1))
++  := do
++  let (c1, b, i, i1, o) := c
++  let (_, b1, o1) ←
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_d42bc9e37bab50104689534314a20a71.call
++      c1 (b, tupled_args, (i, i1), o)
++  let i2 ← i1 + 1#usize
++  let back :=
++    (fun c2 => let (_, b2, _, _, _) := c2
++               (c1, b2, i, i1, o) :
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  let back1 :=
++    (fun c2 => let (_, _, _, i3, _) := c2
++               (c1, b, i, i3, o) :
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  let back2 :=
++    (fun c2 => let (_, _, _, _, o2) := c2
++               (c1, b, i, i1, o2) :
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 →
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (), (c1,
++    b1, i, i2, o1), back, back1, back2)
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_borrows_closure_shared_closure_arms::analyze::closure#1<0, 1, 2, 3, 4, 5>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 90:38-94:5 -/
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible.call_once
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  (e : _root_.nested_borrows_closure_shared_closure_arms.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1 ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1)
++  := do
++  let (c1, b, i, i1, o) := c
++  let (r, c2, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++      (c1, b, i, i1, o) e
++  let c3 := call_mut_back c2
++  let (_, b1, _, _, _) := c3
++  let c4 := call_mut_back1 c2
++  let (_, _, _, i2, _) := c4
++  let c5 := call_mut_back2 c2
++  let (_, _, _, _, o1) := c5
++  _root_.Aeneas.Std.Result.ok (r, (c1, b1, i, i1, o), (c1, b, i, i2, o), (c1,
++    b, i, i1, o1))
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnOnce<(&'_ (nested_borrows_closure_shared_closure_arms::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_borrows_closure_shared_closure_arms::analyze::closure#1<0, 1, 2, 3, 4, 5>}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 90:38-94:5 -/
++@[reducible]
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit
++  _root_.Aeneas.Std.core.convert.Infallible) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let capture_state2 := captured2
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1, 
++        arg.#2, capture_state1.#3, capture_state2.#4))
++}
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnMut<(&'_ (nested_borrows_closure_shared_closure_arms::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_borrows_closure_shared_closure_arms::analyze::closure#1<0, 1, 2, 3, 4, 5>}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 90:38-94:5 -/
++@[reducible]
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.core.result.Result _root_.Unit
++  _root_.Aeneas.Std.core.convert.Infallible) := {
++  FnOnceInst :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let capture_state2 := captured3 captured
++      _root_.Aeneas.Std.Result.ok (output, (captured.#0, capture_state.#1,
++        captured.#2, capture_state1.#3, capture_state2.#4))
++}
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 81:0-98:1
++    Visibility: public -/
++def analyze
++  (expr : _root_.nested_borrows_closure_shared_closure_arms.Expr)
++  (node : _root_.Aeneas.Std.Usize)
++  (summaries : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (out : _root_.nested_borrows_closure_shared_closure_arms.Out) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out)
++  := do
++  let facts ←
++    _root_.nested_borrows_closure_shared_closure_arms.leaf expr summaries
++  let (_, c, _, c1) ←
++    _root_.nested_borrows_closure_shared_closure_arms.visit_children0T0closure_1_specialized_5f363b19bd503a9372064cbe1483fe04
++      _root_.nested_borrows_closure_shared_closure_arms.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible
++      expr (summaries, facts, node, 0#usize, out)
++  let (_, _, _, _, out1) := c1
++  let (_, facts1, _, _, _) := c
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push out1.facts facts1
++  let i ← lift (_root_.Aeneas.Std.UScalar.cast .U32 node)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add out1.nodes i)
++  _root_.Aeneas.Std.Result.ok (facts1, { facts := v, nodes := i1 })
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_3d305039defc94dbddecc6e3eea4fef3.call_mut
++  (state : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  (args : (_root_.Bool × _root_.nested_borrows_closure_shared_closure_arms.Expr
++  × (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize) ×
++  _root_.nested_borrows_closure_shared_closure_arms.Out)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Bool ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out ×
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  := do
++  let (_, args1, args2) ←
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_d42bc9e37bab50104689534314a20a71.call
++      state args
++  _root_.Aeneas.Std.Result.ok ((), args1, args2, state)
++
++/-- [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}::call_once]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_275f74ec4e2ded5a05341802beca9088.call_once
++  (c : _root_.nested_borrows_closure_shared_closure_arms.analyze.closure)
++  (t : (_root_.Bool × _root_.nested_borrows_closure_shared_closure_arms.Expr ×
++  (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize) ×
++  _root_.nested_borrows_closure_shared_closure_arms.Out)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Bool ×
++    _root_.nested_borrows_closure_shared_closure_arms.Out)
++  := do
++  let (_, b, o, _) ←
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_3d305039defc94dbddecc6e3eea4fef3.call_mut
++      c t
++  _root_.Aeneas.Std.Result.ok ((), b, o)
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_275f74ec4e2ded5a05341802beca9088
++  :
++  _root_.nested_borrows_closure_shared_closure_arms.core.ops.function.FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure _root_.Bool
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++  _root_.nested_borrows_closure_shared_closure_arms.Out _root_.Unit := {
++  call_once :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_275f74ec4e2ded5a05341802beca9088.call_once
++}
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_3d305039defc94dbddecc6e3eea4fef3
++  :
++  _root_.nested_borrows_closure_shared_closure_arms.core.ops.function.FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure _root_.Bool
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++  _root_.nested_borrows_closure_shared_closure_arms.Out _root_.Unit := {
++  FnOnceT0TupleMut0T1T2T3Mut1T4T5_specialized_275f74ec4e2ded5a05341802beca9088Inst
++    :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_275f74ec4e2ded5a05341802beca9088
++  call_mut :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_3d305039defc94dbddecc6e3eea4fef3.call_mut
++}
++
++/-- Trait implementation: [nested_borrows_closure_shared_closure_arms::analyze::{core::ops::function::Fn::<T0, (&0 mut (T1), T2, T3, &1 mut (T4)), T5><'_, '_, bool, &'_ (nested_borrows_closure_shared_closure_arms::Expr), (usize, usize), nested_borrows_closure_shared_closure_arms::Out, ()> for nested_borrows_closure_shared_closure_arms::analyze::closure<0>}]
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 83:22-88:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_d42bc9e37bab50104689534314a20a71
++  :
++  _root_.nested_borrows_closure_shared_closure_arms.core.ops.function.FnT0TupleMut0T1T2T3Mut1T4T5_specialized_d42bc9e37bab50104689534314a20a71
++  _root_.nested_borrows_closure_shared_closure_arms.analyze.closure _root_.Bool
++  _root_.nested_borrows_closure_shared_closure_arms.Expr
++  (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++  _root_.nested_borrows_closure_shared_closure_arms.Out _root_.Unit := {
++  FnMutT0TupleMut0T1T2T3Mut1T4T5_specialized_3d305039defc94dbddecc6e3eea4fef3Inst
++    :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_3d305039defc94dbddecc6e3eea4fef3
++  call :=
++    _root_.nested_borrows_closure_shared_closure_arms.analyze.closure.Insts.CoreOpsFunctionFnTupleMutBoolSharedExprPairUsizeUsizeMutOutTuple_specialized_d42bc9e37bab50104689534314a20a71.call
++}
++
++/-- [nested_borrows_closure_shared_closure_arms::ty]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 100:0-102:1 -/
++def ty
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    _root_.nested_borrows_closure_shared_closure_arms.MetadataValue
++  := do
++  _root_.Aeneas.Std.Result.ok
++    (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Type
++    (_root_.nested_borrows_closure_shared_closure_arms.Expr.Atom n))
++
++/-- [nested_borrows_closure_shared_closure_arms::tree]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 109:0-134:1 -/
++def tree
++  (shape : _root_.Aeneas.Std.U8) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    _root_.nested_borrows_closure_shared_closure_arms.Expr
++  := do
++  let joined ←
++    match shape with
++    | 0#uscalar =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++        (_root_.nested_borrows_closure_shared_closure_arms.Expr.Atom a) :
++        _root_.Sum (_root_.Aeneas.Std.U8 × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++        _root_.nested_borrows_closure_shared_closure_arms.Expr)
++    | 1#uscalar =>
++      do
++      let mv ← _root_.nested_borrows_closure_shared_closure_arms.ty a
++      let values ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) mv
++      let values1 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push values
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc
++          c)
++      let mv1 ← _root_.nested_borrows_closure_shared_closure_arms.ty b
++      let values2 ← _root_.Aeneas.Std.alloc.vec.Vec.push values1 mv1
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (1#u8, values2) : _root_.Sum
++        (_root_.Aeneas.Std.U8 × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++        _root_.nested_borrows_closure_shared_closure_arms.Expr)
++    | 2#uscalar =>
++      do
++      let mv ← _root_.nested_borrows_closure_shared_closure_arms.ty c
++      let inner ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue) mv
++      let values ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc
++          a)
++      let mv1 ← _root_.nested_borrows_closure_shared_closure_arms.ty a
++      let values1 ← _root_.Aeneas.Std.alloc.vec.Vec.push values mv1
++      let values2 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push values1
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Type
++          (_root_.nested_borrows_closure_shared_closure_arms.Expr.Map
++          (_root_.nested_borrows_closure_shared_closure_arms.Metadata.mk
++          (_root_.Aeneas.Std.alloc.vec.Vec.toNested inner))))
++      let values3 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push values2
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc
++          b)
++      let values4 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push values3
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc
++          c)
++      let mv2 ← _root_.nested_borrows_closure_shared_closure_arms.ty b
++      let values5 ← _root_.Aeneas.Std.alloc.vec.Vec.push values4 mv2
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (2#u8, values5) : _root_.Sum
++        (_root_.Aeneas.Std.U8 × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++        _root_.nested_borrows_closure_shared_closure_arms.Expr)
++    | _ =>
++      do
++      let values ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push
++          (_root_.Aeneas.Std.alloc.vec.Vec.new
++          _root_.nested_borrows_closure_shared_closure_arms.MetadataValue)
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Doc
++          a)
++      let values1 ←
++        _root_.Aeneas.Std.alloc.vec.Vec.push values
++          (_root_.nested_borrows_closure_shared_closure_arms.MetadataValue.Loc
++          b)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (shape, values1) : _root_.Sum
++        (_root_.Aeneas.Std.U8 × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_borrows_closure_shared_closure_arms.MetadataValue))
++        _root_.nested_borrows_closure_shared_closure_arms.Expr)
++  match joined with
++  | _root_.Sum.inl (_, values) =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.nested_borrows_closure_shared_closure_arms.Expr.Map
++      (_root_.nested_borrows_closure_shared_closure_arms.Metadata.mk
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested values)))
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [nested_borrows_closure_shared_closure_arms::run_analyze]: loop body 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 155:4-160:5
++    Visibility: public -/
++@[rust_loop_body]
++def run_analyze_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool)
++  (mask : _root_.Aeneas.Std.U32) (bit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done mask)
++  | some f =>
++    let mask1 ←
++      if f
++      then _root_.Aeneas.Std.Result.ok (mask ||| bit)
++      else _root_.Aeneas.Std.Result.ok mask
++    let bit1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul bit 2#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, mask1, bit1))
++
++/-- [nested_borrows_closure_shared_closure_arms::run_analyze]: loop 0:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 155:4-160:5
++    Visibility: public -/
++@[rust_loop]
++def run_analyze_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool)
++  (mask : _root_.Aeneas.Std.U32) (bit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, mask1, bit1) =>
++       _root_.nested_borrows_closure_shared_closure_arms.run_analyze_loop.body
++       iter1 mask1 bit1 : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool)
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Bool) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, mask, bit)
++
++/-- [nested_borrows_closure_shared_closure_arms::run_analyze]:
++    Source: 'tests/src/nested-borrows-closure-shared-closure-arms.rs', lines 141:0-162:1
++    Visibility: public -/
++def run_analyze
++  (shape : _root_.Aeneas.Std.U8) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) (c : _root_.Aeneas.Std.U32)
++  (s0 : _root_.Aeneas.Std.U32) (s1 : _root_.Aeneas.Std.U32)
++  (node : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let e ← _root_.nested_borrows_closure_shared_closure_arms.tree shape a b c
++  let summaries ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) s0
++  let summaries1 ← _root_.Aeneas.Std.alloc.vec.Vec.push summaries s1
++  let (r, o) ←
++    _root_.nested_borrows_closure_shared_closure_arms.analyze e node summaries1
++      {
++        facts := (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Bool),
++        nodes := 0#u32
++      }
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push o.facts true
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let mask ←
++    _root_.nested_borrows_closure_shared_closure_arms.run_analyze_loop iter
++      0#u32 1#u32
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len v
++  let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i)
++  _root_.Aeneas.Std.Result.ok (r, i1, mask, o.nodes)
++
++end nested_borrows_closure_shared_closure_arms
+diff --git a/tests/lean/NestedBorrowsJoinThenLoop.lean b/tests/lean/NestedBorrowsJoinThenLoop.lean
+new file mode 100644
+index 0000000..a0c92e7
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinThenLoop.lean
+@@ -0,0 +1 @@
++import NestedBorrowsJoinThenLoop.Checks
+diff --git a/tests/lean/NestedBorrowsJoinThenLoop/Checks.lean b/tests/lean/NestedBorrowsJoinThenLoop/Checks.lean
+new file mode 100644
+index 0000000..205abee
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinThenLoop/Checks.lean
+@@ -0,0 +1,57 @@
++import NestedBorrowsJoinThenLoop.NestedBorrowsJoinThenLoop
++
++/-! Evaluate the model of `tests/src/nested-borrows-join-then-loop.rs` on
++    the inputs of its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame
++    back. -/
++
++namespace nested_borrows_join_then_loop.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7, 11], ctx := u ctx, pos := us pos }
++
++/-- `run (&mut frame)`; the caller then sets the frame's `ctx` to `set` (if
++    any) and gives the frame back -/
++def onFrame (run : Frame → Result (U32 × Frame × (Frame → Frame)))
++    (ctx pos : Nat) (set : Option Nat := none) : Option (Nat × Nat × Nat) :=
++  match run (frame ctx pos) with
++  | ok (r, f1, back) =>
++    let f1' := match set with
++      | some c => { f1 with ctx := u c }
++      | none => f1
++    some (r.val, (back f1').ctx.val, f1.pos.val)
++  | _ => none
++
++-- join_then_loop_native
++#guard onFrame (run_join_then_loop · true (u 0)) 10 0 == some (3, 13, 1)
++#guard onFrame (run_join_then_loop · true (u 1)) 10 0 == some (3, 13, 1)
++#guard onFrame (run_join_then_loop · true (u 3)) 10 0 == some (15, 25, 3)
++#guard onFrame (run_join_then_loop · true (u 3)) 10 1 == some (23, 33, 4)
++#guard onFrame (run_join_then_loop · false (u 3)) 10 1 == some (0, 10, 1)
++#guard onFrame (run_join_then_loop · true (u 2)) 10 1 (set := some 99) == some (12, 99, 3)
++#guard onFrame (run_join_then_loop · true (u 2)) max 0 == some (8, 7, 2)
++#guard onFrame (run_join_then_loop · true (u 2)) 10 2 == some (18, 28, 4)
++-- join_then_loop_out_of_steps_panics, join_then_loop_join_out_of_steps_panics
++#guard onFrame (run_join_then_loop · true (u 2)) 10 3 == none
++#guard onFrame (run_join_then_loop · true (u 1)) 10 4 == none
++
++-- join_then_loop_write_native
++#guard onFrame (run_join_then_loop_write · true (u 0)) 10 0 == some (3, 113, 1)
++#guard onFrame (run_join_then_loop_write · true (u 3)) 10 0 == some (15, 125, 3)
++#guard onFrame (run_join_then_loop_write · true (u 3)) 10 1 == some (23, 133, 4)
++#guard onFrame (run_join_then_loop_write · false (u 3)) 10 1 == some (0, 10, 1)
++#guard onFrame (run_join_then_loop_write · true (u 2)) 10 1 (set := some 99) == some (12, 99, 3)
++#guard onFrame (run_join_then_loop_write · true (u 2)) max 0 == some (8, 107, 2)
++#guard onFrame (run_join_then_loop_write · true (u 2)) 10 2 == some (18, 128, 4)
++
++end nested_borrows_join_then_loop.checks
+diff --git a/tests/lean/NestedBorrowsJoinThenLoop/NestedBorrowsJoinThenLoop.lean b/tests/lean/NestedBorrowsJoinThenLoop/NestedBorrowsJoinThenLoop.lean
+new file mode 100644
+index 0000000..59574c6
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinThenLoop/NestedBorrowsJoinThenLoop.lean
+@@ -0,0 +1,797 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_join_then_loop]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_join_then_loop
++
++/-- [nested_borrows_join_then_loop::Frame]
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 14:0-18:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- Trait declaration: [core::ops::deref::Deref::<&0 mut (nested_borrows_join_then_loop::Frame<1>), nested_borrows_join_then_loop::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 139:0-139:35
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::Deref<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>"]
++structure
++  core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  where
++  deref : _root_.nested_borrows_join_then_loop.Frame → _root_.Aeneas.Std.Result
++    _root_.nested_borrows_join_then_loop.Frame
++
++/-- [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::deref::<0, 2, nested_borrows_join_then_loop::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 172:4-172:25
++    Name pattern: [core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_join_then_loop::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_join_then_loop::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++  (self : _root_.nested_borrows_join_then_loop.Frame) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_join_then_loop.Frame
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_join_then_loop::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 169:0-169:38
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::Deref<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  :
++  _root_.nested_borrows_join_then_loop.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  := {
++  deref :=
++    _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++}
++
++/-- Trait declaration: [core::ops::deref::DerefMut::<&0 mut (nested_borrows_join_then_loop::Frame<1>), nested_borrows_join_then_loop::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 270:0-270:54
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>"
++  (parentClauses := ["DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst"])]
++structure
++  core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  where
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :
++    _root_.nested_borrows_join_then_loop.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  deref_mut : _root_.nested_borrows_join_then_loop.Frame →
++    _root_.Aeneas.Std.Result (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame) ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame) ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame))))))
++
++/-- [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::deref_mut::<0, 2, nested_borrows_join_then_loop::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 280:4-280:37
++    Name pattern: [core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_join_then_loop::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_join_then_loop::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++  (self : _root_.nested_borrows_join_then_loop.Frame) :
++  _root_.Aeneas.Std.Result (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame) ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame) ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    (_root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame))))))
++  := do
++  let back :=
++    (fun self1 => (self1,
++       fun self2 => ({ self with ctx := self2.ctx },
++         fun f => { self with ctx := f.ctx })) :
++      _root_.nested_borrows_join_then_loop.Frame →
++      (_root_.nested_borrows_join_then_loop.Frame ×
++      (_root_.nested_borrows_join_then_loop.Frame →
++      (_root_.nested_borrows_join_then_loop.Frame ×
++      (_root_.nested_borrows_join_then_loop.Frame →
++      _root_.nested_borrows_join_then_loop.Frame)))))
++  _root_.Aeneas.Std.Result.ok (self, fun self1 => self1, fun self1 => self1,
++    back)
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_join_then_loop::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 279:0-279:41
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_join_then_loop::Frame<'1>, nested_borrows_join_then_loop::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++  :
++  _root_.nested_borrows_join_then_loop.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  := {
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :=
++    _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  deref_mut :=
++    _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++}
++
++/-- [core::option::{core::option::Option<T>}::as_deref_mut::<0, &1 mut (nested_borrows_join_then_loop::Frame<2>), nested_borrows_join_then_loop::Frame<2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1414:4-1416:28
++    Name pattern: [core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_join_then_loop::Frame<'2>, nested_borrows_join_then_loop::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_join_then_loop::Frame<'2>, nested_borrows_join_then_loop::Frame<'2>>"]
++def
++  core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++  (opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst
++  :
++  _root_.nested_borrows_join_then_loop.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5)
++  (self : _root_.Option _root_.nested_borrows_join_then_loop.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => none : _root_.Option _root_.nested_borrows_join_then_loop.Frame
++        → _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++    let back1 :=
++      (fun self1 => none : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame)
++    let back2 :=
++      (fun self1 => (none,
++         fun self2 => (none,
++           fun o => match self with
++                    | none => none
++                    | some f => some f)) : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++        _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++        _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame)))))
++    _root_.Aeneas.Std.Result.ok (none, back, back1, back2)
++  | some f =>
++    let (f1, deref_mut_back, deref_mut_back1, deref_mut_back2) ←
++      opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst.deref_mut
++        f
++    let back :=
++      (fun o =>
++         let f2 := match o with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back f2
++         some f3 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++        _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++    let back1 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back1 f2
++         some f3 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++        _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++    let back2 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f
++         let (f3, _) := deref_mut_back2 f2
++         (some f3,
++           fun self2 =>
++             let f4 := deref_mut_back f1
++             let f5 := match self2 with
++                       | some f6 => f6
++                       | _ => f4
++             let f6 := match self1 with
++                       | some f7 => f7
++                       | _ => f
++             let (_, back3) := deref_mut_back2 f6
++             let (f7, _) := back3 { f4 with ctx := f5.ctx }
++             (some { f1 with ctx := f7.ctx },
++               fun o =>
++                 let f8 := match self2 with
++                           | some f9 => f9
++                           | _ => f1
++                 let f9 := match self1 with
++                           | some f10 => f10
++                           | _ => f
++                 let (_, back4) := deref_mut_back2 f9
++                 let (_, back5) := back4 { f4 with ctx := f8.ctx }
++                 let i :=
++                   match o with
++                   | some (_root_.nested_borrows_join_then_loop.Frame.mk _ i1
++                     _) =>
++                     i1
++                   | _ => f1.ctx
++                 let f10 := back5 { f1 with ctx := i }
++                 match self with
++                 | none => none
++                 | some f11 => some { f11 with ctx := f10.ctx })) :
++        _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++        ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) ×
++        (_root_.Option _root_.nested_borrows_join_then_loop.Frame →
++        ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) ×
++        (_root_.Option _root_.nested_borrows_join_then_loop.Frame →
++        _root_.Option _root_.nested_borrows_join_then_loop.Frame)))))
++    _root_.Aeneas.Std.Result.ok (some f1, back, back1, back2)
++
++/-- [nested_borrows_join_then_loop::{nested_borrows_join_then_loop::Frame<'a>}::advance]:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 21:4-26:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.nested_borrows_join_then_loop.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame))
++  := do
++  let s ← _root_.Aeneas.Std.Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.nested_borrows_join_then_loop.Frame →
++      _root_.nested_borrows_join_then_loop.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [nested_borrows_join_then_loop::join_then_loop]: loop body 0:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 36:4-41:5
++    Visibility: public -/
++@[rust_loop_body]
++def join_then_loop_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++  _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++  _root_.nested_borrows_join_then_loop.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame)))))
++  := do
++  if i < n
++  then
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_join_then_loop.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (execution1, acc1, back2, back3) ←
++      match o with
++      | none =>
++        let execution2 := as_deref_mut_back none
++        _root_.Aeneas.Std.Result.ok (execution2, acc,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 none
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame))))
++      | some f =>
++        do
++        let (i1, f1, advance_back) ←
++          _root_.nested_borrows_join_then_loop.Frame.advance f
++        let acc2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i1)
++        let execution2 := as_deref_mut_back (some f1)
++        _root_.Aeneas.Std.Result.ok (execution2, acc2,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 (some { f with ctx := (advance_back f1).ctx })
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame))))
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back4 => back3 back4, back2, execution1, acc1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (acc, back1
++      execution, fun back2 => back back2))
++
++/-- [nested_borrows_join_then_loop::join_then_loop]: loop 0:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 36:4-41:5
++    Visibility: public -/
++@[rust_loop]
++def join_then_loop_loop
++  (back : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++  _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++  _root_.nested_borrows_join_then_loop.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_join_then_loop.join_then_loop_loop.body n back2
++       back3 execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_join_then_loop::join_then_loop]:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 30:0-43:1
++    Visibility: public -/
++def join_then_loop
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))
++  := do
++  let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++    _root_.nested_borrows_join_then_loop.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++      _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++      execution
++  let (execution1, acc, back, back1) ←
++    match o with
++    | none =>
++      let execution2 := as_deref_mut_back none
++      _root_.Aeneas.Std.Result.ok (execution2, 0#u32,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 none : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame), as_deref_mut_back1)
++    | some f =>
++      do
++      let (acc1, f1, advance_back) ←
++        _root_.nested_borrows_join_then_loop.Frame.advance f
++      let execution2 := as_deref_mut_back (some f1)
++      _root_.Aeneas.Std.Result.ok (execution2, acc1,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 (some { f with ctx := (advance_back f1).ctx }) : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame), as_deref_mut_back1)
++  let (acc1, back2, back3) ←
++    _root_.nested_borrows_join_then_loop.join_then_loop_loop
++      (fun back4 => (back4, back)) back1 execution1 n acc 1#u32
++  let back4 :=
++    (fun execution2 =>
++       let (back5, back6) :=
++         back3
++           (match back2 with
++            | none => none
++            | some f =>
++              match execution2 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back2)
++       let back7 := back6 back5
++       let o1 :=
++         match back7 with
++         | none => none
++         | some f =>
++           match execution2 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => back7
++       match execution with
++       | none => none
++       | some f =>
++         match o1 with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame)
++  _root_.Aeneas.Std.Result.ok (acc1, back2, back4)
++
++/-- [nested_borrows_join_then_loop::join_then_loop_write]: loop body 0:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 52:4-57:5
++    Visibility: public -/
++@[rust_loop_body]
++def join_then_loop_write_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++  _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++  _root_.nested_borrows_join_then_loop.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame)))))
++  := do
++  if i < n
++  then
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_join_then_loop.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (execution1, acc1, back2, back3) ←
++      match o with
++      | none =>
++        let execution2 := as_deref_mut_back none
++        _root_.Aeneas.Std.Result.ok (execution2, acc,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 none
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame))))
++      | some f =>
++        do
++        let (i1, f1, advance_back) ←
++          _root_.nested_borrows_join_then_loop.Frame.advance f
++        let acc2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i1)
++        let execution2 := as_deref_mut_back (some f1)
++        _root_.Aeneas.Std.Result.ok (execution2, acc2,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 (some { f with ctx := (advance_back f1).ctx })
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++          _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++          _root_.nested_borrows_join_then_loop.Frame))))
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back4 => back3 back4, back2, execution1, acc1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1, fun back2 => back back2))
++
++/-- [nested_borrows_join_then_loop::join_then_loop_write]: loop 0:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 52:4-57:5
++    Visibility: public -/
++@[rust_loop]
++def join_then_loop_write_loop
++  (back : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  ((_root_.Option _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++  _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++  _root_.nested_borrows_join_then_loop.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_join_then_loop.Frame →
++  _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_join_then_loop.join_then_loop_write_loop.body n
++       back2 back3 execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → ((_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++      _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++      _root_.nested_borrows_join_then_loop.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_join_then_loop::join_then_loop_write]:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 46:0-62:1
++    Visibility: public -/
++def join_then_loop_write
++  (execution : _root_.Option _root_.nested_borrows_join_then_loop.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame) × (_root_.Option
++    _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++    _root_.nested_borrows_join_then_loop.Frame))
++  := do
++  let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++    _root_.nested_borrows_join_then_loop.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++      _root_.nested_borrows_join_then_loop.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++      execution
++  let (execution1, acc, back, back1) ←
++    match o with
++    | none =>
++      let execution2 := as_deref_mut_back none
++      _root_.Aeneas.Std.Result.ok (execution2, 0#u32,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 none : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame), as_deref_mut_back1)
++    | some f =>
++      do
++      let (acc1, f1, advance_back) ←
++        _root_.nested_borrows_join_then_loop.Frame.advance f
++      let execution2 := as_deref_mut_back (some f1)
++      _root_.Aeneas.Std.Result.ok (execution2, acc1,
++        (fun o1 =>
++           let (_, back2) := as_deref_mut_back2 o1
++           let (_, back3) := back2 o1
++           back3 (some { f with ctx := (advance_back f1).ctx }) : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame), as_deref_mut_back1)
++  let (execution2, acc1, back2, back3) ←
++    _root_.nested_borrows_join_then_loop.join_then_loop_write_loop
++      (fun back4 => (back4, back)) back1 execution1 n acc 1#u32
++  match execution2 with
++  | none =>
++    let execution3 := back2 none
++    let back4 :=
++      (fun execution4 =>
++         let (_, back5) :=
++           back3
++             (match execution3 with
++              | none => none
++              | some f =>
++                match execution4 with
++                | some f1 => some { f with ctx := f1.ctx }
++                | _ => execution3)
++         let back6 := back5 none
++         let o1 :=
++           match back6 with
++           | none => none
++           | some f =>
++             match execution4 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back6
++         match execution with
++         | none => none
++         | some f =>
++           match o1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (acc1, execution3, back4)
++  | some f =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add f.ctx 100#u32)
++    let execution3 := back2 (some { f with ctx := i })
++    let back4 :=
++      (fun execution4 =>
++         let (i1, back5) :=
++           match back3
++             (match execution3 with
++              | none => none
++              | some f1 =>
++                match execution4 with
++                | some f2 => some { f1 with ctx := f2.ctx }
++                | _ => execution3) with
++           | (some (_root_.nested_borrows_join_then_loop.Frame.mk _ i2 _),
++             back6) =>
++             (i2, back6)
++           | _ => (i, back2)
++         let back6 := back5 (some { f with ctx := i1 })
++         let o1 :=
++           match back6 with
++           | none => none
++           | some f1 =>
++             match execution4 with
++             | some f2 => some { f1 with ctx := f2.ctx }
++             | _ => back6
++         match execution with
++         | none => none
++         | some f1 =>
++           match o1 with
++           | some f2 => some { f1 with ctx := f2.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame → _root_.Option
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (acc1, execution3, back4)
++
++/-- [nested_borrows_join_then_loop::run_join_then_loop]:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 64:0-66:1
++    Visibility: public -/
++def run_join_then_loop
++  (f : _root_.nested_borrows_join_then_loop.Frame) (some1 : _root_.Bool)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame))
++  := do
++  if some1
++  then
++    let (i, o, join_then_loop_back) ←
++      _root_.nested_borrows_join_then_loop.join_then_loop (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := join_then_loop_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_join_then_loop.Frame.mk _ i2 _) => i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_join_then_loop.Frame →
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ← _root_.nested_borrows_join_then_loop.join_then_loop none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_join_then_loop.Frame →
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++/-- [nested_borrows_join_then_loop::run_join_then_loop_write]:
++    Source: 'tests/src/nested-borrows-join-then-loop.rs', lines 68:0-70:1
++    Visibility: public -/
++def run_join_then_loop_write
++  (f : _root_.nested_borrows_join_then_loop.Frame) (some1 : _root_.Bool)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_then_loop.Frame ×
++    (_root_.nested_borrows_join_then_loop.Frame →
++    _root_.nested_borrows_join_then_loop.Frame))
++  := do
++  if some1
++  then
++    let (i, o, join_then_loop_write_back) ←
++      _root_.nested_borrows_join_then_loop.join_then_loop_write (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := join_then_loop_write_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_join_then_loop.Frame.mk _ i2 _) => i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_join_then_loop.Frame →
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ←
++      _root_.nested_borrows_join_then_loop.join_then_loop_write none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_join_then_loop.Frame →
++        _root_.nested_borrows_join_then_loop.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++end nested_borrows_join_then_loop
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 5aef2e9..c69d006 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -59,10 +59,12 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsLoopMatchJoin
+ @[default_target] lean_lib NestedBorrowsLoopInnerLoop
+ @[default_target] lean_lib NestedBorrowsLoopThen
++@[default_target] lean_lib NestedBorrowsJoinThenLoop
+ @[default_target] lean_lib NestedBorrowsClosureVisitor
+ @[default_target] lean_lib NestedBorrowsClosureVisitorLoop
+ @[default_target] lean_lib NestedBorrowsClosureVisitorFn
+ @[default_target] lean_lib NestedBorrowsClosureSharedClosure
++@[default_target] lean_lib NestedBorrowsClosureSharedClosureArms
+ @[default_target] lean_lib NestedBorrowsClosureVisitorCalls
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
+diff --git a/tests/src/nested-borrows-closure-shared-closure-arms.rs b/tests/src/nested-borrows-closure-shared-closure-arms.rs
+new file mode 100644
+index 0000000..56cb3d5
+--- /dev/null
++++ b/tests/src/nested-borrows-closure-shared-closure-arms.rs
+@@ -0,0 +1,180 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsClosureSharedClosureArms
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::result::{core::result::Result}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The visit of `Metadata::visit_expressions` (chelis_deep `annotations.rs`,
++//! called by chelis_ir `visit_semantic_expr_children` for
++//! `analyze_tensor_helper_preflight_scoped`) with a visiting closure which
++//! captures, by shared reference, another closure (`merge_child`) which
++//! captures a shared reference (`summaries`), besides mutable borrows of the
++//! caller, over metadata values some of which share an arm (an or-pattern).
++//!
++//! In the loop, the abstraction of the region of the shared reference to
++//! `merge_child` holds, in a field of the ignored loan of the reborrow of the
++//! visiting closure, the ignored shared loan of `merge_child`, which holds the
++//! loan of `summaries` (see `nested-borrows-closure-shared-closure`). The arms
++//! of the match join in three branches (the or-pattern is two edges to one
++//! arm): the join of two of them is matched with the third, whose abstraction
++//! holds the same ignored shared loan, matched through its child.
++
++use std::convert::Infallible;
++
++pub enum Expr {
++    Atom(u32),
++    Map(Box<Metadata>),
++}
++
++pub enum MetadataValue {
++    Type(Expr),
++    Doc(u32),
++    Loc(u32),
++}
++
++pub struct Metadata {
++    pub values: Vec<MetadataValue>,
++}
++
++impl Metadata {
++    pub fn visit_expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr, u8)) {
++        for value in self.values.iter() {
++            match value {
++                MetadataValue::Type(v) => visit(v, 0),
++                MetadataValue::Doc(_) | MetadataValue::Loc(_) => {}
++            }
++        }
++    }
++}
++
++fn visit_children<E>(expr: &Expr, mut visit: impl FnMut(&Expr) -> Result<(), E>) -> Result<(), E> {
++    match expr {
++        Expr::Atom(_) => {}
++        Expr::Map(map) => {
++            let mut outcome = Ok(());
++            map.visit_expressions(&mut |value, _| {
++                if outcome.is_ok() {
++                    outcome = visit(value);
++                }
++            });
++            outcome?;
++        }
++    }
++    Ok(())
++}
++
++pub struct Out {
++    pub facts: Vec<bool>,
++    pub nodes: u32,
++}
++
++/// Whether `expr` is an atom in `summaries`
++fn leaf(expr: &Expr, summaries: &Vec<u32>) -> bool {
++    match expr {
++        Expr::Atom(n) => summaries.contains(n),
++        Expr::Map(_) => false,
++    }
++}
++
++/// Whether `expr` or one of its semantic children (`Metadata::visit_expressions`)
++/// is an atom in `summaries`; pushes the facts of every child to `out.facts`,
++/// then those of `expr`, and sums the node numbers into `out.nodes` (a child is
++/// numbered by the number of `expr` plus its index)
++pub fn analyze(expr: &Expr, node: usize, summaries: &Vec<u32>, out: &mut Out) -> bool {
++    let mut facts = leaf(expr, summaries);
++    let merge_child = |facts: &mut bool, child: &Expr, (parent, index): (usize, usize), out: &mut Out| {
++        let child_facts = leaf(child, summaries);
++        out.facts.push(child_facts);
++        out.nodes = out.nodes.wrapping_add((parent + index) as u32);
++        *facts |= child_facts;
++    };
++    let mut index = 0;
++    let Ok(()) = visit_children(expr, |child| -> Result<(), Infallible> {
++        merge_child(&mut facts, child, (node, index), out);
++        index += 1;
++        Ok(())
++    });
++    out.facts.push(facts);
++    out.nodes = out.nodes.wrapping_add(node as u32);
++    facts
++}
++
++fn ty(n: u32) -> MetadataValue {
++    MetadataValue::Type(Expr::Atom(n))
++}
++
++/// A tree over the atoms `a`, `b`, `c` of the given shape:
++/// - 0: `a`
++/// - 1: `{a, doc, b}`
++/// - 2: `{loc, a, {c}, doc, loc, b}`
++/// - 3: `{doc, loc}`
++fn tree(shape: u8, a: u32, b: u32, c: u32) -> Expr {
++    let mut values = Vec::new();
++    match shape {
++        0 => return Expr::Atom(a),
++        1 => {
++            values.push(ty(a));
++            values.push(MetadataValue::Doc(c));
++            values.push(ty(b));
++        }
++        2 => {
++            let mut inner = Vec::new();
++            inner.push(ty(c));
++            values.push(MetadataValue::Loc(a));
++            values.push(ty(a));
++            values.push(MetadataValue::Type(Expr::Map(Box::new(Metadata { values: inner }))));
++            values.push(MetadataValue::Doc(b));
++            values.push(MetadataValue::Loc(c));
++            values.push(ty(b));
++        }
++        _ => {
++            values.push(MetadataValue::Doc(a));
++            values.push(MetadataValue::Loc(b));
++        }
++    }
++    Expr::Map(Box::new(Metadata { values }))
++}
++
++/// `(result, facts, mask, nodes)` of `analyze` on `tree(shape, a, b, c)` with
++/// the summaries `[s0, s1]`, from node `node`: `facts` is the number of facts
++/// pushed, `mask` their bits (the first one lowest), `nodes` the sum of the
++/// node numbers; the caller then pushes `true` through the borrow given back
++/// by the call (included in `facts` and `mask`)
++pub fn run_analyze(shape: u8, a: u32, b: u32, c: u32, s0: u32, s1: u32, node: usize) -> (bool, u32, u32, u32) {
++    let e = tree(shape, a, b, c);
++    let mut summaries = Vec::new();
++    summaries.push(s0);
++    summaries.push(s1);
++    let mut out = Out { facts: Vec::new(), nodes: 0 };
++    let r = {
++        let o = &mut out;
++        let r = analyze(&e, node, &summaries, o);
++        o.facts.push(true);
++        r
++    };
++    let mut mask = 0u32;
++    let mut bit = 1u32;
++    for f in out.facts.iter() {
++        if *f {
++            mask |= bit;
++        }
++        bit = bit.wrapping_mul(2);
++    }
++    (r, out.facts.len() as u32, mask, out.nodes)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn run_analyze_native() {
++        assert_eq!(run_analyze(0, 5, 0, 0, 5, 7, 3), (true, 2, 3, 3));
++        assert_eq!(run_analyze(0, 6, 0, 0, 5, 7, 3), (false, 2, 2, 3));
++        assert_eq!(run_analyze(1, 1, 2, 3, 2, 9, 0), (true, 4, 14, 1));
++        assert_eq!(run_analyze(1, 1, 2, 3, 8, 9, 4), (false, 4, 8, 13));
++        assert_eq!(run_analyze(2, 1, 2, 3, 3, 9, 0), (false, 5, 16, 3));
++        assert_eq!(run_analyze(2, 1, 2, 3, 2, 1, 10), (true, 5, 29, 43));
++        assert_eq!(run_analyze(2, 4, 5, 6, 7, 8, 1), (false, 5, 16, 7));
++        assert_eq!(run_analyze(3, 1, 2, 3, 1, 2, 6), (false, 2, 2, 6));
++        assert_eq!(run_analyze(3, 1, 2, 3, 9, 9, 0), (false, 2, 2, 0));
++    }
++}
+diff --git a/tests/src/nested-borrows-join-then-loop.rs b/tests/src/nested-borrows-join-then-loop.rs
+new file mode 100644
+index 0000000..89c6e08
+--- /dev/null
++++ b/tests/src/nested-borrows-join-then-loop.rs
+@@ -0,0 +1,131 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsJoinThenLoop
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A match on `execution.as_deref_mut()` (a reborrow of an optional frame
++//! whose field `ctx` borrows the caller), then a loop over the same reborrow:
++//! the loop abstraction of the frame's region is staged at level 1 (the first
++//! stage of `as_deref_mut` in the loop receives the inner borrows of the value
++//! given back to the loop state), and its continuation at the loop entry
++//! applies the continuation of the join before the loop, which is not staged
++//! (its branches applied the first stage of `as_deref_mut` to the values they
++//! give): it routes the values at level 1 unchanged.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++}
++
++/// A join over a reborrow, then a loop advancing the frame
++pub fn join_then_loop(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = match execution.as_deref_mut() {
++        Some(f) => f.advance(),
++        None => 0,
++    };
++    let mut i = 1;
++    while i < n {
++        if let Some(f) = execution.as_deref_mut() {
++            acc = acc.wrapping_add(f.advance());
++        }
++        i += 1;
++    }
++    acc
++}
++
++/// The same, the frame written after the loop
++pub fn join_then_loop_write(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = match execution.as_deref_mut() {
++        Some(f) => f.advance(),
++        None => 0,
++    };
++    let mut i = 1;
++    while i < n {
++        if let Some(f) = execution.as_deref_mut() {
++            acc = acc.wrapping_add(f.advance());
++        }
++        i += 1;
++    }
++    if let Some(f) = execution {
++        *f.ctx = (*f.ctx).wrapping_add(100);
++    }
++    acc
++}
++
++pub fn run_join_then_loop(f: &mut Frame<'_>, some: bool, n: u32) -> u32 {
++    if some { join_then_loop(Some(f), n) } else { join_then_loop(None, n) }
++}
++
++pub fn run_join_then_loop_write(f: &mut Frame<'_>, some: bool, n: u32) -> u32 {
++    if some { join_then_loop_write(Some(f), n) } else { join_then_loop_write(None, n) }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    /// `(result, ctx, pos)` after running `run` on a frame over `steps`, the
++    /// caller then setting the frame's `ctx` to `set` (if any)
++    fn on_frame<R>(
++        ctx: u32,
++        pos: usize,
++        set: Option<u32>,
++        run: impl FnOnce(&mut Frame<'_>) -> R,
++    ) -> (R, u32, usize) {
++        let steps = [3u32, 5, 7, 11];
++        let mut c = ctx;
++        let mut f = Frame { steps: &steps, ctx: &mut c, pos };
++        let r = run(&mut f);
++        if let Some(s) = set {
++            *f.ctx = s;
++        }
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn join_then_loop_native() {
++        let run = |some, n| move |f: &mut Frame<'_>| run_join_then_loop(f, some, n);
++        assert_eq!(on_frame(10, 0, None, run(true, 0)), (3, 13, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 1)), (3, 13, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 3)), (15, 25, 3));
++        assert_eq!(on_frame(10, 1, None, run(true, 3)), (23, 33, 4));
++        assert_eq!(on_frame(10, 1, None, run(false, 3)), (0, 10, 1));
++        assert_eq!(on_frame(10, 1, Some(99), run(true, 2)), (12, 99, 3));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, 2)), (8, 7, 2));
++        assert_eq!(on_frame(10, 2, None, run(true, 2)), (18, 28, 4));
++    }
++
++    #[test]
++    #[should_panic]
++    fn join_then_loop_out_of_steps_panics() {
++        on_frame(10, 3, None, |f| run_join_then_loop(f, true, 2));
++    }
++
++    #[test]
++    #[should_panic]
++    fn join_then_loop_join_out_of_steps_panics() {
++        on_frame(10, 4, None, |f| run_join_then_loop(f, true, 1));
++    }
++
++    #[test]
++    fn join_then_loop_write_native() {
++        let run = |some, n| move |f: &mut Frame<'_>| run_join_then_loop_write(f, some, n);
++        assert_eq!(on_frame(10, 0, None, run(true, 0)), (3, 113, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 3)), (15, 125, 3));
++        assert_eq!(on_frame(10, 1, None, run(true, 3)), (23, 133, 4));
++        assert_eq!(on_frame(10, 1, None, run(false, 3)), (0, 10, 1));
++        assert_eq!(on_frame(10, 1, Some(99), run(true, 2)), (12, 99, 3));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, 2)), (8, 107, 2));
++        assert_eq!(on_frame(10, 2, None, run(true, 2)), (18, 128, 4));
++    }
++}

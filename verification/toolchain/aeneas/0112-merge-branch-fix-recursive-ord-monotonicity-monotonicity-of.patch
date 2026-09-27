@@ -1,0 +1,2863 @@
+# aeneas integration step 112 after cba11f3beb: commit e4acdb8f09582e13884a064732d6bf3fc5976387
+# first parent 4d0a1d0eab893278cfd79e975edc514449b25817, merged 2555c065847b0ebf3c3c21c53cf76a1f0a0c9bfa
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/recursive-ord-monotonicity' (monotonicity of derived comparisons through [T] and Box<T>; Hash for Box<T>)
+
+diff --git a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+index 83745ef..a2fde5e 100644
+--- a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
++++ b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+@@ -192,9 +192,18 @@ def alloc.string.ToStringBlanket {T : Type} (inst : core.fmt.Display T) : alloc.
+ 
+ end Aeneas.Std
+ 
++open Lean in
++/-- `e` without its metadata nodes (definitionally equal to `e`). -/
++private partial def eraseMData (e : Expr) : Expr :=
++  e.replace fun e => if let .mdata _ b := e then some (eraseMData b) else none
++
+ open Lean Meta Elab Tactic in
+ /-- Fallback step of `aeneas_monotonicity`, for a goal `monotone (fun f => c args)` to
+-    which no monotonicity lemma applies. If `c` is a non-recursive definition (e.g. the
++    which no monotonicity lemma applies. If the goal holds metadata, erase it:
++    `monotonicity` only looks through metadata around a whole recursive call, while the
++    recursive function used as a trait method (`{ eq := f }`, marked `_recApp`) ends up
++    at the head of the calls of the trait's default methods (`ne := fun a b => ... f a b`,
++    so `(mdata f) a b`). Otherwise, if `c` is a non-recursive definition (e.g. the
+     derived method of a generic type, called with an instance built from the recursive
+     function `f`), unfold it once; if `c` is a structure projection, reduce it.
+     Recursive definitions (structural, well-founded, `partial_fixpoint`) and matchers
+@@ -205,6 +214,9 @@ elab "aeneas_unfold_monotone" : tactic => do
+     let type ← instantiateMVars (← goal.getType)
+     let_expr Lean.Order.monotone α inst_α β inst_β f := type
+       | throwError "aeneas_unfold_monotone: not a monotonicity goal"
++    if (f.find? Expr.isMData).isSome then
++      return some (← goal.replaceTargetDefEq
++        (mkAppN type.getAppFn #[α, inst_α, β, inst_β, eraseMData f]))
+     let f := f.headBeta
+     unless f.isLambda do throwError "aeneas_unfold_monotone: not a lambda"
+     let some c := f.bindingBody!.getAppFn.constName?
+diff --git a/backends/lean/Aeneas/Std/Core/Hash.lean b/backends/lean/Aeneas/Std/Core/Hash.lean
+index 21c79d1..fb7753f 100644
+--- a/backends/lean/Aeneas/Std/Core/Hash.lean
++++ b/backends/lean/Aeneas/Std/Core/Hash.lean
+@@ -12,4 +12,16 @@ structure core.hash.Hasher (Self : Type) where
+ structure core.hash.Hash (Self : Type) where
+   hash : forall {H : Type}, core.hash.Hasher H → Self → H → Result H
+ 
++/-! `Box<T>` is modeled by `T`: its `Hash` impl hashes the boxed value (`(**self).hash(state)`). -/
++
++@[rust_fun "alloc::boxed::{core::hash::Hash<Box<@T>>}::hash" (keepParams := [true, false, true])]
++def alloc.boxed.HashBox.hash {T : Type} {H : Type} (HashInst : core.hash.Hash T)
++    (HasherInst : core.hash.Hasher H) (x : T) (state : H) : Result H :=
++  HashInst.hash HasherInst x state
++
++@[reducible, rust_trait_impl "core::hash::Hash<Box<@T>>" (keepParams := [true, false])]
++def core.hash.HashBox {T : Type} (HashInst : core.hash.Hash T) : core.hash.Hash T := {
++  hash := fun HasherInst => alloc.boxed.HashBox.hash HashInst HasherInst
++}
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/InstanceMonotonicity.lean b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+index 0fb6e26..3cbc8cb 100644
+--- a/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
++++ b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+@@ -25,7 +25,7 @@ partial_fixpoint
+ so the monotonicity prover needs to know that every such model is monotone in
+ the methods of its instance arguments. The lemmas below state this for the
+ models of the implementations of the derivable traits (`Clone`, `PartialEq`,
+-`Debug`) on containers. Each instance argument is a structure literal whose
++`PartialOrd`, `Ord`, `Debug`) on containers. Each instance argument is a structure literal whose
+ fields all depend on the recursive function `g`; the hypotheses only concern
+ the fields the model calls (e.g. `PartialEq for [T]` compares with `ne`).
+ Each lemma comes in the forms the derived code produces: the model applied to
+@@ -508,6 +508,150 @@ theorem core.array.equality.PartialEqSliceArray.ne.monotone {T U : Type} {N : Us
+ 
+ end PartialEqMono
+ 
++section OrdMono
++
++variable {γ : Type w} [Lean.Order.PartialOrder γ]
++
++/-! The comparisons of `[T]` and `Box<T>` (the derived `PartialOrd`/`Ord` of a type recursive
++    through `Box<[Self]>` or `Box<Self>`): the instance literals carry the fields `PartialOrd`/`Ord`
++    fills in by default (`lt`, ..., `max`, ...); the models only call `partial_cmp`/`cmp`. -/
++
++/-- The element step of `chaining` depends monotonically on `g`. -/
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.chaining.monotone {T B C : Type}
++    (elem : γ → T → T → Result (core.ops.control_flow.ControlFlow B Unit))
++    (len : Nat → Nat → core.ops.control_flow.ControlFlow B C) (xs ys : List T)
++    (hmono : Lean.Order.monotone elem) :
++    Lean.Order.monotone (fun g => core.slice.cmp.chaining (elem g) len xs ys) := by
++  induction xs generalizing ys with
++  | nil => exact monotone_const _
++  | cons x xs ih =>
++    cases ys with
++    | nil => exact monotone_const _
++    | cons y ys =>
++      simp only [core.slice.cmp.chaining]
++      repeat' first
++        | exact ih _
++        | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++        | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialOrdSlice.partial_cmp.apply_monotone {T : Type}
++    (pe : γ → core.cmp.PartialEq T T) (pc : γ → T → T → Result (Option Ordering))
++    (lt le gt ge : γ → T → T → Result Bool)
++    (clt cle cgt cge : γ → T → T → Result (core.ops.control_flow.ControlFlow Bool Unit))
++    (x y : Slice T) (hmono : Lean.Order.monotone pc) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialOrdSlice.partial_cmp
++      { partialEqInst := pe g, partial_cmp := pc g, lt := lt g, le := le g, gt := gt g, ge := ge g,
++        __chaining_lt := clt g, __chaining_le := cle g, __chaining_gt := cgt g,
++        __chaining_ge := cge g } x y) := by
++  simp only [core.slice.cmp.PartialOrdSlice.partial_cmp]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.PartialOrdSlice.partial_cmp.monotone {T : Type}
++    (pe : γ → core.cmp.PartialEq T T) (pc : γ → T → T → Result (Option Ordering))
++    (lt le gt ge : γ → T → T → Result Bool)
++    (clt cle cgt cge : γ → T → T → Result (core.ops.control_flow.ControlFlow Bool Unit))
++    (hmono : Lean.Order.monotone pc) :
++    Lean.Order.monotone (fun g => core.slice.cmp.PartialOrdSlice.partial_cmp
++      { partialEqInst := pe g, partial_cmp := pc g, lt := lt g, le := le g, gt := gt g, ge := ge g,
++        __chaining_lt := clt g, __chaining_le := cle g, __chaining_gt := cgt g,
++        __chaining_ge := cge g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.slice.cmp.PartialOrdSlice.partial_cmp.apply_monotone pe pc lt le gt ge clt cle cgt cge x y
++      hmono
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.OrdSlice.cmp.apply_monotone {T : Type}
++    (eqi : γ → core.cmp.Eq T) (poi : γ → core.cmp.PartialOrd T T) (c : γ → T → T → Result Ordering)
++    (mx mn : γ → T → T → Result T) (cl : γ → T → T → T → Result T)
++    (x y : Slice T) (hmono : Lean.Order.monotone c) :
++    Lean.Order.monotone (fun g => core.slice.cmp.OrdSlice.cmp
++      { eqInst := eqi g, partialOrdInst := poi g, cmp := c g, max := mx g, min := mn g,
++        clamp := cl g } x y) := by
++  simp only [core.slice.cmp.OrdSlice.cmp]
++  repeat' first
++    | exact monotone_apply _ _ (monotone_apply _ _ hmono)
++    | monotonicity
++
++@[partial_fixpoint_monotone]
++theorem core.slice.cmp.OrdSlice.cmp.monotone {T : Type}
++    (eqi : γ → core.cmp.Eq T) (poi : γ → core.cmp.PartialOrd T T) (c : γ → T → T → Result Ordering)
++    (mx mn : γ → T → T → Result T) (cl : γ → T → T → T → Result T)
++    (hmono : Lean.Order.monotone c) :
++    Lean.Order.monotone (fun g => core.slice.cmp.OrdSlice.cmp
++      { eqInst := eqi g, partialOrdInst := poi g, cmp := c g, max := mx g, min := mn g,
++        clamp := cl g }) :=
++  monotone_of_monotone_apply _ fun x => monotone_of_monotone_apply _ fun y =>
++    core.slice.cmp.OrdSlice.cmp.apply_monotone eqi poi c mx mn cl x y hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.PartialOrdBox.partial_cmp.apply_monotone {T : Type}
++    (pe : γ → core.cmp.PartialEq T T) (pc : γ → T → T → Result (Option Ordering))
++    (lt le gt ge : γ → T → T → Result Bool)
++    (clt cle cgt cge : γ → T → T → Result (core.ops.control_flow.ControlFlow Bool Unit))
++    (x y : T) (hmono : Lean.Order.monotone pc) :
++    Lean.Order.monotone (fun g => alloc.boxed.PartialOrdBox.partial_cmp
++      { partialEqInst := pe g, partial_cmp := pc g, lt := lt g, le := le g, gt := gt g, ge := ge g,
++        __chaining_lt := clt g, __chaining_le := cle g, __chaining_gt := cgt g,
++        __chaining_ge := cge g } x y) :=
++  monotone_apply y _ (monotone_apply x _ hmono)
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.PartialOrdBox.partial_cmp.monotone {T : Type}
++    (pe : γ → core.cmp.PartialEq T T) (pc : γ → T → T → Result (Option Ordering))
++    (lt le gt ge : γ → T → T → Result Bool)
++    (clt cle cgt cge : γ → T → T → Result (core.ops.control_flow.ControlFlow Bool Unit))
++    (hmono : Lean.Order.monotone pc) :
++    Lean.Order.monotone (fun g => alloc.boxed.PartialOrdBox.partial_cmp
++      { partialEqInst := pe g, partial_cmp := pc g, lt := lt g, le := le g, gt := gt g, ge := ge g,
++        __chaining_lt := clt g, __chaining_le := cle g, __chaining_gt := cgt g,
++        __chaining_ge := cge g }) :=
++  hmono
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.OrdBox.cmp.apply_monotone {T : Type}
++    (eqi : γ → core.cmp.Eq T) (poi : γ → core.cmp.PartialOrd T T) (c : γ → T → T → Result Ordering)
++    (mx mn : γ → T → T → Result T) (cl : γ → T → T → T → Result T)
++    (x y : T) (hmono : Lean.Order.monotone c) :
++    Lean.Order.monotone (fun g => alloc.boxed.OrdBox.cmp
++      { eqInst := eqi g, partialOrdInst := poi g, cmp := c g, max := mx g, min := mn g,
++        clamp := cl g } x y) :=
++  monotone_apply y _ (monotone_apply x _ hmono)
++
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.OrdBox.cmp.monotone {T : Type}
++    (eqi : γ → core.cmp.Eq T) (poi : γ → core.cmp.PartialOrd T T) (c : γ → T → T → Result Ordering)
++    (mx mn : γ → T → T → Result T) (cl : γ → T → T → T → Result T)
++    (hmono : Lean.Order.monotone c) :
++    Lean.Order.monotone (fun g => alloc.boxed.OrdBox.cmp
++      { eqInst := eqi g, partialOrdInst := poi g, cmp := c g, max := mx g, min := mn g,
++        clamp := cl g }) :=
++  hmono
++
++end OrdMono
++
++section HashMono
++
++variable {γ : Type w} [Lean.Order.PartialOrder γ]
++
++/-- The `Hash` of `Box<T>` (a `Hash` impl recursive through `Box<Self>`, e.g. derived on
++    `enum E { Mul(Box<E>, Box<E>), .. }`): the instance literal's `hash` is generic in the
++    hasher. -/
++@[partial_fixpoint_monotone]
++theorem alloc.boxed.HashBox.hash.apply_monotone {T H : Type}
++    (hash : γ → ∀ {H : Type}, core.hash.Hasher H → T → H → Result H)
++    (hasher : core.hash.Hasher H) (x : T) (state : H) (hmono : Lean.Order.monotone hash) :
++    Lean.Order.monotone (fun g => alloc.boxed.HashBox.hash
++      ({ hash := fun {H'} (hasher' : core.hash.Hasher H') => hash g hasher' } : core.hash.Hash T)
++      hasher x state) :=
++  monotone_apply state _ (monotone_apply x _ (monotone_apply hasher _ (monotone_apply H _ hmono)))
++
++end HashMono
++
+ section DebugMono
+ 
+ open core.fmt
+diff --git a/tests/lean/RecursiveBoxHash.lean b/tests/lean/RecursiveBoxHash.lean
+new file mode 100644
+index 0000000..e7ca334
+--- /dev/null
++++ b/tests/lean/RecursiveBoxHash.lean
+@@ -0,0 +1 @@
++import RecursiveBoxHash.Checks
+diff --git a/tests/lean/RecursiveBoxHash/Checks.lean b/tests/lean/RecursiveBoxHash/Checks.lean
+new file mode 100644
+index 0000000..215a4a7
+--- /dev/null
++++ b/tests/lean/RecursiveBoxHash/Checks.lean
+@@ -0,0 +1,32 @@
++import RecursiveBoxHash.RecursiveBoxHash
++
++/-! Evaluate the model of `tests/src/recursive-box-hash.rs` on the inputs of its
++    `native` test module and compare with the native results. `Dim`'s `hash` is a
++    `partial_fixpoint` which calls the model of `Hash for Box<T>` with an instance
++    built from itself; the hasher is given back through `&mut H` (its `finish`
++    folds the written bytes and the number of writes). -/
++
++namespace recursive_box_hash.checks
++open Aeneas Aeneas.Std Result
++
++def okU64 : Result U64 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++#guard okU64 (box_leaf_hash 5#u8) == some 162001
++#guard okU64 (dim_hash 3#u8 4#u8) == some 8603741549474383393
++#guard okU64 (dim_hash 4#u8 3#u8) == some 8604594439588334393
++#guard okU64 (box_dim_hash 9#u8) == some 59868003
++
++/-! The `Hash` impls are definitions, not axioms. -/
++
++/-- info: 'recursive_box_hash.dim_hash' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms dim_hash
++
++/-- info: 'recursive_box_hash.box_dim_hash' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms box_dim_hash
++
++/-- info: 'recursive_box_hash.box_leaf_hash' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms box_leaf_hash
++
++end recursive_box_hash.checks
+diff --git a/tests/lean/RecursiveBoxHash/RecursiveBoxHash.lean b/tests/lean/RecursiveBoxHash/RecursiveBoxHash.lean
+new file mode 100644
+index 0000000..c8232d4
+--- /dev/null
++++ b/tests/lean/RecursiveBoxHash/RecursiveBoxHash.lean
+@@ -0,0 +1,238 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [recursive_box_hash]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace recursive_box_hash
++
++/-- [recursive_box_hash::Fold]
++    Source: 'tests/src/recursive-box-hash.rs', lines 17:0-20:1
++    Visibility: public -/
++structure Fold where
++  acc : _root_.Aeneas.Std.U64
++  writes : _root_.Aeneas.Std.U32
++
++/-- [recursive_box_hash::{core::hash::Hasher for recursive_box_hash::Fold}::write]: loop body 0:
++    Source: 'tests/src/recursive-box-hash.rs', lines 29:8-32:9
++    Visibility: public -/
++@[rust_loop_body]
++def Fold.Insts.CoreHashHasher.write_loop.body
++  (bytes : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8)
++  (self : _root_.recursive_box_hash.Fold) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.recursive_box_hash.Fold × _root_.Aeneas.Std.Usize)
++    _root_.recursive_box_hash.Fold)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len bytes
++  if i < i1
++  then
++    let i2 ← lift (core.num.U64.wrapping_mul self.acc 31#u64)
++    let i3 ← Slice.index_usize bytes i
++    let i4 ← lift (UScalar.cast .U64 i3)
++    let i5 ← lift (core.num.U64.wrapping_add i2 i4)
++    let i6 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      ({ self with acc := i5 }, i6))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done self)
++
++/-- [recursive_box_hash::{core::hash::Hasher for recursive_box_hash::Fold}::write]: loop 0:
++    Source: 'tests/src/recursive-box-hash.rs', lines 29:8-32:9
++    Visibility: public -/
++@[rust_loop]
++def Fold.Insts.CoreHashHasher.write_loop
++  (self : _root_.recursive_box_hash.Fold)
++  (bytes : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.recursive_box_hash.Fold
++  := do
++  loop
++    (fun (self1, i1) =>
++       _root_.recursive_box_hash.Fold.Insts.CoreHashHasher.write_loop.body
++       bytes self1 i1 : (_root_.recursive_box_hash.Fold ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.recursive_box_hash.Fold ×
++      _root_.Aeneas.Std.Usize) _root_.recursive_box_hash.Fold))
++    (self, i)
++
++/-- [recursive_box_hash::{core::hash::Hasher for recursive_box_hash::Fold}::write]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 27:4-34:5
++    Visibility: public -/
++def Fold.Insts.CoreHashHasher.write
++  (self : _root_.recursive_box_hash.Fold)
++  (bytes : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.recursive_box_hash.Fold
++  := do
++  let self1 ←
++    _root_.recursive_box_hash.Fold.Insts.CoreHashHasher.write_loop self bytes
++      0#usize
++  let i ← self1.writes + 1#u32
++  _root_.Aeneas.Std.Result.ok { self1 with writes := i }
++
++/-- [recursive_box_hash::{core::hash::Hasher for recursive_box_hash::Fold}::finish]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 23:4-25:5
++    Visibility: public -/
++def Fold.Insts.CoreHashHasher.finish
++  (self : _root_.recursive_box_hash.Fold) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let i ← lift (core.num.U64.wrapping_mul self.acc 1000#u64)
++  let i1 ← lift (UScalar.cast .U64 self.writes)
++  _root_.Aeneas.Std.Result.ok (core.num.U64.wrapping_add i i1)
++
++/-- Trait implementation: [recursive_box_hash::{core::hash::Hasher for recursive_box_hash::Fold}]
++    Source: 'tests/src/recursive-box-hash.rs', lines 22:0-35:1 -/
++@[reducible]
++def Fold.Insts.CoreHashHasher : _root_.Aeneas.Std.core.hash.Hasher
++  _root_.recursive_box_hash.Fold := {
++  finish := _root_.recursive_box_hash.Fold.Insts.CoreHashHasher.finish
++  write := _root_.recursive_box_hash.Fold.Insts.CoreHashHasher.write
++}
++
++/-- [recursive_box_hash::Leaf]
++    Source: 'tests/src/recursive-box-hash.rs', lines 37:0-37:24
++    Visibility: public -/
++@[reducible]
++def Leaf := _root_.Aeneas.Std.U8
++
++/-- [recursive_box_hash::{core::hash::Hash for recursive_box_hash::Leaf}::hash]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 40:4-42:5
++    Visibility: public -/
++def Leaf.Insts.CoreHashHash.hash
++  {H : Type} (corehashHasherInst : _root_.Aeneas.Std.core.hash.Hasher H)
++  (self : _root_.recursive_box_hash.Leaf) (state : H) :
++  _root_.Aeneas.Std.Result H
++  := do
++  let s ←
++    lift (Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ self, 7#u8 ]))
++  corehashHasherInst.write state s
++
++/-- Trait implementation: [recursive_box_hash::{core::hash::Hash for recursive_box_hash::Leaf}]
++    Source: 'tests/src/recursive-box-hash.rs', lines 39:0-43:1 -/
++@[reducible]
++def Leaf.Insts.CoreHashHash : _root_.Aeneas.Std.core.hash.Hash
++  _root_.recursive_box_hash.Leaf := {
++  hash := fun {H : Type} (corehashHasherInst :
++    _root_.Aeneas.Std.core.hash.Hasher H) =>
++    _root_.recursive_box_hash.Leaf.Insts.CoreHashHash.hash corehashHasherInst
++}
++
++/-- [recursive_box_hash::Dim]
++    Source: 'tests/src/recursive-box-hash.rs', lines 45:0-49:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Dim where
++| Lit : _root_.recursive_box_hash.Leaf → Dim
++| Mul : Dim → Dim → Dim
++| Neg : Dim → Dim
++
++/-- [recursive_box_hash::{core::hash::Hash for recursive_box_hash::Dim}::hash]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 52:4-68:5
++    Visibility: public -/
++def Dim.Insts.CoreHashHash.hash
++  {H : Type} (corehashHasherInst : _root_.Aeneas.Std.core.hash.Hasher H)
++  (self : _root_.recursive_box_hash.Dim) (state : H) :
++  _root_.Aeneas.Std.Result H
++  := do
++  match self with
++  | _root_.recursive_box_hash.Dim.Lit leaf =>
++    let s ←
++      lift (Array.to_slice (_root_.Aeneas.Std.Array.make 1#usize [ 0#u8 ]))
++    let state1 ← corehashHasherInst.write state s
++    _root_.recursive_box_hash.Leaf.Insts.CoreHashHash.hash corehashHasherInst
++      leaf state1
++  | _root_.recursive_box_hash.Dim.Mul a b =>
++    let s ←
++      lift (Array.to_slice (_root_.Aeneas.Std.Array.make 1#usize [ 1#u8 ]))
++    let state1 ← corehashHasherInst.write state s
++    let state2 ←
++      _root_.Aeneas.Std.alloc.boxed.HashBox.hash
++        ({
++            hash := fun {H1 : Type} (corehashHasherInst1 :
++              _root_.Aeneas.Std.core.hash.Hasher H1) =>
++              Dim.Insts.CoreHashHash.hash corehashHasherInst1 } :
++          _root_.Aeneas.Std.core.hash.Hash _root_.recursive_box_hash.Dim)
++        corehashHasherInst a state1
++    _root_.Aeneas.Std.alloc.boxed.HashBox.hash
++      ({
++          hash := fun {H1 : Type} (corehashHasherInst1 :
++            _root_.Aeneas.Std.core.hash.Hasher H1) =>
++            Dim.Insts.CoreHashHash.hash corehashHasherInst1 } :
++        _root_.Aeneas.Std.core.hash.Hash _root_.recursive_box_hash.Dim)
++      corehashHasherInst b state2
++  | _root_.recursive_box_hash.Dim.Neg a =>
++    let s ←
++      lift (Array.to_slice (_root_.Aeneas.Std.Array.make 1#usize [ 2#u8 ]))
++    let state1 ← corehashHasherInst.write state s
++    _root_.Aeneas.Std.alloc.boxed.HashBox.hash
++      ({
++          hash := fun {H1 : Type} (corehashHasherInst1 :
++            _root_.Aeneas.Std.core.hash.Hasher H1) =>
++            Dim.Insts.CoreHashHash.hash corehashHasherInst1 } :
++        _root_.Aeneas.Std.core.hash.Hash _root_.recursive_box_hash.Dim)
++      corehashHasherInst a state1
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_box_hash::{core::hash::Hash for recursive_box_hash::Dim}]
++    Source: 'tests/src/recursive-box-hash.rs', lines 51:0-69:1 -/
++@[reducible]
++def Dim.Insts.CoreHashHash : _root_.Aeneas.Std.core.hash.Hash
++  _root_.recursive_box_hash.Dim := {
++  hash := fun {H : Type} (corehashHasherInst :
++    _root_.Aeneas.Std.core.hash.Hasher H) =>
++    _root_.recursive_box_hash.Dim.Insts.CoreHashHash.hash corehashHasherInst
++}
++
++/-- [recursive_box_hash::hash_of]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 71:0-75:1
++    Visibility: public -/
++def hash_of
++  {T : Type} (corehashHashInst : _root_.Aeneas.Std.core.hash.Hash T) (x : T) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let state ←
++    corehashHashInst.hash _root_.recursive_box_hash.Fold.Insts.CoreHashHasher x
++      { acc := 0#u64, writes := 0#u32 }
++  _root_.recursive_box_hash.Fold.Insts.CoreHashHasher.finish state
++
++/-- [recursive_box_hash::box_leaf_hash]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 78:0-80:1
++    Visibility: public -/
++def box_leaf_hash
++  (n : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  _root_.recursive_box_hash.hash_of (_root_.Aeneas.Std.core.hash.HashBox
++    _root_.recursive_box_hash.Leaf.Insts.CoreHashHash) n
++
++/-- [recursive_box_hash::dim_hash]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 82:0-91:1
++    Visibility: public -/
++def dim_hash
++  (a : _root_.Aeneas.Std.U8) (b : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  _root_.recursive_box_hash.hash_of
++    _root_.recursive_box_hash.Dim.Insts.CoreHashHash
++    (_root_.recursive_box_hash.Dim.Mul (_root_.recursive_box_hash.Dim.Neg
++    (_root_.recursive_box_hash.Dim.Lit a)) (_root_.recursive_box_hash.Dim.Mul
++    (_root_.recursive_box_hash.Dim.Lit b) (_root_.recursive_box_hash.Dim.Lit
++    a)))
++
++/-- [recursive_box_hash::box_dim_hash]:
++    Source: 'tests/src/recursive-box-hash.rs', lines 94:0-96:1
++    Visibility: public -/
++def box_dim_hash
++  (a : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  _root_.recursive_box_hash.hash_of (_root_.Aeneas.Std.core.hash.HashBox
++    _root_.recursive_box_hash.Dim.Insts.CoreHashHash)
++    (_root_.recursive_box_hash.Dim.Neg (_root_.recursive_box_hash.Dim.Lit a))
++
++end recursive_box_hash
+diff --git a/tests/lean/RecursiveOrdDerives.lean b/tests/lean/RecursiveOrdDerives.lean
+new file mode 100644
+index 0000000..5486f24
+--- /dev/null
++++ b/tests/lean/RecursiveOrdDerives.lean
+@@ -0,0 +1 @@
++import RecursiveOrdDerives.Checks
+diff --git a/tests/lean/RecursiveOrdDerives/Checks.lean b/tests/lean/RecursiveOrdDerives/Checks.lean
+new file mode 100644
+index 0000000..f16086e
+--- /dev/null
++++ b/tests/lean/RecursiveOrdDerives/Checks.lean
+@@ -0,0 +1,88 @@
++import RecursiveOrdDerives.RecursiveOrdDerives
++
++/-! Evaluate the model of `tests/src/recursive-ord-derives.rs` on the inputs of
++    its `native` test module and compare with the native results. The derived
++    `PartialEq`, `PartialOrd`, `Ord` (and `Clone`, `Debug`) methods of
++    `Canonical` are `partial_fixpoint`s which recurse through the models of the
++    comparisons of `[T]` and `Box<T>`; `sort`, `dedup` and `max`/`min` call them.
++    The sorted and deduplicated vectors are the values given back through
++    `&mut [T]`/`&mut Vec<T>`. -/
++
++namespace recursive_ord_derives.checks
++open Aeneas Aeneas.Std Result
++
++def okString : Result String → Option String
++  | ok s => some s
++  | _ => none
++
++def okRow : Result (alloc.vec.Vec U32) → Option (List Nat)
++  | ok v => some (v.val.map (·.val))
++  | _ => none
++
++#guard okString (sorted_debug 4#u64 9#u64) == some (
++  "[Literal(4), Literal(9), Source(Axis { scope: 9, load: 7, axis: 0 }), Source(Scalar { " ++
++  "scope: 4, node: 1 }), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), " ++
++  "Literal(9)]), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9)]), " ++
++  "Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9), Source(Scalar { scope: " ++
++  "4, node: 3 })]), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), " ++
++  "Product([Literal(4)])]), ExactQuotient { dividend: Source(Axis { scope: 4, load: 2, " ++
++  "axis: 0 }), divisor: Literal(4) }, ExactQuotient { dividend: Source(Axis { scope: 4, " ++
++  "load: 2, axis: 0 }), divisor: Literal(9) }]")
++#guard okString (sorted_debug 9#u64 4#u64) == some (
++  "[Literal(4), Literal(9), Source(Axis { scope: 4, load: 7, axis: 0 }), Source(Scalar { " ++
++  "scope: 9, node: 1 }), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), " ++
++  "Literal(4)]), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Literal(4)]), " ++
++  "Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Literal(4), Source(Scalar { scope: " ++
++  "9, node: 3 })]), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), " ++
++  "Product([Literal(9)])]), ExactQuotient { dividend: Source(Axis { scope: 9, load: 2, " ++
++  "axis: 0 }), divisor: Literal(4) }, ExactQuotient { dividend: Source(Axis { scope: 9, " ++
++  "load: 2, axis: 0 }), divisor: Literal(9) }]")
++
++/-! `cmp`, `partial_cmp`, `==`, `!=`, `lt`, `ge` of every pair of `sample 4 9`, one row per left operand. -/
++#guard okRow (compare_row 4#u64 9#u64 0#usize) ==
++  some [221001, 330101, 330101, 330101, 330101, 330101, 330101, 330101, 330101, 330101]
++#guard okRow (compare_row 4#u64 9#u64 1#usize) ==
++  some [110110, 221001, 330101, 330101, 330101, 110110, 110110, 330101, 330101, 330101]
++#guard okRow (compare_row 4#u64 9#u64 2#usize) ==
++  some [110110, 110110, 221001, 110110, 110110, 110110, 110110, 110110, 330101, 110110]
++#guard okRow (compare_row 4#u64 9#u64 3#usize) ==
++  some [110110, 110110, 330101, 221001, 330101, 110110, 110110, 330101, 330101, 221001]
++#guard okRow (compare_row 4#u64 9#u64 4#usize) ==
++  some [110110, 110110, 330101, 110110, 221001, 110110, 110110, 330101, 330101, 110110]
++#guard okRow (compare_row 4#u64 9#u64 5#usize) ==
++  some [110110, 330101, 330101, 330101, 330101, 221001, 330101, 330101, 330101, 330101]
++#guard okRow (compare_row 4#u64 9#u64 6#usize) ==
++  some [110110, 330101, 330101, 330101, 330101, 110110, 221001, 330101, 330101, 330101]
++#guard okRow (compare_row 4#u64 9#u64 7#usize) ==
++  some [110110, 110110, 330101, 110110, 110110, 110110, 110110, 221001, 330101, 110110]
++#guard okRow (compare_row 4#u64 9#u64 8#usize) ==
++  some [110110, 110110, 110110, 110110, 110110, 110110, 110110, 110110, 221001, 110110]
++#guard okRow (compare_row 4#u64 9#u64 9#usize) ==
++  some [110110, 110110, 330101, 221001, 330101, 110110, 110110, 330101, 330101, 221001]
++
++#guard okString (clone_max_min 4#u64 9#u64) == some (
++  "true Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9), Source(Scalar { " ++
++  "scope: 4, node: 3 })]) Product([Source(Axis { scope: 4, load: 1, axis: 0 }), " ++
++  "Literal(9)])")
++#guard okString (validity_debug 4#u64 9#u64) == some (
++  "4 Validity { obligations: [NonZero(Product([Literal(9), Source(Scalar { scope: 4, node: " ++
++  "1 })])), NonZero(ExactQuotient { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), " ++
++  "divisor: Literal(9) }), DividesEvenly { dividend: Source(Axis { scope: 4, load: 2, axis: " ++
++  "0 }), divisor: Literal(9) }, DividesEvenly { dividend: Source(Axis { scope: 4, load: 2, " ++
++  "axis: 0 }), divisor: Product([Literal(9), Source(Scalar { scope: 4, node: 1 })]) }] }")
++
++/-! The derived methods are definitions, not axioms. -/
++
++/-- info: 'recursive_ord_derives.sorted_debug' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms sorted_debug
++
++/-- info: 'recursive_ord_derives.compare_row' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms compare_row
++
++/-- info: 'recursive_ord_derives.clone_max_min' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms clone_max_min
++
++/-- info: 'recursive_ord_derives.validity_debug' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms validity_debug
++
++end recursive_ord_derives.checks
+diff --git a/tests/lean/RecursiveOrdDerives/RecursiveOrdDerives.lean b/tests/lean/RecursiveOrdDerives/RecursiveOrdDerives.lean
+new file mode 100644
+index 0000000..a10dff3
+--- /dev/null
++++ b/tests/lean/RecursiveOrdDerives/RecursiveOrdDerives.lean
+@@ -0,0 +1,1875 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [recursive_ord_derives]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace recursive_ord_derives
++
++/-- [recursive_ord_derives::Source]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 17:0-20:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Source where
++| Axis :
++  _root_.Aeneas.Std.U64 →
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Usize →
++  Source
++| Scalar : _root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U32 → Source
++
++/-- [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Source}::clone]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:9-16:14
++    Visibility: public -/
++def Source.Insts.CoreCloneClone.clone
++  (self : _root_.recursive_ord_derives.Source) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Source
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:9-16:14 -/
++@[reducible]
++def Source.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.recursive_ord_derives.Source := {
++  clone := _root_.recursive_ord_derives.Source.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [recursive_ord_derives::{core::marker::Copy for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:16-16:20 -/
++@[reducible]
++def Source.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.recursive_ord_derives.Source := {
++  cloneInst := _root_.recursive_ord_derives.Source.Insts.CoreCloneClone
++}
++
++/-- [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Source}::fmt]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:22-16:27
++    Visibility: public -/
++def Source.Insts.CoreFmtDebug.fmt
++  (self : _root_.recursive_ord_derives.Source)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.recursive_ord_derives.Source.Axis __self_0 __self_1 __self_2 =>
++    let __self_01 := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU64 __self_0
++    let __self_11 := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU32 __self_1
++    let __self_21 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugUsize) __self_2
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field3_finish f
++      (_root_.Aeneas.Std.toStr "Axis") (_root_.Aeneas.Std.toStr "scope")
++      __self_01 (_root_.Aeneas.Std.toStr "load") __self_11
++      (_root_.Aeneas.Std.toStr "axis") __self_21
++  | _root_.recursive_ord_derives.Source.Scalar __self_0 __self_1 =>
++    let __self_01 := Dyn.mk _ _root_.Aeneas.Std.core.fmt.DebugU64 __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU32) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++      (_root_.Aeneas.Std.toStr "Scalar") (_root_.Aeneas.Std.toStr "scope")
++      __self_01 (_root_.Aeneas.Std.toStr "node") __self_11
++
++/-- Trait implementation: [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:22-16:27 -/
++@[reducible]
++def Source.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.recursive_ord_derives.Source := {
++  fmt := _root_.recursive_ord_derives.Source.Insts.CoreFmtDebug.fmt
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Source> for recursive_ord_derives::Source}::eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:38-16:47
++    Visibility: public -/
++def Source.Insts.CoreCmpPartialEqSource.eq
++  (self : _root_.recursive_ord_derives.Source)
++  (other : _root_.recursive_ord_derives.Source) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.recursive_ord_derives.Source.Axis __self_0 __self_1 __self_2 =>
++      match other with
++      | _root_.recursive_ord_derives.Source.Axis __arg1_0 __arg1_1 __arg1_2 =>
++        let b ←
++          _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++            core.cmp.PartialEqU64 __self_0 __arg1_0
++        if b
++        then
++          let b1 ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqU32 __self_1 __arg1_1
++          if b1
++          then
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqUsize __self_2 __arg1_2
++          else _root_.Aeneas.Std.Result.ok false
++        else _root_.Aeneas.Std.Result.ok false
++      | _root_.recursive_ord_derives.Source.Scalar _ _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.recursive_ord_derives.Source.Scalar __self_0 __self_1 =>
++      match other with
++      | _root_.recursive_ord_derives.Source.Axis _ _ _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.recursive_ord_derives.Source.Scalar __arg1_0 __arg1_1 =>
++        let b ←
++          _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++            core.cmp.PartialEqU64 __self_0 __arg1_0
++        if b
++        then
++          _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++            core.cmp.PartialEqU32 __self_1 __arg1_1
++        else _root_.Aeneas.Std.Result.ok false
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Source> for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:38-16:47 -/
++@[reducible]
++def Source.Insts.CoreCmpPartialEqSource : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.recursive_ord_derives.Source _root_.recursive_ord_derives.Source := {
++  eq := _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialEqSource.eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Source}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:29-16:31
++    Visibility: public -/
++def Source.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.recursive_ord_derives.Source) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:29-16:31 -/
++@[reducible]
++def Source.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.recursive_ord_derives.Source := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialEqSource
++  assert_receiver_is_total_eq :=
++    _root_.recursive_ord_derives.Source.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Source> for recursive_ord_derives::Source}::partial_cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:49-16:59
++    Visibility: public -/
++def Source.Insts.CoreCmpPartialOrdSource.partial_cmp
++  (self : _root_.recursive_ord_derives.Source)
++  (other : _root_.recursive_ord_derives.Source) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Ordering)
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  match self with
++  | _root_.recursive_ord_derives.Source.Axis __self_0 __self_1 __self_2 =>
++    match other with
++    | _root_.recursive_ord_derives.Source.Axis __arg1_0 __arg1_1 __arg1_2 =>
++      let o ←
++        lift (core.cmp.impls.PartialOrdU64.partial_cmp __self_0 __arg1_0)
++      match o with
++      | none => _root_.Aeneas.Std.Result.ok none
++      | some o1 =>
++        let joined ←
++          match o1 with
++          | _root_.Ordering.lt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++          | _root_.Ordering.eq =>
++            do
++            let o2 ←
++              lift (core.cmp.impls.PartialOrdU32.partial_cmp __self_1 __arg1_1)
++            match o2 with
++            | none =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr none : _root_.Sum
++                _root_.Ordering (_root_.Option _root_.Ordering))
++            | some o3 =>
++              let joined1 ←
++                match o3 with
++                | _root_.Ordering.lt =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                    _root_.Ordering.lt : _root_.Sum _root_.Ordering (_root_.Sum
++                    _root_.Ordering (_root_.Option _root_.Ordering)))
++                | _root_.Ordering.eq =>
++                  do
++                  let o4 ←
++                    lift (core.cmp.impls.PartialOrdUsize.partial_cmp __self_2
++                      __arg1_2)
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                    o4) : _root_.Sum _root_.Ordering (_root_.Sum
++                    _root_.Ordering (_root_.Option _root_.Ordering)))
++                | _root_.Ordering.gt =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                    _root_.Ordering.gt : _root_.Sum _root_.Ordering (_root_.Sum
++                    _root_.Ordering (_root_.Option _root_.Ordering)))
++              match joined1 with
++              | _root_.Sum.inl o4 =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some o4) :
++                  _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++              | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++          | _root_.Ordering.gt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++        match joined with
++        | _root_.Sum.inl o2 => _root_.Aeneas.Std.Result.ok (some o2)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.recursive_ord_derives.Source.Scalar _ _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++  | _root_.recursive_ord_derives.Source.Scalar __self_0 __self_1 =>
++    match other with
++    | _root_.recursive_ord_derives.Source.Axis _ _ _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.recursive_ord_derives.Source.Scalar __arg1_0 __arg1_1 =>
++      let o ←
++        lift (core.cmp.impls.PartialOrdU64.partial_cmp __self_0 __arg1_0)
++      match o with
++      | none => _root_.Aeneas.Std.Result.ok none
++      | some o1 =>
++        let joined ←
++          match o1 with
++          | _root_.Ordering.lt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++          | _root_.Ordering.eq =>
++            do
++            let o2 ←
++              lift (core.cmp.impls.PartialOrdU32.partial_cmp __self_1 __arg1_1)
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr o2 : _root_.Sum
++              _root_.Ordering (_root_.Option _root_.Ordering))
++          | _root_.Ordering.gt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++        match joined with
++        | _root_.Sum.inl o2 => _root_.Aeneas.Std.Result.ok (some o2)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Source> for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:49-16:59 -/
++@[reducible]
++def Source.Insts.CoreCmpPartialOrdSource :
++  _root_.Aeneas.Std.core.cmp.PartialOrd _root_.recursive_ord_derives.Source
++  _root_.recursive_ord_derives.Source := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialEqSource
++  partial_cmp :=
++    _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialOrdSource.partial_cmp
++}
++
++/-- [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Source}::cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:33-16:36
++    Visibility: public -/
++def Source.Insts.CoreCmpOrd.cmp
++  (self : _root_.recursive_ord_derives.Source)
++  (other : _root_.recursive_ord_derives.Source) :
++  _root_.Aeneas.Std.Result _root_.Ordering
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  let cmp ← lift (core.cmp.impls.OrdIsize.cmp self1 other1)
++  let joined ←
++    match cmp with
++    | _root_.Ordering.lt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++    | _root_.Ordering.eq =>
++      match self with
++      | _root_.recursive_ord_derives.Source.Axis __self_0 __self_1 __self_2 =>
++        match other with
++        | _root_.recursive_ord_derives.Source.Axis __arg1_0 __arg1_1 __arg1_2
++          =>
++          do
++          let cmp1 ← lift (core.cmp.impls.OrdU64.cmp __self_0 __arg1_0)
++          let joined1 ←
++            match cmp1 with
++            | _root_.Ordering.lt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++            | _root_.Ordering.eq =>
++              do
++              let cmp2 ← lift (core.cmp.impls.OrdU32.cmp __self_1 __arg1_1)
++              let joined2 ←
++                match cmp2 with
++                | _root_.Ordering.lt =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                    _root_.Ordering.lt : _root_.Sum _root_.Ordering (_root_.Sum
++                    _root_.Ordering (_root_.Sum _root_.Ordering
++                    _root_.Ordering)))
++                | _root_.Ordering.eq =>
++                  do
++                  let cmp3 ←
++                    lift (core.cmp.impls.OrdUsize.cmp __self_2 __arg1_2)
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                    (_root_.Sum.inr cmp3)) : _root_.Sum _root_.Ordering
++                    (_root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                    _root_.Ordering)))
++                | _root_.Ordering.gt =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                    _root_.Ordering.gt : _root_.Sum _root_.Ordering (_root_.Sum
++                    _root_.Ordering (_root_.Sum _root_.Ordering
++                    _root_.Ordering)))
++              match joined2 with
++              | _root_.Sum.inl cmp3 =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  cmp3) : _root_.Sum _root_.Ordering (_root_.Sum
++                  _root_.Ordering _root_.Ordering))
++              | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++            | _root_.Ordering.gt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++          match joined1 with
++          | _root_.Sum.inl cmp2 =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr cmp2 : _root_.Sum
++              _root_.Ordering _root_.Ordering)
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++        | _root_.recursive_ord_derives.Source.Scalar _ _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.recursive_ord_derives.Source.Scalar __self_0 __self_1 =>
++        match other with
++        | _root_.recursive_ord_derives.Source.Axis _ _ _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.recursive_ord_derives.Source.Scalar __arg1_0 __arg1_1 =>
++          do
++          let cmp1 ← lift (core.cmp.impls.OrdU64.cmp __self_0 __arg1_0)
++          let joined1 ←
++            match cmp1 with
++            | _root_.Ordering.lt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++            | _root_.Ordering.eq =>
++              do
++              let cmp2 ← lift (core.cmp.impls.OrdU32.cmp __self_1 __arg1_1)
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp2)
++                : _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++            | _root_.Ordering.gt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++          match joined1 with
++          | _root_.Sum.inl cmp2 =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr cmp2 : _root_.Sum
++              _root_.Ordering _root_.Ordering)
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.Ordering.gt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++  match joined with
++  | _root_.Sum.inl cmp1 => _root_.Aeneas.Std.Result.ok cmp1
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:33-16:36 -/
++@[reducible]
++def Source.Insts.CoreCmpOrd : _root_.Aeneas.Std.core.cmp.Ord
++  _root_.recursive_ord_derives.Source := {
++  eqInst := _root_.recursive_ord_derives.Source.Insts.CoreCmpEq
++  partialOrdInst :=
++    _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialOrdSource
++  cmp := _root_.recursive_ord_derives.Source.Insts.CoreCmpOrd.cmp
++}
++
++/-- Trait implementation: [recursive_ord_derives::{core::marker::StructuralPartialEq for recursive_ord_derives::Source}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 16:38-16:47 -/
++@[reducible]
++def Source.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.recursive_ord_derives.Source := {
++}
++
++/-- [recursive_ord_derives::Canonical]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 23:0-31:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Canonical where
++| Literal : _root_.Aeneas.Std.U64 → Canonical
++| Source : _root_.recursive_ord_derives.Source → Canonical
++| Product : _root_.Aeneas.Std.NestedSlice Canonical → Canonical
++| ExactQuotient : Canonical → Canonical → Canonical
++
++/-- [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Canonical}::clone]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:9-22:14
++    Visibility: public -/
++def Canonical.Insts.CoreCloneClone.clone
++  (self : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  match self with
++  | _root_.recursive_ord_derives.Canonical.Literal __self_0 =>
++    let i ← lift (core.clone.impls.CloneU64.clone __self_0)
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Literal
++      i)
++  | _root_.recursive_ord_derives.Canonical.Source __self_0 =>
++    let s ←
++      _root_.recursive_ord_derives.Source.Insts.CoreCloneClone.clone __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Source
++      s)
++  | _root_.recursive_ord_derives.Canonical.Product __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedSlice.toSlice __self_0
++    let s ←
++      _root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone
++        ({
++            clone := Canonical.Insts.CoreCloneClone.clone } :
++          _root_.Aeneas.Std.core.clone.Clone
++          _root_.recursive_ord_derives.Canonical) __self_01
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Product
++      (_root_.Aeneas.Std.Slice.toNested s))
++  | _root_.recursive_ord_derives.Canonical.ExactQuotient __self_0 __self_1 =>
++    let c ← Canonical.Insts.CoreCloneClone.clone __self_0
++    let c1 ← Canonical.Insts.CoreCloneClone.clone __self_1
++    _root_.Aeneas.Std.Result.ok
++      (_root_.recursive_ord_derives.Canonical.ExactQuotient c c1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:9-22:14 -/
++@[reducible]
++def Canonical.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.recursive_ord_derives.Canonical := {
++  clone := _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone
++}
++
++/-- [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Canonical}::fmt]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:16-22:21
++    Visibility: public -/
++def Canonical.Insts.CoreFmtDebug.fmt
++  (self : _root_.recursive_ord_derives.Canonical)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.recursive_ord_derives.Canonical.Literal __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.Aeneas.Std.core.fmt.DebugU64) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Literal") __self_01
++  | _root_.recursive_ord_derives.Canonical.Source __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.recursive_ord_derives.Source.Insts.CoreFmtDebug) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Source") __self_01
++  | _root_.recursive_ord_derives.Canonical.Product __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedSlice.toSlice __self_0
++    let __self_02 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugBox
++        (_root_.Aeneas.Std.core.fmt.DebugSlice
++        ({
++            fmt := Canonical.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.recursive_ord_derives.Canonical)))) __self_01
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "Product") __self_02
++  | _root_.recursive_ord_derives.Canonical.ExactQuotient __self_0 __self_1 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugBox
++        ({
++            fmt := Canonical.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.recursive_ord_derives.Canonical)) __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        (_root_.Aeneas.Std.core.fmt.DebugBox
++        ({
++            fmt := Canonical.Insts.CoreFmtDebug.fmt } :
++          _root_.Aeneas.Std.core.fmt.Debug
++          _root_.recursive_ord_derives.Canonical))) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++      (_root_.Aeneas.Std.toStr "ExactQuotient") (_root_.Aeneas.Std.toStr
++      "dividend") __self_01 (_root_.Aeneas.Std.toStr "divisor") __self_11
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:16-22:21 -/
++@[reducible]
++def Canonical.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.recursive_ord_derives.Canonical := {
++  fmt := _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug.fmt
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Canonical> for recursive_ord_derives::Canonical}::eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:32-22:41
++    Visibility: public -/
++def Canonical.Insts.CoreCmpPartialEqCanonical.eq
++  (self : _root_.recursive_ord_derives.Canonical)
++  (other : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.recursive_ord_derives.Canonical.Literal __self_0 =>
++      let joined ←
++        match other with
++        | _root_.recursive_ord_derives.Canonical.Literal __arg1_0 =>
++          do
++          let b ←
++            _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.eq
++              core.cmp.PartialEqU64 __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Source _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Product _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.recursive_ord_derives.Canonical.Source __self_0 =>
++      let joined ←
++        match other with
++        | _root_.recursive_ord_derives.Canonical.Literal _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Source __arg1_0 =>
++          do
++          let b ←
++            _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialEqSource.eq
++              __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Product _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.recursive_ord_derives.Canonical.Product __self_0 =>
++      let __self_01 := _root_.Aeneas.Std.NestedSlice.toSlice __self_0
++      let joined ←
++        match other with
++        | _root_.recursive_ord_derives.Canonical.Literal _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Source _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Product __arg1_0 =>
++          do
++          let __arg1_01 := _root_.Aeneas.Std.NestedSlice.toSlice __arg1_0
++          let b ←
++            _root_.Aeneas.Std.alloc.boxed.PartialEqBox.eq
++              (_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst
++              ({
++                  eq := Canonical.Insts.CoreCmpPartialEqCanonical.eq } :
++                _root_.Aeneas.Std.core.cmp.PartialEq
++                _root_.recursive_ord_derives.Canonical
++                _root_.recursive_ord_derives.Canonical)) __self_01 __arg1_01
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.recursive_ord_derives.Canonical.ExactQuotient __self_0 __self_1 =>
++      let joined ←
++        match other with
++        | _root_.recursive_ord_derives.Canonical.Literal _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Source _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.Product _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++            _root_.recursive_ord_derives.Canonical _root_.Bool)
++        | _root_.recursive_ord_derives.Canonical.ExactQuotient __arg1_0
++          __arg1_1 =>
++          do
++          let b ←
++            Canonical.Insts.CoreCmpPartialEqCanonical.eq __self_0 __arg1_0
++          if b
++          then
++            let b1 ←
++              Canonical.Insts.CoreCmpPartialEqCanonical.eq __self_1 __arg1_1
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr b1 : _root_.Sum
++              _root_.recursive_ord_derives.Canonical _root_.Bool)
++          else
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr false : _root_.Sum
++              _root_.recursive_ord_derives.Canonical _root_.Bool)
++      match joined with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  else _root_.Aeneas.Std.Result.ok false
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Canonical> for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:32-22:41 -/
++@[reducible]
++def Canonical.Insts.CoreCmpPartialEqCanonical :
++  _root_.Aeneas.Std.core.cmp.PartialEq _root_.recursive_ord_derives.Canonical
++  _root_.recursive_ord_derives.Canonical := {
++  eq :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Canonical}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:23-22:25
++    Visibility: public -/
++def Canonical.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:23-22:25 -/
++@[reducible]
++def Canonical.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.recursive_ord_derives.Canonical := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical
++  assert_receiver_is_total_eq :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Canonical> for recursive_ord_derives::Canonical}::partial_cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:43-22:53
++    Visibility: public -/
++def Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++  (self : _root_.recursive_ord_derives.Canonical)
++  (other : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Ordering)
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  match self with
++  | _root_.recursive_ord_derives.Canonical.Literal __self_0 =>
++    let joined ←
++      match other with
++      | _root_.recursive_ord_derives.Canonical.Literal __arg1_0 =>
++        do
++        let o ←
++          lift (core.cmp.impls.PartialOrdU64.partial_cmp __self_0 __arg1_0)
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr o : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Source _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Product _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  | _root_.recursive_ord_derives.Canonical.Source __self_0 =>
++    let joined ←
++      match other with
++      | _root_.recursive_ord_derives.Canonical.Literal _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Source __arg1_0 =>
++        do
++        let o ←
++          _root_.recursive_ord_derives.Source.Insts.CoreCmpPartialOrdSource.partial_cmp
++            __self_0 __arg1_0
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr o : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Product _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  | _root_.recursive_ord_derives.Canonical.Product __self_0 =>
++    let __self_01 := _root_.Aeneas.Std.NestedSlice.toSlice __self_0
++    let joined ←
++      match other with
++      | _root_.recursive_ord_derives.Canonical.Literal _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Source _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Product __arg1_0 =>
++        do
++        let __arg1_01 := _root_.Aeneas.Std.NestedSlice.toSlice __arg1_0
++        let o ←
++          _root_.Aeneas.Std.alloc.boxed.PartialOrdBox.partial_cmp
++            (_root_.Aeneas.Std.core.slice.cmp.PartialOrdSliceInst
++            ({
++                partialEqInst :=
++                  _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical
++                partial_cmp :=
++                  Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp } :
++              _root_.Aeneas.Std.core.cmp.PartialOrd
++              _root_.recursive_ord_derives.Canonical
++              _root_.recursive_ord_derives.Canonical)) __self_01 __arg1_01
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr o : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  | _root_.recursive_ord_derives.Canonical.ExactQuotient __self_0 __self_1 =>
++    let joined ←
++      match other with
++      | _root_.recursive_ord_derives.Canonical.Literal _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Source _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.Product _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++          _root_.recursive_ord_derives.Canonical (_root_.Option
++          _root_.Ordering))
++      | _root_.recursive_ord_derives.Canonical.ExactQuotient __arg1_0 __arg1_1
++        =>
++        do
++        let o ←
++          _root_.Aeneas.Std.alloc.boxed.PartialOrdBox.partial_cmp
++            ({
++                partialEqInst :=
++                  _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical
++                partial_cmp :=
++                  Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp } :
++              _root_.Aeneas.Std.core.cmp.PartialOrd
++              _root_.recursive_ord_derives.Canonical
++              _root_.recursive_ord_derives.Canonical) __self_0 __arg1_0
++        match o with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr none : _root_.Sum
++            _root_.recursive_ord_derives.Canonical (_root_.Option
++            _root_.Ordering))
++        | some o1 =>
++          let joined1 ←
++            match o1 with
++            | _root_.Ordering.lt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++                _root_.Sum _root_.Ordering (_root_.Sum
++                _root_.recursive_ord_derives.Canonical (_root_.Option
++                _root_.Ordering)))
++            | _root_.Ordering.eq =>
++              do
++              let o2 ←
++                _root_.Aeneas.Std.alloc.boxed.PartialOrdBox.partial_cmp
++                  ({
++                      partialEqInst :=
++                        _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical
++                      partial_cmp :=
++                        Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++                    } : _root_.Aeneas.Std.core.cmp.PartialOrd
++                    _root_.recursive_ord_derives.Canonical
++                    _root_.recursive_ord_derives.Canonical) __self_1 __arg1_1
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr o2) :
++                _root_.Sum _root_.Ordering (_root_.Sum
++                _root_.recursive_ord_derives.Canonical (_root_.Option
++                _root_.Ordering)))
++            | _root_.Ordering.gt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++                _root_.Sum _root_.Ordering (_root_.Sum
++                _root_.recursive_ord_derives.Canonical (_root_.Option
++                _root_.Ordering)))
++          match joined1 with
++          | _root_.Sum.inl o2 =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (some o2) : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Option
++              _root_.Ordering))
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    match joined with
++    | _root_.Sum.inl _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Canonical> for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:43-22:53 -/
++@[reducible]
++def Canonical.Insts.CoreCmpPartialOrdCanonical :
++  _root_.Aeneas.Std.core.cmp.PartialOrd _root_.recursive_ord_derives.Canonical
++  _root_.recursive_ord_derives.Canonical := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical
++  partial_cmp :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++}
++
++/-- [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Canonical}::cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:27-22:30
++    Visibility: public -/
++def Canonical.Insts.CoreCmpOrd.cmp
++  (self : _root_.recursive_ord_derives.Canonical)
++  (other : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.Ordering
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  let cmp ← lift (core.cmp.impls.OrdIsize.cmp self1 other1)
++  let joined ←
++    match cmp with
++    | _root_.Ordering.lt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++    | _root_.Ordering.eq =>
++      match self with
++      | _root_.recursive_ord_derives.Canonical.Literal __self_0 =>
++        do
++        let joined1 ←
++          match other with
++          | _root_.recursive_ord_derives.Canonical.Literal __arg1_0 =>
++            do
++            let cmp1 ← lift (core.cmp.impls.OrdU64.cmp __self_0 __arg1_0)
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp1) :
++              _root_.Sum _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Source _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Product _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.recursive_ord_derives.Canonical.Source __self_0 =>
++        do
++        let joined1 ←
++          match other with
++          | _root_.recursive_ord_derives.Canonical.Literal _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Source __arg1_0 =>
++            do
++            let cmp1 ←
++              _root_.recursive_ord_derives.Source.Insts.CoreCmpOrd.cmp __self_0
++                __arg1_0
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp1) :
++              _root_.Sum _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Product _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.recursive_ord_derives.Canonical.Product __self_0 =>
++        do
++        let __self_01 := _root_.Aeneas.Std.NestedSlice.toSlice __self_0
++        let joined1 ←
++          match other with
++          | _root_.recursive_ord_derives.Canonical.Literal _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Source _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Product __arg1_0 =>
++            do
++            let __arg1_01 := _root_.Aeneas.Std.NestedSlice.toSlice __arg1_0
++            let cmp1 ←
++              _root_.Aeneas.Std.alloc.boxed.OrdBox.cmp
++                (_root_.Aeneas.Std.core.slice.cmp.OrdSliceInst
++                ({
++                    eqInst :=
++                      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpEq
++                    partialOrdInst :=
++                      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical
++                    cmp := Canonical.Insts.CoreCmpOrd.cmp } :
++                  _root_.Aeneas.Std.core.cmp.Ord
++                  _root_.recursive_ord_derives.Canonical)) __self_01 __arg1_01
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp1) :
++              _root_.Sum _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.ExactQuotient _ _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      | _root_.recursive_ord_derives.Canonical.ExactQuotient __self_0 __self_1
++        =>
++        do
++        let joined1 ←
++          match other with
++          | _root_.recursive_ord_derives.Canonical.Literal _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Source _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.Product _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl other : _root_.Sum
++              _root_.recursive_ord_derives.Canonical (_root_.Sum
++              _root_.Ordering _root_.Ordering))
++          | _root_.recursive_ord_derives.Canonical.ExactQuotient __arg1_0
++            __arg1_1 =>
++            do
++            let cmp1 ←
++              _root_.Aeneas.Std.alloc.boxed.OrdBox.cmp
++                ({
++                    eqInst :=
++                      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpEq
++                    partialOrdInst :=
++                      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical
++                    cmp := Canonical.Insts.CoreCmpOrd.cmp } :
++                  _root_.Aeneas.Std.core.cmp.Ord
++                  _root_.recursive_ord_derives.Canonical) __self_0 __arg1_0
++            let joined2 ←
++              match cmp1 with
++              | _root_.Ordering.lt =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt
++                  : _root_.Sum _root_.Ordering (_root_.Sum
++                  _root_.recursive_ord_derives.Canonical (_root_.Sum
++                  _root_.Ordering _root_.Ordering)))
++              | _root_.Ordering.eq =>
++                do
++                let cmp2 ←
++                  _root_.Aeneas.Std.alloc.boxed.OrdBox.cmp
++                    ({
++                        eqInst :=
++                          _root_.recursive_ord_derives.Canonical.Insts.CoreCmpEq
++                        partialOrdInst :=
++                          _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical
++                        cmp := Canonical.Insts.CoreCmpOrd.cmp } :
++                      _root_.Aeneas.Std.core.cmp.Ord
++                      _root_.recursive_ord_derives.Canonical) __self_1 __arg1_1
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inr cmp2)) : _root_.Sum _root_.Ordering
++                  (_root_.Sum _root_.recursive_ord_derives.Canonical
++                  (_root_.Sum _root_.Ordering _root_.Ordering)))
++              | _root_.Ordering.gt =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt
++                  : _root_.Sum _root_.Ordering (_root_.Sum
++                  _root_.recursive_ord_derives.Canonical (_root_.Sum
++                  _root_.Ordering _root_.Ordering)))
++            match joined2 with
++            | _root_.Sum.inl cmp2 =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp2)
++                : _root_.Sum _root_.recursive_ord_derives.Canonical (_root_.Sum
++                _root_.Ordering _root_.Ordering))
++            | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++        match joined1 with
++        | _root_.Sum.inl _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.Ordering.gt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++  match joined with
++  | _root_.Sum.inl cmp1 => _root_.Aeneas.Std.Result.ok cmp1
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:27-22:30 -/
++@[reducible]
++def Canonical.Insts.CoreCmpOrd : _root_.Aeneas.Std.core.cmp.Ord
++  _root_.recursive_ord_derives.Canonical := {
++  eqInst := _root_.recursive_ord_derives.Canonical.Insts.CoreCmpEq
++  partialOrdInst :=
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical
++  cmp := _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd.cmp
++}
++
++/-- Trait implementation: [recursive_ord_derives::{core::marker::StructuralPartialEq for recursive_ord_derives::Canonical}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 22:32-22:41 -/
++@[reducible]
++def Canonical.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.recursive_ord_derives.Canonical := {
++}
++
++/-- [recursive_ord_derives::Predicate]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 35:0-41:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Predicate where
++| NonZero : _root_.recursive_ord_derives.Canonical → Predicate
++| DividesEvenly :
++  _root_.recursive_ord_derives.Canonical →
++  _root_.recursive_ord_derives.Canonical →
++  Predicate
++
++/-- [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Predicate}::clone]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:9-34:14
++    Visibility: public -/
++def Predicate.Insts.CoreCloneClone.clone
++  (self : _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Predicate
++  := do
++  match self with
++  | _root_.recursive_ord_derives.Predicate.NonZero __self_0 =>
++    let c ←
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone
++        __self_0
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Predicate.NonZero
++      c)
++  | _root_.recursive_ord_derives.Predicate.DividesEvenly __self_0 __self_1 =>
++    let c ←
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone
++        __self_0
++    let c1 ←
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone
++        __self_1
++    _root_.Aeneas.Std.Result.ok
++      (_root_.recursive_ord_derives.Predicate.DividesEvenly c c1)
++
++/-- Trait implementation: [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:9-34:14 -/
++@[reducible]
++def Predicate.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.recursive_ord_derives.Predicate := {
++  clone := _root_.recursive_ord_derives.Predicate.Insts.CoreCloneClone.clone
++}
++
++/-- [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Predicate}::fmt]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:16-34:21
++    Visibility: public -/
++def Predicate.Insts.CoreFmtDebug.fmt
++  (self : _root_.recursive_ord_derives.Predicate)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  match self with
++  | _root_.recursive_ord_derives.Predicate.NonZero __self_0 =>
++    let __self_01 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug) __self_0
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish f
++      (_root_.Aeneas.Std.toStr "NonZero") __self_01
++  | _root_.recursive_ord_derives.Predicate.DividesEvenly __self_0 __self_1 =>
++    let __self_01 :=
++      Dyn.mk _ _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug
++        __self_0
++    let __self_11 :=
++      Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++        _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug) __self_1
++    _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish f
++      (_root_.Aeneas.Std.toStr "DividesEvenly") (_root_.Aeneas.Std.toStr
++      "dividend") __self_01 (_root_.Aeneas.Std.toStr "divisor") __self_11
++
++/-- Trait implementation: [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:16-34:21 -/
++@[reducible]
++def Predicate.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.recursive_ord_derives.Predicate := {
++  fmt := _root_.recursive_ord_derives.Predicate.Insts.CoreFmtDebug.fmt
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Predicate> for recursive_ord_derives::Predicate}::eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:32-34:41
++    Visibility: public -/
++def Predicate.Insts.CoreCmpPartialEqPredicate.eq
++  (self : _root_.recursive_ord_derives.Predicate)
++  (other : _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  if self1 = other1
++  then
++    match self with
++    | _root_.recursive_ord_derives.Predicate.NonZero __self_0 =>
++      match other with
++      | _root_.recursive_ord_derives.Predicate.NonZero __arg1_0 =>
++        _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq
++          __self_0 __arg1_0
++      | _root_.recursive_ord_derives.Predicate.DividesEvenly _ _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++    | _root_.recursive_ord_derives.Predicate.DividesEvenly __self_0 __self_1 =>
++      match other with
++      | _root_.recursive_ord_derives.Predicate.NonZero _ =>
++        _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.recursive_ord_derives.Predicate.DividesEvenly __arg1_0 __arg1_1
++        =>
++        let b ←
++          _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq
++            __self_0 __arg1_0
++        if b
++        then
++          _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq
++            __self_1 __arg1_1
++        else _root_.Aeneas.Std.Result.ok false
++  else _root_.Aeneas.Std.Result.ok false
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Predicate> for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:32-34:41 -/
++@[reducible]
++def Predicate.Insts.CoreCmpPartialEqPredicate :
++  _root_.Aeneas.Std.core.cmp.PartialEq _root_.recursive_ord_derives.Predicate
++  _root_.recursive_ord_derives.Predicate := {
++  eq :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialEqPredicate.eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Predicate}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:23-34:25
++    Visibility: public -/
++def Predicate.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:23-34:25 -/
++@[reducible]
++def Predicate.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.recursive_ord_derives.Predicate := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialEqPredicate
++  assert_receiver_is_total_eq :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Predicate> for recursive_ord_derives::Predicate}::partial_cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:43-34:53
++    Visibility: public -/
++def Predicate.Insts.CoreCmpPartialOrdPredicate.partial_cmp
++  (self : _root_.recursive_ord_derives.Predicate)
++  (other : _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Ordering)
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  match self with
++  | _root_.recursive_ord_derives.Predicate.NonZero __self_0 =>
++    match other with
++    | _root_.recursive_ord_derives.Predicate.NonZero __arg1_0 =>
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++        __self_0 __arg1_0
++    | _root_.recursive_ord_derives.Predicate.DividesEvenly _ _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++  | _root_.recursive_ord_derives.Predicate.DividesEvenly __self_0 __self_1 =>
++    match other with
++    | _root_.recursive_ord_derives.Predicate.NonZero _ =>
++      _root_.Aeneas.Std.Result.ok (core.cmp.impls.PartialOrdIsize.partial_cmp
++        self1 other1)
++    | _root_.recursive_ord_derives.Predicate.DividesEvenly __arg1_0 __arg1_1 =>
++      let o ←
++        _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++          __self_0 __arg1_0
++      match o with
++      | none => _root_.Aeneas.Std.Result.ok none
++      | some o1 =>
++        let joined ←
++          match o1 with
++          | _root_.Ordering.lt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++          | _root_.Ordering.eq =>
++            do
++            let o2 ←
++              _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++                __self_1 __arg1_1
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr o2 : _root_.Sum
++              _root_.Ordering (_root_.Option _root_.Ordering))
++          | _root_.Ordering.gt =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++              _root_.Sum _root_.Ordering (_root_.Option _root_.Ordering))
++        match joined with
++        | _root_.Sum.inl o2 => _root_.Aeneas.Std.Result.ok (some o2)
++        | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialOrd<recursive_ord_derives::Predicate> for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:43-34:53 -/
++@[reducible]
++def Predicate.Insts.CoreCmpPartialOrdPredicate :
++  _root_.Aeneas.Std.core.cmp.PartialOrd _root_.recursive_ord_derives.Predicate
++  _root_.recursive_ord_derives.Predicate := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialEqPredicate
++  partial_cmp :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialOrdPredicate.partial_cmp
++}
++
++/-- [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Predicate}::cmp]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:27-34:30
++    Visibility: public -/
++def Predicate.Insts.CoreCmpOrd.cmp
++  (self : _root_.recursive_ord_derives.Predicate)
++  (other : _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result _root_.Ordering
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  let cmp ← lift (core.cmp.impls.OrdIsize.cmp self1 other1)
++  let joined ←
++    match cmp with
++    | _root_.Ordering.lt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++    | _root_.Ordering.eq =>
++      match self with
++      | _root_.recursive_ord_derives.Predicate.NonZero __self_0 =>
++        match other with
++        | _root_.recursive_ord_derives.Predicate.NonZero __arg1_0 =>
++          do
++          let cmp1 ←
++            _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd.cmp
++              __self_0 __arg1_0
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr cmp1 : _root_.Sum
++            _root_.Ordering _root_.Ordering)
++        | _root_.recursive_ord_derives.Predicate.DividesEvenly _ _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++      | _root_.recursive_ord_derives.Predicate.DividesEvenly __self_0 __self_1
++        =>
++        match other with
++        | _root_.recursive_ord_derives.Predicate.NonZero _ =>
++          _root_.Aeneas.Std.Result.fail _root_.Aeneas.Std.Error.panic
++        | _root_.recursive_ord_derives.Predicate.DividesEvenly __arg1_0
++          __arg1_1 =>
++          do
++          let cmp1 ←
++            _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd.cmp
++              __self_0 __arg1_0
++          let joined1 ←
++            match cmp1 with
++            | _root_.Ordering.lt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.lt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++            | _root_.Ordering.eq =>
++              do
++              let cmp2 ←
++                _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd.cmp
++                  __self_1 __arg1_1
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr cmp2)
++                : _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++            | _root_.Ordering.gt =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++                _root_.Sum _root_.Ordering (_root_.Sum _root_.Ordering
++                _root_.Ordering))
++          match joined1 with
++          | _root_.Sum.inl cmp2 =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr cmp2 : _root_.Sum
++              _root_.Ordering _root_.Ordering)
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    | _root_.Ordering.gt =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl _root_.Ordering.gt :
++        _root_.Sum _root_.Ordering _root_.Ordering)
++  match joined with
++  | _root_.Sum.inl cmp1 => _root_.Aeneas.Std.Result.ok cmp1
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Ord for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:27-34:30 -/
++@[reducible]
++def Predicate.Insts.CoreCmpOrd : _root_.Aeneas.Std.core.cmp.Ord
++  _root_.recursive_ord_derives.Predicate := {
++  eqInst := _root_.recursive_ord_derives.Predicate.Insts.CoreCmpEq
++  partialOrdInst :=
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialOrdPredicate
++  cmp := _root_.recursive_ord_derives.Predicate.Insts.CoreCmpOrd.cmp
++}
++
++/-- Trait implementation: [recursive_ord_derives::{core::marker::StructuralPartialEq for recursive_ord_derives::Predicate}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 34:32-34:41 -/
++@[reducible]
++def Predicate.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.recursive_ord_derives.Predicate := {
++}
++
++/-- [recursive_ord_derives::Validity]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 45:0-47:1
++    Visibility: public -/
++structure Validity where
++  obligations : _root_.Aeneas.Std.Slice _root_.recursive_ord_derives.Predicate
++
++/-- [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Validity}::clone]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:9-44:14
++    Visibility: public -/
++def Validity.Insts.CoreCloneClone.clone
++  (self : _root_.recursive_ord_derives.Validity) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Validity
++  := do
++  let s ←
++    _root_.Aeneas.Std.alloc.boxed.CloneBoxSlice.clone
++      _root_.recursive_ord_derives.Predicate.Insts.CoreCloneClone
++      self.obligations
++  _root_.Aeneas.Std.Result.ok { obligations := s }
++
++/-- Trait implementation: [recursive_ord_derives::{core::clone::Clone for recursive_ord_derives::Validity}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:9-44:14 -/
++@[reducible]
++def Validity.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.recursive_ord_derives.Validity := {
++  clone := _root_.recursive_ord_derives.Validity.Insts.CoreCloneClone.clone
++}
++
++/-- [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Validity}::fmt]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:16-44:21
++    Visibility: public -/
++def Validity.Insts.CoreFmtDebug.fmt
++  (self : _root_.recursive_ord_derives.Validity)
++  (f : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  let dyn :=
++    Dyn.mk _ (_root_.Aeneas.Std.core.fmt.DebugShared
++      (_root_.Aeneas.Std.core.fmt.DebugBox
++      (_root_.Aeneas.Std.core.fmt.DebugSlice
++      _root_.recursive_ord_derives.Predicate.Insts.CoreFmtDebug)))
++      self.obligations
++  _root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field1_finish f
++    (_root_.Aeneas.Std.toStr "Validity") (_root_.Aeneas.Std.toStr
++    "obligations") dyn
++
++/-- Trait implementation: [recursive_ord_derives::{core::fmt::Debug for recursive_ord_derives::Validity}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:16-44:21 -/
++@[reducible]
++def Validity.Insts.CoreFmtDebug : _root_.Aeneas.Std.core.fmt.Debug
++  _root_.recursive_ord_derives.Validity := {
++  fmt := _root_.recursive_ord_derives.Validity.Insts.CoreFmtDebug.fmt
++}
++
++/-- [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Validity> for recursive_ord_derives::Validity}::eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:27-44:36
++    Visibility: public -/
++def Validity.Insts.CoreCmpPartialEqValidity.eq
++  (self : _root_.recursive_ord_derives.Validity)
++  (other : _root_.recursive_ord_derives.Validity) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.alloc.boxed.PartialEqBox.eq
++    (_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst
++    _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialEqPredicate)
++    self.obligations other.obligations
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::PartialEq<recursive_ord_derives::Validity> for recursive_ord_derives::Validity}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:27-44:36 -/
++@[reducible]
++def Validity.Insts.CoreCmpPartialEqValidity :
++  _root_.Aeneas.Std.core.cmp.PartialEq _root_.recursive_ord_derives.Validity
++  _root_.recursive_ord_derives.Validity := {
++  eq := _root_.recursive_ord_derives.Validity.Insts.CoreCmpPartialEqValidity.eq
++}
++
++/-- [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Validity}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:23-44:25
++    Visibility: public -/
++def Validity.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.recursive_ord_derives.Validity) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [recursive_ord_derives::{core::cmp::Eq for recursive_ord_derives::Validity}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:23-44:25 -/
++@[reducible]
++def Validity.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.recursive_ord_derives.Validity := {
++  partialEqInst :=
++    _root_.recursive_ord_derives.Validity.Insts.CoreCmpPartialEqValidity
++  assert_receiver_is_total_eq :=
++    _root_.recursive_ord_derives.Validity.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- Trait implementation: [recursive_ord_derives::{core::marker::StructuralPartialEq for recursive_ord_derives::Validity}]
++    Source: 'tests/src/recursive-ord-derives.rs', lines 44:27-44:36 -/
++@[reducible]
++def Validity.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.recursive_ord_derives.Validity := {
++}
++
++/-- [recursive_ord_derives::lit]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 49:0-51:1
++    Visibility: public -/
++def lit
++  (n : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Literal
++    n)
++
++/-- [recursive_ord_derives::axis]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 53:0-59:1
++    Visibility: public -/
++def axis
++  (scope : _root_.Aeneas.Std.U64) (load : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Source
++    (_root_.recursive_ord_derives.Source.Axis scope load 0#usize))
++
++/-- [recursive_ord_derives::scalar]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 61:0-63:1
++    Visibility: public -/
++def scalar
++  (scope : _root_.Aeneas.Std.U64) (node : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Source
++    (_root_.recursive_ord_derives.Source.Scalar scope node))
++
++/-- [recursive_ord_derives::product]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 65:0-67:1
++    Visibility: public -/
++def product
++  (factors : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  let s ← _root_.Aeneas.Std.alloc.vec.Vec.into_boxed_slice factors
++  _root_.Aeneas.Std.Result.ok (_root_.recursive_ord_derives.Canonical.Product
++    (_root_.Aeneas.Std.Slice.toNested s))
++
++/-- [recursive_ord_derives::quotient]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 69:0-74:1
++    Visibility: public -/
++def quotient
++  (dividend : _root_.recursive_ord_derives.Canonical)
++  (divisor : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Canonical
++  := do
++  _root_.Aeneas.Std.Result.ok
++    (_root_.recursive_ord_derives.Canonical.ExactQuotient dividend divisor)
++
++/-- [recursive_ord_derives::sort_factors]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 77:0-80:1
++    Visibility: public -/
++def sort_factors
++  (factors : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.recursive_ord_derives.Canonical)
++  := do
++  let (s, deref_mut_back) ←
++    lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut factors)
++  let s1 ←
++    _root_.Aeneas.Std.alloc.slice.Slice.sort
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd s
++  _root_.Aeneas.Std.Result.ok (deref_mut_back s1)
++
++/-- [recursive_ord_derives::validity]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 83:0-89:1
++    Visibility: public -/
++def validity
++  (obligations : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.recursive_ord_derives.Predicate) :
++  _root_.Aeneas.Std.Result _root_.recursive_ord_derives.Validity
++  := do
++  let (s, deref_mut_back) ←
++    lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut obligations)
++  let s1 ←
++    _root_.Aeneas.Std.alloc.slice.Slice.sort
++      _root_.recursive_ord_derives.Predicate.Insts.CoreCmpOrd s
++  let obligations1 := deref_mut_back s1
++  let obligations2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.dedup
++      _root_.recursive_ord_derives.Predicate.Insts.CoreCmpPartialEqPredicate
++      obligations1
++  let s2 ← _root_.Aeneas.Std.alloc.vec.Vec.into_boxed_slice obligations2
++  _root_.Aeneas.Std.Result.ok { obligations := s2 }
++
++/-- [recursive_ord_derives::sample]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 94:0-107:1
++    Visibility: public -/
++def sample
++  (a : _root_.Aeneas.Std.U64) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.recursive_ord_derives.Canonical)
++  := do
++  let c ← _root_.recursive_ord_derives.axis a 2#u32
++  let c1 ← _root_.recursive_ord_derives.lit b
++  let c2 ← _root_.recursive_ord_derives.quotient c c1
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.recursive_ord_derives.Canonical) c2
++  let c3 ← _root_.recursive_ord_derives.axis a 1#u32
++  let c4 ← _root_.recursive_ord_derives.scalar a 3#u32
++  let s ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 3#usize [ c3, c1, c4 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 3#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let c5 ← _root_.recursive_ord_derives.product v1
++  let v2 ← _root_.Aeneas.Std.alloc.vec.Vec.push v c5
++  let v3 ← _root_.Aeneas.Std.alloc.vec.Vec.push v2 c1
++  let s1 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c3, c1 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 2#usize))
++  let v4 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let c6 ← _root_.recursive_ord_derives.product v4
++  let v5 ← _root_.Aeneas.Std.alloc.vec.Vec.push v3 c6
++  let c7 ← _root_.recursive_ord_derives.scalar a 1#u32
++  let v6 ← _root_.Aeneas.Std.alloc.vec.Vec.push v5 c7
++  let c8 ← _root_.recursive_ord_derives.lit a
++  let c9 ← _root_.recursive_ord_derives.quotient c c8
++  let v7 ← _root_.Aeneas.Std.alloc.vec.Vec.push v6 c9
++  let s2 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 1#usize [ c8 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 1#usize))
++  let v8 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let c10 ← _root_.recursive_ord_derives.product v8
++  let s3 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c3, c10 ]
++      : _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical
++      2#usize))
++  let v9 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s3
++  let c11 ← _root_.recursive_ord_derives.product v9
++  let v10 ← _root_.Aeneas.Std.alloc.vec.Vec.push v7 c11
++  let c12 ← _root_.recursive_ord_derives.axis b 7#u32
++  let v11 ← _root_.Aeneas.Std.alloc.vec.Vec.push v10 c12
++  let v12 ← _root_.Aeneas.Std.alloc.vec.Vec.push v11 c8
++  let s4 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c3, c1 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 2#usize))
++  let v13 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s4
++  let c13 ← _root_.recursive_ord_derives.product v13
++  _root_.Aeneas.Std.alloc.vec.Vec.push v12 c13
++
++/-- [recursive_ord_derives::sorted_debug]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 109:0-111:1
++    Visibility: public -/
++def sorted_debug
++  (a : _root_.Aeneas.Std.U64) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let v ← _root_.recursive_ord_derives.sample a b
++  let args ← _root_.recursive_ord_derives.sort_factors v
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.fmt.DebugVec
++      _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug) args
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 2#usize [ 192#u8, 0#u8 ])
++      (_root_.Aeneas.Std.Array.make 1#usize [ a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [recursive_ord_derives::ordering_code]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 113:0-119:1 -/
++def ordering_code
++  (o : _root_.Ordering) : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 := do
++  match o with
++  | _root_.Ordering.lt => _root_.Aeneas.Std.Result.ok 1#u32
++  | _root_.Ordering.eq => _root_.Aeneas.Std.Result.ok 2#u32
++  | _root_.Ordering.gt => _root_.Aeneas.Std.Result.ok 3#u32
++
++/-- [recursive_ord_derives::partial_code]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 121:0-126:1 -/
++def partial_code
++  (o : _root_.Option _root_.Ordering) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some o1 => _root_.recursive_ord_derives.ordering_code o1
++
++/-- [recursive_ord_derives::compare]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 129:0-137:1
++    Visibility: public -/
++def compare
++  (x : _root_.recursive_ord_derives.Canonical)
++  (y : _root_.recursive_ord_derives.Canonical) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let o ← _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd.cmp x y
++  let r ← _root_.recursive_ord_derives.ordering_code o
++  let i ← r * 10#u32
++  let o1 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.partial_cmp
++      x y
++  let i1 ← _root_.recursive_ord_derives.partial_code o1
++  let r1 ← i + i1
++  let i2 ← r1 * 10#u32
++  let b ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq x
++      y
++  let i3 ←
++    if b
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  let r2 ← i2 + i3
++  let i4 ← r2 * 10#u32
++  let b1 ←
++    _root_.Aeneas.Std.core.cmp.impls.PartialEqShared.ne
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical x
++      y
++  let i5 ←
++    if b1
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  let r3 ← i4 + i5
++  let i6 ← r3 * 10#u32
++  let b2 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.lt
++      x y
++  let i7 ←
++    if b2
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  let r4 ← i6 + i7
++  let i8 ← r4 * 10#u32
++  let b3 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialOrdCanonical.ge
++      x y
++  let i9 ←
++    if b3
++    then _root_.Aeneas.Std.Result.ok 1#u32
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  i8 + i9
++
++/-- [recursive_ord_derives::compare_row]: loop body 0:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 144:4-147:5
++    Visibility: public -/
++@[rust_loop_body]
++def compare_row_loop.body
++  (i : _root_.Aeneas.Std.Usize)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.recursive_ord_derives.Canonical)
++  (row : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len v
++  if j < i1
++  then
++    let c ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.recursive_ord_derives.Canonical) v i
++    let c1 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.recursive_ord_derives.Canonical) v j
++    let i2 ← _root_.recursive_ord_derives.compare c c1
++    let row1 ← _root_.Aeneas.Std.alloc.vec.Vec.push row i2
++    let j1 ← j + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (row1, j1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done row)
++
++/-- [recursive_ord_derives::compare_row]: loop 0:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 144:4-147:5
++    Visibility: public -/
++@[rust_loop]
++def compare_row_loop
++  (i : _root_.Aeneas.Std.Usize)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.recursive_ord_derives.Canonical)
++  (row : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (row1, j1) => _root_.recursive_ord_derives.compare_row_loop.body i v
++       row1 j1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (row, j)
++
++/-- [recursive_ord_derives::compare_row]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 140:0-149:1
++    Visibility: public -/
++def compare_row
++  (a : _root_.Aeneas.Std.U64) (b : _root_.Aeneas.Std.U64)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let v ← _root_.recursive_ord_derives.sample a b
++  _root_.recursive_ord_derives.compare_row_loop i v
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#usize
++
++/-- [recursive_ord_derives::clone_max_min]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 152:0-159:1
++    Visibility: public -/
++def clone_max_min
++  (a : _root_.Aeneas.Std.U64) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let v ← _root_.recursive_ord_derives.sample a b
++  let c ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.recursive_ord_derives.Canonical) v 1#usize
++  let c1 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone c
++  let eq ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCmpPartialEqCanonical.eq
++      c1 c
++  let c2 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone c
++  let c3 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.recursive_ord_derives.Canonical) v 3#usize
++  let c4 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone c3
++  let mx ←
++    _root_.Aeneas.Std.core.cmp.max
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd c2 c4
++  let c5 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.recursive_ord_derives.Canonical) v 6#usize
++  let c6 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone c5
++  let c7 ←
++    _root_.recursive_ord_derives.Canonical.Insts.CoreCloneClone.clone c3
++  let mn ←
++    _root_.Aeneas.Std.core.cmp.min
++      _root_.recursive_ord_derives.Canonical.Insts.CoreCmpOrd c6 c7
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_display
++      _root_.Aeneas.Std.core.fmt.DisplayBool eq
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug mx
++  let a3 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.recursive_ord_derives.Canonical.Insts.CoreFmtDebug mn
++  let a4 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 8#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 3#usize [ a1, a2, a3 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a4
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [recursive_ord_derives::validity_debug]:
++    Source: 'tests/src/recursive-ord-derives.rs', lines 162:0-181:1
++    Visibility: public -/
++def validity_debug
++  (a : _root_.Aeneas.Std.U64) (b : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.String
++  := do
++  let c ← _root_.recursive_ord_derives.axis a 2#u32
++  let c1 ← _root_.recursive_ord_derives.lit b
++  let c2 ← _root_.recursive_ord_derives.scalar a 1#u32
++  let s ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c1, c2 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let c3 ← _root_.recursive_ord_derives.product v
++  let obligations ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.recursive_ord_derives.Predicate)
++      (_root_.recursive_ord_derives.Predicate.DividesEvenly c c3)
++  let s1 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c1, c2 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 2#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let c4 ← _root_.recursive_ord_derives.product v1
++  let obligations1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push obligations
++      (_root_.recursive_ord_derives.Predicate.NonZero c4)
++  let obligations2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push obligations1
++      (_root_.recursive_ord_derives.Predicate.DividesEvenly c c1)
++  let s2 ←
++    lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 2#usize [ c1, c2 ] :
++      _root_.Aeneas.Std.Array _root_.recursive_ord_derives.Canonical 2#usize))
++  let v2 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let c5 ← _root_.recursive_ord_derives.product v2
++  let obligations3 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push obligations2
++      (_root_.recursive_ord_derives.Predicate.NonZero c5)
++  let c6 ← _root_.recursive_ord_derives.quotient c c1
++  let obligations4 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push obligations3
++      (_root_.recursive_ord_derives.Predicate.NonZero c6)
++  let obligations5 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push obligations4
++      (_root_.recursive_ord_derives.Predicate.DividesEvenly c c1)
++  let v3 ← _root_.recursive_ord_derives.validity obligations5
++  let i := _root_.Aeneas.Std.Slice.len v3.obligations
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_display
++      _root_.Aeneas.Std.core.fmt.DisplayUsize i
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      _root_.recursive_ord_derives.Validity.Insts.CoreFmtDebug v3
++  let a3 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 5#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 2#usize [ a1, a2 ])
++  let s3 ← _root_.Aeneas.Std.alloc.fmt.format a3
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s3)
++
++end recursive_ord_derives
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 6f64dca..87a2cd7 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -156,6 +156,8 @@ package «tests» {}
+ @[default_target] lean_lib NestedCollections
+ @[default_target] lean_lib NestedLoopExits
+ @[default_target] lean_lib NestedRecursiveDerives
++@[default_target] lean_lib RecursiveOrdDerives
++@[default_target] lean_lib RecursiveBoxHash
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
+ @[default_target] lean_lib OptionMutNestedRegion
+diff --git a/tests/src/recursive-box-hash.rs b/tests/src/recursive-box-hash.rs
+new file mode 100644
+index 0000000..3859402
+--- /dev/null
++++ b/tests/src/recursive-box-hash.rs
+@@ -0,0 +1,109 @@
++//@ [!lean] skip
++//@ [lean] subdir=RecursiveBoxHash
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Hash` of `Box<T>` (it hashes the boxed value) and a `Hash` impl which is
++//! recursive through `Box<Self>` (the shape of the derived `Hash` of chelis-ir
++//! `dag::DimExpr`; here the leaves write their bytes directly instead of going
++//! through the integer `Hash` impls). The Lean definition of `Dim`'s `hash` is
++//! a `partial_fixpoint` which calls the model of `Hash for Box<T>` with an
++//! instance built from itself. `RecursiveBoxHash/Checks.lean` evaluates the
++//! model on the inputs of the `native` test module below and compares with the
++//! native results; the hasher is given back through `&mut H`.
++
++use std::hash::{Hash, Hasher};
++
++/// A hasher which folds the written bytes and counts the writes
++pub struct Fold {
++    pub acc: u64,
++    pub writes: u32,
++}
++
++impl Hasher for Fold {
++    fn finish(&self) -> u64 {
++        self.acc.wrapping_mul(1000).wrapping_add(self.writes as u64)
++    }
++
++    fn write(&mut self, bytes: &[u8]) {
++        let mut i = 0;
++        while i < bytes.len() {
++            self.acc = self.acc.wrapping_mul(31).wrapping_add(bytes[i] as u64);
++            i += 1;
++        }
++        self.writes += 1;
++    }
++}
++
++pub struct Leaf(pub u8);
++
++impl Hash for Leaf {
++    fn hash<H: Hasher>(&self, state: &mut H) {
++        state.write(&[self.0, 7]);
++    }
++}
++
++pub enum Dim {
++    Lit(Leaf),
++    Mul(Box<Dim>, Box<Dim>),
++    Neg(Box<Dim>),
++}
++
++impl Hash for Dim {
++    fn hash<H: Hasher>(&self, state: &mut H) {
++        match self {
++            Dim::Lit(leaf) => {
++                state.write(&[0]);
++                leaf.hash(state)
++            }
++            Dim::Mul(a, b) => {
++                state.write(&[1]);
++                a.hash(state);
++                b.hash(state)
++            }
++            Dim::Neg(a) => {
++                state.write(&[2]);
++                a.hash(state)
++            }
++        }
++    }
++}
++
++pub fn hash_of<T: Hash>(x: &T) -> u64 {
++    let mut state = Fold { acc: 0, writes: 0 };
++    x.hash(&mut state);
++    state.finish()
++}
++
++/// `Hash for Box<Leaf>`
++pub fn box_leaf_hash(n: u8) -> u64 {
++    hash_of(&Box::new(Leaf(n)))
++}
++
++pub fn dim_hash(a: u8, b: u8) -> u64 {
++    let d = Dim::Mul(
++        Box::new(Dim::Neg(Box::new(Dim::Lit(Leaf(a))))),
++        Box::new(Dim::Mul(
++            Box::new(Dim::Lit(Leaf(b))),
++            Box::new(Dim::Lit(Leaf(a))),
++        )),
++    );
++    hash_of(&d)
++}
++
++/// `Hash for Box<Dim>`
++pub fn box_dim_hash(a: u8) -> u64 {
++    hash_of(&Box::new(Dim::Neg(Box::new(Dim::Lit(Leaf(a))))))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn hashes() {
++        assert_eq!(box_leaf_hash(5), 162001);
++        assert_eq!(dim_hash(3, 4), 8603741549474383393);
++        assert_eq!(dim_hash(4, 3), 8604594439588334393);
++        assert_eq!(box_dim_hash(9), 59868003);
++    }
++}
+diff --git a/tests/src/recursive-ord-derives.rs b/tests/src/recursive-ord-derives.rs
+new file mode 100644
+index 0000000..f0c697f
+--- /dev/null
++++ b/tests/src/recursive-ord-derives.rs
+@@ -0,0 +1,233 @@
++//@ [!lean] skip
++//@ [lean] subdir=RecursiveOrdDerives
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Derived `PartialEq`, `PartialOrd` and `Ord` (with `Clone` and `Debug`) of a
++//! type recursive through `Box<[Self]>` and `Box<Self>` (the shape of chelis-ir
++//! `capacity_key::CanonicalCapacity`): the derived comparisons recurse through
++//! the models of the comparison impls of `[T]` and `Box<T>`, called with an
++//! instance built from the method being defined. The Lean definitions are
++//! `partial_fixpoint`s, whose monotonicity goes through those models.
++//! `RecursiveOrdDerives/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++use std::cmp::Ordering;
++
++#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub enum Source {
++    Axis { scope: u64, load: u32, axis: usize },
++    Scalar { scope: u64, node: u32 },
++}
++
++#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub enum Canonical {
++    Literal(u64),
++    Source(Source),
++    Product(Box<[Canonical]>),
++    ExactQuotient {
++        dividend: Box<Canonical>,
++        divisor: Box<Canonical>,
++    },
++}
++
++/// Not recursive itself: holds the recursive type (`CapacityPredicate`)
++#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub enum Predicate {
++    NonZero(Canonical),
++    DividesEvenly {
++        dividend: Canonical,
++        divisor: Canonical,
++    },
++}
++
++/// The sorted, deduplicated obligations (`ValidityDomain`)
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct Validity {
++    pub obligations: Box<[Predicate]>,
++}
++
++pub fn lit(n: u64) -> Canonical {
++    Canonical::Literal(n)
++}
++
++pub fn axis(scope: u64, load: u32) -> Canonical {
++    Canonical::Source(Source::Axis {
++        scope,
++        load,
++        axis: 0,
++    })
++}
++
++pub fn scalar(scope: u64, node: u32) -> Canonical {
++    Canonical::Source(Source::Scalar { scope, node })
++}
++
++pub fn product(factors: Vec<Canonical>) -> Canonical {
++    Canonical::Product(factors.into_boxed_slice())
++}
++
++pub fn quotient(dividend: Canonical, divisor: Canonical) -> Canonical {
++    Canonical::ExactQuotient {
++        dividend: Box::new(dividend),
++        divisor: Box::new(divisor),
++    }
++}
++
++/// `canonical_factors.sort()`
++pub fn sort_factors(mut factors: Vec<Canonical>) -> Vec<Canonical> {
++    factors.sort();
++    factors
++}
++
++/// `ValidityDomain::new`: sort, then dedup
++pub fn validity(mut obligations: Vec<Predicate>) -> Validity {
++    obligations.sort();
++    obligations.dedup();
++    Validity {
++        obligations: obligations.into_boxed_slice(),
++    }
++}
++
++/// Mixed factors: literals, sources, nested products (compared
++/// lexicographically, including a strict prefix) and quotients (compared by
++/// dividend, then divisor)
++pub fn sample(a: u64, b: u64) -> Vec<Canonical> {
++    let mut v = Vec::new();
++    v.push(quotient(axis(a, 2), lit(b)));
++    v.push(product(vec![axis(a, 1), lit(b), scalar(a, 3)]));
++    v.push(lit(b));
++    v.push(product(vec![axis(a, 1), lit(b)]));
++    v.push(scalar(a, 1));
++    v.push(quotient(axis(a, 2), lit(a)));
++    v.push(product(vec![axis(a, 1), product(vec![lit(a)])]));
++    v.push(axis(b, 7));
++    v.push(lit(a));
++    v.push(product(vec![axis(a, 1), lit(b)]));
++    v
++}
++
++pub fn sorted_debug(a: u64, b: u64) -> String {
++    format!("{:?}", sort_factors(sample(a, b)))
++}
++
++fn ordering_code(o: Ordering) -> u32 {
++    match o {
++        Ordering::Less => 1,
++        Ordering::Equal => 2,
++        Ordering::Greater => 3,
++    }
++}
++
++fn partial_code(o: Option<Ordering>) -> u32 {
++    match o {
++        None => 0,
++        Some(o) => ordering_code(o),
++    }
++}
++
++/// `cmp`, `partial_cmp`, `==`, `!=`, `lt` and `ge` of two values, one decimal digit each
++pub fn compare(x: &Canonical, y: &Canonical) -> u32 {
++    let mut r = ordering_code(x.cmp(y));
++    r = r * 10 + partial_code(x.partial_cmp(y));
++    r = r * 10 + if x == y { 1 } else { 0 };
++    r = r * 10 + if x != y { 1 } else { 0 };
++    r = r * 10 + if x.lt(y) { 1 } else { 0 };
++    r = r * 10 + if x.ge(y) { 1 } else { 0 };
++    r
++}
++
++/// The comparisons of the `i`-th element of `sample(a, b)` with every element
++pub fn compare_row(a: u64, b: u64, i: usize) -> Vec<u32> {
++    let v = sample(a, b);
++    let mut row = Vec::new();
++    let mut j = 0;
++    while j < v.len() {
++        row.push(compare(&v[i], &v[j]));
++        j += 1;
++    }
++    row
++}
++
++/// A clone compares equal to its original; the maximum and minimum by `Ord`
++pub fn clone_max_min(a: u64, b: u64) -> String {
++    let v = sample(a, b);
++    let c = v[1].clone();
++    let eq = c == v[1];
++    let mx = std::cmp::max(v[1].clone(), v[3].clone());
++    let mn = std::cmp::min(v[6].clone(), v[3].clone());
++    format!("{eq} {mx:?} {mn:?}")
++}
++
++/// Obligations with duplicates (`ValidityDomain::new`)
++pub fn validity_debug(a: u64, b: u64) -> String {
++    let mut obligations = Vec::new();
++    obligations.push(Predicate::DividesEvenly {
++        dividend: axis(a, 2),
++        divisor: product(vec![lit(b), scalar(a, 1)]),
++    });
++    obligations.push(Predicate::NonZero(product(vec![lit(b), scalar(a, 1)])));
++    obligations.push(Predicate::DividesEvenly {
++        dividend: axis(a, 2),
++        divisor: lit(b),
++    });
++    obligations.push(Predicate::NonZero(product(vec![lit(b), scalar(a, 1)])));
++    obligations.push(Predicate::NonZero(quotient(axis(a, 2), lit(b))));
++    obligations.push(Predicate::DividesEvenly {
++        dividend: axis(a, 2),
++        divisor: lit(b),
++    });
++    let v = validity(obligations);
++    format!("{} {:?}", v.obligations.len(), v)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn sorted() {
++        assert_eq!(
++            sorted_debug(4, 9),
++            "[Literal(4), Literal(9), Source(Axis { scope: 9, load: 7, axis: 0 }), Source(Scalar { scope: 4, node: 1 }), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9)]), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9)]), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9), Source(Scalar { scope: 4, node: 3 })]), Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Product([Literal(4)])]), ExactQuotient { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), divisor: Literal(4) }, ExactQuotient { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), divisor: Literal(9) }]"
++        );
++        assert_eq!(
++            sorted_debug(9, 4),
++            "[Literal(4), Literal(9), Source(Axis { scope: 4, load: 7, axis: 0 }), Source(Scalar { scope: 9, node: 1 }), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Literal(4)]), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Literal(4)]), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Literal(4), Source(Scalar { scope: 9, node: 3 })]), Product([Source(Axis { scope: 9, load: 1, axis: 0 }), Product([Literal(9)])]), ExactQuotient { dividend: Source(Axis { scope: 9, load: 2, axis: 0 }), divisor: Literal(4) }, ExactQuotient { dividend: Source(Axis { scope: 9, load: 2, axis: 0 }), divisor: Literal(9) }]"
++        );
++    }
++
++    #[test]
++    fn comparisons() {
++        let expected: [[u32; 10]; 10] = [
++            [221001, 330101, 330101, 330101, 330101, 330101, 330101, 330101, 330101, 330101],
++            [110110, 221001, 330101, 330101, 330101, 110110, 110110, 330101, 330101, 330101],
++            [110110, 110110, 221001, 110110, 110110, 110110, 110110, 110110, 330101, 110110],
++            [110110, 110110, 330101, 221001, 330101, 110110, 110110, 330101, 330101, 221001],
++            [110110, 110110, 330101, 110110, 221001, 110110, 110110, 330101, 330101, 110110],
++            [110110, 330101, 330101, 330101, 330101, 221001, 330101, 330101, 330101, 330101],
++            [110110, 330101, 330101, 330101, 330101, 110110, 221001, 330101, 330101, 330101],
++            [110110, 110110, 330101, 110110, 110110, 110110, 110110, 221001, 330101, 110110],
++            [110110, 110110, 110110, 110110, 110110, 110110, 110110, 110110, 221001, 110110],
++            [110110, 110110, 330101, 221001, 330101, 110110, 110110, 330101, 330101, 221001],
++        ];
++        for (i, row) in expected.iter().enumerate() {
++            assert_eq!(compare_row(4, 9, i), row.to_vec());
++        }
++    }
++
++    #[test]
++    fn clones() {
++        assert_eq!(
++            clone_max_min(4, 9),
++            "true Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9), Source(Scalar { scope: 4, node: 3 })]) Product([Source(Axis { scope: 4, load: 1, axis: 0 }), Literal(9)])"
++        );
++    }
++
++    #[test]
++    fn validity_domain() {
++        assert_eq!(
++            validity_debug(4, 9),
++            "4 Validity { obligations: [NonZero(Product([Literal(9), Source(Scalar { scope: 4, node: 1 })])), NonZero(ExactQuotient { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), divisor: Literal(9) }), DividesEvenly { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), divisor: Literal(9) }, DividesEvenly { dividend: Source(Axis { scope: 4, load: 2, axis: 0 }), divisor: Product([Literal(9), Source(Scalar { scope: 4, node: 1 })]) }] }"
++        );
++    }
++}

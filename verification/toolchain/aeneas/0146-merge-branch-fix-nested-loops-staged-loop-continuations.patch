@@ -1,0 +1,2128 @@
+# aeneas integration step 146 after cba11f3beb: commit d5127677a497a33572ea08c6241ce2cddf1ca4d4
+# first parent 93dc8595c6a77d4d05b72263d02dc93218cda12e, merged 939dafab4be101be65289f153a8c9e1c24326b64
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (staged loop continuations through the exits of enclosing loops: the eval root's own error)
+
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 7cf0136..8a2cf33 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -929,8 +929,10 @@ let call_abs_is_staged (ctx : bs_ctx) (calls : S.call V.AbsId.Map.t)
+   | _ -> false
+ 
+ (** Whether the continuation of an abstraction applies a call whose abstraction
+-    satisfies [staged] *)
+-let abs_holds_staged_call (staged : V.AbsId.id -> bool) (abs : V.abs) : bool =
++    satisfies [staged], or the continuation of a join or loop abstraction which
++    satisfies [staged_cont] *)
++let abs_holds_staged_call ?(staged_cont : V.AbsId.id -> bool = fun _ -> false)
++    (staged : V.AbsId.id -> bool) (abs : V.abs) : bool =
+   let found = ref false in
+   let visitor =
+     object
+@@ -940,6 +942,8 @@ let abs_holds_staged_call (staged : V.AbsId.id -> bool) (abs : V.abs) : bool =
+         (match f with
+         | V.EFunCall aid | V.EFunCallOutputs (aid, _) ->
+             if staged aid then found := true
++        | V.ELoop (aid, _) | V.EJoin aid ->
++            if staged_cont aid then found := true
+         | _ -> ());
+         super#visit_EApp env f args
+     end
+@@ -1005,8 +1009,38 @@ let join_may_snapshot_positions (ctx : bs_ctx) (lete : S.let_expr) : int list =
+     of a join which reaches a [continue] hold the calls, and the
+     continuations at the [continue] apply the continuation of the join). The
+     loop abstractions and the abstractions which join them keep the regions of
+-    the loop abstraction: we identify them by their regions. *)
+-let loop_level1_staged_abs (ctx : bs_ctx) (loop : S.loop) : V.AbsId.Set.t =
++    the loop abstraction: we identify them by their regions.
++
++    The staging propagates outwards: a loop whose body applies the staged
++    continuation of an abstraction of a nested loop (e.g., a returning loop,
++    whose continuation, a loop over [execution.as_deref_mut()], is copied onto
++    its [break]: the abstraction at that [break], or of a join before it,
++    applies the continuation of the exit abstraction of the nested loop) stages
++    the loop abstractions of the same regions, including those of its exits.
++    The loop abstractions of the nested loops are computed first. *)
++let rec loop_level1_staged_abs (ctx : bs_ctx) (loop : S.loop) : V.AbsId.Set.t =
++  (* The loops nested in the body first: an abstraction of the body can apply
++     the staged continuation of one of their abstractions (e.g., the
++     abstraction at a [break] which follows a nested loop, through a join) *)
++  let nested = ref ctx.level1_staged_abs in
++  let nested_visitor =
++    object (self)
++      inherit [_] S.iter_expr
++      method! visit_ty _ _ = ()
++      method! visit_tvalue _ _ = ()
++      method! visit_symbolic_value _ _ = ()
++      method! visit_abs _ _ = ()
++
++      method! visit_Loop env inner =
++        nested :=
++          loop_level1_staged_abs { ctx with level1_staged_abs = !nested } inner;
++        List.iter
++          (fun (exit : S.loop_exit) -> self#visit_expr env exit.exit_expr)
++          inner.exits
++    end
++  in
++  nested_visitor#visit_expr () loop.loop_expr;
++  let ctx = { ctx with level1_staged_abs = !nested } in
+   let calls = expr_fun_calls loop.loop_expr in
+   (* The abstractions at the [continue]s, the [break]s and the joins *)
+   let body_abs = ref [] in
+@@ -1032,9 +1066,21 @@ let loop_level1_staged_abs (ctx : bs_ctx) (loop : S.loop) : V.AbsId.Set.t =
+     end
+   in
+   visitor#visit_expr () loop.loop_expr;
+-  let holds_staged_call = abs_holds_staged_call (call_abs_is_staged ctx calls) in
++  let holds_staged_call =
++    abs_holds_staged_call
++      ~staged_cont:(fun aid -> V.AbsId.Set.mem aid ctx.level1_staged_abs)
++      (call_abs_is_staged ctx calls)
++  in
+   (* The regions of the loop abstractions to stage: some abstraction of the
+-     loop body with these regions holds a staged call *)
++     loop body with these regions holds a staged call, or applies the staged
++     continuation of an abstraction of a nested loop. The abstractions of the
++     exits count as well: a loop whose iterations leave a region untouched has
++     no input abstraction for it, but its [break] can follow a loop which
++     modified the region through a staged call (the continuation of a returning
++     loop is copied onto its [break]s, see [PrePasses.update_loops]): the
++     abstraction at that [break] applies the staged continuation of the inner
++     loop (directly, or through the continuation of a join after the inner
++     loop's exit), so the exit abstraction must be staged as well. *)
+   let staged_regions =
+     List.filter_map
+       (fun (abs : V.abs) ->
+@@ -1049,7 +1095,9 @@ let loop_level1_staged_abs (ctx : bs_ctx) (loop : S.loop) : V.AbsId.Set.t =
+                !body_abs
+         then Some abs.regions.owned
+         else None)
+-      loop.input_abs
++      (loop.input_abs
++      @ List.concat_map (fun (exit : S.loop_exit) -> exit.exit_abs) loop.exits
++      )
+   in
+   if staged_regions = [] then ctx.level1_staged_abs
+   else
+diff --git a/tests/lean/LoopStagedExits.lean b/tests/lean/LoopStagedExits.lean
+new file mode 100644
+index 0000000..fe60be6
+--- /dev/null
++++ b/tests/lean/LoopStagedExits.lean
+@@ -0,0 +1 @@
++import LoopStagedExits.Checks
+diff --git a/tests/lean/LoopStagedExits/Checks.lean b/tests/lean/LoopStagedExits/Checks.lean
+new file mode 100644
+index 0000000..17c40c4
+--- /dev/null
++++ b/tests/lean/LoopStagedExits/Checks.lean
+@@ -0,0 +1,82 @@
++import LoopStagedExits.LoopStagedExits
++
++/-! Evaluate the model of `tests/src/loop-staged-exits.rs` on the inputs of
++    its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame back
++    (after setting its `ctx` to `set`, if any). -/
++
++namespace loop_staged_exits.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def bs (xs : List Bool) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice Bool :=
++  ⟨xs, h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7, 11], ctx := u ctx, pos := us pos }
++
++/-- `Ok v` as `.inl v`, `Err e` as `.inr e` -/
++def res : core.result.Result U32 U32 → Sum Nat Nat
++  | .Ok v => .inl v.val
++  | .Err e => .inr e.val
++
++/-- `run (&mut frame)`; the caller then sets the frame's `ctx` to `set` (if
++    any) and gives the frame back -/
++def onFrame (run : Frame → Result (core.result.Result U32 U32 × Frame × (Frame → Frame)))
++    (ctx pos : Nat) (set : Option Nat := none) : Option (Sum Nat Nat × Nat × Nat) :=
++  match run (frame ctx pos) with
++  | ok (r, f1, back) =>
++    let f1' := match set with
++      | some c => { f1 with ctx := u c }
++      | none => f1
++    some (res r, (back f1').ctx.val, f1.pos.val)
++  | _ => none
++
++-- checked_iflet_native
++#guard onFrame (run_checked_iflet · true (sl []) (u 0)) 10 0 == some (.inl 0, 10, 0)
++#guard onFrame (run_checked_iflet · true (sl [1, 2]) (u 3)) 10 0 == some (.inl 15, 25, 3)
++#guard onFrame (run_checked_iflet · true (sl [1]) (u 3)) 10 1 == some (.inl 23, 33, 4)
++#guard onFrame (run_checked_iflet · false (sl [1]) (u 3)) 10 1 == some (.inl 0, 10, 1)
++#guard onFrame (run_checked_iflet · true (sl [1, 7]) (u 3)) 10 0 == some (.inr 1, 10, 0)
++#guard onFrame (run_checked_iflet · true (sl [1, 7]) (u 3)) 10 0 (set := some 99) == some (.inr 1, 99, 0)
++#guard onFrame (run_checked_iflet · true (sl []) (u 2)) 10 1 (set := some 99) == some (.inl 12, 99, 3)
++#guard onFrame (run_checked_iflet · true (sl [2]) (u 2)) max 0 == some (.inl 8, 7, 2)
++
++-- checked_nodes_native
++#guard onFrame (run_checked_nodes · true (sl []) (sl [])) 10 0 == some (.inl 0, 10, 0)
++#guard onFrame (run_checked_nodes · true (sl [1]) (sl [4, 5])) 10 0 == some (.inl 12, 40, 2)
++#guard onFrame (run_checked_nodes · true (sl [1]) (sl [4, 5, 6])) 10 2 == some (.inl 27, 80, 5)
++#guard onFrame (run_checked_nodes · false (sl [1]) (sl [4, 5, 6])) 10 2 == some (.inl 15, 10, 2)
++#guard onFrame (run_checked_nodes · true (sl [1]) (sl [4, 99, 5])) 10 0 == some (.inr 20, 20, 1)
++#guard onFrame (run_checked_nodes · true (sl [1]) (sl [4, 99, 5])) 10 0 (set := some 77) == some (.inr 20, 77, 1)
++#guard onFrame (run_checked_nodes · true (sl [7]) (sl [4, 5])) 10 0 == some (.inr 1, 10, 0)
++#guard onFrame (run_checked_nodes · true (sl [3, 7]) (sl [4, 5])) 10 0 (set := some 77) == some (.inr 1, 77, 0)
++#guard onFrame (run_checked_nodes · true (sl []) (sl [4])) 10 1 (set := some 99) == some (.inl 6, 99, 2)
++#guard onFrame (run_checked_nodes · true (sl []) (sl [1, 2])) max 0 == some (.inl 6, 4294967292, 2)
++
++-- checked_eval_native
++#guard onFrame (run_checked_eval · (sl []) (bs []) (sl []) (u 0)) 10 0 == some (.inl 0, 10, 0)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [true, false, false]) (sl [3, 4, 5]) (u 0)) 10 0
++  == some (.inl 14, 52, 3)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [false, true, false]) (sl [4, 3, 5]) (u 0)) 10 0
++  (set := some 9) == some (.inl 13, 9, 3)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [true, true]) (sl [3, 0]) (u 0)) 10 0
++  == some (.inr 10, 13, 1)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [false, false]) (sl [4, 99]) (u 0)) 10 0
++  == some (.inr 20, 20, 1)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [true, false]) (sl [3, 4]) (u 6)) 10 0
++  == some (.inr 2, 13, 1)
++#guard onFrame (run_checked_eval · (sl [1]) (bs [true, false]) (sl [3, 4]) (u 6)) 10 0
++  (set := some 5) == some (.inr 2, 5, 1)
++#guard onFrame (run_checked_eval · (sl [7]) (bs [true, false]) (sl [3, 4]) (u 0)) 10 0
++  (set := some 5) == some (.inr 1, 5, 0)
++
++end loop_staged_exits.checks
+diff --git a/tests/lean/LoopStagedExits/LoopStagedExits.lean b/tests/lean/LoopStagedExits/LoopStagedExits.lean
+new file mode 100644
+index 0000000..14b6d74
+--- /dev/null
++++ b/tests/lean/LoopStagedExits/LoopStagedExits.lean
+@@ -0,0 +1,1650 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_staged_exits]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_staged_exits
++
++/-- [loop_staged_exits::Frame]
++    Source: 'tests/src/loop-staged-exits.rs', lines 23:0-27:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- Trait declaration: [core::ops::deref::Deref::<&0 mut (loop_staged_exits::Frame<1>), loop_staged_exits::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 139:0-139:35
++    Name pattern: [core::ops::deref::Deref<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::Deref<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>"]
++structure
++  core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  where
++  deref : _root_.loop_staged_exits.Frame → _root_.Aeneas.Std.Result
++    _root_.loop_staged_exits.Frame
++
++/-- [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::deref::<0, 2, loop_staged_exits::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 172:4-172:25
++    Name pattern: [core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, loop_staged_exits::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, loop_staged_exits::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d.deref_specialized_f5241b514e867838b2c70437ca821848
++  (self : _root_.loop_staged_exits.Frame) :
++  _root_.Aeneas.Std.Result _root_.loop_staged_exits.Frame
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::<0, loop_staged_exits::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 169:0-169:38
++    Name pattern: [core::ops::deref::Deref<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::Deref<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d
++  :
++  _root_.loop_staged_exits.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  := {
++  deref :=
++    _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d.deref_specialized_f5241b514e867838b2c70437ca821848
++}
++
++/-- Trait declaration: [core::ops::deref::DerefMut::<&0 mut (loop_staged_exits::Frame<1>), loop_staged_exits::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 270:0-270:54
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::DerefMut<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>"
++  (parentClauses := ["DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst"])]
++structure
++  core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  where
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :
++    _root_.loop_staged_exits.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  deref_mut : _root_.loop_staged_exits.Frame → _root_.Aeneas.Std.Result
++    (_root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame) × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame) × (_root_.loop_staged_exits.Frame →
++    (_root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    (_root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame))))))
++
++/-- [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::deref_mut::<0, 2, loop_staged_exits::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 280:4-280:37
++    Name pattern: [core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, loop_staged_exits::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, loop_staged_exits::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++  (self : _root_.loop_staged_exits.Frame) :
++  _root_.Aeneas.Std.Result (_root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame) ×
++    (_root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame) ×
++    (_root_.loop_staged_exits.Frame → (_root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → (_root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame))))))
++  := do
++  let back :=
++    (fun self1 => (self1,
++       fun self2 => ({ self with ctx := self2.ctx },
++         fun f => { self with ctx := f.ctx })) : _root_.loop_staged_exits.Frame
++      → (_root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++      (_root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++      _root_.loop_staged_exits.Frame)))))
++  _root_.Aeneas.Std.Result.ok (self, fun self1 => self1, fun self1 => self1,
++    back)
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::<0, loop_staged_exits::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 279:0-279:41
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::DerefMut<&'0 mut loop_staged_exits::Frame<'1>, loop_staged_exits::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++  :
++  _root_.loop_staged_exits.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  := {
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :=
++    _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_2e1d242d9addf16b5e1f12423167856d
++  deref_mut :=
++    _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++}
++
++/-- [core::option::{core::option::Option<T>}::expect::<0, &1 mut (loop_staged_exits::Frame<2>)>]:
++    Source: '/rustc/library/core/src/option.rs', lines 968:4-968:45
++    Name pattern: [core::option::{core::option::Option<@T>}::expect<'0, &'1 mut loop_staged_exits::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::expect<'0, &'1 mut loop_staged_exits::Frame<'2>>"]
++def
++  core.option.Option.expect0Mut1Frame_specialized_791a87bed930b740484e573e8af12127
++  (self : _root_.Option _root_.loop_staged_exits.Frame)
++  (msg : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → (_root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  match self with
++  | none => let x ← _root_.Aeneas.Std.core.option.expect_failed msg
++            nomatch
++            x
++  | some f =>
++    let back :=
++      (fun self1 =>
++         let f1 :=
++           match self1 with
++           | some f2 => { f with ctx := f2.ctx }
++           | _ => f
++         ({ f with ctx := f1.ctx },
++           fun f2 =>
++             match self with
++             | none => none
++             | some f3 => some { f3 with ctx := f2.ctx }) : _root_.Option
++        _root_.loop_staged_exits.Frame → (_root_.loop_staged_exits.Frame ×
++        (_root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)))
++    _root_.Aeneas.Std.Result.ok (f, some, back)
++
++/-- [core::option::{core::option::Option<T>}::as_deref_mut::<0, &1 mut (loop_staged_exits::Frame<2>), loop_staged_exits::Frame<2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1414:4-1416:28
++    Name pattern: [core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut loop_staged_exits::Frame<'2>, loop_staged_exits::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut loop_staged_exits::Frame<'2>, loop_staged_exits::Frame<'2>>"]
++def
++  core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++  (opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst
++  :
++  _root_.loop_staged_exits.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5)
++  (self : _root_.Option _root_.loop_staged_exits.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => none : _root_.Option _root_.loop_staged_exits.Frame →
++        _root_.Option _root_.loop_staged_exits.Frame)
++    let back1 :=
++      (fun self1 => none : _root_.Option _root_.loop_staged_exits.Frame →
++        _root_.Option _root_.loop_staged_exits.Frame)
++    let back2 :=
++      (fun self1 => (none,
++         fun self2 => (none,
++           fun o => match self with
++                    | none => none
++                    | some f => some f)) : _root_.Option
++        _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)))))
++    _root_.Aeneas.Std.Result.ok (none, back, back1, back2)
++  | some f =>
++    let (f1, deref_mut_back, deref_mut_back1, deref_mut_back2) ←
++      opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst.deref_mut
++        f
++    let back :=
++      (fun o =>
++         let f2 := match o with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back f2
++         some f3 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)
++    let back1 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back1 f2
++         some f3 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)
++    let back2 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f
++         let (f3, _) := deref_mut_back2 f2
++         (some f3,
++           fun self2 =>
++             let f4 := deref_mut_back f1
++             let f5 := match self2 with
++                       | some f6 => f6
++                       | _ => f4
++             let f6 := match self1 with
++                       | some f7 => f7
++                       | _ => f
++             let (_, back3) := deref_mut_back2 f6
++             let (f7, _) := back3 { f4 with ctx := f5.ctx }
++             (some { f1 with ctx := f7.ctx },
++               fun o =>
++                 let f8 := match self2 with
++                           | some f9 => f9
++                           | _ => f1
++                 let f9 := match self1 with
++                           | some f10 => f10
++                           | _ => f
++                 let (_, back4) := deref_mut_back2 f9
++                 let (_, back5) := back4 { f4 with ctx := f8.ctx }
++                 let i :=
++                   match o with
++                   | some (_root_.loop_staged_exits.Frame.mk _ i1 _) => i1
++                   | _ => f1.ctx
++                 let f10 := back5 { f1 with ctx := i }
++                 match self with
++                 | none => none
++                 | some f11 => some { f11 with ctx := f10.ctx })) :
++        _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)))))
++    _root_.Aeneas.Std.Result.ok (some f1, back, back1, back2)
++
++/-- [loop_staged_exits::{loop_staged_exits::Frame<'a>}::advance]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 30:4-35:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.loop_staged_exits.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame))
++  := do
++  let s ← _root_.Aeneas.Std.Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [loop_staged_exits::{loop_staged_exits::Frame<'a>}::control]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 37:4-44:5
++    Visibility: public -/
++def Frame.control
++  (self : _root_.loop_staged_exits.Frame) (c : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.U32) × _root_.loop_staged_exits.Frame ×
++    (_root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame))
++  := do
++  if c = 0#u32
++  then
++    let back'a :=
++      (fun self1 => { self with ctx := self1.ctx } :
++        _root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      10#u32, self, back'a)
++  else
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.ctx c)
++    let i1 ← self.pos + 1#usize
++    let back'a :=
++      (fun self1 => { self with ctx := self1.ctx } :
++        _root_.loop_staged_exits.Frame → _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      { self with ctx := i, pos := i1 }, back'a)
++
++/-- [loop_staged_exits::node_value]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 47:0-59:1
++    Visibility: public -/
++def node_value
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (id : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))
++  := do
++  match execution with
++  | none =>
++    let back :=
++      (fun execution1 => match execution with
++                         | none => none
++                         | some f => some f : _root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok id,
++      none, back)
++  | some f =>
++    if id = 99#u32
++    then
++      let back :=
++        (fun execution1 =>
++           let i :=
++             match execution1 with
++             | some f1 =>
++               match f1 with
++               | _root_.loop_staged_exits.Frame.mk _ i1 _ => i1
++             | _ => f.ctx
++           match execution with
++           | none => none
++           | some f1 => some { f1 with ctx := i } : _root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++        20#u32, execution, back)
++    else
++      let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul f.ctx 2#u32)
++      let i1 ← f.pos + 1#usize
++      let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++      let i3 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add id i2)
++      let back :=
++        (fun execution1 =>
++           let i4 :=
++             match execution1 with
++             | some f1 =>
++               match f1 with
++               | _root_.loop_staged_exits.Frame.mk _ i5 _ => i5
++             | _ => i
++           match execution with
++           | none => none
++           | some f1 => some { f1 with ctx := i4 } : _root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i3,
++        some { f with ctx := i, pos := i1 }, back)
++
++/-- [loop_staged_exits::checked_iflet]: loop body 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 75:4-80:5
++    Visibility: public -/
++@[rust_loop_body]
++def checked_iflet_loop0_loop0.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (acc : _root_.Aeneas.Std.U32) (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option _root_.loop_staged_exits.Frame) ×
++    _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame →
++    _root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  if j < n
++  then
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.loop_staged_exits.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++        _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (execution1, acc1, back2, back3) ←
++      match o with
++      | none =>
++        let execution2 := as_deref_mut_back none
++        _root_.Aeneas.Std.Result.ok (execution2, acc,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option _root_.loop_staged_exits.Frame →
++          _root_.Option _root_.loop_staged_exits.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 none
++                 back6 o3) : _root_.Option _root_.loop_staged_exits.Frame →
++          ((_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++      | some f =>
++        do
++        let (i, f1, advance_back) ← _root_.loop_staged_exits.Frame.advance f
++        let acc2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i)
++        let execution2 := as_deref_mut_back (some f1)
++        _root_.Aeneas.Std.Result.ok (execution2, acc2,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option _root_.loop_staged_exits.Frame →
++          _root_.Option _root_.loop_staged_exits.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 (some { f with ctx := (advance_back f1).ctx })
++                 back6 o3) : _root_.Option _root_.loop_staged_exits.Frame →
++          ((_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++    let j1 ← j + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back4 => back3 back4, back2, execution1, acc1, j1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1, fun back2 => back back2))
++
++/-- [loop_staged_exits::checked_iflet]: loop 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 75:4-80:5
++    Visibility: public -/
++@[rust_loop]
++def checked_iflet_loop0_loop0
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.loop_staged_exits.Frame) ×
++    _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame →
++    _root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, j1) =>
++       _root_.loop_staged_exits.checked_iflet_loop0_loop0.body n back2 back3
++       execution1 acc1 j1 : ((_root_.Option _root_.loop_staged_exits.Frame →
++      ((_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option _root_.loop_staged_exits.Frame) ×
++      _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame →
++      _root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    (back, back1, execution, acc, j)
++
++/-- [loop_staged_exits::checked_iflet]: loop body 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 67:4-82:1
++    Visibility: public -/
++@[rust_loop_body]
++def checked_iflet_loop0.body
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len checks
++  if i < i1
++  then
++    let i2 ← _root_.Aeneas.Std.Slice.index_usize checks i
++    if i2 = 7#u32
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err 1#u32, execution,
++        fun back => (back, fun o => o)))
++    else
++      let i3 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i3)
++  else
++    let (execution1, acc, back, back1) ←
++      _root_.loop_staged_exits.checked_iflet_loop0_loop0
++        (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok acc, back execution1,
++      fun back2 => back1 back2))
++
++/-- [loop_staged_exits::checked_iflet]: loop 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 67:4-82:1
++    Visibility: public -/
++@[rust_loop]
++def checked_iflet_loop0
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun i1 => _root_.loop_staged_exits.checked_iflet_loop0.body checks
++       execution n i1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    i
++
++/-- [loop_staged_exits::checked_iflet]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 61:0-82:1
++    Visibility: public -/
++def checked_iflet
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))
++  := do
++  let (r, back, back1) ←
++    _root_.loop_staged_exits.checked_iflet_loop0 checks execution n 0#usize
++  let back2 :=
++    (fun execution1 =>
++       let (back3, back4) :=
++         back1
++           (match back with
++            | none => none
++            | some f =>
++              match execution1 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back)
++       let back5 := back4 back3
++       let o :=
++         match back5 with
++         | none => none
++         | some f =>
++           match execution1 with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => back5
++       match execution with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option _root_.loop_staged_exits.Frame →
++      _root_.Option _root_.loop_staged_exits.Frame)
++  _root_.Aeneas.Std.Result.ok (r, back, back2)
++
++/-- [loop_staged_exits::checked_nodes]: loop body 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-104:1
++    Visibility: public -/
++@[rust_loop_body]
++def checked_nodes_loop0_loop0.body
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (acc : _root_.Aeneas.Std.U32) (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  let i := _root_.Aeneas.Std.Slice.len ids
++  if j < i
++  then
++    let id ← _root_.Aeneas.Std.Slice.index_usize ids j
++    let j1 ← j + 1#usize
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.loop_staged_exits.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++        _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (r, o1, node_value_back) ← _root_.loop_staged_exits.node_value o id
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc val)
++      let execution1 := as_deref_mut_back o1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (fun back2 =>
++           let (back3, back4) := back back2
++           let (o2, back5) := as_deref_mut_back2 back3
++           (o2,
++             fun o3 =>
++               let (o4, back6) := back5 o3
++               let o5 := node_value_back o4
++               let o6 := back6 o5
++               back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
++                                    back1 o3, execution1, acc1, j1))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++          _root_.Aeneas.Std.U32) residual
++      let execution1 := as_deref_mut_back o1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r1,
++        checks, execution1, ids,
++        fun o2 => let o3 := as_deref_mut_back1 o2
++                  back1 o3,
++        fun back2 =>
++          let (back3, back4) := back back2
++          let (o2, back5) := as_deref_mut_back2 back3
++          (o2,
++            fun o3 =>
++              let (o4, back6) := back5 o3
++              let o5 := node_value_back o4
++              let o6 := back6 o5
++              back4 o6)))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok acc, checks, execution, ids,
++      back1, fun back2 => back back2))
++
++/-- [loop_staged_exits::checked_nodes]: loop 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-104:1
++    Visibility: public -/
++@[rust_loop]
++def checked_nodes_loop0_loop0
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) (acc : _root_.Aeneas.Std.U32)
++  (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, j1) =>
++       _root_.loop_staged_exits.checked_nodes_loop0_loop0.body checks ids back2
++       back3 execution1 acc1 j1 : ((_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    (back, back1, execution, acc, j)
++
++/-- [loop_staged_exits::checked_nodes]: loop body 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-104:1
++    Visibility: public -/
++@[rust_loop_body]
++def checked_nodes_loop0.body
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len checks
++  let joined ←
++    if i < i1
++    then
++      do
++      let i2 ← _root_.Aeneas.Std.Slice.index_usize checks i
++      if i2 = 7#u32
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          (_root_.Aeneas.Std.core.result.Result.Err 1#u32, execution,
++          fun back => (back, fun o => o), fun o => o) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++      else
++        let i3 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (checks,
++          execution, ids, i3)) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++    else
++      do
++      let (r, _, execution1, _, back, back1) ←
++        _root_.loop_staged_exits.checked_nodes_loop0_loop0
++          (fun back2 => (back2, fun o => o)) (fun o => o) checks execution ids
++          i 0#u32 0#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r, execution1,
++        fun back2 => back1 back2, back) : _root_.Sum
++        ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++        _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++        _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++        _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))))
++  match joined with
++  | _root_.Sum.inl (r, o, back, back1) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, back1
++      o, fun back2 => back back2))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, _, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit3 exit1, exit2))
++
++/-- [loop_staged_exits::checked_nodes]: loop 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-104:1
++    Visibility: public -/
++@[rust_loop]
++def checked_nodes_loop0
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun (checks1, execution1, ids1, i1) =>
++       _root_.loop_staged_exits.checked_nodes_loop0.body checks1 execution1
++       ids1 i1 : ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    (checks, execution, ids, i)
++
++/-- [loop_staged_exits::checked_nodes]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 84:0-104:1
++    Visibility: public -/
++def checked_nodes
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))
++  := do
++  let (r, back, back1) ←
++    _root_.loop_staged_exits.checked_nodes_loop0 checks execution ids 0#usize
++  let back2 :=
++    (fun execution1 =>
++       let (back3, back4) :=
++         back1
++           (match back with
++            | none => none
++            | some f =>
++              match execution1 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back)
++       let o := back4 back3
++       match execution with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option _root_.loop_staged_exits.Frame →
++      _root_.Option _root_.loop_staged_exits.Frame)
++  _root_.Aeneas.Std.Result.ok (r, back, back2)
++
++/-- [loop_staged_exits::checked_eval]: loop body 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-135:1
++    Visibility: public -/
++@[rust_loop_body]
++def checked_eval_loop0_loop0.body
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize)
++  (acc : _root_.Aeneas.Std.U32) (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++    _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame →
++    _root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len ids
++  if j < i1
++  then
++    let id ← _root_.Aeneas.Std.Slice.index_usize ids j
++    let j1 ← j + 1#usize
++    let i2 ← j1 - 1#usize
++    let b ← _root_.Aeneas.Std.Slice.index_usize kinds i2
++    let joined ←
++      if b
++      then
++        do
++        let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++          _root_.loop_staged_exits.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++            _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++            execution
++        let (f, expect_back, expect_back1) ←
++          _root_.loop_staged_exits.core.option.Option.expect0Mut1Frame_specialized_791a87bed930b740484e573e8af12127
++            o (_root_.Aeneas.Std.toStr "controls")
++        let (r, f1, control_back) ← _root_.loop_staged_exits.Frame.control f id
++        let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++        match cf with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++          let o1 := expect_back f1
++          let execution1 := as_deref_mut_back o1
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++            (fun back2 =>
++               let (back3, back4) := back back2
++               let (o2, back5) := as_deref_mut_back2 back3
++               (o2,
++                 fun o3 =>
++                   let (o4, back6) := back5 o3
++                   let (f2, back7) := expect_back1 o4
++                   let o5 := back7 { f with ctx := (control_back f2).ctx }
++                   let o6 := back6 o5
++                   back4 o6),
++            fun o2 => let o3 := as_deref_mut_back1 o2
++                      back1 o3, checks, execution1, kinds, ids, cancel, i, acc,
++            j1)) : _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++            _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame)))) (_root_.Sum ((_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))))))
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          let r1 ←
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++              _root_.Aeneas.Std.U32) residual
++          let o1 := expect_back f1
++          let execution1 := as_deref_mut_back o1
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (r1,
++            checks, execution1, kinds, ids, cancel,
++            fun o2 => let o3 := as_deref_mut_back1 o2
++                      back1 o3,
++            fun back2 =>
++              let (back3, back4) := back back2
++              let (o2, back5) := as_deref_mut_back2 back3
++              (o2,
++                fun o3 =>
++                  let (o4, back6) := back5 o3
++                  let (f2, back7) := expect_back1 o4
++                  let o5 := back7 { f with ctx := (control_back f2).ctx }
++                  let o6 := back6 o5
++                  back4 o6))) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame)))) (_root_.Sum ((_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))))))
++      else
++        if cancel > 5#u32
++        then
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++            (_root_.Aeneas.Std.core.result.Result.Err 2#u32, execution, back1,
++            fun back2 => back back2) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame)))) (_root_.Sum ((_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++            _root_.Aeneas.Std.U32) × (_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++            _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++            _root_.Aeneas.Std.U32 × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → ((_root_.Option
++            _root_.loop_staged_exits.Frame) × (_root_.Option
++            _root_.loop_staged_exits.Frame → _root_.Option
++            _root_.loop_staged_exits.Frame))))))
++        else
++          do
++          let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++            _root_.loop_staged_exits.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_2fb2d05d162d274b4d5092dd7d66f382
++              _root_.loop_staged_exits.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++              execution
++          let (r, o1, node_value_back) ←
++            _root_.loop_staged_exits.node_value o id
++          let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++          match cf with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++            let acc1 ←
++              lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc val)
++            let execution1 := as_deref_mut_back o1
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++              (fun back2 =>
++                 let (back3, back4) := back back2
++                 let (o2, back5) := as_deref_mut_back2 back3
++                 (o2,
++                   fun o3 =>
++                     let (o4, back6) := back5 o3
++                     let o5 := node_value_back o4
++                     let o6 := back6 o5
++                     back4 o6),
++              fun o2 => let o3 := as_deref_mut_back1 o2
++                        back1 o3, checks, execution1, kinds, ids, cancel, i,
++              acc1, j1)) : _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++              _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame)))) (_root_.Sum ((_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame))) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame))))))
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            let r1 ←
++              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++                _root_.Aeneas.Std.U32) residual
++            let execution1 := as_deref_mut_back o1
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r1, execution1,
++              fun o2 => let o3 := as_deref_mut_back1 o2
++                        back1 o3,
++              fun back2 =>
++                let (back3, back4) := back back2
++                let (o2, back5) := as_deref_mut_back2 back3
++                (o2,
++                  fun o3 =>
++                    let (o4, back6) := back5 o3
++                    let o5 := node_value_back o4
++                    let o6 := back6 o5
++                    back4 o6)) : _root_.Sum
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame)))) (_root_.Sum ((_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame))) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++              _root_.Aeneas.Std.U32) × (_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++              _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++              _root_.Aeneas.Std.U32 × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → ((_root_.Option
++              _root_.loop_staged_exits.Frame) × (_root_.Option
++              _root_.loop_staged_exits.Frame → _root_.Option
++              _root_.loop_staged_exits.Frame))))))
++    match joined with
++    | _root_.Sum.inl (r, o, back2, back3) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r,
++        checks, o, kinds, ids, cancel, back2, fun back4 => back3 back4))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5,
++      exit6, exit7, exit8, exit9)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++        exit1, exit2, exit3, exit4, exit5, exit6, exit7, exit8, exit9))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, exit1, exit2, exit3, exit4, exit5,
++      exit6, exit7)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++        exit1, exit2, exit3, exit4, exit5, exit6, exit7))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok acc, checks, execution, kinds,
++      ids, cancel, back1, fun back2 => back back2))
++
++/-- [loop_staged_exits::checked_eval]: loop 1:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-135:1
++    Visibility: public -/
++@[rust_loop]
++def checked_eval_loop0_loop0
++  (back : _root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++  _root_.loop_staged_exits.Frame) × (_root_.Option
++  _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)))
++  (back1 : _root_.Option _root_.loop_staged_exits.Frame → _root_.Option
++  _root_.loop_staged_exits.Frame)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize)
++  (acc : _root_.Aeneas.Std.U32) (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++    (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun (back2, back3, checks1, execution1, kinds1, ids1, cancel1, i1, acc1,
++       j1) => _root_.loop_staged_exits.checked_eval_loop0_loop0.body back2
++       back3 checks1 execution1 kinds1 ids1 cancel1 i1 acc1 j1 :
++      ((_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++      × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    (back, back1, checks, execution, kinds, ids, cancel, i, acc, j)
++
++/-- [loop_staged_exits::checked_eval]: loop body 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-135:1
++    Visibility: public -/
++@[rust_loop_body]
++def checked_eval_loop0.body
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice _root_.Bool) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame)))))
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len checks
++  let joined ←
++    if i < i1
++    then
++      do
++      let i2 ← _root_.Aeneas.Std.Slice.index_usize checks i
++      if i2 = 7#u32
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++          (_root_.Aeneas.Std.core.result.Result.Err 1#u32, execution,
++          fun back => (back, fun o => o), fun o => o) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame
++          → ((_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++      else
++        let i3 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (checks,
++          execution, kinds, ids, cancel, i3)) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → ((_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame)) (_root_.Sum
++          ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++          _root_.Aeneas.Std.U32) × (_root_.Option
++          _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice
++          _root_.Bool) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++          _root_.Aeneas.Std.U32 × (_root_.Option _root_.loop_staged_exits.Frame
++          → ((_root_.Option _root_.loop_staged_exits.Frame) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))) × (_root_.Option
++          _root_.loop_staged_exits.Frame → _root_.Option
++          _root_.loop_staged_exits.Frame))))
++    else
++      do
++      let (r, _, execution1, _, _, _, back, back1) ←
++        _root_.loop_staged_exits.checked_eval_loop0_loop0
++          (fun back2 => (back2, fun o => o)) (fun o => o) checks execution
++          kinds ids cancel i 0#u32 0#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r, execution1,
++        fun back2 => back1 back2, back) : _root_.Sum
++        ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Option _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame)) (_root_.Sum ((_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++        _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++        _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame)
++        × (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++        _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × (_root_.Option
++        _root_.loop_staged_exits.Frame → ((_root_.Option
++        _root_.loop_staged_exits.Frame) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))) × (_root_.Option
++        _root_.loop_staged_exits.Frame → _root_.Option
++        _root_.loop_staged_exits.Frame))))
++  match joined with
++  | _root_.Sum.inl (r, o, back, back1) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, back1
++      o, fun back2 => back back2))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5))
++    =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3, exit4, exit5))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, _, _, _, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit3 exit1, exit2))
++
++/-- [loop_staged_exits::checked_eval]: loop 0:
++    Source: 'tests/src/loop-staged-exits.rs', lines 1:0-135:1
++    Visibility: public -/
++@[rust_loop]
++def checked_eval_loop0
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → ((_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))))
++  := do
++  loop
++    (fun (checks1, execution1, kinds1, ids1, cancel1, i1) =>
++       _root_.loop_staged_exits.checked_eval_loop0.body checks1 execution1
++       kinds1 ids1 cancel1 i1 : ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.loop_staged_exits.Frame) ×
++      (_root_.Aeneas.Std.Slice _root_.Bool) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Aeneas.Std.Slice _root_.Bool) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → ((_root_.Option
++      _root_.loop_staged_exits.Frame) × (_root_.Option
++      _root_.loop_staged_exits.Frame → _root_.Option
++      _root_.loop_staged_exits.Frame))))))
++    (checks, execution, kinds, ids, cancel, i)
++
++/-- [loop_staged_exits::checked_eval]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 106:0-135:1
++    Visibility: public -/
++def checked_eval
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (execution : _root_.Option _root_.loop_staged_exits.Frame)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.loop_staged_exits.Frame) × (_root_.Option
++    _root_.loop_staged_exits.Frame → _root_.Option
++    _root_.loop_staged_exits.Frame))
++  := do
++  let (r, back, back1) ←
++    _root_.loop_staged_exits.checked_eval_loop0 checks execution kinds ids
++      cancel 0#usize
++  let back2 :=
++    (fun execution1 =>
++       let (back3, back4) :=
++         back1
++           (match back with
++            | none => none
++            | some f =>
++              match execution1 with
++              | some f1 => some { f with ctx := f1.ctx }
++              | _ => back)
++       let o := back4 back3
++       match execution with
++       | none => none
++       | some f =>
++         match o with
++         | some f1 => some { f with ctx := f1.ctx }
++         | _ => execution : _root_.Option _root_.loop_staged_exits.Frame →
++      _root_.Option _root_.loop_staged_exits.Frame)
++  _root_.Aeneas.Std.Result.ok (r, back, back2)
++
++/-- [loop_staged_exits::run_checked_iflet]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 137:0-139:1
++    Visibility: public -/
++def run_checked_iflet
++  (f : _root_.loop_staged_exits.Frame) (some1 : _root_.Bool)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame))
++  := do
++  if some1
++  then
++    let (r, o, checked_iflet_back) ←
++      _root_.loop_staged_exits.checked_iflet checks (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := checked_iflet_back (some { f3 with ctx := f2.ctx })
++         let i :=
++           match o1 with
++           | some (_root_.loop_staged_exits.Frame.mk _ i1 _) => i1
++           | _ => f.ctx
++         { f with ctx := i } : _root_.loop_staged_exits.Frame →
++        _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (r, f1, back)
++  else
++    let (r, _, _) ← _root_.loop_staged_exits.checked_iflet checks none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } : _root_.loop_staged_exits.Frame →
++        _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (r, f, back)
++
++/-- [loop_staged_exits::run_checked_nodes]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 141:0-148:1
++    Visibility: public -/
++def run_checked_nodes
++  (f : _root_.loop_staged_exits.Frame) (some1 : _root_.Bool)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame))
++  := do
++  if some1
++  then
++    let (r, o, checked_nodes_back) ←
++      _root_.loop_staged_exits.checked_nodes checks (some f) ids
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := checked_nodes_back (some { f3 with ctx := f2.ctx })
++         let i :=
++           match o1 with
++           | some (_root_.loop_staged_exits.Frame.mk _ i1 _) => i1
++           | _ => f.ctx
++         { f with ctx := i } : _root_.loop_staged_exits.Frame →
++        _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (r, f1, back)
++  else
++    let (r, _, _) ← _root_.loop_staged_exits.checked_nodes checks none ids
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } : _root_.loop_staged_exits.Frame →
++        _root_.loop_staged_exits.Frame)
++    _root_.Aeneas.Std.Result.ok (r, f, back)
++
++/-- [loop_staged_exits::run_checked_eval]:
++    Source: 'tests/src/loop-staged-exits.rs', lines 150:0-158:1
++    Visibility: public -/
++def run_checked_eval
++  (f : _root_.loop_staged_exits.Frame)
++  (checks : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (kinds : _root_.Aeneas.Std.Slice _root_.Bool)
++  (ids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (cancel : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.loop_staged_exits.Frame × (_root_.loop_staged_exits.Frame →
++    _root_.loop_staged_exits.Frame))
++  := do
++  let (r, o, checked_eval_back) ←
++    _root_.loop_staged_exits.checked_eval checks (some f) kinds ids cancel
++  let f1 := match o with
++            | some f2 => f2
++            | _ => f
++  let back :=
++    (fun f2 =>
++       let f3 := match o with
++                 | some f4 => f4
++                 | _ => f
++       let o1 := checked_eval_back (some { f3 with ctx := f2.ctx })
++       let i :=
++         match o1 with
++         | some (_root_.loop_staged_exits.Frame.mk _ i1 _) => i1
++         | _ => f.ctx
++       { f with ctx := i } : _root_.loop_staged_exits.Frame →
++      _root_.loop_staged_exits.Frame)
++  _root_.Aeneas.Std.Result.ok (r, f1, back)
++
++end loop_staged_exits
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 90160a0..efd736b 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -151,6 +151,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopReturnOptionMutArg
+ @[default_target] lean_lib LoopSharedComponents
++@[default_target] lean_lib LoopStagedExits
+ @[default_target] lean_lib LoopStaticStrElementContinue
+ @[default_target] lean_lib LoopUntouchedSharedReborrows
+ @[default_target] lean_lib JoinDistinctOwnedRegion
+diff --git a/tests/src/loop-staged-exits.rs b/tests/src/loop-staged-exits.rs
+new file mode 100644
+index 0000000..d0913a3
+--- /dev/null
++++ b/tests/src/loop-staged-exits.rs
+@@ -0,0 +1,251 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopStagedExits
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A returning loop followed by a loop over `execution.as_deref_mut()` on
++//! `Option<&'1 mut Frame<'2>>` (the shape of
++//! `chelis_ir::eval::eval_tensor_internal_with_result_claims`). The
++//! continuation of the returning loop (the node loop) is copied onto its
++//! `break`, so the node loop is nested in the body of the first loop, which
++//! never touches the frame. The loop abstraction of the frame's region in the
++//! node loop is staged at level 1 (the first stage of `as_deref_mut` routes the
++//! inner borrows of the frame). Its exit abstraction flows, through the `break`
++//! of the first loop, into the exit of the first loop, which must then be
++//! staged at level 1 as well:
++//! - `checked_iflet`: the node loop's exit abstraction is applied directly by
++//!   the abstraction at that `break`;
++//! - `checked_nodes`: the node loop returns through `?`, so its exits and the
++//!   early return of the first loop are joined before the `break`: the
++//!   abstractions of that join apply the staged continuation of the node loop;
++//! - `checked_eval`: both, with `continue`s and a second early return in the
++//!   node loop.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++
++    pub fn control(&mut self, c: u32) -> Result<(), u32> {
++        if c == 0 {
++            return Err(10);
++        }
++        *self.ctx = (*self.ctx).wrapping_add(c);
++        self.pos += 1;
++        Ok(())
++    }
++}
++
++pub fn node_value(execution: Option<&mut Frame<'_>>, id: u32) -> Result<u32, u32> {
++    match execution {
++        Some(f) => {
++            if id == 99 {
++                return Err(20);
++            }
++            *f.ctx = (*f.ctx).wrapping_mul(2);
++            f.pos += 1;
++            Ok(id.wrapping_add(f.pos as u32))
++        }
++        None => Ok(id),
++    }
++}
++
++pub fn checked_iflet(
++    checks: &[u32],
++    mut execution: Option<&mut Frame<'_>>,
++    n: u32,
++) -> Result<u32, u32> {
++    let mut i = 0;
++    while i < checks.len() {
++        if checks[i] == 7 {
++            return Err(1);
++        }
++        i += 1;
++    }
++    let mut acc = 0u32;
++    let mut j = 0;
++    while j < n {
++        if let Some(f) = execution.as_deref_mut() {
++            acc = acc.wrapping_add(f.advance());
++        }
++        j += 1;
++    }
++    Ok(acc)
++}
++
++pub fn checked_nodes(
++    checks: &[u32],
++    mut execution: Option<&mut Frame<'_>>,
++    ids: &[u32],
++) -> Result<u32, u32> {
++    let mut i = 0;
++    while i < checks.len() {
++        if checks[i] == 7 {
++            return Err(1);
++        }
++        i += 1;
++    }
++    let mut acc = 0u32;
++    let mut j = 0;
++    while j < ids.len() {
++        let id = ids[j];
++        j += 1;
++        acc = acc.wrapping_add(node_value(execution.as_deref_mut(), id)?);
++    }
++    Ok(acc)
++}
++
++pub fn checked_eval(
++    checks: &[u32],
++    mut execution: Option<&mut Frame<'_>>,
++    kinds: &[bool],
++    ids: &[u32],
++    cancel: &u32,
++) -> Result<u32, u32> {
++    let mut i = 0;
++    while i < checks.len() {
++        if checks[i] == 7 {
++            return Err(1);
++        }
++        i += 1;
++    }
++    let mut acc = 0u32;
++    let mut j = 0;
++    while j < ids.len() {
++        let id = ids[j];
++        j += 1;
++        if kinds[j - 1] {
++            execution.as_deref_mut().expect("controls").control(id)?;
++            continue;
++        }
++        if *cancel > 5 {
++            return Err(2);
++        }
++        acc = acc.wrapping_add(node_value(execution.as_deref_mut(), id)?);
++    }
++    Ok(acc)
++}
++
++pub fn run_checked_iflet(f: &mut Frame<'_>, some: bool, checks: &[u32], n: u32) -> Result<u32, u32> {
++    if some { checked_iflet(checks, Some(f), n) } else { checked_iflet(checks, None, n) }
++}
++
++pub fn run_checked_nodes(
++    f: &mut Frame<'_>,
++    some: bool,
++    checks: &[u32],
++    ids: &[u32],
++) -> Result<u32, u32> {
++    if some { checked_nodes(checks, Some(f), ids) } else { checked_nodes(checks, None, ids) }
++}
++
++pub fn run_checked_eval(
++    f: &mut Frame<'_>,
++    checks: &[u32],
++    kinds: &[bool],
++    ids: &[u32],
++    cancel: u32,
++) -> Result<u32, u32> {
++    checked_eval(checks, Some(f), kinds, ids, &cancel)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    /// `(result, ctx, pos)` after running `run` on a frame over `steps`, the
++    /// caller then setting the frame's `ctx` to `set` (if any)
++    fn on_frame<R>(
++        ctx: u32,
++        pos: usize,
++        set: Option<u32>,
++        run: impl FnOnce(&mut Frame<'_>) -> R,
++    ) -> (R, u32, usize) {
++        let steps = [3u32, 5, 7, 11];
++        let mut c = ctx;
++        let mut f = Frame { steps: &steps, ctx: &mut c, pos };
++        let r = run(&mut f);
++        if let Some(s) = set {
++            *f.ctx = s;
++        }
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn checked_iflet_native() {
++        let run = |some, checks: &'static [u32], n| {
++            move |f: &mut Frame<'_>| run_checked_iflet(f, some, checks, n)
++        };
++        assert_eq!(on_frame(10, 0, None, run(true, &[], 0)), (Ok(0), 10, 0));
++        assert_eq!(on_frame(10, 0, None, run(true, &[1, 2], 3)), (Ok(15), 25, 3));
++        assert_eq!(on_frame(10, 1, None, run(true, &[1], 3)), (Ok(23), 33, 4));
++        assert_eq!(on_frame(10, 1, None, run(false, &[1], 3)), (Ok(0), 10, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, &[1, 7], 3)), (Err(1), 10, 0));
++        assert_eq!(on_frame(10, 0, Some(99), run(true, &[1, 7], 3)), (Err(1), 99, 0));
++        assert_eq!(on_frame(10, 1, Some(99), run(true, &[], 2)), (Ok(12), 99, 3));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, &[2], 2)), (Ok(8), 7, 2));
++    }
++
++    #[test]
++    fn checked_nodes_native() {
++        let run = |some, checks: &'static [u32], ids: &'static [u32]| {
++            move |f: &mut Frame<'_>| run_checked_nodes(f, some, checks, ids)
++        };
++        assert_eq!(on_frame(10, 0, None, run(true, &[], &[])), (Ok(0), 10, 0));
++        assert_eq!(on_frame(10, 0, None, run(true, &[1], &[4, 5])), (Ok(12), 40, 2));
++        assert_eq!(on_frame(10, 2, None, run(true, &[1], &[4, 5, 6])), (Ok(27), 80, 5));
++        assert_eq!(on_frame(10, 2, None, run(false, &[1], &[4, 5, 6])), (Ok(15), 10, 2));
++        assert_eq!(on_frame(10, 0, None, run(true, &[1], &[4, 99, 5])), (Err(20), 20, 1));
++        assert_eq!(on_frame(10, 0, Some(77), run(true, &[1], &[4, 99, 5])), (Err(20), 77, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, &[7], &[4, 5])), (Err(1), 10, 0));
++        assert_eq!(on_frame(10, 0, Some(77), run(true, &[3, 7], &[4, 5])), (Err(1), 77, 0));
++        assert_eq!(on_frame(10, 1, Some(99), run(true, &[], &[4])), (Ok(6), 99, 2));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, &[], &[1, 2])), (Ok(6), 4294967292, 2));
++    }
++
++    #[test]
++    fn checked_eval_native() {
++        let run =
++            |checks: &'static [u32], kinds: &'static [bool], ids: &'static [u32], cancel| {
++                move |f: &mut Frame<'_>| run_checked_eval(f, checks, kinds, ids, cancel)
++            };
++        assert_eq!(on_frame(10, 0, None, run(&[], &[], &[], 0)), (Ok(0), 10, 0));
++        assert_eq!(
++            on_frame(10, 0, None, run(&[1], &[true, false, false], &[3, 4, 5], 0)),
++            (Ok(14), 52, 3)
++        );
++        assert_eq!(
++            on_frame(10, 0, Some(9), run(&[1], &[false, true, false], &[4, 3, 5], 0)),
++            (Ok(13), 9, 3)
++        );
++        assert_eq!(
++            on_frame(10, 0, None, run(&[1], &[true, true], &[3, 0], 0)),
++            (Err(10), 13, 1)
++        );
++        assert_eq!(
++            on_frame(10, 0, None, run(&[1], &[false, false], &[4, 99], 0)),
++            (Err(20), 20, 1)
++        );
++        assert_eq!(
++            on_frame(10, 0, None, run(&[1], &[true, false], &[3, 4], 6)),
++            (Err(2), 13, 1)
++        );
++        assert_eq!(
++            on_frame(10, 0, Some(5), run(&[1], &[true, false], &[3, 4], 6)),
++            (Err(2), 5, 1)
++        );
++        assert_eq!(
++            on_frame(10, 0, Some(5), run(&[7], &[true, false], &[3, 4], 0)),
++            (Err(1), 5, 0)
++        );
++    }
++}

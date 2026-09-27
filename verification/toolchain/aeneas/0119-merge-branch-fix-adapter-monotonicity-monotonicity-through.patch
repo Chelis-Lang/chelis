@@ -1,0 +1,3216 @@
+# aeneas integration step 119 after cba11f3beb: commit 0584f8ebd512cda36d1bb490ca9fc141f52a9f88
+# first parent cdf003c59e17bbe78a30fa146c9ab8d4a0156bcb, merged aa02e9360a29c2e6548d3d9e60601eb949ee1ba4
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/adapter-monotonicity' (monotonicity through iterator adapters and fixpoints taking the closure's instance; Discriminant of the std enums)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Discriminant.lean b/backends/lean/Aeneas/Std/Core/Discriminant.lean
+index ac9eef6..7d56f53 100644
+--- a/backends/lean/Aeneas/Std/Core/Discriminant.lean
++++ b/backends/lean/Aeneas/Std/Core/Discriminant.lean
+@@ -2,6 +2,10 @@ import Aeneas.Std.Core.Core
+ import Aeneas.Std.Core.Fmt
+ import Aeneas.Std.Core.Cmp
+ import Aeneas.Std.Core.Hash
++import Aeneas.Std.Core.Ops
++import Aeneas.Std.Core.Result
++import Aeneas.Std.Core.Borrow
++import Aeneas.Std.RangeBounds
+ import Aeneas.Data.Discriminant
+ import Aeneas.Std.Scalar.Fmt
+ 
+@@ -14,6 +18,41 @@ instance : Discriminant Ordering I8 where
+     | .eq => 0#i8
+     | .gt => 1#i8
+ 
++/-! The discriminants of the other standard enums the library models (the extracted bodies of
++their methods read them, e.g. `Result::is_ok` is `matches!(*self, Ok(_))`, and so does
++`core::mem::discriminant`): Rust numbers the variants of an enum without `repr` from `0`,
++in declaration order, as `isize`. -/
++
++instance core.option.Option.instDiscriminant {T : Type u} : Discriminant (Option T) Isize where
++  read_discriminant
++    | none => 0#isize
++    | some _ => 1#isize
++
++instance core.result.Result.instDiscriminant {T : Type u} {E : Type v} :
++    Discriminant (core.result.Result T E) Isize where
++  read_discriminant
++    | .Ok _ => 0#isize
++    | .Err _ => 1#isize
++
++instance core.ops.control_flow.ControlFlow.instDiscriminant {B C : Type} :
++    Discriminant (core.ops.control_flow.ControlFlow B C) Isize where
++  read_discriminant
++    | .Continue _ => 0#isize
++    | .Break _ => 1#isize
++
++instance core.ops.range.Bound.instDiscriminant {T : Type} :
++    Discriminant (core.ops.range.Bound T) Isize where
++  read_discriminant
++    | .Included _ => 0#isize
++    | .Excluded _ => 1#isize
++    | .Unbounded => 2#isize
++
++instance alloc.borrow.Cow.instDiscriminant {B O : Type} :
++    Discriminant (alloc.borrow.Cow B O) Isize where
++  read_discriminant
++    | .Borrowed _ => 0#isize
++    | .Owned _ => 1#isize
++
+ @[rust_trait "core::marker::DiscriminantKind"
+   (parentClauses := ["cloneInst", "copyInst", "debugInst", "partialEqInst", "eqInst", "hashInst"])
+   (types := ["Discriminant"])]
+diff --git a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+index a2fde5e..d8a8bac 100644
+--- a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
++++ b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+@@ -192,12 +192,136 @@ def alloc.string.ToStringBlanket {T : Type} (inst : core.fmt.Display T) : alloc.
+ 
+ end Aeneas.Std
+ 
+-open Lean in
++namespace Aeneas.Std
++open Lean.Order
++
++/-- A least fixpoint is monotone in a parameter of its functional, if the functional is
++    monotone in the parameter and the recursive function together (fixpoint induction). -/
++theorem fix_monotone_param {γ : Sort u} {α : Sort v} [PartialOrder γ] [CCPO α]
++    (F : γ → α → α) (hF : ∀ g, monotone (F g))
++    (hjoint : monotone (fun (p : γ ×' α) => F p.1 p.2)) :
++    monotone (fun g => fix (F g) (hF g)) := by
++  intro g₁ g₂ h
++  refine fix_induct (hF g₁) (fun x => x ⊑ fix (F g₂) (hF g₂)) ?_ ?_
++  · intro c hc hx
++    exact csup_le hc hx
++  · intro x hx
++    have hstep := hjoint ⟨g₁, x⟩ ⟨g₂, fix (F g₂) (hF g₂)⟩ ⟨h, hx⟩
++    rw [fix_eq (hF g₂)]
++    exact hstep
++
++end Aeneas.Std
++
++namespace Aeneas.Std.Monotonicity
++open Lean Meta
++
+ /-- `e` without its metadata nodes (definitionally equal to `e`). -/
+-private partial def eraseMData (e : Expr) : Expr :=
++partial def eraseMData (e : Expr) : Expr :=
+   e.replace fun e => if let .mdata _ b := e then some (eraseMData b) else none
+ 
+-open Lean Meta Elab Tactic in
++/-- `proj (S.mk .. xᵢ ..) args` to `xᵢ args`, when the structure argument of the projection
++    function reduces to a constructor application: a definition building a structure (e.g. an
++    instance, `(IteratorMap i f).next`, or a closure's `FnMut` built from its call). -/
++def reduceProjOfDef? (b : Expr) : MetaM (Option Expr) := do
++  let .const c _ := b.getAppFn | return none
++  let some info ← getProjectionFnInfo? c | return none
++  let args := b.getAppArgs
++  unless args.size > info.numParams do return none
++  let s ← whnfD args[info.numParams]!
++  let .const ctor _ := s.getAppFn | return none
++  let some (.ctorInfo ctorVal) := (← getEnv).find? ctor | return none
++  let sargs := s.getAppArgs
++  unless sargs.size == ctorVal.numParams + ctorVal.numFields do return none
++  return some (mkAppN sargs[ctorVal.numParams + info.i]! args[info.numParams + 1:]).headBeta
++
++/-- What lies between a `fix` and the expression it is part of. -/
++inductive Layer where
++  | app (a : Expr)
++  | proj (s : Name) (i : Nat)
++
++/-- The head of `e` below its applications and projections (`PProd.fst/snd` included),
++    and those layers, innermost first. -/
++partial def strip (e : Expr) (acc : List Layer := []) : Expr × List Layer :=
++  match e with
++  | .mdata _ b => strip b acc
++  | .proj s i b => strip b (.proj s i :: acc)
++  | .app f a =>
++    if e.isAppOfArity ``PProd.fst 3 then strip a (.proj ``PProd 0 :: acc)
++    else if e.isAppOfArity ``PProd.snd 3 then strip a (.proj ``PProd 1 :: acc)
++    else strip f (.app a :: acc)
++  | _ => (e, acc)
++
++def rebuild (e : Expr) (layers : List Layer) : Expr :=
++  layers.foldl (init := e) fun e l =>
++    match l with
++    | .app a => (mkApp e a).headBeta
++    | .proj s i => mkProj s i e
++
++/-- The body of a definition below its parameters. -/
++partial def lambdaBody : Expr → Expr
++  | .lam _ _ b _ => lambdaBody b
++  | .mdata _ b => lambdaBody b
++  | e => e
++
++/-- Whether `c` is defined by `partial_fixpoint`, or is the auxiliary definition of a mutual
++    group of such definitions (its body is a projection of a `fix`). -/
++def isFixpointDef (c : Name) : MetaM Bool := do
++  if (Lean.Elab.PartialFixpoint.eqnInfoExt.find? (← getEnv) c).isSome then return true
++  let some (.defnInfo info) := (← getEnv).find? c | return false
++  return (strip (lambdaBody info.value)).1.isConstOf ``Lean.Order.fix
++
++/-- Unfold the fixpoint definitions at the head of `e` until its head is `fix`. -/
++partial def unfoldToFix (e : Expr) (fuel : Nat := 8) : MetaM Expr := do
++  let (head, layers) := strip e
++  let .const c us := head | throwError "aeneas_fix_monotone: no head constant in{indentExpr e}"
++  if c == ``Lean.Order.fix then return e
++  if fuel == 0 || !(← isFixpointDef c) then
++    throwError "aeneas_fix_monotone: {c} is not a partial fixpoint"
++  let some (.defnInfo info) := (← getEnv).find? c | throwError "aeneas_fix_monotone: {c}"
++  unfoldToFix (rebuild (info.value.instantiateLevelParams info.levelParams us) layers) (fuel - 1)
++
++/-- `p.1`, `p.2` as projections, which the monotonicity tactic follows to the recursive
++    function, instead of projection function applications. -/
++partial def projOfPProdFn (e : Expr) : Expr :=
++  e.replace fun e =>
++    if e.isAppOfArity ``PProd.fst 3 then some (mkProj ``PProd 0 (projOfPProdFn e.appArg!))
++    else if e.isAppOfArity ``PProd.snd 3 then some (mkProj ``PProd 1 (projOfPProdFn e.appArg!))
++    else none
++
++/-- From `h : monotone f`, with `f : γ → ∀ x, β x`, the monotonicity of `fun g => f g a` (layer
++    `.app a`) or, with `f : γ → α ×' β`, of `fun g => (f g).1` or `(f g).2` (layer `.proj`).
++    The order instances are read off `h`'s type, as the `monotonicity` tactic does for the
++    recursive calls: synthesizing the order of the tuple of a large mutual group of functions
++    can exceed the instance search limits. -/
++def monotoneLayer (γ instγ : Expr) (h : Expr) (layer : Layer) : MetaM Expr := do
++  let_expr Lean.Order.monotone _ _ _ inst _ := (← inferType h)
++    | throwError "aeneas_fix_monotone: unexpected{indentExpr (← inferType h)}"
++  match layer with
++  | .app a =>
++    let some inst ← whnfUntil inst ``Lean.Order.instOrderPi
++      | throwError "aeneas_fix_monotone: not a function order{indentExpr inst}"
++    let_expr Lean.Order.instOrderPi α β instβ ← inst
++      | throwError "aeneas_fix_monotone: not a function order{indentExpr inst}"
++    mkAppOptM ``Lean.Order.monotone_apply #[α, β, γ, instγ, instβ, a, none, h]
++  | .proj _ i =>
++    let some inst ← whnfUntil inst ``Lean.Order.instPartialOrderPProd
++      | throwError "aeneas_fix_monotone: not a product order{indentExpr inst}"
++    let_expr Lean.Order.instPartialOrderPProd α β instα instβ ← inst
++      | throwError "aeneas_fix_monotone: not a product order{indentExpr inst}"
++    let n := if i == 0 then ``Lean.Order.PProd.monotone_fst else ``Lean.Order.PProd.monotone_snd
++    mkAppOptM n #[α, β, γ, instα, instβ, instγ, none, h]
++
++/-- The outcome of the fallback step on a goal `monotone (fun f => c args)`. -/
++inductive UnfoldStep where
++  /-- the goal with `c` unfolded, or without its metadata -/
++  | unfolded (goal : MVarId)
++  /-- `c` is a structure projection: the body with it reduced, if its structure argument
++      is a definition building a structure -/
++  | proj (reduced? : Option Expr)
++
++end Aeneas.Std.Monotonicity
++
++open Lean Meta Elab Tactic Aeneas.Std.Monotonicity in
+ /-- Fallback step of `aeneas_monotonicity`, for a goal `monotone (fun f => c args)` to
+     which no monotonicity lemma applies. If the goal holds metadata, erase it:
+     `monotonicity` only looks through metadata around a whole recursive call, while the
+@@ -205,24 +329,29 @@ open Lean Meta Elab Tactic in
+     at the head of the calls of the trait's default methods (`ne := fun a b => ... f a b`,
+     so `(mdata f) a b`). Otherwise, if `c` is a non-recursive definition (e.g. the
+     derived method of a generic type, called with an instance built from the recursive
+-    function `f`), unfold it once; if `c` is a structure projection, reduce it.
++    function `f`), unfold it once; if `c` is a structure projection, reduce it, unfolding
++    the definition which builds the structure if needed (the method of an instance, e.g.
++    `(IteratorMap i {..f..}).next`, or of a closure built from its call).
+     Recursive definitions (structural, well-founded, `partial_fixpoint`) and matchers
+     are never unfolded, so repeating this step terminates. -/
+ elab "aeneas_unfold_monotone" : tactic => do
+   let goal ← getMainGoal
+-  let unfolded? ← goal.withContext do
++  let step ← goal.withContext do
+     let type ← instantiateMVars (← goal.getType)
+     let_expr Lean.Order.monotone α inst_α β inst_β f := type
+       | throwError "aeneas_unfold_monotone: not a monotonicity goal"
+     if (f.find? Expr.isMData).isSome then
+-      return some (← goal.replaceTargetDefEq
++      return UnfoldStep.unfolded (← goal.replaceTargetDefEq
+         (mkAppN type.getAppFn #[α, inst_α, β, inst_β, eraseMData f]))
+     let f := f.headBeta
+     unless f.isLambda do throwError "aeneas_unfold_monotone: not a lambda"
+     let some c := f.bindingBody!.getAppFn.constName?
+       | throwError "aeneas_unfold_monotone: no head constant"
+     let env ← getEnv
+-    if (← isProjectionFn c) then return none
++    if (← isProjectionFn c) then
++      return UnfoldStep.proj (← lambdaBoundedTelescope f 1 fun xs b => do
++        let some b' ← reduceProjOfDef? b | return none
++        return some (← mkLambdaFVars xs b'))
+     if isMatcherCore env c || (← isRecursiveDefinition c) ||
+         (Lean.Elab.PartialFixpoint.eqnInfoExt.find? env c).isSome then
+       throwError "aeneas_unfold_monotone: {c} is recursive or a matcher"
+@@ -230,23 +359,63 @@ elab "aeneas_unfold_monotone" : tactic => do
+       let some b' ← unfoldDefinition? b
+         | throwError "aeneas_unfold_monotone: cannot unfold {c}"
+       mkLambdaFVars xs b'.headBeta
+-    return some (← goal.replaceTargetDefEq (mkAppN type.getAppFn #[α, inst_α, β, inst_β, f']))
+-  match unfolded? with
+-  | some goal' =>
++    return UnfoldStep.unfolded
++      (← goal.replaceTargetDefEq (mkAppN type.getAppFn #[α, inst_α, β, inst_β, f']))
++  match step with
++  | .unfolded goal' =>
+     replaceMainGoal [goal']
+     evalTactic (← `(tactic| dsimp (config := { failIfUnchanged := false }) only))
+-  | none => evalTactic (← `(tactic| dsimp only))
+-
+-open Aeneas.Std Lean.Order in
+-/-- Normalize callback containers before monadic monotonicity: `Result.ok` has
+-    flat equality, so its callback payload must be consumed before comparing it.
+-    Goals no monotonicity lemma applies to go through `aeneas_unfold_monotone`
+-    (the monotonicity lemmas of the models taking trait instances are in
+-    `Aeneas.Std.InstanceMonotonicity`). -/
+-macro "aeneas_monotonicity" : tactic =>
+-  `(tactic| (
+-    simp (config := { failIfUnchanged := false }) only
+-      [core.fmt.rt.Argument.new_display, core.fmt.rt.Argument.new_debug,
+-      core.fmt.rt.Argument.new_lower_hex, core.fmt.rt.Argument.new_debug_noop,
+-      core.fmt.Arguments.new, Aeneas.Std.Array.make, bind_tc_ok]
+-    repeat' (first | monotonicity | aeneas_unfold_monotone)))
++  | .proj reduced? =>
++    try evalTactic (← `(tactic| dsimp only))
++    catch ex =>
++      let some f' := reduced? | throw ex
++      let goal' ← goal.withContext do
++        let type ← instantiateMVars (← goal.getType)
++        goal.replaceTargetDefEq (mkAppN type.getAppFn (type.getAppArgs.set! 4 f'))
++      replaceMainGoal [goal']
++
++open Lean Meta Elab Tactic Aeneas.Std.Monotonicity in
++/-- Step of `aeneas_monotonicity` for a goal `monotone (fun g => P a₁ … aₙ)` where `P` is
++    defined by `partial_fixpoint` (e.g. the model `iterToList` of `collect`, a fold, or a
++    specialized visitor's loops) and some of its fixed parameters depend on `g`: a trait
++    instance, typically a closure's, built from the function being defined. `P` unfolds to
++    a least fixpoint `fix (F a)`, which is monotone in `a` if `F` is monotone in `a` and in
++    its recursive function together (`fix_monotone_param`); that joint monotonicity is the
++    new goal. The arguments of the fixpoint itself must not depend on `g`. -/
++elab "aeneas_fix_monotone" : tactic => do
++  let goal ← getMainGoal
++  let newGoal ← goal.withContext do
++    let type ← instantiateMVars (← goal.getType)
++    let_expr Lean.Order.monotone γ instγ _ _ f := type
++      | throwError "aeneas_fix_monotone: not a monotonicity goal"
++    let f := f.headBeta
++    unless f.isLambda do throwError "aeneas_fix_monotone: not a lambda"
++    withLocalDeclD f.bindingName! γ fun g => do
++      let e ← unfoldToFix (f.bindingBody!.instantiate1 g)
++      let (_, layers) := strip e
++      let (args, rest) := layers.splitAt 4
++      let args := args.filterMap fun | .app a => some a | .proj .. => none
++      let [α, instα, F, hF] := args
++        | throwError "aeneas_fix_monotone: unexpected fixpoint{indentExpr e}"
++      if α.containsFVar g.fvarId! || instα.containsFVar g.fvarId! then
++        throwError "aeneas_fix_monotone: the fixpoint's type depends on the variable"
++      unless F.containsFVar g.fvarId! do
++        throwError "aeneas_fix_monotone: the fixpoint does not depend on the variable"
++      let lem ← mkAppOptM ``Aeneas.Std.fix_monotone_param
++        #[γ, α, instγ, instα, ← mkLambdaFVars #[g] F, ← mkLambdaFVars #[g] hF]
++      let .forallE _ jointTy _ _ ← whnfR (← inferType lem)
++        | throwError "aeneas_fix_monotone: unexpected lemma type"
++      let jointTy := projOfPProdFn (← Core.betaReduce (← instantiateMVars jointTy))
++      let joint ← mkFreshExprSyntheticOpaqueMVar jointTy
++      let mut prf := mkApp lem joint
++      for l in rest do
++        if let .app a := l then
++          if a.containsFVar g.fvarId! then
++            throwError "aeneas_fix_monotone: an argument of the fixpoint depends on the variable"
++        prf ← monotoneLayer γ instγ prf l
++      -- `P` is irreducible: the elaborator unfolds it only at transparency `all`
++      unless ← withTransparency .all <| isDefEq (← inferType prf) type do
++        throwError "aeneas_fix_monotone: the unfolded fixpoint does not match the goal"
++      goal.assign prf
++      pure joint.mvarId!
++  replaceMainGoal [newGoal]
+diff --git a/backends/lean/Aeneas/Std/InstanceMonotonicity.lean b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+index 3cbc8cb..2cd53d1 100644
+--- a/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
++++ b/backends/lean/Aeneas/Std/InstanceMonotonicity.lean
+@@ -5,6 +5,8 @@ import Aeneas.Std.SliceCmp
+ import Aeneas.Std.Sync
+ import Aeneas.Std.Tuple
+ import Aeneas.Std.Vec
++import Aeneas.Std.VecIter
++import Aeneas.Std.SliceIter
+ 
+ /-!
+ # Monotonicity of the models in their trait instances
+@@ -32,6 +34,13 @@ Each lemma comes in the forms the derived code produces: the model applied to
+ its instances only (when it is itself a field of an enclosing instance, e.g.
+ `PartialEqShared (PartialEqVec {..})`) and fully applied (the discrimination
+ tree keys of the monotonicity lemmas include the number of arguments).
++
++Models which are themselves fixpoints taking an instance built from the function
++being defined (`collect` through `iterToList`, `sum` through `foldFromNext`, a
++visitor specialized to a closure) need no lemma: `aeneas_fix_monotone` shows them
++monotone in the instance by fixpoint induction. Section `AdapterMono` rewrites the
++consumers of an adapter whose closure is a function item, which is the adapter's
++state, into consumers of a stateless closure.
+ -/
+ 
+ namespace Aeneas.Std
+@@ -952,4 +961,272 @@ theorem alloc.collections.btree.map.DebugBTreeMap.fmt.apply_fmt_monotone {K V :
+ 
+ end DebugMono
+ 
++section AdapterMono
++
++/-! A function item used as a closure (`iter.map(f)`, with the instance `BuiltinFnMut`) is the
++state of the adapter (`Map { iter, f }`), and the consumers of the adapter give their final
++state back, so a recursive function passed that way would be a value in the flat order of
++`Result`, where it is not monotone. The consumers below are the same as the consumers of a
++stateless closure which calls the function, whose instance (not state) depends on it; the
++`aeneas_monotonicity` tactic rewrites them so, and `aeneas_fix_monotone` shows the fixpoints of
++the consumers (`iterToList`, `foldFromNext`) monotone in the instance. The equations are proved
++by fixpoint induction from maps of the states which commute with the steps of the fixpoints. -/
++
++open Result
++
++/-- In the flat order of `Result`, a pointwise property of a two-argument function which
++    holds at `div` is admissible (a chain has at most one value besides `div`). -/
++theorem admissible_result_apply₂ {A : Sort u} {B : Sort v} {γ : Type w}
++    (P : A → B → Result γ → Prop) (hdiv : ∀ a b, P a b .div) :
++    admissible (fun (f : A → B → Result γ) => ∀ a b, P a b (f a b)) :=
++  admissible_pi_apply (fun a (g : B → Result γ) => ∀ b, P a b (g b)) fun a =>
++    admissible_pi_apply (fun b (v : Result γ) => P a b v) fun b =>
++      admissible_flatOrder (P a b) (hdiv a b)
++
++/-- In the flat order of `Result`, a pointwise property of a three-argument function which
++    holds at `div` is admissible. -/
++theorem admissible_result_apply₃ {A : Sort u} {B : Sort v} {C : Sort w} {γ : Type w'}
++    (P : A → B → C → Result γ → Prop) (hdiv : ∀ a b c, P a b c .div) :
++    admissible (fun (f : A → B → C → Result γ) => ∀ a b c, P a b c (f a b c)) :=
++  admissible_pi_apply (fun a (g : B → C → Result γ) => ∀ b c, P a b c (g b c)) fun a =>
++    admissible_result_apply₂ (P a) (hdiv a)
++
++/-- `iter.map(f)`: the function is the state of the `Map`. -/
++theorem core.iter.traits.iterator.Iterator.map.default_builtin {I A B : Type}
++    (iterInst : core.iter.traits.iterator.Iterator I A) (s : I) (f : A → Result B) :
++    core.iter.traits.iterator.Iterator.map.default iterInst (BuiltinFnMut A B) s f = ok ⟨s, f⟩ := rfl
++
++/-- A step of `Map` with a function item is a step of `Map` with a stateless closure calling the
++    function, the function put back as the state. -/
++theorem core.iter.adapters.map.IteratorMap.next_builtin {I A B : Type}
++    (iterInst : core.iter.traits.iterator.Iterator I A) (f : A → Result B)
++    (st : core.iter.adapters.map.Map I Unit) :
++    core.iter.adapters.map.IteratorMap.next iterInst (BuiltinFnMut A B) ⟨st.iter, f⟩ =
++      (do let r ← core.iter.adapters.map.IteratorMap.next iterInst
++            ({ FnOnceInst := { call_once := fun _ a => do let b ← f a; ok (b, ()) },
++               call_mut := fun _ a => do let b ← f a; ok (b, ()) } : core.ops.function.FnMut Unit A B) st
++          ok (r.1, ⟨r.2.iter, f⟩)) := by
++  obtain ⟨s, ⟨⟩⟩ := st
++  simp only [core.iter.adapters.map.IteratorMap.next, BuiltinFnMut]
++  cases iterInst.next s with
++  | ok r =>
++    obtain ⟨item, it⟩ := r
++    cases item with
++    | none => simp only [bind_tc_ok]
++    | some a =>
++      simp only [bind_tc_ok]
++      cases f a <;> simp only [bind_tc_ok, bind_tc_fail, bind_tc_div]
++  | fail e => simp only [bind_tc_fail]
++  | div => simp only [bind_tc_div]
++
++/-- `iterToList` commutes with a map `φ` of iterator states that commutes with `next`. -/
++theorem alloc.vec.FromIteratorVec.iterToList_state_map {T S₁ S₂ : Type}
++    (inst₁ : core.iter.traits.iterator.Iterator S₁ T)
++    (inst₂ : core.iter.traits.iterator.Iterator S₂ T) (φ : S₂ → S₁)
++    (hnext : ∀ s, inst₁.next (φ s) = (do let r ← inst₂.next s; ok (r.1, φ r.2)))
++    (s : S₂) (acc : List T) :
++    alloc.vec.FromIteratorVec.iterToList inst₁ (φ s) acc =
++      (do let r ← alloc.vec.FromIteratorVec.iterToList inst₂ s acc; ok (r.1, φ r.2)) := by
++  apply PartialOrder.rel_antisymm
++  · -- the left fixpoint below the right-hand side
++    have hadm := admissible_result_apply₂ (fun st acc v => ∀ s, st = φ s → v ⊑
++        (do let r ← alloc.vec.FromIteratorVec.iterToList inst₂ s acc; ok (r.1, φ r.2)))
++      fun _ _ _ _ => FlatOrder.rel.bot
++    refine alloc.vec.FromIteratorVec.iterToList.fixpoint_induct inst₁ _ hadm ?_ (φ s) acc s rfl
++    intro recur ih st acc s hst
++    subst hst
++    dsimp only
++    rw [hnext s, alloc.vec.FromIteratorVec.iterToList.eq_def inst₂ s acc]
++    cases inst₂.next s with
++    | ok r =>
++      obtain ⟨opt, it⟩ := r
++      cases opt with
++      | none => simp only [bind_tc_ok]; exact FlatOrder.rel.refl
++      | some item => simp only [bind_tc_ok]; exact ih (φ it) (item :: acc) it rfl
++    | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++    | div => simp only [bind_tc_div]; exact FlatOrder.rel.refl
++  · -- the right fixpoint, mapped, below the left-hand side
++    have hadm := admissible_result_apply₂ (fun s acc (v : Result (List T × S₂)) =>
++        (do let r ← v; ok (r.1, φ r.2)) ⊑
++        alloc.vec.FromIteratorVec.iterToList inst₁ (φ s) acc) fun _ _ => FlatOrder.rel.bot
++    refine alloc.vec.FromIteratorVec.iterToList.fixpoint_induct inst₂ _ hadm ?_ s acc
++    intro recur ih s acc
++    dsimp only
++    rw [alloc.vec.FromIteratorVec.iterToList.eq_def inst₁ (φ s) acc, hnext s]
++    cases inst₂.next s with
++    | ok r =>
++      obtain ⟨opt, it⟩ := r
++      cases opt with
++      | none => simp only [bind_tc_ok]; exact FlatOrder.rel.refl
++      | some item => simp only [bind_tc_ok]; exact ih it (item :: acc)
++    | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++    | div => simp only [bind_tc_div]; exact FlatOrder.rel.bot
++
++/-- `iter.map(f).collect::<Vec<_>>()` for a function item `f`: the function is the state of
++    the `Map`, and is given back unchanged. The same as with a stateless closure calling `f`,
++    whose instance, not state, depends on `f` (so that the fixpoint `iterToList` is monotone
++    in it when `f` is the function being defined). -/
++theorem core.iter.traits.iterator.Iterator.collect.default_map_builtin_vec {I A B C : Type}
++    (iterInst : core.iter.traits.iterator.Iterator I A) (f : A → Result B) (s : I)
++    (k : alloc.vec.Vec B × core.iter.adapters.map.Map I (A → Result B) → Result C) :
++    (do let r ← core.iter.traits.iterator.Iterator.collect.default
++          (core.iter.traits.iterator.IteratorMap iterInst (BuiltinFnMut A B))
++          (core.iter.traits.collect.FromIteratorVec B) ⟨s, f⟩
++        k r) =
++    (do let r ← core.iter.traits.iterator.Iterator.collect.default
++          (core.iter.traits.iterator.IteratorMap iterInst
++            ({ FnOnceInst := { call_once := fun _ a => do let b ← f a; ok (b, ()) },
++               call_mut := fun _ a => do let b ← f a; ok (b, ()) } : core.ops.function.FnMut Unit A B))
++          (core.iter.traits.collect.FromIteratorVec B) ⟨s, ()⟩
++        k (r.1, ⟨r.2.iter, f⟩)) := by
++  have h := alloc.vec.FromIteratorVec.iterToList_state_map
++    (core.iter.traits.iterator.IteratorMap iterInst (BuiltinFnMut A B))
++    (core.iter.traits.iterator.IteratorMap iterInst
++      ({ FnOnceInst := { call_once := fun _ a => do let b ← f a; ok (b, ()) },
++         call_mut := fun _ a => do let b ← f a; ok (b, ()) } : core.ops.function.FnMut Unit A B))
++    (fun st => ⟨st.iter, f⟩) (core.iter.adapters.map.IteratorMap.next_builtin iterInst f) ⟨s, ()⟩ []
++  simp only [core.iter.traits.iterator.Iterator.collect.default,
++    alloc.vec.FromIteratorVec.from_iter, core.iter.traits.collect.IntoIterator.Blanket.into_iter,
++    bind_tc_ok, bind_assoc_eq] at h ⊢
++  rw [h]
++  simp only [bind_assoc_eq, bind_tc_ok]
++  congr 1
++  funext r
++  split <;> simp only [bind_tc_ok, bind_tc_fail, id]
++
++/-- `foldFromNext` commutes with a map `ψ` of closure states that commutes with the closure's
++    `call_mut`. -/
++theorem core.iter.traits.iterator.foldFromNext_state_map {Self Item B F₁ F₂ : Type}
++    (next : Self → Result (Option Item × Self))
++    (inst₁ : core.ops.function.FnMut F₁ (B × Item) B)
++    (inst₂ : core.ops.function.FnMut F₂ (B × Item) B) (ψ : F₂ → F₁)
++    (hcall : ∀ st args, inst₁.call_mut (ψ st) args =
++      (do let r ← inst₂.call_mut st args; ok (r.1, ψ r.2)))
++    (self : Self) (init : B) (st : F₂) :
++    core.iter.traits.iterator.foldFromNext next inst₁ self init (ψ st) =
++      (do let r ← core.iter.traits.iterator.foldFromNext next inst₂ self init st
++          ok (r.1, r.2.1, ψ r.2.2)) := by
++  apply PartialOrder.rel_antisymm
++  · have hadm := admissible_result_apply₃ (fun self init st₁ v => ∀ st, st₁ = ψ st → v ⊑
++        (do let r ← core.iter.traits.iterator.foldFromNext next inst₂ self init st
++            ok (r.1, r.2.1, ψ r.2.2)))
++      fun _ _ _ _ _ => FlatOrder.rel.bot
++    refine core.iter.traits.iterator.foldFromNext.fixpoint_induct next inst₁ _ hadm ?_
++      self init (ψ st) st rfl
++    intro recur ih self init st₁ st hst
++    subst hst
++    dsimp only
++    rw [core.iter.traits.iterator.foldFromNext.eq_def next inst₂ self init st]
++    cases next self with
++    | ok r =>
++      obtain ⟨item, it⟩ := r
++      cases item with
++      | none => simp only [bind_tc_ok, pure]; exact FlatOrder.rel.refl
++      | some item =>
++        simp only [bind_tc_ok, hcall, bind_assoc_eq]
++        cases inst₂.call_mut st (init, item) with
++        | ok r =>
++          obtain ⟨acc, st'⟩ := r
++          simp only [bind_tc_ok]
++          exact ih it acc (ψ st') st' rfl
++        | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++        | div => simp only [bind_tc_div]; exact FlatOrder.rel.refl
++    | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++    | div => simp only [bind_tc_div]; exact FlatOrder.rel.refl
++  · have hadm := admissible_result_apply₃ (fun self init st (v : Result (B × Self × F₂)) =>
++        (do let r ← v; ok (r.1, r.2.1, ψ r.2.2)) ⊑
++          core.iter.traits.iterator.foldFromNext next inst₁ self init (ψ st))
++      fun _ _ _ => FlatOrder.rel.bot
++    refine core.iter.traits.iterator.foldFromNext.fixpoint_induct next inst₂ _ hadm ?_ self init st
++    intro recur ih self init st
++    dsimp only
++    rw [core.iter.traits.iterator.foldFromNext.eq_def next inst₁ self init (ψ st)]
++    cases next self with
++    | ok r =>
++      obtain ⟨item, it⟩ := r
++      cases item with
++      | none => simp only [bind_tc_ok, pure]; exact FlatOrder.rel.refl
++      | some item =>
++        simp only [bind_tc_ok, hcall, bind_assoc_eq]
++        cases inst₂.call_mut st (init, item) with
++        | ok r =>
++          obtain ⟨acc, st'⟩ := r
++          simp only [bind_tc_ok]
++          exact ih it acc st'
++        | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++        | div => simp only [bind_tc_div]; exact FlatOrder.rel.bot
++    | fail e => simp only [bind_tc_fail]; exact FlatOrder.rel.refl
++    | div => simp only [bind_tc_div]; exact FlatOrder.rel.bot
++
++/-- `iter.map(f).sum::<usize>()` over a slice iterator for a function item `f`: as with a
++    stateless closure calling `f` (the closure's state goes through the slice iterator's `fold`,
++    `foldFromNext`). -/
++theorem core.iter.traits.iterator.Iterator.sum.default_map_builtin_slice {T C : Type}
++    (f : T → Result Usize) (s : core.slice.iter.Iter T)
++    (k : Usize × core.iter.adapters.map.Map (core.slice.iter.Iter T) (T → Result Usize) → Result C) :
++    (do let r ← core.iter.traits.iterator.Iterator.sum.default
++          (core.iter.traits.iterator.IteratorMap (core.iter.traits.iterator.IteratorSliceIter T)
++            (BuiltinFnMut T Usize))
++          core.iter.traits.accum.SumUsizeUsize ⟨s, f⟩
++        k r) =
++    (do let r ← core.iter.traits.iterator.Iterator.sum.default
++          (core.iter.traits.iterator.IteratorMap (core.iter.traits.iterator.IteratorSliceIter T)
++            ({ FnOnceInst := { call_once := fun _ a => do let b ← f a; ok (b, ()) },
++               call_mut := fun _ a => do let b ← f a; ok (b, ()) } : core.ops.function.FnMut Unit T Usize))
++          core.iter.traits.accum.SumUsizeUsize ⟨s, ()⟩
++        k (r.1, ⟨r.2.iter, f⟩)) := by
++  simp only [core.iter.traits.iterator.Iterator.sum.default, core.iter.traits.accum.SumUsizeUsize.sum,
++    core.iter.adapters.map.IteratorMap.fold, core.slice.iter.IteratorSliceIter.fold,
++    bind_assoc_eq, bind_tc_ok]
++  have key : ∀ (c₁ : (T → Result Usize) × Unit → Usize × T → Result (Usize × (T → Result Usize) × Unit))
++      (c₂ : Unit × Unit → Usize × T → Result (Usize × Unit × Unit)),
++      (∀ st args, c₁ (f, st.2) args = (do let r ← c₂ st args; ok (r.1, (f, r.2.2)))) →
++      ∀ (K : Usize × core.slice.iter.Iter T × (T → Result Usize) × Unit → Result C),
++      (do
++        let x ← core.iter.traits.iterator.foldFromNext core.slice.iter.IteratorSliceIter.next
++          { FnOnceInst := { call_once := c₁ }, call_mut := c₁ } s 0#usize (f, ())
++        K x) =
++      (do
++        let x ← core.iter.traits.iterator.foldFromNext core.slice.iter.IteratorSliceIter.next
++          { FnOnceInst := { call_once := c₂ }, call_mut := c₂ } s 0#usize ((), ())
++        K (x.1, x.2.1, (f, x.2.2.2))) := by
++    intro c₁ c₂ hcall K
++    rw [show ((f, ()) : (T → Result Usize) × Unit) = (fun st : Unit × Unit => (f, st.2)) ((), ()) from rfl,
++      core.iter.traits.iterator.foldFromNext_state_map _
++        { FnOnceInst := { call_once := c₁ }, call_mut := c₁ }
++        { FnOnceInst := { call_once := c₂ }, call_mut := c₂ } (fun (st : Unit × Unit) => (f, st.2)) hcall]
++    simp only [bind_assoc_eq, bind_tc_ok]
++  apply key
++  intro st args
++  simp only [BuiltinFnMut, bind_assoc_eq]
++  cases f args.2 with
++  | ok b => simp only [bind_tc_ok, pure]
++  | fail e => simp only [bind_tc_fail]
++  | div => simp only [bind_tc_div]
++
++end AdapterMono
++
+ end Aeneas.Std
++
++open Aeneas.Std Lean.Order in
++/-- Normalize callback containers before monadic monotonicity: `Result.ok` has
++    flat equality, so its callback payload must be consumed before comparing it.
++    A function item used as a closure (`iter.map(f)`, instance `BuiltinFnMut`) is the
++    state of the adapter, so the recursive function would be a value in the flat order:
++    the consumers of such adapters (`collect` into a `Vec`, `sum`) are rewritten to the
++    same consumers of a stateless closure calling the function, whose instance, not state,
++    depends on it. Goals no monotonicity lemma applies to go through
++    `aeneas_unfold_monotone`, then `aeneas_fix_monotone` (both in
++    `Aeneas.Std.Core.FmtWithSlice`); the monotonicity lemmas of the models taking trait
++    instances and those rewritings are above. -/
++macro "aeneas_monotonicity" : tactic =>
++  `(tactic| (
++    simp (config := { failIfUnchanged := false }) only
++      [core.fmt.rt.Argument.new_display, core.fmt.rt.Argument.new_debug,
++      core.fmt.rt.Argument.new_lower_hex, core.fmt.rt.Argument.new_debug_noop,
++      core.fmt.Arguments.new, Aeneas.Std.Array.make, bind_tc_ok,
++      core.iter.traits.iterator.Iterator.map.default_builtin,
++      core.iter.traits.iterator.Iterator.collect.default_map_builtin_vec,
++      core.iter.traits.iterator.Iterator.sum.default_map_builtin_slice,
++      Function.uncurry_apply_pair]
++    repeat' (first | monotonicity | aeneas_unfold_monotone | aeneas_fix_monotone)))
+diff --git a/tests/lean/RecursiveAdapterClosures.lean b/tests/lean/RecursiveAdapterClosures.lean
+new file mode 100644
+index 0000000..786e5f5
+--- /dev/null
++++ b/tests/lean/RecursiveAdapterClosures.lean
+@@ -0,0 +1 @@
++import RecursiveAdapterClosures.Checks
+diff --git a/tests/lean/RecursiveAdapterClosures/Checks.lean b/tests/lean/RecursiveAdapterClosures/Checks.lean
+new file mode 100644
+index 0000000..37c257b
+--- /dev/null
++++ b/tests/lean/RecursiveAdapterClosures/Checks.lean
+@@ -0,0 +1,52 @@
++import RecursiveAdapterClosures.RecursiveAdapterClosures
++
++/-! Evaluate the model of `tests/src/recursive-adapter-closures.rs` on the inputs of its
++    `native` test module and compare with the native results. The recursive functions are
++    `partial_fixpoint`s which recurse through `map` (with the function item or a closure)
++    consumed by `collect` into a `Vec` or an `Option<Vec<_>>` or by `sum`, and through a
++    visitor monomorphized to a closure capturing mutable borrows (`weight`: the closure's
++    state, `total` and `visits`, is given back by the visitor). -/
++
++namespace recursive_adapter_closures.checks
++open Aeneas Aeneas.Std Result
++
++def okU64 : Result U64 → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++def okUsize : Result Usize → Option Nat
++  | ok a => some a.val
++  | _ => none
++
++def okOptUsize : Result (Option Usize) → Option (Option Nat)
++  | ok a => some (a.map (·.val))
++  | _ => none
++
++#guard okU64 (wire_digest 2#u32 5#u32) == some 11073888
++#guard okU64 (wire_digest 0#u32 1#u32) == some 11034080
++#guard okUsize (sample_size 2#u32 5#u32) == some 11
++#guard okUsize (sample_weight 2#u32 5#u32) == some 130773
++#guard okUsize (sample_weight 0#u32 1#u32) == some 56573
++#guard okOptUsize (sample_positive 2#u32 5#u32) == some (some 8)
++#guard okOptUsize (sample_positive 0#u32 5#u32) == some none
++#guard okU64 (sample_score 2#u32 5#u32 3#u64) == some 229015
++#guard okU64 (sample_score 1#u32 1#u32 7#u64) == some 220527
++
++/-! The recursive functions are definitions, not axioms. -/
++
++/-- info: 'recursive_adapter_closures.Tree.to_wire' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms Tree.to_wire
++
++/-- info: 'recursive_adapter_closures.size' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms size
++
++/-- info: 'recursive_adapter_closures.weight' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms weight
++
++/-- info: 'recursive_adapter_closures.positive_leaves' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms positive_leaves
++
++/-- info: 'recursive_adapter_closures.Scale.score' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms Scale.score
++
++end recursive_adapter_closures.checks
+diff --git a/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+new file mode 100644
+index 0000000..a5bebe4
+--- /dev/null
++++ b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+@@ -0,0 +1,1955 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [recursive_adapter_closures]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace recursive_adapter_closures
++
++/-- [recursive_adapter_closures::weight::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++def weight.closure := _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++
++/-- [core::option::{core::ops::try_trait::Try<T, core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::branch]:
++    Source: '/rustc/library/core/src/option.rs', lines 2765:4-2765:64
++    Name pattern: [core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::Try<core::option::Option<@T>, @T, core::option::Option<core::convert::Infallible>>}::branch"]
++def core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++  {T : Type} (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow
++    (_root_.Option _root_.Aeneas.Std.core.convert.Infallible) T)
++  := do
++  match self with
++  | none =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break none)
++  | some v =>
++    _root_.Aeneas.Std.Result.ok
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue v)
++
++/-- [core::option::{core::ops::try_trait::FromResidual<core::option::Option<core::convert::Infallible>> for core::option::Option<T>}::from_residual]:
++    Source: '/rustc/library/core/src/option.rs', lines 2779:4-2779:67
++    Name pattern: [core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::ops::try_trait::FromResidual<core::option::Option<@T>, core::option::Option<core::convert::Infallible>>}::from_residual"]
++def
++  core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++  (T : Type) (o : _root_.Option _root_.Aeneas.Std.core.convert.Infallible) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  _root_.Aeneas.Std.Result.ok none
++
++/-- [recursive_adapter_closures::Tree]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 16:0-20:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Tree where
++| Leaf : _root_.Aeneas.Std.U32 → Tree
++| Node : _root_.Aeneas.Std.NestedVec Tree → Tree
++| Named : _root_.Aeneas.Std.NestedVec (_root_.Aeneas.Std.U32 × Tree) → Tree
++
++/-- [recursive_adapter_closures::Wire]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 22:0-26:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Wire where
++| Leaf : _root_.Aeneas.Std.U32 → Wire
++| List : _root_.Aeneas.Std.NestedVec Wire → Wire
++| Map : _root_.Aeneas.Std.NestedVec (_root_.Aeneas.Std.U32 × Wire) → Wire
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++@[reducible]
++def Tree.to_wire.closure := _root_.Unit
++
++mutual
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 31:4-37:5
++    Visibility: public -/
++def Tree.to_wire
++  (self : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.recursive_adapter_closures.Wire
++  := do
++  match self with
++  | _root_.recursive_adapter_closures.Tree.Leaf n =>
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.Leaf n)
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++        _root_.recursive_adapter_closures.Tree
++        _root_.recursive_adapter_closures.Wire) i (Tree.to_wire)
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++        _root_.recursive_adapter_closures.Tree
++        _root_.recursive_adapter_closures.Wire))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.recursive_adapter_closures.Wire) model_state
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.List
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested model_state1))
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Tree.to_wire.closure
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32
++                × _root_.recursive_adapter_closures.Wire))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Tree.to_wire.closure
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire)) i
++        ()
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Tree.to_wire.closure
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32
++                × _root_.recursive_adapter_closures.Wire))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Tree.to_wire.closure
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire)))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire))
++        model_state
++    _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Wire.Map
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested model_state1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++def
++  Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++  (c : _root_.recursive_adapter_closures.Tree.to_wire.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Wire)
++  := do
++  let (p1, _) ←
++    Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok p1
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++def
++  Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++  (c : _root_.recursive_adapter_closures.Tree.to_wire.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Wire) ×
++    _root_.recursive_adapter_closures.Tree.to_wire.closure)
++  := do
++  let (k, t) := tupled_args
++  let w ← Tree.to_wire t
++  _root_.Aeneas.Std.Result.ok ((k, w), c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++@[reducible]
++def
++  Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.Tree.to_wire.closure (_root_.Aeneas.Std.U32
++  × _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), (u32, recursive_adapter_closures::Wire)> for recursive_adapter_closures::{recursive_adapter_closures::Tree}::to_wire::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 35:53-35:79 -/
++@[reducible]
++def
++  Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.Tree.to_wire.closure (_root_.Aeneas.Std.U32
++  × _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire) := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.Tree.to_wire.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreePairU32Wire.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.Tree.to_wire.closure
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Wire))
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.Tree.to_wire.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreePairU32Wire.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop body 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Visibility: public -/
++@[rust_loop_body]
++def Tree.visit_children_loop0.body
++  {F : Type} (coreopsfunctionFnMutFTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Tree) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.recursive_adapter_closures.Tree) × F) F)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done f)
++  | some c =>
++    let (_, model_state2) ←
++      coreopsfunctionFnMutFTupleSharedTreeTupleInst.call_mut f c
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, model_state2))
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Visibility: public -/
++@[rust_loop]
++def Tree.visit_children_loop0
++  {F : Type} (coreopsfunctionFnMutFTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Tree) (f : F) :
++  _root_.Aeneas.Std.Result F
++  := do
++  loop
++    (fun (iter1, f1) =>
++       _root_.recursive_adapter_closures.Tree.visit_children_loop0.body
++       coreopsfunctionFnMutFTupleSharedTreeTupleInst iter1 f1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Tree) × F) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Tree) × F) F))
++    (iter, f)
++
++mutual
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Visibility: public -/
++@[rust_loop]
++def Tree.visit_children_loop1
++  {F : Type} (coreopsfunctionFnMutFTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) (f : F) :
++  _root_.Aeneas.Std.Result F
++  := do
++  loop
++    (fun (iter1, f1) => Tree.visit_children_loop1.body
++       coreopsfunctionFnMutFTupleSharedTreeTupleInst iter1 f1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Tree)) × F) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) × F)
++      F))
++    (iter, f)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]: loop body 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Visibility: public -/
++@[rust_loop_body]
++def Tree.visit_children_loop1.body
++  {F : Type} (coreopsfunctionFnMutFTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Tree)) × F) F)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done f)
++  | some p =>
++    let (_, c) := p
++    let (_, model_state2) ←
++      coreopsfunctionFnMutFTupleSharedTreeTupleInst.call_mut f c
++    let f1 ←
++      Tree.visit_children coreopsfunctionFnMutFTupleSharedTreeTupleInst c
++        model_state2
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, f1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 42:4-57:5
++    Visibility: public -/
++def Tree.visit_children
++  {F : Type} (coreopsfunctionFnMutFTupleShared0TreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (self : _root_.recursive_adapter_closures.Tree) (f : F) :
++  _root_.Aeneas.Std.Result F
++  := do
++  match self with
++  | _root_.recursive_adapter_closures.Tree.Leaf _ =>
++    _root_.Aeneas.Std.Result.ok f
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    _root_.recursive_adapter_closures.Tree.visit_children_loop0
++      coreopsfunctionFnMutFTupleShared0TreeTupleInst iter f
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    Tree.visit_children_loop1 coreopsfunctionFnMutFTupleShared0TreeTupleInst
++      iter f
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop body 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Visibility: public -/
++@[rust_loop_body]
++def
++  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0.body
++  (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Tree)
++  (back : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (back1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) (i1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.recursive_adapter_closures.Tree) × (_root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, i1,
++      back, back1))
++  | some c =>
++    let (_, model_state2) ←
++      coreopsfunctionFnMutclosureTupleSharedTreeTupleInst.call_mut (i, i1) c
++    let (i2, i3) := model_state2
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, fun i4 => let (i5, _) := (i4, i3)
++                               back i5,
++      fun i4 => let (_, i5) := (i2, i4)
++                back1 i5, i2, i3))
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 46:16-48:17
++    Visibility: public -/
++@[rust_loop]
++def
++  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0
++  (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Tree)
++  (back : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (back1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) (i1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize))
++  := do
++  loop
++    (fun (iter1, back2, back3, i2, i3) =>
++       _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0.body
++       coreopsfunctionFnMutclosureTupleSharedTreeTupleInst iter1 back2 back3 i2
++       i3 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Tree) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Tree) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize))))
++    (iter, back, back1, i, i1)
++
++mutual
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Visibility: public -/
++@[rust_loop]
++def
++  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1
++  (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree))
++  (back : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (back1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) (i1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize))
++  := do
++  loop
++    (fun (iter1, back2, back3, i2, i3) =>
++       Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1.body
++       coreopsfunctionFnMutclosureTupleSharedTreeTupleInst iter1 back2 back3 i2
++       i3 : ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Tree)) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) ×
++      (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++      (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++      (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++      (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize))))
++    (iter, back, back1, i, i1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]: loop body 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 51:16-54:17
++    Visibility: public -/
++@[rust_loop_body]
++def
++  Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1.body
++  (coreopsfunctionFnMutclosureTupleSharedTreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree))
++  (back : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (back1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) (i1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Tree)) × (_root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Usize) × (_root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize) ×
++    (_root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, i1,
++      back, back1))
++  | some p =>
++    let (_, c) := p
++    let (_, model_state2) ←
++      coreopsfunctionFnMutclosureTupleSharedTreeTupleInst.call_mut (i, i1) c
++    let (i2, i3) := model_state2
++    let (f, visit_children_back, visit_children_back1) ←
++      Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++        coreopsfunctionFnMutclosureTupleSharedTreeTupleInst c model_state2
++    let (i4, i5) := f
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1,
++      fun i6 =>
++        let (i7, _) := visit_children_back (i6, i5)
++        let (i8, _) := (i7, i3)
++        back i8,
++      fun i6 =>
++        let (_, i7) := visit_children_back1 (i4, i6)
++        let (_, i8) := (i2, i7)
++        back1 i8, i4, i5))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Tree}::visit_children::<0, 1, recursive_adapter_closures::weight::closure<2, 3>>]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 42:4-57:5
++    Visibility: public -/
++def Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++  (coreopsfunctionFnMutclosureTupleShared0TreeTupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit)
++  (self : _root_.recursive_adapter_closures.Tree)
++  (f : _root_.recursive_adapter_closures.weight.closure) :
++  _root_.Aeneas.Std.Result (_root_.recursive_adapter_closures.weight.closure ×
++    (_root_.recursive_adapter_closures.weight.closure →
++    _root_.recursive_adapter_closures.weight.closure) ×
++    (_root_.recursive_adapter_closures.weight.closure →
++    _root_.recursive_adapter_closures.weight.closure))
++  := do
++  let (i, i1) := f
++  match self with
++  | _root_.recursive_adapter_closures.Tree.Leaf _ =>
++    let back :=
++      (fun f1 => let (i2, _) := f1
++                 (i2, i1) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    let back1 :=
++      (fun f1 => let (_, i2) := f1
++                 (i, i2) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    _root_.Aeneas.Std.Result.ok (f, back, back1)
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let (i2, i3, back, back1) ←
++      _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop0
++        coreopsfunctionFnMutclosureTupleShared0TreeTupleInst iter
++        (fun i4 => i4) (fun i4 => i4) i i1
++    let back2 :=
++      (fun f1 => let (i4, _) := f1
++                 let i5 := back i4
++                 (i5, i1) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    let back3 :=
++      (fun f1 => let (_, i4) := f1
++                 let i5 := back1 i4
++                 (i, i5) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    _root_.Aeneas.Std.Result.ok ((i2, i3), back2, back3)
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let (i2, i3, back, back1) ←
++      Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f_loop1
++        coreopsfunctionFnMutclosureTupleShared0TreeTupleInst iter
++        (fun i4 => i4) (fun i4 => i4) i i1
++    let back2 :=
++      (fun f1 => let (i4, _) := f1
++                 let i5 := back i4
++                 (i5, i1) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    let back3 :=
++      (fun f1 => let (_, i4) := f1
++                 let i5 := back1 i4
++                 (i, i5) : _root_.recursive_adapter_closures.weight.closure →
++        _root_.recursive_adapter_closures.weight.closure)
++    _root_.Aeneas.Std.Result.ok ((i2, i3), back2, back3)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++mutual
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 67:16-69:17
++    Visibility: public -/
++@[rust_loop]
++def Wire.digest_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Wire) (h : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, h1) => Wire.digest_loop0.body iter1 h1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Wire) × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.recursive_adapter_closures.Wire) × _root_.Aeneas.Std.U64)
++      _root_.Aeneas.Std.U64))
++    (iter, h)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 74:16-80:17
++    Visibility: public -/
++@[rust_loop]
++def Wire.digest_loop1
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire)) (h : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, h1) => Wire.digest_loop1.body iter1 h1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Wire)) × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Wire)) × _root_.Aeneas.Std.U64)
++      _root_.Aeneas.Std.U64))
++    (iter, h)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop body 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 67:16-69:17
++    Visibility: public -/
++@[rust_loop_body]
++def Wire.digest_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.recursive_adapter_closures.Wire) (h : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.recursive_adapter_closures.Wire) × _root_.Aeneas.Std.U64)
++    _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done h)
++  | some w =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_mul h 31#u64)
++    let i1 ← Wire.digest w
++    let h1 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_add i i1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, h1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]: loop body 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 74:16-80:17
++    Visibility: public -/
++@[rust_loop_body]
++def Wire.digest_loop1.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Wire)) (h : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.recursive_adapter_closures.Wire)) × _root_.Aeneas.Std.U64)
++    _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done h)
++  | some p =>
++    let (k, w) := p
++    let i ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_mul h 37#u64)
++    let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U64 k)
++    let i2 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_add i i1)
++    let i3 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_mul i2 7#u64)
++    let i4 ← Wire.digest w
++    let h1 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_add i3 i4)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, h1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Wire}::digest]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 62:4-84:5
++    Visibility: public -/
++def Wire.digest
++  (self : _root_.recursive_adapter_closures.Wire) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  match self with
++  | _root_.recursive_adapter_closures.Wire.Leaf n =>
++    let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 n)
++    i + 1#u64
++  | _root_.recursive_adapter_closures.Wire.List v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    Wire.digest_loop0 iter 3#u64
++  | _root_.recursive_adapter_closures.Wire.Map v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    Wire.digest_loop1 iter 5#u64
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [recursive_adapter_closures::size::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++@[reducible]
++def size.closure := _root_.Unit
++
++mutual
++
++/-- [recursive_adapter_closures::size]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 89:0-95:1
++    Visibility: public -/
++def size
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let i ←
++    match t with
++    | _root_.recursive_adapter_closures.Tree.Leaf _ =>
++      _root_.Aeneas.Std.Result.ok 0#usize
++    | _root_.recursive_adapter_closures.Tree.Node v =>
++      do
++      let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++      let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++      let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter s
++      let model_state ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++          _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize) i1
++          (size)
++      let (model_state1, _) ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.sum.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++          _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize))
++          _root_.Aeneas.Std.core.iter.traits.accum.SumUsizeUsize model_state
++      _root_.Aeneas.Std.Result.ok model_state1
++    | _root_.recursive_adapter_closures.Tree.Named v =>
++      do
++      let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++      let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++      let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter s
++      let model_state ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++          ({
++              FnOnceInst :=
++                ({
++                    call_once :=
++                      fun arg arg1 =>
++                        do
++                        let output ←
++                          size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
++                            arg arg1
++                        _root_.Aeneas.Std.Result.ok (output, arg) } :
++                  _root_.Aeneas.Std.core.ops.function.FnOnce
++                  _root_.recursive_adapter_closures.size.closure
++                  (_root_.Aeneas.Std.U32 ×
++                  _root_.recursive_adapter_closures.Tree)
++                  _root_.Aeneas.Std.Usize)
++              call_mut :=
++                fun arg arg1 =>
++                  do
++                  let (output, captured) ←
++                    size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
++                      arg arg1
++                  _root_.Aeneas.Std.Result.ok (output, captured) } :
++            _root_.Aeneas.Std.core.ops.function.FnMut
++            _root_.recursive_adapter_closures.size.closure
++            (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++            _root_.Aeneas.Std.Usize) i1 ()
++      let (model_state1, _) ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.sum.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++          ({
++              FnOnceInst :=
++                ({
++                    call_once :=
++                      fun arg arg1 =>
++                        do
++                        let output ←
++                          size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
++                            arg arg1
++                        _root_.Aeneas.Std.Result.ok (output, arg) } :
++                  _root_.Aeneas.Std.core.ops.function.FnOnce
++                  _root_.recursive_adapter_closures.size.closure
++                  (_root_.Aeneas.Std.U32 ×
++                  _root_.recursive_adapter_closures.Tree)
++                  _root_.Aeneas.Std.Usize)
++              call_mut :=
++                fun arg arg1 =>
++                  do
++                  let (output, captured) ←
++                    size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
++                      arg arg1
++                  _root_.Aeneas.Std.Result.ok (output, captured) } :
++            _root_.Aeneas.Std.core.ops.function.FnMut
++            _root_.recursive_adapter_closures.size.closure
++            (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++            _root_.Aeneas.Std.Usize))
++          _root_.Aeneas.Std.core.iter.traits.accum.SumUsizeUsize model_state
++      _root_.Aeneas.Std.Result.ok model_state1
++  1#usize + i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::size::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++def
++  size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
++  (c : _root_.recursive_adapter_closures.size.closure)
++  (p : (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let (i, _) ←
++    size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::size::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++def size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
++  (c : _root_.recursive_adapter_closures.size.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize ×
++    _root_.recursive_adapter_closures.size.closure)
++  := do
++  let (_, c1) := tupled_args
++  let i ← size c1
++  _root_.Aeneas.Std.Result.ok (i, c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::size::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++@[reducible]
++def size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.size.closure (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree) _root_.Aeneas.Std.Usize := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::size::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), usize> for recursive_adapter_closures::size::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 93:39-93:55 -/
++@[reducible]
++def size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.size.closure (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree) _root_.Aeneas.Std.Usize := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.size.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeUsize.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.size.closure (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Tree) _root_.Aeneas.Std.Usize)
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.size.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeUsize.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [recursive_adapter_closures::own_weight]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 97:0-102:1 -/
++def own_weight
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let joined ←
++    match t with
++    | _root_.recursive_adapter_closures.Tree.Leaf n =>
++      do
++      let i ← lift (_root_.Aeneas.Std.UScalar.cast .Usize n)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr i : _root_.Sum
++        _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize)
++    | _root_.recursive_adapter_closures.Tree.Node _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize)
++    | _root_.recursive_adapter_closures.Tree.Named _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl t : _root_.Sum
++        _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize)
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok 1#usize
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++mutual
++
++/-- [recursive_adapter_closures::weight]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 106:0-114:1
++    Visibility: public -/
++def weight
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let total ← _root_.recursive_adapter_closures.own_weight t
++  let (c, visit_children_back, visit_children_back1) ←
++    _root_.recursive_adapter_closures.Tree.visit_children01closure_specialized_7859d0ff6da8a5fbf2b0272e5511849f
++      ({
++          FnOnceInst :=
++            ({
++                call_once :=
++                  fun arg arg1 =>
++                    do
++                    let (output, captured, captured1) ←
++                      weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
++                        arg arg1
++                    let capture_state := captured
++                    let capture_state1 := captured1
++                    _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++                      capture_state1.#1)) } :
++              _root_.Aeneas.Std.core.ops.function.FnOnce
++              _root_.recursive_adapter_closures.weight.closure
++              _root_.recursive_adapter_closures.Tree _root_.Unit)
++          call_mut :=
++            fun arg arg1 =>
++              do
++              let (output, captured, captured1, captured2) ←
++                weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple.call_mut
++                  arg arg1
++              let capture_state := captured1 captured
++              let capture_state1 := captured2 captured
++              _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++                capture_state1.#1)) } :
++        _root_.Aeneas.Std.core.ops.function.FnMut
++        _root_.recursive_adapter_closures.weight.closure
++        _root_.recursive_adapter_closures.Tree _root_.Unit) t (total, 0#usize)
++  let c1 := visit_children_back c
++  let (total1, _) := c1
++  let i ← total1 * 10#usize
++  let c2 := visit_children_back1 c
++  let (_, visits) := c2
++  i + visits
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::weight::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
++  (c : _root_.recursive_adapter_closures.weight.closure)
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.recursive_adapter_closures.weight.closure ×
++    _root_.recursive_adapter_closures.weight.closure)
++  := do
++  let (i, i1) := c
++  let (_, c1, call_mut_back, call_mut_back1) ←
++    weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple.call_mut c t
++  let c2 := call_mut_back c1
++  let (i2, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, i3) := c3
++  _root_.Aeneas.Std.Result.ok ((), (i2, i1), (i, i3))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::weight::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++def weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple.call_mut
++  (c : _root_.recursive_adapter_closures.weight.closure)
++  (tupled_args : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.recursive_adapter_closures.weight.closure ×
++    (_root_.recursive_adapter_closures.weight.closure →
++    _root_.recursive_adapter_closures.weight.closure) ×
++    (_root_.recursive_adapter_closures.weight.closure →
++    _root_.recursive_adapter_closures.weight.closure))
++  := do
++  let (i, i1) := c
++  let i2 ← weight tupled_args
++  let i3 ← i + i2
++  let i4 ← i1 + 1#usize
++  let back :=
++    (fun c1 => let (i5, _) := c1
++               (i5, i1) : _root_.recursive_adapter_closures.weight.closure →
++      _root_.recursive_adapter_closures.weight.closure)
++  let back1 :=
++    (fun c1 => let (_, i5) := c1
++               (i, i5) : _root_.recursive_adapter_closures.weight.closure →
++      _root_.recursive_adapter_closures.weight.closure)
++  _root_.Aeneas.Std.Result.ok ((), (i3, i4), back, back1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::weight::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++@[reducible]
++def weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.recursive_adapter_closures.weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- Trait implementation: [recursive_adapter_closures::weight::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), ()> for recursive_adapter_closures::weight::closure<0, 1>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 109:26-112:5 -/
++@[reducible]
++def weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.weight.closure
++  _root_.recursive_adapter_closures.Tree _root_.Unit := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let (output, captured, captured1) ←
++              _root_.recursive_adapter_closures.weight.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeTuple.call_once
++                arg arg1
++            let capture_state := captured
++            let capture_state1 := captured1
++            _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++              capture_state1.#1)) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.weight.closure
++      _root_.recursive_adapter_closures.Tree _root_.Unit)
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.recursive_adapter_closures.weight.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeTuple.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1))
++}
++
++/-- [recursive_adapter_closures::positive_leaves::closure#1]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++@[reducible]
++def positive_leaves.closure_1 := _root_.Unit
++
++/-- [recursive_adapter_closures::positive_leaves::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++@[reducible]
++def positive_leaves.closure := _root_.Unit
++
++mutual
++
++/-- [recursive_adapter_closures::positive_leaves]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 118:0-137:1
++    Visibility: public -/
++def positive_leaves
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  := do
++  match t with
++  | _root_.recursive_adapter_closures.Tree.Leaf i =>
++    match i with
++    | 0#uscalar => _root_.Aeneas.Std.Result.ok none
++    | _ => _root_.Aeneas.Std.Result.ok (some 1#usize)
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.positive_leaves.closure
++                _root_.recursive_adapter_closures.Tree (_root_.Option
++                _root_.Aeneas.Std.Usize))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.positive_leaves.closure
++          _root_.recursive_adapter_closures.Tree (_root_.Option
++          _root_.Aeneas.Std.Usize)) i ()
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.positive_leaves.closure
++                _root_.recursive_adapter_closures.Tree (_root_.Option
++                _root_.Aeneas.Std.Usize))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.positive_leaves.closure
++          _root_.recursive_adapter_closures.Tree (_root_.Option
++          _root_.Aeneas.Std.Usize)))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.Aeneas.Std.Usize)) model_state
++    let cf ←
++      _root_.recursive_adapter_closures.core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++        model_state1
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref val
++      let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++      let (model_state2, _) ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.sum.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.Aeneas.Std.Usize)
++          _root_.Aeneas.Std.core.iter.traits.accum.SumUsizeSharedUsize i1
++      _root_.Aeneas.Std.Result.ok (some model_state2)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.recursive_adapter_closures.core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++        _root_.Aeneas.Std.Usize residual
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.positive_leaves.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Option
++                _root_.Aeneas.Std.Usize))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.positive_leaves.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Option _root_.Aeneas.Std.Usize)) i ()
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.positive_leaves.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) (_root_.Option
++                _root_.Aeneas.Std.Usize))
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.positive_leaves.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          (_root_.Option _root_.Aeneas.Std.Usize)))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.Aeneas.Std.Usize)) model_state
++    let cf ←
++      _root_.recursive_adapter_closures.core.option.Option.Insts.CoreOpsTry_traitTryTOptionInfallible.branch
++        model_state1
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len val
++      let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref val
++      let i2 ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++      let (model_state2, _) ←
++        _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.sum.default
++          (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++          _root_.Aeneas.Std.Usize)
++          _root_.Aeneas.Std.core.iter.traits.accum.SumUsizeSharedUsize i2
++      let i3 ← i1 + model_state2
++      _root_.Aeneas.Std.Result.ok (some i3)
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.recursive_adapter_closures.core.option.Option.Insts.CoreOpsTry_traitFromResidualOptionInfallible.from_residual
++        _root_.Aeneas.Std.Usize residual
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++def
++  positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
++  (c : _root_.recursive_adapter_closures.positive_leaves.closure)
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  := do
++  let (o, _) ←
++    positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
++      c t
++  _root_.Aeneas.Std.Result.ok o
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++def
++  positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
++  (c : _root_.recursive_adapter_closures.positive_leaves.closure)
++  (tupled_args : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.Usize) ×
++    _root_.recursive_adapter_closures.positive_leaves.closure)
++  := do
++  let o ← positive_leaves tupled_args
++  _root_.Aeneas.Std.Result.ok (o, c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++def
++  positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
++  (c : _root_.recursive_adapter_closures.positive_leaves.closure_1)
++  (p : (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  := do
++  let (o, _) ←
++    positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok o
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++def
++  positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
++  (c : _root_.recursive_adapter_closures.positive_leaves.closure_1)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.Usize) ×
++    _root_.recursive_adapter_closures.positive_leaves.closure_1)
++  := do
++  let (_, c1) := tupled_args
++  let o ← positive_leaves c1
++  _root_.Aeneas.Std.Result.ok (o, c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++@[reducible]
++def
++  positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.positive_leaves.closure
++  _root_.recursive_adapter_closures.Tree (_root_.Option
++  _root_.Aeneas.Std.Usize) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 125:21-125:43 -/
++@[reducible]
++def
++  positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.positive_leaves.closure
++  _root_.recursive_adapter_closures.Tree (_root_.Option
++  _root_.Aeneas.Std.Usize) := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.positive_leaves.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeOptionUsize.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.positive_leaves.closure
++      _root_.recursive_adapter_closures.Tree (_root_.Option
++      _root_.Aeneas.Std.Usize))
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.positive_leaves.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeOptionUsize.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++@[reducible]
++def
++  positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.positive_leaves.closure_1
++  (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++  (_root_.Option _root_.Aeneas.Std.Usize) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::positive_leaves::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), core::option::Option<usize>> for recursive_adapter_closures::positive_leaves::closure#1}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 132:21-132:48 -/
++@[reducible]
++def
++  positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.positive_leaves.closure_1
++  (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++  (_root_.Option _root_.Aeneas.Std.Usize) := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.positive_leaves.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeOptionUsize.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.positive_leaves.closure_1
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++      (_root_.Option _root_.Aeneas.Std.Usize))
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.positive_leaves.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeOptionUsize.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [recursive_adapter_closures::Scale]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 139:0-141:1
++    Visibility: public -/
++structure Scale where
++  factor : _root_.Aeneas.Std.U64
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++@[reducible]
++def Scale.score.closure_1 := _root_.recursive_adapter_closures.Scale
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++@[reducible]
++def Scale.score.closure := _root_.recursive_adapter_closures.Scale
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop body 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:16-153:17
++    Visibility: public -/
++@[rust_loop_body]
++def Scale.score_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64) ×
++    _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++  | some p =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_mul s 10#u64)
++    let s1 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_add i p)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, s1))
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop 0:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 151:16-153:17
++    Visibility: public -/
++@[rust_loop]
++def Scale.score_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, s1) =>
++       _root_.recursive_adapter_closures.Scale.score_loop0.body iter1 s1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64) ×
++      _root_.Aeneas.Std.U64) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64))
++    (iter, s)
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop body 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:16-161:17
++    Visibility: public -/
++@[rust_loop_body]
++def Scale.score_loop1.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64) ×
++    _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++  | some p =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_mul s 100#u64)
++    let s1 ← lift (_root_.Aeneas.Std.core.num.U64.wrapping_add i p)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, s1))
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]: loop 1:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 159:16-161:17
++    Visibility: public -/
++@[rust_loop]
++def Scale.score_loop1
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, s1) =>
++       _root_.recursive_adapter_closures.Scale.score_loop1.body iter1 s1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U64) ×
++      _root_.Aeneas.Std.U64) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U64) × _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64))
++    (iter, s)
++
++mutual
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 145:4-165:5
++    Visibility: public -/
++def Scale.score
++  (self : _root_.recursive_adapter_closures.Scale)
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  match t with
++  | _root_.recursive_adapter_closures.Tree.Leaf n =>
++    let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 n)
++    i * self.factor
++  | _root_.recursive_adapter_closures.Tree.Node v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Scale.score.closure
++                _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Scale.score.closure
++          _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64) i self
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        _root_.recursive_adapter_closures.Tree)
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Scale.score.closure
++                _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Scale.score.closure
++          _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.Aeneas.Std.U64) model_state
++    let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++    _root_.recursive_adapter_closures.Scale.score_loop0 iter 1#u64
++  | _root_.recursive_adapter_closures.Tree.Named v =>
++    let v1 := _root_.Aeneas.Std.NestedVec.toVec v
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref v1
++    let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    let model_state ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Scale.score.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) _root_.Aeneas.Std.U64)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Scale.score.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          _root_.Aeneas.Std.U64) i self
++    let (model_state1, _) ←
++      _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++        (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++        (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree))
++        ({
++            FnOnceInst :=
++              ({
++                  call_once :=
++                    fun arg arg1 =>
++                      do
++                      let output ←
++                        Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
++                          arg arg1
++                      _root_.Aeneas.Std.Result.ok (output, arg) } :
++                _root_.Aeneas.Std.core.ops.function.FnOnce
++                _root_.recursive_adapter_closures.Scale.score.closure_1
++                (_root_.Aeneas.Std.U32 ×
++                _root_.recursive_adapter_closures.Tree) _root_.Aeneas.Std.U64)
++            call_mut :=
++              fun arg arg1 =>
++                do
++                let (output, captured) ←
++                  Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
++                    arg arg1
++                _root_.Aeneas.Std.Result.ok (output, captured) } :
++          _root_.Aeneas.Std.core.ops.function.FnMut
++          _root_.recursive_adapter_closures.Scale.score.closure_1
++          (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++          _root_.Aeneas.Std.U64))
++        (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++        _root_.Aeneas.Std.U64) model_state
++    let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state1
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++    _root_.recursive_adapter_closures.Scale.score_loop1 iter 2#u64
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
++  (c : _root_.recursive_adapter_closures.Scale.score.closure)
++  (t : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let (i, _) ←
++    Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut c
++      t
++  _root_.Aeneas.Std.Result.ok i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
++  (c : _root_.recursive_adapter_closures.Scale.score.closure)
++  (tupled_args : _root_.recursive_adapter_closures.Tree) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 ×
++    _root_.recursive_adapter_closures.Scale.score.closure)
++  := do
++  let i ← Scale.score c tupled_args
++  _root_.Aeneas.Std.Result.ok (i, c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}::call_once]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++def
++  Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
++  (c : _root_.recursive_adapter_closures.Scale.score.closure_1)
++  (p : (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let (i, _) ←
++    Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}::call_mut]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++def
++  Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
++  (c : _root_.recursive_adapter_closures.Scale.score.closure_1)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.recursive_adapter_closures.Tree)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 ×
++    _root_.recursive_adapter_closures.Scale.score.closure_1)
++  := do
++  let (k, c1) := tupled_args
++  let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 k)
++  let i1 ← Scale.score c c1
++  let i2 ← i + i1
++  _root_.Aeneas.Std.Result.ok (i2, c)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++@[reducible]
++def Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.Scale.score.closure
++  _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ (recursive_adapter_closures::Tree)), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 149:51-149:68 -/
++@[reducible]
++def Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.Scale.score.closure
++  _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64 := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.Scale.score.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTreeU64.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.Scale.score.closure
++      _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.U64)
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.Scale.score.closure.Insts.CoreOpsFunctionFnMutTupleSharedTreeU64.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnOnce<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++@[reducible]
++def Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.recursive_adapter_closures.Scale.score.closure_1
++  (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++  _root_.Aeneas.Std.U64 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.recursive_adapter_closures.Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::{core::ops::function::FnMut<(&'_ ((u32, recursive_adapter_closures::Tree))), u64> for recursive_adapter_closures::{recursive_adapter_closures::Scale}::score::closure#1<0>}]
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 157:51-157:85 -/
++@[reducible]
++def Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.recursive_adapter_closures.Scale.score.closure_1
++  (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++  _root_.Aeneas.Std.U64 := {
++  FnOnceInst :=
++    ({
++        call_once :=
++          fun arg arg1 =>
++            do
++            let output ←
++              _root_.recursive_adapter_closures.Scale.score.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedPairU32TreeU64.call_once
++                arg arg1
++            _root_.Aeneas.Std.Result.ok (output, arg) } :
++      _root_.Aeneas.Std.core.ops.function.FnOnce
++      _root_.recursive_adapter_closures.Scale.score.closure_1
++      (_root_.Aeneas.Std.U32 × _root_.recursive_adapter_closures.Tree)
++      _root_.Aeneas.Std.U64)
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.recursive_adapter_closures.Scale.score.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedPairU32TreeU64.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [recursive_adapter_closures::sample]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 168:0-177:1
++    Visibility: public -/
++def sample
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.recursive_adapter_closures.Tree
++  := do
++  let i ← a + b
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.recursive_adapter_closures.Tree.Leaf i,
++         _root_.recursive_adapter_closures.Tree.Node
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++         (_root_.Aeneas.Std.alloc.vec.Vec.new
++         _root_.recursive_adapter_closures.Tree))
++         ] : _root_.Aeneas.Std.Array _root_.recursive_adapter_closures.Tree
++      2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let s1 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         (7#u32, _root_.recursive_adapter_closures.Tree.Leaf b), (9#u32,
++         _root_.recursive_adapter_closures.Tree.Node
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v))
++         ] : _root_.Aeneas.Std.Array (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Tree) 2#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let s2 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 1#usize [
++         (1#u32, _root_.recursive_adapter_closures.Tree.Leaf 3#u32)
++         ] : _root_.Aeneas.Std.Array (_root_.Aeneas.Std.U32 ×
++      _root_.recursive_adapter_closures.Tree) 1#usize))
++  let v2 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let s3 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.recursive_adapter_closures.Tree.Named
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v2),
++         _root_.recursive_adapter_closures.Tree.Leaf b
++         ] : _root_.Aeneas.Std.Array _root_.recursive_adapter_closures.Tree
++      2#usize))
++  let v3 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s3
++  let s4 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 3#usize [
++         _root_.recursive_adapter_closures.Tree.Leaf a,
++         _root_.recursive_adapter_closures.Tree.Named
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v1),
++         _root_.recursive_adapter_closures.Tree.Node
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v3)
++         ] : _root_.Aeneas.Std.Array _root_.recursive_adapter_closures.Tree
++      3#usize))
++  let v4 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s4
++  _root_.Aeneas.Std.Result.ok (_root_.recursive_adapter_closures.Tree.Node
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested v4))
++
++/-- [recursive_adapter_closures::wire_digest]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 179:0-181:1
++    Visibility: public -/
++def wire_digest
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  let w ← _root_.recursive_adapter_closures.Tree.to_wire t
++  _root_.recursive_adapter_closures.Wire.digest w
++
++/-- [recursive_adapter_closures::sample_size]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 183:0-185:1
++    Visibility: public -/
++def sample_size
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  _root_.recursive_adapter_closures.size t
++
++/-- [recursive_adapter_closures::sample_weight]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 187:0-189:1
++    Visibility: public -/
++def sample_weight
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  _root_.recursive_adapter_closures.weight t
++
++/-- [recursive_adapter_closures::sample_positive]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 191:0-193:1
++    Visibility: public -/
++def sample_positive
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Usize)
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  _root_.recursive_adapter_closures.positive_leaves t
++
++/-- [recursive_adapter_closures::sample_score]:
++    Source: 'tests/src/recursive-adapter-closures.rs', lines 195:0-197:1
++    Visibility: public -/
++def sample_score
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (factor : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let t ← _root_.recursive_adapter_closures.sample a b
++  _root_.recursive_adapter_closures.Scale.score { factor } t
++
++end recursive_adapter_closures
+diff --git a/tests/lean/StdEnumDiscriminants.lean b/tests/lean/StdEnumDiscriminants.lean
+new file mode 100644
+index 0000000..8351972
+--- /dev/null
++++ b/tests/lean/StdEnumDiscriminants.lean
+@@ -0,0 +1 @@
++import StdEnumDiscriminants.Checks
+diff --git a/tests/lean/StdEnumDiscriminants/Checks.lean b/tests/lean/StdEnumDiscriminants/Checks.lean
+new file mode 100644
+index 0000000..cb39a19
+--- /dev/null
++++ b/tests/lean/StdEnumDiscriminants/Checks.lean
+@@ -0,0 +1,28 @@
++import StdEnumDiscriminants.StdEnumDiscriminants
++
++/-! Evaluate the model of `tests/src/std-enum-discriminants.rs` on the inputs of its `native`
++    test module and compare with the native results: `Result::is_ok`/`is_err`, translated from
++    their bodies, read the discriminant of `Result`; `core::mem::discriminant` reads the
++    discriminants of `Option`, `Result`, `ControlFlow`, `Bound` and `Cow`, printed by
++    `Debug for Discriminant`. -/
++
++namespace std_enum_discriminants.checks
++open Aeneas Aeneas.Std Result
++
++def okFlags : Result (Bool × Bool) → Option (Bool × Bool)
++  | ok a => some a
++  | _ => none
++
++def okString : Result String → Option String
++  | ok s => some s
++  | _ => none
++
++#guard okFlags (result_flags 4#u32) == some (true, false)
++#guard okFlags (result_flags 7#u32) == some (false, true)
++#guard okString (option_discriminants 3#u32) == some "Discriminant(0) Discriminant(1) true"
++#guard okString (result_discriminants 3#u32) == some "Discriminant(0) Discriminant(1) false"
++#guard okString (control_flow_discriminants 3#u32) == some "Discriminant(0) Discriminant(1)"
++#guard okString (bound_discriminants 3#u32) == some "Discriminant(0) Discriminant(1) Discriminant(2)"
++#guard okString (cow_discriminants (toStr "x")) == some "Discriminant(0) Discriminant(1)"
++
++end std_enum_discriminants.checks
+diff --git a/tests/lean/StdEnumDiscriminants/StdEnumDiscriminants.lean b/tests/lean/StdEnumDiscriminants/StdEnumDiscriminants.lean
+new file mode 100644
+index 0000000..75a0283
+--- /dev/null
++++ b/tests/lean/StdEnumDiscriminants/StdEnumDiscriminants.lean
+@@ -0,0 +1,213 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [std_enum_discriminants]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace std_enum_discriminants
++
++/-- [core::result::{core::result::Result<T, E>}::is_ok]:
++    Source: '/rustc/library/core/src/result.rs', lines 593:4-593:37
++    Name pattern: [core::result::{core::result::Result<@T, @E>}::is_ok]
++    Visibility: public -/
++@[rust_fun "core::result::{core::result::Result<@T, @E>}::is_ok"]
++def core.result.Result.is_ok
++  {T : Type} {E : Type} (self : _root_.Aeneas.Std.core.result.Result T E) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  _root_.Aeneas.Std.Result.ok (self1 = 0#isize)
++
++/-- [core::result::{core::result::Result<T, E>}::is_err]:
++    Source: '/rustc/library/core/src/result.rs', lines 646:4-646:38
++    Name pattern: [core::result::{core::result::Result<@T, @E>}::is_err]
++    Visibility: public -/
++@[rust_fun "core::result::{core::result::Result<@T, @E>}::is_err"]
++def core.result.Result.is_err
++  {T : Type} {E : Type} (self : _root_.Aeneas.Std.core.result.Result T E) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  _root_.Aeneas.Std.Result.ok (¬ (self1 = 0#isize))
++
++/-- [std_enum_discriminants::result_flags]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 17:0-20:1
++    Visibility: public -/
++def result_flags
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Bool)
++  := do
++  let i ← n % 2#u32
++  let r ←
++    if i = 0#u32
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok n)
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err n)
++  let b ← _root_.std_enum_discriminants.core.result.Result.is_ok r
++  let b1 ← _root_.std_enum_discriminants.core.result.Result.is_err r
++  _root_.Aeneas.Std.Result.ok (b, b1)
++
++/-- [std_enum_discriminants::option_discriminants]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 22:0-26:1
++    Visibility: public -/
++def option_discriminants
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let d ← _root_.Aeneas.Std.core.mem.discriminant none
++  let d1 ← _root_.Aeneas.Std.core.mem.discriminant (some n)
++  let i ← n + 1#u32
++  let d2 ← _root_.Aeneas.Std.core.mem.discriminant (some i)
++  let b ← _root_.Aeneas.Std.core.mem.PartialEqDiscriminant.eq d1 d2
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant (_root_.Option
++      _root_.Aeneas.Std.U32)) d
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant (_root_.Option
++      _root_.Aeneas.Std.U32)) d1
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_display
++      _root_.Aeneas.Std.core.fmt.DisplayBool b
++  let a3 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 8#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 3#usize [ a, a1, a2 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a3
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [std_enum_discriminants::result_discriminants]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 28:0-32:1
++    Visibility: public -/
++def result_discriminants
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let d ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.result.Result.Ok n)
++  let d1 ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.result.Result.Err false)
++  let b ← _root_.Aeneas.Std.core.mem.PartialEqDiscriminant.eq d d1
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32 _root_.Bool))
++      d
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32 _root_.Bool))
++      d1
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_display
++      _root_.Aeneas.Std.core.fmt.DisplayBool b
++  let a3 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 8#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 3#usize [ a, a1, a2 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a3
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [std_enum_discriminants::control_flow_discriminants]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 34:0-38:1
++    Visibility: public -/
++def control_flow_discriminants
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let d ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue n)
++  let d1 ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break n)
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) d
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.ops.control_flow.ControlFlow
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) d1
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 5#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 2#usize [ a, a1 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [std_enum_discriminants::bound_discriminants]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 40:0-45:1
++    Visibility: public -/
++def bound_discriminants
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.String := do
++  let d ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.ops.range.Bound.Included n)
++  let d1 ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.core.ops.range.Bound.Excluded n)
++  let d2 ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      _root_.Aeneas.Std.core.ops.range.Bound.Unbounded
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.ops.range.Bound _root_.Aeneas.Std.U32)) d
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.ops.range.Bound _root_.Aeneas.Std.U32)) d1
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.core.ops.range.Bound _root_.Aeneas.Std.U32)) d2
++  let a3 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 8#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 3#usize [ a, a1, a2 ])
++  let s ← _root_.Aeneas.Std.alloc.fmt.format a3
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s)
++
++/-- [std_enum_discriminants::cow_discriminants]:
++    Source: 'tests/src/std-enum-discriminants.rs', lines 47:0-51:1
++    Visibility: public -/
++def cow_discriminants
++  (s : _root_.Aeneas.Std.Str) : _root_.Aeneas.Std.Result _root_.String := do
++  let s1 ←
++    _root_.Aeneas.Std.alloc.string.ToStringBlanket.to_string
++      _root_.Aeneas.Std.core.fmt.DisplayStr s
++  let d ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.alloc.borrow.Cow.Borrowed s)
++  let d1 ←
++    _root_.Aeneas.Std.core.mem.discriminant
++      (_root_.Aeneas.Std.alloc.borrow.Cow.Owned s1)
++  let a ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.alloc.borrow.Cow _root_.Aeneas.Std.Str _root_.String))
++      d
++  let a1 ←
++    _root_.Aeneas.Std.core.fmt.rt.Argument.new_debug
++      (_root_.Aeneas.Std.core.mem.DebugDiscriminant
++      (_root_.Aeneas.Std.alloc.borrow.Cow _root_.Aeneas.Std.Str _root_.String))
++      d1
++  let a2 ←
++    _root_.Aeneas.Std.core.fmt.Arguments.new
++      (_root_.Aeneas.Std.Array.make 5#usize [
++        192#u8, 1#u8, 32#u8, 192#u8, 0#u8
++        ]) (_root_.Aeneas.Std.Array.make 2#usize [ a, a1 ])
++  let s2 ← _root_.Aeneas.Std.alloc.fmt.format a2
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.hint.must_use s2)
++
++end std_enum_discriminants
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 776b601..f3bfd9e 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -168,6 +168,8 @@ package «tests» {}
+ @[default_target] lean_lib NestedRecursiveDerives
+ @[default_target] lean_lib RecursiveOrdDerives
+ @[default_target] lean_lib RecursiveBoxHash
++@[default_target] lean_lib RecursiveAdapterClosures
++@[default_target] lean_lib StdEnumDiscriminants
+ @[default_target] lean_lib NoNestedBorrows
+ @[default_target] lean_lib Options
+ @[default_target] lean_lib OptionMutNestedRegion
+diff --git a/tests/src/recursive-adapter-closures.rs b/tests/src/recursive-adapter-closures.rs
+new file mode 100644
+index 0000000..c7045c9
+--- /dev/null
++++ b/tests/src/recursive-adapter-closures.rs
+@@ -0,0 +1,215 @@
++//@ [!lean] skip
++//@ [lean] subdir=RecursiveAdapterClosures
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::option::{core::ops::try_trait::Try} --include core::option::{core::ops::try_trait::FromResidual}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Recursion through iterator adapters: the closure of `map` calls the function
++//! being defined, either as the function item itself (`map(Tree::to_wire)`) or
++//! inside a closure (`map(|c| c.to_wire())`), consumed by `collect` into a
++//! `Vec` or an `Option<Vec<_>>`, or by `sum`; and recursion through a visitor
++//! which takes the closure by `&mut` (monomorphized per closure). The Lean
++//! definitions are `partial_fixpoint`s, whose monotonicity goes through the
++//! models of the adapters, of their consumers (themselves fixpoints, taking the
++//! closure's instance as a parameter) and of the monomorphized visitor.
++//! `RecursiveAdapterClosures/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++pub enum Tree {
++    Leaf(u32),
++    Node(Vec<Tree>),
++    Named(Vec<(u32, Tree)>),
++}
++
++pub enum Wire {
++    Leaf(u32),
++    List(Vec<Wire>),
++    Map(Vec<(u32, Wire)>),
++}
++
++impl Tree {
++    /// `map` with the function item and with a closure, collected into a `Vec`
++    /// (`WireExpr::from_raw_data`)
++    pub fn to_wire(&self) -> Wire {
++        match self {
++            Tree::Leaf(n) => Wire::Leaf(*n),
++            Tree::Node(v) => Wire::List(v.iter().map(Tree::to_wire).collect()),
++            Tree::Named(v) => Wire::Map(v.iter().map(|(k, t)| (*k, t.to_wire())).collect()),
++        }
++    }
++
++    /// The closure taken by `&mut`: monomorphized per closure type, and itself
++    /// recursive (`Metadata::visit_expressions`): below a `Named`, the children's
++    /// children are visited too
++    pub fn visit_children<F: FnMut(&Tree)>(&self, f: &mut F) {
++        match self {
++            Tree::Leaf(_) => {}
++            Tree::Node(v) => {
++                for c in v.iter() {
++                    f(c)
++                }
++            }
++            Tree::Named(v) => {
++                for (_, c) in v.iter() {
++                    f(c);
++                    c.visit_children(f)
++                }
++            }
++        }
++    }
++}
++
++impl Wire {
++    /// Recursive through plain loops
++    pub fn digest(&self) -> u64 {
++        match self {
++            Wire::Leaf(n) => *n as u64 + 1,
++            Wire::List(v) => {
++                let mut h: u64 = 3;
++                for w in v.iter() {
++                    h = h.wrapping_mul(31).wrapping_add(w.digest());
++                }
++                h
++            }
++            Wire::Map(v) => {
++                let mut h: u64 = 5;
++                for (k, w) in v.iter() {
++                    h = h
++                        .wrapping_mul(37)
++                        .wrapping_add(*k as u64)
++                        .wrapping_mul(7)
++                        .wrapping_add(w.digest());
++                }
++                h
++            }
++        }
++    }
++}
++
++/// `map` with the function item and with a closure, consumed by `sum`
++/// (`deep_expr_nodes`)
++pub fn size(t: &Tree) -> usize {
++    1 + match t {
++        Tree::Leaf(_) => 0,
++        Tree::Node(v) => v.iter().map(size).sum(),
++        Tree::Named(v) => v.iter().map(|(_, c)| size(c)).sum::<usize>(),
++    }
++}
++
++fn own_weight(t: &Tree) -> usize {
++    match t {
++        Tree::Leaf(n) => *n as usize,
++        _ => 1,
++    }
++}
++
++/// Through the visitor, with a closure capturing mutable borrows
++/// (`deep_metadata_nodes`)
++pub fn weight(t: &Tree) -> usize {
++    let mut total = own_weight(t);
++    let mut visits = 0;
++    t.visit_children(&mut |c| {
++        total += weight(c);
++        visits += 1
++    });
++    total * 10 + visits
++}
++
++/// A closure consumed by `collect` into an `Option<Vec<_>>`
++/// (`extract_cons_chain_tensor`)
++pub fn positive_leaves(t: &Tree) -> Option<usize> {
++    match t {
++        Tree::Leaf(0) => None,
++        Tree::Leaf(_) => Some(1),
++        Tree::Node(v) => {
++            let counts = v
++                .iter()
++                .map(|c| positive_leaves(c))
++                .collect::<Option<Vec<usize>>>()?;
++            Some(counts.iter().sum::<usize>())
++        }
++        Tree::Named(v) => {
++            let counts = v
++                .iter()
++                .map(|(_, c)| positive_leaves(c))
++                .collect::<Option<Vec<usize>>>()?;
++            Some(counts.len() + counts.iter().sum::<usize>())
++        }
++    }
++}
++
++pub struct Scale {
++    pub factor: u64,
++}
++
++impl Scale {
++    /// A closure capturing `&self` (`Printer::fmt_list_flat`)
++    pub fn score(&self, t: &Tree) -> u64 {
++        match t {
++            Tree::Leaf(n) => *n as u64 * self.factor,
++            Tree::Node(v) => {
++                let parts: Vec<u64> = v.iter().map(|c| self.score(c)).collect();
++                let mut s: u64 = 1;
++                for p in parts.iter() {
++                    s = s.wrapping_mul(10).wrapping_add(*p);
++                }
++                s
++            }
++            Tree::Named(v) => {
++                let parts: Vec<u64> = v.iter().map(|(k, c)| *k as u64 + self.score(c)).collect();
++                let mut s: u64 = 2;
++                for p in parts.iter() {
++                    s = s.wrapping_mul(100).wrapping_add(*p);
++                }
++                s
++            }
++        }
++    }
++}
++
++pub fn sample(a: u32, b: u32) -> Tree {
++    Tree::Node(vec![
++        Tree::Leaf(a),
++        Tree::Named(vec![
++            (7, Tree::Leaf(b)),
++            (9, Tree::Node(vec![Tree::Leaf(a + b), Tree::Node(vec![])])),
++        ]),
++        Tree::Node(vec![Tree::Named(vec![(1, Tree::Leaf(3))]), Tree::Leaf(b)]),
++    ])
++}
++
++pub fn wire_digest(a: u32, b: u32) -> u64 {
++    sample(a, b).to_wire().digest()
++}
++
++pub fn sample_size(a: u32, b: u32) -> usize {
++    size(&sample(a, b))
++}
++
++pub fn sample_weight(a: u32, b: u32) -> usize {
++    weight(&sample(a, b))
++}
++
++pub fn sample_positive(a: u32, b: u32) -> Option<usize> {
++    positive_leaves(&sample(a, b))
++}
++
++pub fn sample_score(a: u32, b: u32, factor: u64) -> u64 {
++    Scale { factor }.score(&sample(a, b))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn results() {
++        assert_eq!(wire_digest(2, 5), 11073888);
++        assert_eq!(wire_digest(0, 1), 11034080);
++        assert_eq!(sample_size(2, 5), 11);
++        assert_eq!(sample_weight(2, 5), 130773);
++        assert_eq!(sample_weight(0, 1), 56573);
++        assert_eq!(sample_positive(2, 5), Some(8));
++        assert_eq!(sample_positive(0, 5), None);
++        assert_eq!(sample_score(2, 5, 3), 229015);
++        assert_eq!(sample_score(1, 1, 7), 220527);
++    }
++}
+diff --git a/tests/src/std-enum-discriminants.rs b/tests/src/std-enum-discriminants.rs
+new file mode 100644
+index 0000000..3f3f000
+--- /dev/null
++++ b/tests/src/std-enum-discriminants.rs
+@@ -0,0 +1,67 @@
++//@ [!lean] skip
++//@ [lean] subdir=StdEnumDiscriminants
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::result::{core::result::Result}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The discriminants of the standard enums the library models. `Result::is_ok` is
++//! translated from its body (`matches!(*self, Ok(_))`, a read of the discriminant),
++//! as in production, which includes the `core::result::{Result}` family;
++//! `core::mem::discriminant` reads the discriminant of any enum.
++//! `StdEnumDiscriminants/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++use std::borrow::Cow;
++use std::mem::discriminant;
++use std::ops::{Bound, ControlFlow};
++
++/// `Result::is_ok`/`is_err` translated from their bodies
++pub fn result_flags(n: u32) -> (bool, bool) {
++    let r: Result<u32, u32> = if n % 2 == 0 { Ok(n) } else { Err(n) };
++    (r.is_ok(), r.is_err())
++}
++
++pub fn option_discriminants(n: u32) -> String {
++    let some: Option<u32> = Some(n);
++    let none: Option<u32> = None;
++    format!("{:?} {:?} {}", discriminant(&none), discriminant(&some), discriminant(&some) == discriminant(&Some(n + 1)))
++}
++
++pub fn result_discriminants(n: u32) -> String {
++    let ok: Result<u32, bool> = Ok(n);
++    let err: Result<u32, bool> = Err(false);
++    format!("{:?} {:?} {}", discriminant(&ok), discriminant(&err), discriminant(&ok) == discriminant(&err))
++}
++
++pub fn control_flow_discriminants(n: u32) -> String {
++    let cont: ControlFlow<u32, u32> = ControlFlow::Continue(n);
++    let brk: ControlFlow<u32, u32> = ControlFlow::Break(n);
++    format!("{:?} {:?}", discriminant(&cont), discriminant(&brk))
++}
++
++pub fn bound_discriminants(n: u32) -> String {
++    let a: Bound<u32> = Bound::Included(n);
++    let b: Bound<u32> = Bound::Excluded(n);
++    let c: Bound<u32> = Bound::Unbounded;
++    format!("{:?} {:?} {:?}", discriminant(&a), discriminant(&b), discriminant(&c))
++}
++
++pub fn cow_discriminants(s: &str) -> String {
++    let b: Cow<'_, str> = Cow::Borrowed(s);
++    let o: Cow<'_, str> = Cow::Owned(s.to_string());
++    format!("{:?} {:?}", discriminant(&b), discriminant(&o))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn discriminants() {
++        assert_eq!(result_flags(4), (true, false));
++        assert_eq!(result_flags(7), (false, true));
++        assert_eq!(option_discriminants(3), "Discriminant(0) Discriminant(1) true");
++        assert_eq!(result_discriminants(3), "Discriminant(0) Discriminant(1) false");
++        assert_eq!(control_flow_discriminants(3), "Discriminant(0) Discriminant(1)");
++        assert_eq!(bound_discriminants(3), "Discriminant(0) Discriminant(1) Discriminant(2)");
++        assert_eq!(cow_discriminants("x"), "Discriminant(0) Discriminant(1)");
++    }
++}

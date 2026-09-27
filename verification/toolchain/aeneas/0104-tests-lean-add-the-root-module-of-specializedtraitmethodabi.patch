@@ -1,0 +1,16 @@
+# aeneas integration step 104 after cba11f3beb: commit 9d04f4588f3cb0083624f3068a3aa810a8ff0cd9
+# first parent 59baace682d218550ffd90b7d1f9f61d4f4de5ba
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# tests/lean: add the root module of SpecializedTraitMethodAbi
+#
+# be88f30 registered the lean_lib without its root module, like
+# DiagnosticRecoveryInstance (59baace).
+
+diff --git a/tests/lean/SpecializedTraitMethodAbi.lean b/tests/lean/SpecializedTraitMethodAbi.lean
+new file mode 100644
+index 0000000..ac2cc70
+--- /dev/null
++++ b/tests/lean/SpecializedTraitMethodAbi.lean
+@@ -0,0 +1 @@
++import SpecializedTraitMethodAbi.Checks

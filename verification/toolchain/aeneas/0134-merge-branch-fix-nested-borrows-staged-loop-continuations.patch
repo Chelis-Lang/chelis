@@ -1,0 +1,1390 @@
+# aeneas integration step 134 after cba11f3beb: commit a3acd679505d976c6bfb711a3ffdc4d6f5de2320
+# first parent 4ac4de8a3827b09f73783a2c5fbf2eead3eeb5a5, merged 58df0e9c3b9914a5a3414acd06f3f8c1404b2f5b
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-borrows' (staged loop continuations keep their level-1 positions: loop_then_write; merged markers keep the left ignored child: with_preflight (A))
+
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index 13147c2..f8b3a47 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -1494,6 +1494,11 @@ let rec merge_abstractions_merge_markers (span : Meta.span)
+     if ty_erase_regions child0.ty <> ty_erase_regions child1.ty then None
+     else
+       match (child0.value, child1.value) with
++      | AIgnored _, AIgnored _ ->
++          (* The merged value keeps the type of [av0] (see [try_merge_avalues]):
++             keep its ignored children, whose unowned regions may differ from
++             those of [av1] (see [merge_child]) *)
++          Some child0
+       | AIgnored _, _ -> Some child1
+       | _, AIgnored _ -> Some child0
+       | _ -> try_merge_avalues child0 child1
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 5a099a8..9de0bc9 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -336,6 +336,8 @@ let abs_staged_cont (ctx : bs_ctx) (abs : V.abs) : staged_cont option =
+           pending_inputs;
+           num_inputs = List.length inputs;
+           stages_applied = 0;
++          level1_positions =
++            (if level1 then abs_level1_positions ctx abs else ([], []));
+           dropped_twins = [];
+           promised_first_outputs = None;
+         }
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 07fa2dc..3d19402 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -189,6 +189,15 @@ type staged_cont = {
+       (** The number of stages which were applied: the continuation registered
+           in [bs_ctx.abs_id_to_info] then receives the inputs of the next
+           stage. *)
++  level1_positions : int list * int list;
++      (** [StageLevel]: the indices, in the values of the abstraction, of its
++          borrow projectors and of its loan projectors with positions at the
++          level of the stage, when its continuation was bound (see
++          [SymbolicToPureAbs.abs_level1_positions]): the stage receives the
++          former and gives back the latter. The interpreter may expand these
++          values afterwards (e.g., the loop state matched after the loop, into
++          an ADT holding a loan projector or no projector at all), which then
++          no longer show on which side they are. *)
+   dropped_twins : (int * fvar) list;
+       (** [StageLevel]: the loan projectors of the abstraction (by index in its
+           values) whose borrows were given back without inner borrows at the
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 74afdd4..ae361f2 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -3725,13 +3725,26 @@ and translate_end_staged_cont (ectx : C.eval_ctx) (abs : V.abs)
+            projected borrows. A loan projector whose borrow was not given back
+            with inner borrows at this level holds none: its output is a
+            dropped twin (see [staged_cont.dropped_twins]), ignored if the last
+-           stage does not receive it. *)
++           stage does not receive it. The positions are those of the
++           abstraction when its continuation was bound (see
++           [staged_cont.level1_positions]): a loan projector expanded since
++           then, e.g. into [None] by a match on the loop state after the loop,
++           gives back what the expanded value holds. *)
+         [%cassert] span
+           (abs_consumed_available ctx abs level)
+           "Nested borrows: the first stage of the continuation of a loop \
+            abstraction staged at level 1 needs the values given back to the \
+            parent borrows of its values, which are not available yet";
+-        let input_indices, output_indices = abs_level1_positions ctx abs in
++        let input_indices, output_indices = staged.level1_positions in
++        [%cassert] span
++          (List.for_all
++             (fun index ->
++               match List.nth_opt abs.avalues index with
++               | Some av -> ty_has_level1_positions ctx abs.regions.owned av.ty
++               | None -> false)
++             (input_indices @ output_indices))
++          "Nested borrows: the values of a loop abstraction staged at level 1 \
++           changed positions since its continuation was bound";
+         let owned = abs.regions.owned in
+         let inputs =
+           List.map
+diff --git a/tests/lean/NestedBorrowsLoopThen.lean b/tests/lean/NestedBorrowsLoopThen.lean
+new file mode 100644
+index 0000000..a1889f0
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopThen.lean
+@@ -0,0 +1 @@
++import NestedBorrowsLoopThen.Checks
+diff --git a/tests/lean/NestedBorrowsLoopThen/Checks.lean b/tests/lean/NestedBorrowsLoopThen/Checks.lean
+new file mode 100644
+index 0000000..0aa34de
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopThen/Checks.lean
+@@ -0,0 +1,62 @@
++import NestedBorrowsLoopThen.NestedBorrowsLoopThen
++
++/-! Evaluate the model of `tests/src/nested-borrows-loop-then.rs` on
++    the inputs of its `native` test module and compare with the native results
++    `(result, ctx, pos)`: `pos` is the frame given back through the `&mut`
++    (the forward output), `ctx` the value of the frame's region given back by
++    the backward function of that region when the caller gives the frame
++    back. -/
++
++namespace nested_borrows_loop_then.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def frame (ctx pos : Nat) : Frame := { steps := sl [3, 5, 7, 11], ctx := u ctx, pos := us pos }
++
++/-- `run (&mut frame)`; the caller then sets the frame's `ctx` to `set` (if
++    any) and gives the frame back -/
++def onFrame (run : Frame → Result (U32 × Frame × (Frame → Frame)))
++    (ctx pos : Nat) (set : Option Nat := none) : Option (Nat × Nat × Nat) :=
++  match run (frame ctx pos) with
++  | ok (r, f1, back) =>
++    let f1' := match set with
++      | some c => { f1 with ctx := u c }
++      | none => f1
++    some (r.val, (back f1').ctx.val, f1.pos.val)
++  | _ => none
++
++-- loop_then_write_native
++#guard onFrame (run_loop_then_write · true (u 0)) 10 0 == some (0, 110, 0)
++#guard onFrame (run_loop_then_write · true (u 1)) 10 0 == some (3, 113, 1)
++#guard onFrame (run_loop_then_write · true (u 3)) 10 0 == some (15, 125, 3)
++#guard onFrame (run_loop_then_write · true (u 3)) 10 1 == some (23, 133, 4)
++#guard onFrame (run_loop_then_write · false (u 3)) 10 1 == some (0, 10, 1)
++#guard onFrame (run_loop_then_write · true (u 2)) 10 1 (set := some 99) == some (12, 99, 3)
++#guard onFrame (run_loop_then_write · true (u 2)) max 0 == some (8, 107, 2)
++
++-- loop_expect_then_native
++#guard onFrame (run_loop_expect_then · true (u 0)) 10 0 == some (3, 13, 1)
++#guard onFrame (run_loop_expect_then · true (u 2)) 10 0 == some (15, 25, 3)
++#guard onFrame (run_loop_expect_then · true (u 2)) 10 1 == some (23, 33, 4)
++#guard onFrame (run_loop_expect_then · false (u 0)) 10 1 == some (0, 10, 1)
++#guard onFrame (run_loop_expect_then · true (u 1)) 10 0 (set := some 99) == some (8, 99, 2)
++#guard onFrame (run_loop_expect_then · true (u 1)) max 0 == some (8, 7, 2)
++-- loop_expect_then_none_panics, loop_expect_then_out_of_steps_panics
++#guard onFrame (run_loop_expect_then · false (u 1)) 10 1 == none
++#guard onFrame (run_loop_expect_then · true (u 2)) 10 2 == none
++
++-- loop_reborrow_then_native
++#guard onFrame (run_loop_reborrow_then · true (u 0)) 10 0 == some (3, 13, 1)
++#guard onFrame (run_loop_reborrow_then · true (u 2)) 10 0 == some (15, 25, 3)
++#guard onFrame (run_loop_reborrow_then · false (u 3)) 10 1 == some (6, 10, 1)
++#guard onFrame (run_loop_reborrow_then · true (u 1)) 10 0 (set := some 99) == some (8, 99, 2)
++#guard onFrame (run_loop_reborrow_then · true (u 1)) max 1 == some (12, 11, 3)
++
++end nested_borrows_loop_then.checks
+diff --git a/tests/lean/NestedBorrowsLoopThen/NestedBorrowsLoopThen.lean b/tests/lean/NestedBorrowsLoopThen/NestedBorrowsLoopThen.lean
+new file mode 100644
+index 0000000..6602006
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopThen/NestedBorrowsLoopThen.lean
+@@ -0,0 +1,1033 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_loop_then]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_loop_then
++
++/-- [nested_borrows_loop_then::Frame]
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 14:0-18:1
++    Visibility: public -/
++structure Frame where
++  steps : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32
++  ctx : _root_.Aeneas.Std.U32
++  pos : _root_.Aeneas.Std.Usize
++
++/-- Trait declaration: [core::ops::deref::Deref::<&0 mut (nested_borrows_loop_then::Frame<1>), nested_borrows_loop_then::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 139:0-139:35
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::Deref<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>"]
++structure
++  core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  where
++  deref : _root_.nested_borrows_loop_then.Frame → _root_.Aeneas.Std.Result
++    _root_.nested_borrows_loop_then.Frame
++
++/-- [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::deref::<0, 2, nested_borrows_loop_then::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 172:4-172:25
++    Name pattern: [core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_loop_then::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::Deref<&'0 mut @T, @T>}::deref<'0, '2, nested_borrows_loop_then::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++  (self : _root_.nested_borrows_loop_then.Frame) :
++  _root_.Aeneas.Std.Result _root_.nested_borrows_loop_then.Frame
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::Deref::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_loop_then::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 169:0-169:38
++    Name pattern: [core::ops::deref::Deref<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::Deref<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  :
++  _root_.nested_borrows_loop_then.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  := {
++  deref :=
++    _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218.deref_specialized_2e138e286e859de8f2fc9edaf357c2e5
++}
++
++/-- Trait declaration: [core::ops::deref::DerefMut::<&0 mut (nested_borrows_loop_then::Frame<1>), nested_borrows_loop_then::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 270:0-270:54
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>"
++  (parentClauses := ["DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst"])]
++structure
++  core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  where
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :
++    _root_.nested_borrows_loop_then.core.ops.deref.DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6
++  deref_mut : _root_.nested_borrows_loop_then.Frame → _root_.Aeneas.Std.Result
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame) ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame) ×
++    (_root_.nested_borrows_loop_then.Frame →
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))))))
++
++/-- [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::deref_mut::<0, 2, nested_borrows_loop_then::Frame<1>>]:
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 280:4-280:37
++    Name pattern: [core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_loop_then::Frame<'1>>]
++    Visibility: public -/
++@[rust_fun
++  "core::ops::deref::{core::ops::deref::DerefMut<&'0 mut @T, @T>}::deref_mut<'0, '2, nested_borrows_loop_then::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++  (self : _root_.nested_borrows_loop_then.Frame) :
++  _root_.Aeneas.Std.Result (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame) ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame) ×
++    (_root_.nested_borrows_loop_then.Frame →
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))))))
++  := do
++  let back :=
++    (fun self1 => (self1,
++       fun self2 => ({ self with ctx := self2.ctx },
++         fun f => { self with ctx := f.ctx })) :
++      _root_.nested_borrows_loop_then.Frame →
++      (_root_.nested_borrows_loop_then.Frame ×
++      (_root_.nested_borrows_loop_then.Frame →
++      (_root_.nested_borrows_loop_then.Frame ×
++      (_root_.nested_borrows_loop_then.Frame →
++      _root_.nested_borrows_loop_then.Frame)))))
++  _root_.Aeneas.Std.Result.ok (self, fun self1 => self1, fun self1 => self1,
++    back)
++
++/-- Trait implementation: [core::ops::deref::{core::ops::deref::DerefMut::<&0 mut (T0), T1><0, T> for T}::<0, nested_borrows_loop_then::Frame<1>>]
++    Source: '/rustc/library/core/src/ops/deref.rs', lines 279:0-279:41
++    Name pattern: [core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>] -/
++@[reducible, rust_trait_impl
++  "core::ops::deref::DerefMut<&'0 mut nested_borrows_loop_then::Frame<'1>, nested_borrows_loop_then::Frame<'1>>"]
++def
++  Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++  :
++  _root_.nested_borrows_loop_then.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5
++  := {
++  DerefMut0FrameFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6Inst :=
++    _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefFrame_specialized_7ddf3fadb35f39c59d6d107f4cc021c6_specialized_7a9b66d5882153bb17f5e3f325143218
++  deref_mut :=
++    _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe.deref_mut_specialized_48aa405ae76578ba70ea04a80314fcec
++}
++
++/-- [core::option::{core::option::Option<T>}::expect::<0, &1 mut (nested_borrows_loop_then::Frame<2>)>]:
++    Source: '/rustc/library/core/src/option.rs', lines 968:4-968:45
++    Name pattern: [core::option::{core::option::Option<@T>}::expect<'0, &'1 mut nested_borrows_loop_then::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::expect<'0, &'1 mut nested_borrows_loop_then::Frame<'2>>"]
++def
++  core.option.Option.expect0Mut1Frame_specialized_791a87bed930b740484e573e8af12127
++  (self : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (msg : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame →
++    (_root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))))
++  := do
++  match self with
++  | none => let x ← _root_.Aeneas.Std.core.option.expect_failed msg
++            nomatch
++            x
++  | some f =>
++    let back :=
++      (fun self1 =>
++         let f1 :=
++           match self1 with
++           | some f2 => { f with ctx := f2.ctx }
++           | _ => f
++         ({ f with ctx := f1.ctx },
++           fun f2 =>
++             match self with
++             | none => none
++             | some f3 => some { f3 with ctx := f2.ctx }) : _root_.Option
++        _root_.nested_borrows_loop_then.Frame →
++        (_root_.nested_borrows_loop_then.Frame ×
++        (_root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)))
++    _root_.Aeneas.Std.Result.ok (f, some, back)
++
++/-- [core::option::{core::option::Option<T>}::as_deref_mut::<0, &1 mut (nested_borrows_loop_then::Frame<2>), nested_borrows_loop_then::Frame<2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1414:4-1416:28
++    Name pattern: [core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_loop_then::Frame<'2>, nested_borrows_loop_then::Frame<'2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::as_deref_mut<'0, &'1 mut nested_borrows_loop_then::Frame<'2>, nested_borrows_loop_then::Frame<'2>>"]
++def
++  core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++  (opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst
++  :
++  _root_.nested_borrows_loop_then.core.ops.deref.DerefMutMut0FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5)
++  (self : _root_.Option _root_.nested_borrows_loop_then.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))))))
++  := do
++  match self with
++  | none =>
++    let back :=
++      (fun o => none : _root_.Option _root_.nested_borrows_loop_then.Frame →
++        _root_.Option _root_.nested_borrows_loop_then.Frame)
++    let back1 :=
++      (fun self1 => none : _root_.Option _root_.nested_borrows_loop_then.Frame
++        → _root_.Option _root_.nested_borrows_loop_then.Frame)
++    let back2 :=
++      (fun self1 => (none,
++         fun self2 => (none,
++           fun o => match self with
++                    | none => none
++                    | some f => some f)) : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)))))
++    _root_.Aeneas.Std.Result.ok (none, back, back1, back2)
++  | some f =>
++    let (f1, deref_mut_back, deref_mut_back1, deref_mut_back2) ←
++      opsderefDerefMutMut1FrameFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5Inst.deref_mut
++        f
++    let back :=
++      (fun o =>
++         let f2 := match o with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back f2
++         some f3 : _root_.Option _root_.nested_borrows_loop_then.Frame →
++        _root_.Option _root_.nested_borrows_loop_then.Frame)
++    let back1 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f1
++         let f3 := deref_mut_back1 f2
++         some f3 : _root_.Option _root_.nested_borrows_loop_then.Frame →
++        _root_.Option _root_.nested_borrows_loop_then.Frame)
++    let back2 :=
++      (fun self1 =>
++         let f2 := match self1 with
++                   | some f3 => f3
++                   | _ => f
++         let (f3, _) := deref_mut_back2 f2
++         (some f3,
++           fun self2 =>
++             let f4 := deref_mut_back f1
++             let f5 := match self2 with
++                       | some f6 => f6
++                       | _ => f4
++             let f6 := match self1 with
++                       | some f7 => f7
++                       | _ => f
++             let (_, back3) := deref_mut_back2 f6
++             let (f7, _) := back3 { f4 with ctx := f5.ctx }
++             (some { f1 with ctx := f7.ctx },
++               fun o =>
++                 let f8 := match self2 with
++                           | some f9 => f9
++                           | _ => f1
++                 let f9 := match self1 with
++                           | some f10 => f10
++                           | _ => f
++                 let (_, back4) := deref_mut_back2 f9
++                 let (_, back5) := back4 { f4 with ctx := f8.ctx }
++                 let i :=
++                   match o with
++                   | some (_root_.nested_borrows_loop_then.Frame.mk _ i1 _) =>
++                     i1
++                   | _ => f1.ctx
++                 let f10 := back5 { f1 with ctx := i }
++                 match self with
++                 | none => none
++                 | some f11 => some { f11 with ctx := f10.ctx })) :
++        _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++        _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)))))
++    _root_.Aeneas.Std.Result.ok (some f1, back, back1, back2)
++
++/-- [nested_borrows_loop_then::{nested_borrows_loop_then::Frame<'a>}::advance]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 21:4-26:5
++    Visibility: public -/
++def Frame.advance
++  (self : _root_.nested_borrows_loop_then.Frame) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  let s ← _root_.Aeneas.Std.Slice.index_usize self.steps self.pos
++  let i ← self.pos + 1#usize
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add self.ctx s)
++  let back'a :=
++    (fun self1 => { self with ctx := self1.ctx } :
++      _root_.nested_borrows_loop_then.Frame →
++      _root_.nested_borrows_loop_then.Frame)
++  _root_.Aeneas.Std.Result.ok (s, { self with ctx := i1, pos := i }, back'a)
++
++/-- [nested_borrows_loop_then::advance_or]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 29:0-34:1
++    Visibility: public -/
++def advance_or
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  match execution with
++  | none =>
++    let back :=
++      (fun execution1 => match execution with
++                         | none => none
++                         | some f => some f : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (d, none, back)
++  | some f =>
++    let (d1, f1, advance_back) ←
++      _root_.nested_borrows_loop_then.Frame.advance f
++    let back :=
++      (fun execution1 =>
++         let f2 :=
++           match execution1 with
++           | some f3 => { f1 with ctx := f3.ctx }
++           | _ => f1
++         let f3 := advance_back { f1 with ctx := f2.ctx }
++         match execution with
++         | none => none
++         | some f4 => some { f4 with ctx := f3.ctx } : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (d1, some f1, back)
++
++/-- [nested_borrows_loop_then::loop_then_write]: loop body 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 40:4-45:5
++    Visibility: public -/
++@[rust_loop_body]
++def loop_then_write_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame)))))
++  := do
++  if i < n
++  then
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_loop_then.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (execution1, acc1, back2, back3) ←
++      match o with
++      | none =>
++        let execution2 := as_deref_mut_back none
++        _root_.Aeneas.Std.Result.ok (execution2, acc,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_loop_then.Frame → _root_.Option
++          _root_.nested_borrows_loop_then.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 none
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++          _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++          _root_.nested_borrows_loop_then.Frame → _root_.Option
++          _root_.nested_borrows_loop_then.Frame))))
++      | some f =>
++        do
++        let (i1, f1, advance_back) ←
++          _root_.nested_borrows_loop_then.Frame.advance f
++        let acc2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i1)
++        let execution2 := as_deref_mut_back (some f1)
++        _root_.Aeneas.Std.Result.ok (execution2, acc2,
++          (fun o1 => let o2 := as_deref_mut_back1 o1
++                     back1 o2 : _root_.Option
++          _root_.nested_borrows_loop_then.Frame → _root_.Option
++          _root_.nested_borrows_loop_then.Frame),
++          (fun back4 =>
++             let (back5, back6) := back back4
++             let (o1, back7) := as_deref_mut_back2 back5
++             (o1,
++               fun o2 =>
++                 let (_, back8) := back7 o2
++                 let o3 := back8 (some { f with ctx := (advance_back f1).ctx })
++                 back6 o3) : _root_.Option
++          _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++          _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++          _root_.nested_borrows_loop_then.Frame → _root_.Option
++          _root_.nested_borrows_loop_then.Frame))))
++    let i1 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back4 => back3 back4, back2, execution1, acc1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1, fun back2 => back back2))
++
++/-- [nested_borrows_loop_then::loop_then_write]: loop 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 40:4-45:5
++    Visibility: public -/
++@[rust_loop]
++def loop_then_write_loop
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_loop_then.loop_then_write_loop.body n back2 back3
++       execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_loop_then::loop_then_write]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 37:0-50:1
++    Visibility: public -/
++def loop_then_write
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  let (execution1, acc, back, back1) ←
++    _root_.nested_borrows_loop_then.loop_then_write_loop
++      (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++  match execution1 with
++  | none =>
++    let execution2 := back none
++    let back2 :=
++      (fun execution3 =>
++         let (_, back3) :=
++           back1
++             (match execution2 with
++              | none => none
++              | some f =>
++                match execution3 with
++                | some f1 => some { f with ctx := f1.ctx }
++                | _ => execution2)
++         let back4 := back3 none
++         let o :=
++           match back4 with
++           | none => none
++           | some f =>
++             match execution3 with
++             | some f1 => some { f with ctx := f1.ctx }
++             | _ => back4
++         match execution with
++         | none => none
++         | some f =>
++           match o with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc, execution2, back2)
++  | some f =>
++    let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add f.ctx 100#u32)
++    let execution2 := back (some { f with ctx := i })
++    let back2 :=
++      (fun execution3 =>
++         let (i1, back3) :=
++           match back1
++             (match execution2 with
++              | none => none
++              | some f1 =>
++                match execution3 with
++                | some f2 => some { f1 with ctx := f2.ctx }
++                | _ => execution2) with
++           | (some (_root_.nested_borrows_loop_then.Frame.mk _ i2 _), back4) =>
++             (i2, back4)
++           | _ => (i, back)
++         let back4 := back3 (some { f with ctx := i1 })
++         let o :=
++           match back4 with
++           | none => none
++           | some f1 =>
++             match execution3 with
++             | some f2 => some { f1 with ctx := f2.ctx }
++             | _ => back4
++         match execution with
++         | none => none
++         | some f1 =>
++           match o with
++           | some f2 => some { f1 with ctx := f2.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc, execution2, back2)
++
++/-- [nested_borrows_loop_then::loop_expect_then]: loop body 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 56:4-59:5
++    Visibility: public -/
++@[rust_loop_body]
++def loop_expect_then_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame)))))
++  := do
++  if i < n
++  then
++    let i1 ← i + 1#u32
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_loop_then.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (f, expect_back, expect_back1) ←
++      _root_.nested_borrows_loop_then.core.option.Option.expect0Mut1Frame_specialized_791a87bed930b740484e573e8af12127
++        o (_root_.Aeneas.Std.toStr "frame")
++    let (i2, f1, advance_back) ←
++      _root_.nested_borrows_loop_then.Frame.advance f
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i2)
++    let o1 := expect_back f1
++    let execution1 := as_deref_mut_back o1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back2 =>
++         let (back3, back4) := back back2
++         let (o2, back5) := as_deref_mut_back2 back3
++         (o2,
++           fun o3 =>
++             let (o4, back6) := back5 o3
++             let (f2, back7) := expect_back1 o4
++             let o5 := back7 { f with ctx := (advance_back f2).ctx }
++             let o6 := back6 o5
++             back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
++                                  back1 o3, execution1, acc1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1, fun back2 => back back2))
++
++/-- [nested_borrows_loop_then::loop_expect_then]: loop 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 56:4-59:5
++    Visibility: public -/
++@[rust_loop]
++def loop_expect_then_loop
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_loop_then.loop_expect_then_loop.body n back2 back3
++       execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_loop_then::loop_expect_then]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 53:0-64:1
++    Visibility: public -/
++def loop_expect_then
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  let (execution1, acc, back, back1) ←
++    _root_.nested_borrows_loop_then.loop_expect_then_loop
++      (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++  match execution1 with
++  | none =>
++    let execution2 := back none
++    let back2 :=
++      (fun execution3 =>
++         let (_, back3) :=
++           back1
++             (match execution2 with
++              | none => none
++              | some f =>
++                match execution3 with
++                | some f1 => some { f with ctx := f1.ctx }
++                | _ => execution2)
++         let o := back3 none
++         match execution with
++         | none => none
++         | some f =>
++           match o with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc, execution2, back2)
++  | some f =>
++    let (i, f1, advance_back) ← _root_.nested_borrows_loop_then.Frame.advance f
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i)
++    let execution2 := back (some f1)
++    let back2 :=
++      (fun execution3 =>
++         let (f2, back3) :=
++           match back1
++             (match execution2 with
++              | none => none
++              | some f3 =>
++                match execution3 with
++                | some f4 => some { f3 with ctx := f4.ctx }
++                | _ => execution2) with
++           | (some f3, back4) => (f3, back4)
++           | _ => (f1, back)
++         let f3 := advance_back { f1 with ctx := f2.ctx }
++         let o := back3 (some { f with ctx := f3.ctx })
++         match execution with
++         | none => none
++         | some f4 =>
++           match o with
++           | some f5 => some { f4 with ctx := f5.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc1, execution2, back2)
++
++/-- [nested_borrows_loop_then::loop_reborrow_then]: loop body 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 70:4-73:5
++    Visibility: public -/
++@[rust_loop_body]
++def loop_reborrow_then_loop.body
++  (n : _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame)))))
++  := do
++  if i < n
++  then
++    let i1 ← i + 1#u32
++    let (o, as_deref_mut_back, as_deref_mut_back1, as_deref_mut_back2) ←
++      _root_.nested_borrows_loop_then.core.option.Option.as_deref_mut0Mut1FrameFrame_specialized_73a8af1d97724e1658bf227d7e272ed8
++        _root_.nested_borrows_loop_then.Mut0Frame.Insts.CoreOpsDerefDerefMutFrame_specialized_d79eb637cb6d8bc21a410cbe924bf9e5_specialized_084a0ba0336756e7fd41d55ca4e4d0fe
++        execution
++    let (i2, o1, advance_or_back) ←
++      _root_.nested_borrows_loop_then.advance_or o i1
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i2)
++    let execution1 := as_deref_mut_back o1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (fun back2 =>
++         let (back3, back4) := back back2
++         let (o2, back5) := as_deref_mut_back2 back3
++         (o2,
++           fun o3 =>
++             let (o4, back6) := back5 o3
++             let o5 := advance_or_back o4
++             let o6 := back6 o5
++             back4 o6), fun o2 => let o3 := as_deref_mut_back1 o2
++                                  back1 o3, execution1, acc1, i1))
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (execution,
++      acc, back1, fun back2 => back back2))
++
++/-- [nested_borrows_loop_then::loop_reborrow_then]: loop 0:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 70:4-73:5
++    Visibility: public -/
++@[rust_loop]
++def loop_reborrow_then_loop
++  (back : _root_.Option _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++  _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++  _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)))
++  (back1 : _root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++  _root_.nested_borrows_loop_then.Frame)
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))))
++  := do
++  loop
++    (fun (back2, back3, execution1, acc1, i1) =>
++       _root_.nested_borrows_loop_then.loop_reborrow_then_loop.body n back2
++       back3 execution1 acc1 i1 : ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → ((_root_.Option
++      _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++      _root_.nested_borrows_loop_then.Frame → _root_.Option
++      _root_.nested_borrows_loop_then.Frame))))))
++    (back, back1, execution, acc, i)
++
++/-- [nested_borrows_loop_then::loop_reborrow_then]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 67:0-78:1
++    Visibility: public -/
++def loop_reborrow_then
++  (execution : _root_.Option _root_.nested_borrows_loop_then.Frame)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame) × (_root_.Option
++    _root_.nested_borrows_loop_then.Frame → _root_.Option
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  let (execution1, acc, back, back1) ←
++    _root_.nested_borrows_loop_then.loop_reborrow_then_loop
++      (fun back2 => (back2, fun o => o)) (fun o => o) execution n 0#u32 0#u32
++  match execution1 with
++  | none =>
++    let execution2 := back none
++    let back2 :=
++      (fun execution3 =>
++         let (_, back3) :=
++           back1
++             (match execution2 with
++              | none => none
++              | some f =>
++                match execution3 with
++                | some f1 => some { f with ctx := f1.ctx }
++                | _ => execution2)
++         let o := back3 none
++         match execution with
++         | none => none
++         | some f =>
++           match o with
++           | some f1 => some { f with ctx := f1.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc, execution2, back2)
++  | some f =>
++    let (i, f1, advance_back) ← _root_.nested_borrows_loop_then.Frame.advance f
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i)
++    let execution2 := back (some f1)
++    let back2 :=
++      (fun execution3 =>
++         let (f2, back3) :=
++           match back1
++             (match execution2 with
++              | none => none
++              | some f3 =>
++                match execution3 with
++                | some f4 => some { f3 with ctx := f4.ctx }
++                | _ => execution2) with
++           | (some f3, back4) => (f3, back4)
++           | _ => (f1, back)
++         let f3 := advance_back { f1 with ctx := f2.ctx }
++         let o := back3 (some { f with ctx := f3.ctx })
++         match execution with
++         | none => none
++         | some f4 =>
++           match o with
++           | some f5 => some { f4 with ctx := f5.ctx }
++           | _ => execution : _root_.Option
++        _root_.nested_borrows_loop_then.Frame → _root_.Option
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (acc1, execution2, back2)
++
++/-- [nested_borrows_loop_then::run_loop_then_write]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 80:0-82:1
++    Visibility: public -/
++def run_loop_then_write
++  (f : _root_.nested_borrows_loop_then.Frame) (some1 : _root_.Bool)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  if some1
++  then
++    let (i, o, loop_then_write_back) ←
++      _root_.nested_borrows_loop_then.loop_then_write (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := loop_then_write_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_loop_then.Frame.mk _ i2 _) => i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ← _root_.nested_borrows_loop_then.loop_then_write none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++/-- [nested_borrows_loop_then::run_loop_expect_then]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 84:0-86:1
++    Visibility: public -/
++def run_loop_expect_then
++  (f : _root_.nested_borrows_loop_then.Frame) (some1 : _root_.Bool)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  if some1
++  then
++    let (i, o, loop_expect_then_back) ←
++      _root_.nested_borrows_loop_then.loop_expect_then (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := loop_expect_then_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_loop_then.Frame.mk _ i2 _) => i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ← _root_.nested_borrows_loop_then.loop_expect_then none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++/-- [nested_borrows_loop_then::run_loop_reborrow_then]:
++    Source: 'tests/src/nested-borrows-loop-then.rs', lines 88:0-90:1
++    Visibility: public -/
++def run_loop_reborrow_then
++  (f : _root_.nested_borrows_loop_then.Frame) (some1 : _root_.Bool)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_loop_then.Frame ×
++    (_root_.nested_borrows_loop_then.Frame →
++    _root_.nested_borrows_loop_then.Frame))
++  := do
++  if some1
++  then
++    let (i, o, loop_reborrow_then_back) ←
++      _root_.nested_borrows_loop_then.loop_reborrow_then (some f) n
++    let f1 := match o with
++              | some f2 => f2
++              | _ => f
++    let back :=
++      (fun f2 =>
++         let f3 := match o with
++                   | some f4 => f4
++                   | _ => f
++         let o1 := loop_reborrow_then_back (some { f3 with ctx := f2.ctx })
++         let i1 :=
++           match o1 with
++           | some (_root_.nested_borrows_loop_then.Frame.mk _ i2 _) => i2
++           | _ => f.ctx
++         { f with ctx := i1 } : _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f1, back)
++  else
++    let (i, _, _) ← _root_.nested_borrows_loop_then.loop_reborrow_then none n
++    let back :=
++      (fun f1 => { f with ctx := f1.ctx } :
++        _root_.nested_borrows_loop_then.Frame →
++        _root_.nested_borrows_loop_then.Frame)
++    _root_.Aeneas.Std.Result.ok (i, f, back)
++
++end nested_borrows_loop_then
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 09be321..741be08 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -58,6 +58,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsLoopReborrow
+ @[default_target] lean_lib NestedBorrowsLoopMatchJoin
+ @[default_target] lean_lib NestedBorrowsLoopInnerLoop
++@[default_target] lean_lib NestedBorrowsLoopThen
+ @[default_target] lean_lib NestedBorrowsClosureVisitor
+ @[default_target] lean_lib NestedBorrowsClosureVisitorLoop
+ @[default_target] lean_lib NestedBorrowsClosureVisitorFn
+diff --git a/tests/src/loop-nested-closure-levels.lean.out b/tests/src/loop-nested-closure-levels.lean.out
+index f6022e9..10c8725 100644
+--- a/tests/src/loop-nested-closure-levels.lean.out
++++ b/tests/src/loop-nested-closure-levels.lean.out
+@@ -1,5 +1,5 @@
+ [[92mInfo[39m ] Imported: tests/llbc/loop_nested_closure_levels.llbc
+ [[91mError[39m] Nested borrows: the continuation of a join or loop abstraction with pending loans calls a function whose backward function is not staged in two stages, or whose first stage was applied
+ Source: 'tests/src/loop-nested-closure-levels.rs', lines 23:0-37:1
+-Compiler source: symbolic/SymbolicToPureAbs.ml, line 2367
++Compiler source: symbolic/SymbolicToPureAbs.ml, line 2369
+ 
+diff --git a/tests/src/nested-borrows-loop-then.rs b/tests/src/nested-borrows-loop-then.rs
+new file mode 100644
+index 0000000..00aae96
+--- /dev/null
++++ b/tests/src/nested-borrows-loop-then.rs
+@@ -0,0 +1,159 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsLoopThen
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option} --include core::ops::deref::{core::ops::deref::Deref} --include core::ops::deref::{core::ops::deref::DerefMut}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `Option<&'1 mut Frame<'2>>` reborrowed with `as_deref_mut` in a loop, then
++//! matched (and written through) after the loop. The loop abstraction of the
++//! frame's region is staged at level 1: the first stage of its continuation
++//! receives the values of its borrow projectors (over the option the function
++//! received) and gives back those of its loan projectors (over the loop state).
++//! The match after the loop expands the loan projector over the loop state
++//! into `Some(<projector>)` or `None`: the first stage still gives back that
++//! position (nothing in the `None` branch), as when its continuation was bound.
++
++pub struct Frame<'a> {
++    pub steps: &'a [u32],
++    pub ctx: &'a mut u32,
++    pub pos: usize,
++}
++
++impl<'a> Frame<'a> {
++    pub fn advance(&mut self) -> u32 {
++        let s = self.steps[self.pos];
++        self.pos += 1;
++        *self.ctx = (*self.ctx).wrapping_add(s);
++        s
++    }
++}
++
++pub fn advance_or(execution: Option<&mut Frame<'_>>, d: u32) -> u32 {
++    match execution {
++        Some(f) => f.advance(),
++        None => d,
++    }
++}
++
++/// The frame is written after the loop
++pub fn loop_then_write(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        if let Some(f) = execution.as_deref_mut() {
++            acc = acc.wrapping_add(f.advance());
++        }
++        i += 1;
++    }
++    if let Some(f) = execution {
++        *f.ctx = (*f.ctx).wrapping_add(100);
++    }
++    acc
++}
++
++/// The frame is advanced after the loop (`expect` in the loop)
++pub fn loop_expect_then(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        i += 1;
++        acc = acc.wrapping_add(execution.as_deref_mut().expect("frame").advance());
++    }
++    match execution {
++        Some(f) => acc.wrapping_add(f.advance()),
++        None => acc,
++    }
++}
++
++/// The reborrow is given to a call in the loop, the frame advanced after it
++pub fn loop_reborrow_then(mut execution: Option<&mut Frame<'_>>, n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        i += 1;
++        acc = acc.wrapping_add(advance_or(execution.as_deref_mut(), i));
++    }
++    match execution {
++        Some(f) => acc.wrapping_add(f.advance()),
++        None => acc,
++    }
++}
++
++pub fn run_loop_then_write(f: &mut Frame<'_>, some: bool, n: u32) -> u32 {
++    if some { loop_then_write(Some(f), n) } else { loop_then_write(None, n) }
++}
++
++pub fn run_loop_expect_then(f: &mut Frame<'_>, some: bool, n: u32) -> u32 {
++    if some { loop_expect_then(Some(f), n) } else { loop_expect_then(None, n) }
++}
++
++pub fn run_loop_reborrow_then(f: &mut Frame<'_>, some: bool, n: u32) -> u32 {
++    if some { loop_reborrow_then(Some(f), n) } else { loop_reborrow_then(None, n) }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    /// `(result, ctx, pos)` after running `run` on a frame over `steps`, the
++    /// caller then setting the frame's `ctx` to `set` (if any)
++    fn on_frame<R>(
++        ctx: u32,
++        pos: usize,
++        set: Option<u32>,
++        run: impl FnOnce(&mut Frame<'_>) -> R,
++    ) -> (R, u32, usize) {
++        let steps = [3u32, 5, 7, 11];
++        let mut c = ctx;
++        let mut f = Frame { steps: &steps, ctx: &mut c, pos };
++        let r = run(&mut f);
++        if let Some(s) = set {
++            *f.ctx = s;
++        }
++        let pos = f.pos;
++        (r, c, pos)
++    }
++
++    #[test]
++    fn loop_then_write_native() {
++        let run = |some, n| move |f: &mut Frame<'_>| run_loop_then_write(f, some, n);
++        assert_eq!(on_frame(10, 0, None, run(true, 0)), (0, 110, 0));
++        assert_eq!(on_frame(10, 0, None, run(true, 1)), (3, 113, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 3)), (15, 125, 3));
++        assert_eq!(on_frame(10, 1, None, run(true, 3)), (23, 133, 4));
++        assert_eq!(on_frame(10, 1, None, run(false, 3)), (0, 10, 1));
++        assert_eq!(on_frame(10, 1, Some(99), run(true, 2)), (12, 99, 3));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, 2)), (8, 107, 2));
++    }
++
++    #[test]
++    fn loop_expect_then_native() {
++        let run = |some, n| move |f: &mut Frame<'_>| run_loop_expect_then(f, some, n);
++        assert_eq!(on_frame(10, 0, None, run(true, 0)), (3, 13, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 2)), (15, 25, 3));
++        assert_eq!(on_frame(10, 1, None, run(true, 2)), (23, 33, 4));
++        assert_eq!(on_frame(10, 1, None, run(false, 0)), (0, 10, 1));
++        assert_eq!(on_frame(10, 0, Some(99), run(true, 1)), (8, 99, 2));
++        assert_eq!(on_frame(u32::MAX, 0, None, run(true, 1)), (8, 7, 2));
++    }
++
++    #[test]
++    #[should_panic(expected = "frame")]
++    fn loop_expect_then_none_panics() {
++        on_frame(10, 1, None, |f| run_loop_expect_then(f, false, 1));
++    }
++
++    #[test]
++    #[should_panic]
++    fn loop_expect_then_out_of_steps_panics() {
++        on_frame(10, 2, None, |f| run_loop_expect_then(f, true, 2));
++    }
++
++    #[test]
++    fn loop_reborrow_then_native() {
++        let run = |some, n| move |f: &mut Frame<'_>| run_loop_reborrow_then(f, some, n);
++        assert_eq!(on_frame(10, 0, None, run(true, 0)), (3, 13, 1));
++        assert_eq!(on_frame(10, 0, None, run(true, 2)), (15, 25, 3));
++        assert_eq!(on_frame(10, 1, None, run(false, 3)), (6, 10, 1));
++        assert_eq!(on_frame(10, 0, Some(99), run(true, 1)), (8, 99, 2));
++        assert_eq!(on_frame(u32::MAX, 1, None, run(true, 1)), (12, 11, 3));
++    }
++}

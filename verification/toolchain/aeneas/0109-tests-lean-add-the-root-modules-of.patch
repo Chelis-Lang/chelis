@@ -1,0 +1,22 @@
+# aeneas integration step 109 after cba11f3beb: commit e567956050fd6952082c7e5295d0dadfbdd2dd1b
+# first parent fdabe3c4ca4812adfa4ea00ad69689473ac48b42
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# tests/lean: add the root modules of NestedBorrowsLoopMatchJoin and NestedBorrowsLoopInnerLoop
+#
+# 0bbd579 registered both lean_libs without their root module.
+
+diff --git a/tests/lean/NestedBorrowsLoopInnerLoop.lean b/tests/lean/NestedBorrowsLoopInnerLoop.lean
+new file mode 100644
+index 0000000..4d72a6c
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopInnerLoop.lean
+@@ -0,0 +1 @@
++import NestedBorrowsLoopInnerLoop.Checks
+diff --git a/tests/lean/NestedBorrowsLoopMatchJoin.lean b/tests/lean/NestedBorrowsLoopMatchJoin.lean
+new file mode 100644
+index 0000000..615e8fb
+--- /dev/null
++++ b/tests/lean/NestedBorrowsLoopMatchJoin.lean
+@@ -0,0 +1 @@
++import NestedBorrowsLoopMatchJoin.Checks

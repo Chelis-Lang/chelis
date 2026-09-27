@@ -1,0 +1,28 @@
+# aeneas integration step 113 after cba11f3beb: commit d9df88b179bea3040aebccac4d6e251cd644f69d
+# first parent e4acdb8f09582e13884a064732d6bf3fc5976387
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Regenerate ExtractBuiltinLean.ml after the round-25 merges
+
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 1e32a11..25a3cbc 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -278,6 +278,8 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::fmt::Debug<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBox.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 75 *)
+   mk_fun "alloc::boxed::{core::fmt::Display<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBox.fmt" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 17 *)
++  mk_fun "alloc::boxed::{core::hash::Hash<Box<@T>>}::hash" "_root_.Aeneas.Std.alloc.boxed.HashBox.hash" ~keep_params:(Some [true; false; true]);
+   (* file: "Aeneas/Std/Alloc.lean", line: 19 *)
+   mk_fun "alloc::boxed::{core::ops::deref::Deref<Box<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.boxed.Box.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Alloc.lean", line: 22 *)
+@@ -2600,6 +2602,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::LowerHex<u16>" "_root_.Aeneas.Std.core.fmt.LowerHexU16";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 181 *)
+   mk_trait_impl "core::fmt::UpperHex<u8>" "_root_.Aeneas.Std.core.fmt.UpperHexU8";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 22 *)
++  mk_trait_impl "core::hash::Hash<Box<@T>>" "_root_.Aeneas.Std.core.hash.HashBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 983 *)
+   mk_trait_impl "core::iter::range::Step<i32>" "_root_.Aeneas.Std.core.iter.range.StepI32";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 1053 *)

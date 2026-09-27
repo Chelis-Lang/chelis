@@ -1,0 +1,2578 @@
+# aeneas integration step 124 after cba11f3beb: commit c3a8161e1c8b27b63d9d40117c4e01c1200f6285
+# first parent 7532d0b17046014c62b07a8b8e71a3f804dc4eeb, merged a2a3558ff900ee4192d1806d2e37bd9e736eb674
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-9' (thiserror AsDisplay; serde missing_field and Option; from_utf8_lossy; integer pow/saturating_mul/trailing_zeros/euclid; split_last, from_ref, ends_with, rfind; Hash with the little-endian platform assumption)
+
+diff --git a/backends/lean/Aeneas/Std.lean b/backends/lean/Aeneas/Std.lean
+index c05e45f..a531e98 100644
+--- a/backends/lean/Aeneas/Std.lean
++++ b/backends/lean/Aeneas/Std.lean
+@@ -36,6 +36,7 @@ import Aeneas.Std.String
+ import Aeneas.Std.StringIter
+ import Aeneas.Std.StringJoin
+ import Aeneas.Std.Sync
++import Aeneas.Std.Thiserror
+ import Aeneas.Std.Tuple
+ import Aeneas.Std.Vec
+ import Aeneas.Std.VecDeque
+diff --git a/backends/lean/Aeneas/Std/Core/Borrow.lean b/backends/lean/Aeneas/Std/Core/Borrow.lean
+index 91fbda6..b92df47 100644
+--- a/backends/lean/Aeneas/Std/Core/Borrow.lean
++++ b/backends/lean/Aeneas/Std/Core/Borrow.lean
+@@ -97,4 +97,76 @@ def alloc.borrow.DerefCow {B O : Type} (toOwnedInst : alloc.borrow.ToOwned B O)
+   deref := alloc.borrow.DerefCow.deref toOwnedInst
+ }
+ 
++namespace alloc.string.lossy
++
++/-- `TAG_CONT_U8`: `byte & 192 == 128`. -/
++def isCont (b : Nat) : Bool := b % 256 / 64 == 2
++
++/-- One `Utf8Chunks::next` (core str/lossy.rs, rustc 1.95) on a nonempty source: `(valid_up_to, i)`,
++    the length of the chunk's valid prefix and the number of bytes it inspects (its valid part and
++    its invalid part, a maximal prefix of an ill-formed sequence). Bytes past the end read as 0. -/
++def chunkSplit (src : Array Nat) : Nat × Nat :=
++  let get := fun i => src.getD i 0
++  let rec loop (i valid : Nat) : (fuel : Nat) → Nat × Nat
++    | 0 => (valid, i)
++    | fuel + 1 =>
++      if i < src.size then
++        let byte := get i
++        let i := i + 1
++        if byte < 128 then loop i i fuel
++        else if 0xC2 ≤ byte ∧ byte ≤ 0xDF then
++          if isCont (get i) then loop (i + 1) (i + 1) fuel else (valid, i)
++        else if 0xE0 ≤ byte ∧ byte ≤ 0xEF then
++          let b := get i
++          let second :=
++            (byte == 0xE0 && 0xA0 ≤ b && b ≤ 0xBF) || (0xE1 ≤ byte && byte ≤ 0xEC && 0x80 ≤ b && b ≤ 0xBF) ||
++            (byte == 0xED && 0x80 ≤ b && b ≤ 0x9F) || (0xEE ≤ byte && byte ≤ 0xEF && 0x80 ≤ b && b ≤ 0xBF)
++          if !second then (valid, i)
++          else if isCont (get (i + 1)) then loop (i + 2) (i + 2) fuel else (valid, i + 1)
++        else if 0xF0 ≤ byte ∧ byte ≤ 0xF4 then
++          let b := get i
++          let second :=
++            (byte == 0xF0 && 0x90 ≤ b && b ≤ 0xBF) || (0xF1 ≤ byte && byte ≤ 0xF3 && 0x80 ≤ b && b ≤ 0xBF) ||
++            (byte == 0xF4 && 0x80 ≤ b && b ≤ 0x8F)
++          if !second then (valid, i)
++          else if !isCont (get (i + 1)) then (valid, i + 1)
++          else if isCont (get (i + 2)) then loop (i + 3) (i + 3) fuel else (valid, i + 2)
++        else (valid, i)
++      else (valid, i)
++  loop 0 0 src.size
++
++/-- The chunks of `bytes` (`<[u8]>::utf8_chunks`): each chunk's valid part and whether its invalid
++    part is nonempty. -/
++def chunks (bytes : List Nat) : List (List Nat × Bool) :=
++  let rec go : (fuel : Nat) → List Nat → List (List Nat × Bool)
++    | 0, _ => []
++    | _, [] => []
++    | fuel + 1, src@(_ :: _) =>
++      let (valid, inspected) := chunkSplit src.toArray
++      (src.take valid, valid < inspected) :: go fuel (src.drop inspected)
++  go bytes.length bytes
++
++end alloc.string.lossy
++
++/-- `String::from_utf8_lossy` (alloc string.rs, rustc 1.95): `Cow::Borrowed` of the input when it
++    is valid UTF-8 (the first chunk has no invalid part; `""` for no chunk), otherwise
++    `Cow::Owned` of the valid parts with U+FFFD for each invalid part. -/
++@[rust_fun "alloc::string::{alloc::string::String}::from_utf8_lossy"]
++def alloc.string.String.from_utf8_lossy (v : Slice U8) :
++    Result (alloc.borrow.Cow Str String) := do
++  let bytes := v.val.map (·.val)
++  match alloc.string.lossy.chunks bytes with
++  | [] => .ok (.Borrowed v)
++  | (_, false) :: _ => .ok (.Borrowed v)
++  | cs =>
++    let decode (valid : List Nat) : Result String :=
++      match String.fromUTF8? ⟨(valid.map Nat.toUInt8).toArray⟩ with
++      | some s => .ok s
++      | none => .fail .undef
++    let mut res := ""
++    for (valid, invalid) in cs do
++      res := res ++ (← decode valid)
++      if invalid then res := res.push '\uFFFD'
++    .ok (.Owned res)
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Core/Hash.lean b/backends/lean/Aeneas/Std/Core/Hash.lean
+index fb7753f..09f12ff 100644
+--- a/backends/lean/Aeneas/Std/Core/Hash.lean
++++ b/backends/lean/Aeneas/Std/Core/Hash.lean
+@@ -1,12 +1,115 @@
+ import Aeneas.Std.Core.Core
+ import Aeneas.Std.Slice
++import Aeneas.Std.String
++import Aeneas.Std.Scalar.Casts
++import Aeneas.Data.BitVec
+ 
+ namespace Aeneas.Std
+ 
+-@[rust_trait "core::hash::Hasher"]
++open Result
++
++/-- **Platform assumption** (verification/trusted_base.json, `platform_assumptions`): native code
++    runs on a little-endian target (aarch64 and x86_64 are both little-endian), so an integer's
++    `to_ne_bytes` is its `to_le_bytes`. Every model that depends on the native byte order reads
++    it from here, and a big-endian target would have to change this definition. -/
++def Platform.littleEndian : Bool := true
++
++/-- `to_ne_bytes` of an integer (core/src/num/mod.rs: `to_ne_bytes` is the in-memory
++    representation): its bytes in the native order (`Platform.littleEndian`), as a `&[u8]`. The
++    at most 16 bytes always fit in a slice. -/
++def core.hash.neBytes {w : Nat} (x : BitVec w) : Result (Slice U8) :=
++  let bytes := (if Platform.littleEndian then x.toLEBytes else x.toBEBytes).map (@UScalar.mk .U8)
++  if h : bytes.length ≤ Usize.max then ok ⟨bytes, h⟩ else fail .panic
++
++/-- The one-byte slice `&[i]`. -/
++def core.hash.byteSlice (i : U8) : Slice U8 := ⟨[i], by scalar_tac⟩
++
++/-- `core::hash::Hasher` (core/src/hash/mod.rs, rustc 1.95). `finish` and `write` are required;
++    the other methods are provided, and a `Hasher` implementation may override any of them, so
++    each is a field whose default is the provided body: `write_u8` writes `&[i]`, the other
++    unsigned `write_*` write `i.to_ne_bytes()` (`core.hash.neBytes`), each signed `write_iN`
++    is `write_uN(i as uN)`, `write_length_prefix` is `write_usize`, and `write_str` writes the
++    bytes of the string and then `write_u8(0xff)`. -/
++@[rust_trait "core::hash::Hasher"
++  (defaultMethods := ["write_u8", "write_u16", "write_u32", "write_u64", "write_u128",
++    "write_usize", "write_i8", "write_i16", "write_i32", "write_i64", "write_i128", "write_isize",
++    "write_length_prefix", "write_str"])]
+ structure core.hash.Hasher (Self : Type) where
+   finish : Self → Result U64
+   write : Self → Slice U8 → Result Self
++  write_u8 : Self → U8 → Result Self := fun self i => write self (core.hash.byteSlice i)
++  write_u16 : Self → U16 → Result Self := fun self i => do write self (← core.hash.neBytes i.bv)
++  write_u32 : Self → U32 → Result Self := fun self i => do write self (← core.hash.neBytes i.bv)
++  write_u64 : Self → U64 → Result Self := fun self i => do write self (← core.hash.neBytes i.bv)
++  write_u128 : Self → U128 → Result Self := fun self i => do write self (← core.hash.neBytes i.bv)
++  write_usize : Self → Usize → Result Self := fun self i => do write self (← core.hash.neBytes i.bv)
++  write_i8 : Self → I8 → Result Self := fun self i => write_u8 self (IScalar.hcast .U8 i)
++  write_i16 : Self → I16 → Result Self := fun self i => write_u16 self (IScalar.hcast .U16 i)
++  write_i32 : Self → I32 → Result Self := fun self i => write_u32 self (IScalar.hcast .U32 i)
++  write_i64 : Self → I64 → Result Self := fun self i => write_u64 self (IScalar.hcast .U64 i)
++  write_i128 : Self → I128 → Result Self := fun self i => write_u128 self (IScalar.hcast .U128 i)
++  write_isize : Self → Isize → Result Self := fun self i => write_usize self (IScalar.hcast .Usize i)
++  write_length_prefix : Self → Usize → Result Self := fun self len => write_usize self len
++  write_str : Self → Str → Result Self := fun self s => do write_u8 (← write self s) 255#u8
++
++/-! The provided methods of `Hasher`, called on an implementation that does not override them:
++    the bodies of the field defaults above, through the implementation's dictionary. -/
++
++def core.hash.Hasher.write_u8.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : U8) : Result Self :=
++  HasherInst.write self (core.hash.byteSlice i)
++
++def core.hash.Hasher.write_u16.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : U16) : Result Self := do
++  HasherInst.write self (← core.hash.neBytes i.bv)
++
++def core.hash.Hasher.write_u32.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : U32) : Result Self := do
++  HasherInst.write self (← core.hash.neBytes i.bv)
++
++def core.hash.Hasher.write_u64.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : U64) : Result Self := do
++  HasherInst.write self (← core.hash.neBytes i.bv)
++
++def core.hash.Hasher.write_u128.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : U128) : Result Self := do
++  HasherInst.write self (← core.hash.neBytes i.bv)
++
++def core.hash.Hasher.write_usize.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : Usize) : Result Self := do
++  HasherInst.write self (← core.hash.neBytes i.bv)
++
++def core.hash.Hasher.write_i8.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : I8) : Result Self :=
++  HasherInst.write_u8 self (IScalar.hcast .U8 i)
++
++def core.hash.Hasher.write_i16.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : I16) : Result Self :=
++  HasherInst.write_u16 self (IScalar.hcast .U16 i)
++
++def core.hash.Hasher.write_i32.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : I32) : Result Self :=
++  HasherInst.write_u32 self (IScalar.hcast .U32 i)
++
++def core.hash.Hasher.write_i64.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : I64) : Result Self :=
++  HasherInst.write_u64 self (IScalar.hcast .U64 i)
++
++def core.hash.Hasher.write_i128.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : I128) : Result Self :=
++  HasherInst.write_u128 self (IScalar.hcast .U128 i)
++
++def core.hash.Hasher.write_isize.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (i : Isize) : Result Self :=
++  HasherInst.write_usize self (IScalar.hcast .Usize i)
++
++def core.hash.Hasher.write_length_prefix.default {Self : Type}
++    (HasherInst : core.hash.Hasher Self) (self : Self) (len : Usize) : Result Self :=
++  HasherInst.write_usize self len
++
++def core.hash.Hasher.write_str.default {Self : Type} (HasherInst : core.hash.Hasher Self)
++    (self : Self) (s : Str) : Result Self := do
++  HasherInst.write_u8 (← HasherInst.write self s) 255#u8
+ 
+ @[rust_trait "core::hash::Hash"]
+ structure core.hash.Hash (Self : Type) where
+@@ -24,4 +127,120 @@ def core.hash.HashBox {T : Type} (HashInst : core.hash.Hash T) : core.hash.Hash
+   hash := fun HasherInst => alloc.boxed.HashBox.hash HashInst HasherInst
+ }
+ 
++/-! The `Hash` impls of core/src/hash/mod.rs (`mod impls`, rustc 1.95): an integer is
++    `state.write_<int>(*self)` (`impl_write!`), `bool` is `write_u8(*self as u8)`, `char` is
++    `write_u32(*self as u32)`, `str` is `write_str(self)`, and `&T` hashes the referenced value. -/
++
++@[rust_fun "core::hash::impls::{core::hash::Hash<u8>}::hash"]
++def core.hash.impls.HashU8.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : U8)
++    (state : H) : Result H := HasherInst.write_u8 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<u16>}::hash"]
++def core.hash.impls.HashU16.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : U16)
++    (state : H) : Result H := HasherInst.write_u16 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<u32>}::hash"]
++def core.hash.impls.HashU32.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : U32)
++    (state : H) : Result H := HasherInst.write_u32 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<u64>}::hash"]
++def core.hash.impls.HashU64.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : U64)
++    (state : H) : Result H := HasherInst.write_u64 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<u128>}::hash"]
++def core.hash.impls.HashU128.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : U128)
++    (state : H) : Result H := HasherInst.write_u128 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<usize>}::hash"]
++def core.hash.impls.HashUsize.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : Usize)
++    (state : H) : Result H := HasherInst.write_usize state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<i8>}::hash"]
++def core.hash.impls.HashI8.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : I8)
++    (state : H) : Result H := HasherInst.write_i8 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<i16>}::hash"]
++def core.hash.impls.HashI16.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : I16)
++    (state : H) : Result H := HasherInst.write_i16 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<i32>}::hash"]
++def core.hash.impls.HashI32.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : I32)
++    (state : H) : Result H := HasherInst.write_i32 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<i64>}::hash"]
++def core.hash.impls.HashI64.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : I64)
++    (state : H) : Result H := HasherInst.write_i64 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<i128>}::hash"]
++def core.hash.impls.HashI128.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : I128)
++    (state : H) : Result H := HasherInst.write_i128 state self
++@[rust_fun "core::hash::impls::{core::hash::Hash<isize>}::hash"]
++def core.hash.impls.HashIsize.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : Isize)
++    (state : H) : Result H := HasherInst.write_isize state self
++
++@[rust_fun "core::hash::impls::{core::hash::Hash<bool>}::hash"]
++def core.hash.impls.HashBool.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : Bool)
++    (state : H) : Result H := HasherInst.write_u8 state (if self then 1#u8 else 0#u8)
++
++@[rust_fun "core::hash::impls::{core::hash::Hash<char>}::hash"]
++def core.hash.impls.HashChar.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : Char)
++    (state : H) : Result H := HasherInst.write_u32 state ⟨BitVec.ofNat _ self.toNat⟩
++
++@[rust_fun "core::hash::impls::{core::hash::Hash<str>}::hash"]
++def core.hash.impls.HashStr.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : Str)
++    (state : H) : Result H := HasherInst.write_str state self
++
++@[rust_fun "core::hash::impls::{core::hash::Hash<&'0 @T>}::hash"]
++def core.hash.impls.HashShared.hash {T H : Type} (HashInst : core.hash.Hash T)
++    (HasherInst : core.hash.Hasher H) (self : T) (state : H) : Result H :=
++  HashInst.hash HasherInst self state
++
++@[reducible, rust_trait_impl "core::hash::Hash<u8>"]
++def core.hash.HashU8 : core.hash.Hash U8 := { hash := core.hash.impls.HashU8.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<u16>"]
++def core.hash.HashU16 : core.hash.Hash U16 := { hash := core.hash.impls.HashU16.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<u32>"]
++def core.hash.HashU32 : core.hash.Hash U32 := { hash := core.hash.impls.HashU32.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<u64>"]
++def core.hash.HashU64 : core.hash.Hash U64 := { hash := core.hash.impls.HashU64.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<u128>"]
++def core.hash.HashU128 : core.hash.Hash U128 := { hash := core.hash.impls.HashU128.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<usize>"]
++def core.hash.HashUsize : core.hash.Hash Usize := { hash := core.hash.impls.HashUsize.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<i8>"]
++def core.hash.HashI8 : core.hash.Hash I8 := { hash := core.hash.impls.HashI8.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<i16>"]
++def core.hash.HashI16 : core.hash.Hash I16 := { hash := core.hash.impls.HashI16.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<i32>"]
++def core.hash.HashI32 : core.hash.Hash I32 := { hash := core.hash.impls.HashI32.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<i64>"]
++def core.hash.HashI64 : core.hash.Hash I64 := { hash := core.hash.impls.HashI64.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<i128>"]
++def core.hash.HashI128 : core.hash.Hash I128 := { hash := core.hash.impls.HashI128.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<isize>"]
++def core.hash.HashIsize : core.hash.Hash Isize := { hash := core.hash.impls.HashIsize.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<bool>"]
++def core.hash.HashBool : core.hash.Hash Bool := { hash := core.hash.impls.HashBool.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<char>"]
++def core.hash.HashChar : core.hash.Hash Char := { hash := core.hash.impls.HashChar.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<str>"]
++def core.hash.HashStr : core.hash.Hash Str := { hash := core.hash.impls.HashStr.hash }
++@[reducible, rust_trait_impl "core::hash::Hash<&'0 @T>"]
++def core.hash.HashShared {T : Type} (HashInst : core.hash.Hash T) : core.hash.Hash T :=
++  { hash := fun HasherInst => core.hash.impls.HashShared.hash HashInst HasherInst }
++
++/-- `impl Hash for String` (alloc/src/string.rs): `(**self).hash(hasher)`, the `str` of its
++    UTF-8 bytes. -/
++@[rust_fun "alloc::string::{core::hash::Hash<alloc::string::String>}::hash"]
++def alloc.string.HashString.hash {H : Type} (HasherInst : core.hash.Hasher H) (self : String)
++    (state : H) : Result H := do
++  core.hash.impls.HashStr.hash HasherInst (← Str.ofString self) state
++
++@[reducible, rust_trait_impl "core::hash::Hash<alloc::string::String>"]
++def core.hash.HashString : core.hash.Hash String := { hash := alloc.string.HashString.hash }
++
++/-- `#[derive(Hash)]` of `Option<T>` (core/src/option.rs): the discriminant as an `isize`
++    (`None` is 0, `Some` is 1) through `Hash for isize`, then the payload of `Some`. -/
++@[rust_fun "core::option::{core::hash::Hash<core::option::Option<@T>>}::hash"]
++def core.option.HashOption.hash {T H : Type} (HashInst : core.hash.Hash T)
++    (HasherInst : core.hash.Hasher H) (self : Option T) (state : H) : Result H :=
++  match self with
++  | none => core.hash.impls.HashIsize.hash HasherInst 0#isize state
++  | some x => do
++    HashInst.hash HasherInst x (← core.hash.impls.HashIsize.hash HasherInst 1#isize state)
++
++@[reducible, rust_trait_impl "core::hash::Hash<core::option::Option<@T>>"]
++def core.hash.HashOption {T : Type} (HashInst : core.hash.Hash T) : core.hash.Hash (Option T) :=
++  { hash := fun HasherInst => core.option.HashOption.hash HashInst HasherInst }
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Scalar/CheckedOps/Div.lean b/backends/lean/Aeneas/Std/Scalar/CheckedOps/Div.lean
+index eb367b3..0a245ff 100644
+--- a/backends/lean/Aeneas/Std/Scalar/CheckedOps/Div.lean
++++ b/backends/lean/Aeneas/Std/Scalar/CheckedOps/Div.lean
+@@ -21,6 +21,22 @@ def core.num.checked_div_IScalar {ty} (x y : IScalar ty) : Option (IScalar ty) :
+ 
+ iscalar def «%S».checked_div (x y : «%S») : Option «%S» := core.num.checked_div_IScalar x y
+ 
++/- [core::num::{T}::checked_div_euclid] (core/src/num/uint_macros.rs): `None` if `rhs == 0`,
++   else `Some(self.div_euclid(rhs))`, which is `self / rhs` for unsigned integers. -/
++uscalar def «%S».checked_div_euclid (x y : «%S») : Option «%S» := core.num.checked_div_UScalar x y
++
++/- [core::num::{T}::checked_div_euclid] (core/src/num/int_macros.rs, rustc 1.95): `None` if
++   `rhs == 0` or `self == MIN && rhs == -1`, else `Some(self.div_euclid(rhs))`, the quotient
++   `q` with `0 ≤ self - rhs * q < |rhs|` (`Int.ediv`: `div_euclid` is the truncated quotient
++   minus 1 if `rhs > 0`, plus 1 otherwise, when the truncated remainder is negative), which is
++   representable. -/
++def core.num.checked_div_euclid_IScalar {ty} (x y : IScalar ty) : Option (IScalar ty) :=
++  if y.val = 0 ∨ (x.val = IScalar.min ty ∧ y.val = -1) then none
++  else some ⟨ BitVec.ofInt _ (Int.ediv x.val y.val) ⟩
++
++iscalar def «%S».checked_div_euclid (x y : «%S») : Option «%S» :=
++  core.num.checked_div_euclid_IScalar x y
++
+ /-!
+ # Checked Division: Theorems
+ -/
+diff --git a/backends/lean/Aeneas/Std/Scalar/CheckedOps/Rem.lean b/backends/lean/Aeneas/Std/Scalar/CheckedOps/Rem.lean
+index a2717ad..9c2e883 100644
+--- a/backends/lean/Aeneas/Std/Scalar/CheckedOps/Rem.lean
++++ b/backends/lean/Aeneas/Std/Scalar/CheckedOps/Rem.lean
+@@ -21,6 +21,21 @@ def core.num.checked_rem_IScalar {ty} (x y : IScalar ty) : Option (IScalar ty) :
+ 
+ iscalar def «%S».checked_rem (x y : «%S») : Option «%S» := core.num.checked_rem_IScalar x y
+ 
++/- [core::num::{T}::checked_rem_euclid] (core/src/num/uint_macros.rs): `None` if `rhs == 0`,
++   else `Some(self.rem_euclid(rhs))`, which is `self % rhs` for unsigned integers. -/
++uscalar def «%S».checked_rem_euclid (x y : «%S») : Option «%S» := core.num.checked_rem_UScalar x y
++
++/- [core::num::{T}::checked_rem_euclid] (core/src/num/int_macros.rs, rustc 1.95): `None` if
++   `rhs == 0` or `self == MIN && rhs == -1`, else `Some(self.rem_euclid(rhs))`, the remainder
++   in `[0, |rhs|)` (`Int.emod`; `rem_euclid` adds `rhs.wrapping_abs()` to a negative truncated
++   remainder, which is `|rhs|` also for `rhs == MIN`). -/
++def core.num.checked_rem_euclid_IScalar {ty} (x y : IScalar ty) : Option (IScalar ty) :=
++  if y.val = 0 ∨ (x.val = IScalar.min ty ∧ y.val = -1) then none
++  else some ⟨ BitVec.ofInt _ (Int.emod x.val y.val) ⟩
++
++iscalar def «%S».checked_rem_euclid (x y : «%S») : Option «%S» :=
++  core.num.checked_rem_euclid_IScalar x y
++
+ /-!
+ # Checked Remainder
+ -/
+diff --git a/backends/lean/Aeneas/Std/Scalar/LeadingZeros.lean b/backends/lean/Aeneas/Std/Scalar/LeadingZeros.lean
+index 2fc31d0..59d8e16 100644
+--- a/backends/lean/Aeneas/Std/Scalar/LeadingZeros.lean
++++ b/backends/lean/Aeneas/Std/Scalar/LeadingZeros.lean
+@@ -21,4 +21,21 @@ def BitVec.leadingZeros {w : Nat} (x : BitVec w) : Nat :=
+ 
+ scalar @[step_pure_def] def core.num.«%S».leading_zeros (x : «%S») : U32 := ⟨ BitVec.leadingZeros x.bv ⟩
+ 
++/-!
++# Trailing zeros
++
++`trailing_zeros` (`intrinsics::cttz`): the index of the lowest set bit, the width for 0.
++-/
++
++def BitVec.trailingZeros {w : Nat} (x : BitVec w) : Nat :=
++  ((List.range w).find? (x.getLsbD ·)).getD w
++
++#assert BitVec.trailingZeros 0#16 = 16
++#assert BitVec.trailingZeros 1#16 = 0
++#assert BitVec.trailingZeros 40#32 = 3
++#assert BitVec.trailingZeros 0x8000#16 = 15
++
++scalar @[step_pure_def] def core.num.«%S».trailing_zeros (x : «%S») : U32 :=
++  ⟨ BitVec.ofNat _ (BitVec.trailingZeros x.bv) ⟩
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Scalar/Pow.lean b/backends/lean/Aeneas/Std/Scalar/Pow.lean
+index 3e48e8b..f5493e4 100644
+--- a/backends/lean/Aeneas/Std/Scalar/Pow.lean
++++ b/backends/lean/Aeneas/Std/Scalar/Pow.lean
+@@ -13,4 +13,28 @@ theorem core.num.Usize.is_power_of_two_spec (x : Std.Usize) :
+   core.num.Usize.is_power_of_two x ⦃ b => b = x.val.isPowerOfTwo ⦄ := by
+   simp only [is_power_of_two, eq_iff_iff, WP.spec_ok, decide_eq_true_eq]
+ 
++/-- `pow` of the unsigned integers (core/src/num/uint_macros.rs, rustc 1.95,
++    `#[rustc_inherit_overflow_checks]`): square-and-multiply. The base is squared only while
++    a higher bit of the exponent remains, so no intermediate product exceeds the result, and
++    a checked caller panics exactly when `self ^ exp` overflows. The powers of 0 and 1 are 0
++    and 1 (`x ^ 0 = 1`); a larger base overflows from `exp ≥ numBits` on, so the power is
++    computed only below that bound. -/
++def UScalar.pow {ty : UScalarTy} (x : UScalar ty) (exp : U32) : Result (UScalar ty) :=
++  if x.val ≤ 1 then UScalar.tryMk ty (if exp.val = 0 then 1 else x.val)
++  else if exp.val < ty.numBits then UScalar.tryMk ty (x.val ^ exp.val)
++  else fail .integerOverflow
++
++@[rust_fun "core::num::{u8}::pow"]
++def core.num.U8.pow (x : U8) (exp : U32) : Result U8 := UScalar.pow x exp
++@[rust_fun "core::num::{u16}::pow"]
++def core.num.U16.pow (x : U16) (exp : U32) : Result U16 := UScalar.pow x exp
++@[rust_fun "core::num::{u32}::pow"]
++def core.num.U32.pow (x : U32) (exp : U32) : Result U32 := UScalar.pow x exp
++@[rust_fun "core::num::{u64}::pow"]
++def core.num.U64.pow (x : U64) (exp : U32) : Result U64 := UScalar.pow x exp
++@[rust_fun "core::num::{u128}::pow"]
++def core.num.U128.pow (x : U128) (exp : U32) : Result U128 := UScalar.pow x exp
++@[rust_fun "core::num::{usize}::pow"]
++def core.num.Usize.pow (x : Usize) (exp : U32) : Result Usize := UScalar.pow x exp
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Scalar/SaturatingOps.lean b/backends/lean/Aeneas/Std/Scalar/SaturatingOps.lean
+index e0bd93d..bee4fae 100644
+--- a/backends/lean/Aeneas/Std/Scalar/SaturatingOps.lean
++++ b/backends/lean/Aeneas/Std/Scalar/SaturatingOps.lean
+@@ -45,4 +45,23 @@ def IScalar.saturating_sub {ty : IScalarTy} (x y : IScalar ty) : IScalar ty :=
+ /- [core::num::{i8}::saturating_sub] -/
+ iscalar def core.num.«%S».saturating_sub := @IScalar.saturating_sub IScalarTy.«%S»
+ 
++/-!
++Saturating mul: unsigned (`checked_mul`, or `MAX` on overflow)
++-/
++def UScalar.saturating_mul {ty : UScalarTy} (x y : UScalar ty) : UScalar ty :=
++  ⟨ BitVec.ofNat _ (Min.min (UScalar.max ty) (x.val * y.val)) ⟩
++
++/- [core::num::{u8}::saturating_mul] -/
++uscalar def core.num.«%S».saturating_mul := @UScalar.saturating_mul UScalarTy.«%S»
++
++/-!
++Saturating mul: signed (`checked_mul`, or `MAX` if the signs agree and `MIN` otherwise: the
++product clamped to the bounds)
++-/
++def IScalar.saturating_mul {ty : IScalarTy} (x y : IScalar ty) : IScalar ty :=
++  ⟨ BitVec.ofInt _ (Max.max (IScalar.min ty) (Min.min (IScalar.max ty) (x.val * y.val))) ⟩
++
++/- [core::num::{i8}::saturating_mul] -/
++iscalar def core.num.«%S».saturating_mul := @IScalar.saturating_mul IScalarTy.«%S»
++
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Serde.lean b/backends/lean/Aeneas/Std/Serde.lean
+index fbbcd2f..12f4143 100644
+--- a/backends/lean/Aeneas/Std/Serde.lean
++++ b/backends/lean/Aeneas/Std/Serde.lean
+@@ -1,3 +1,4 @@
+ import Aeneas.Std.Serde.Ser
+ import Aeneas.Std.Serde.De
+ import Aeneas.Std.Serde.Impls
++import Aeneas.Std.Serde.Private
+diff --git a/backends/lean/Aeneas/Std/Serde/Impls.lean b/backends/lean/Aeneas/Std/Serde/Impls.lean
+index 88f56f3..7e27727 100644
+--- a/backends/lean/Aeneas/Std/Serde/Impls.lean
++++ b/backends/lean/Aeneas/Std/Serde/Impls.lean
+@@ -183,6 +183,33 @@ def DeserializeString.deserialize {D Error : Type} (inst : serde_core.de.Deseria
+ def DeserializeString : serde_core.de.Deserialize String :=
+   { deserialize := fun inst deserializer => DeserializeString.deserialize inst deserializer }
+ 
++/-- `OptionVisitor<T>` of `impl Deserialize for Option<T>` (de/impls.rs): `visit_unit` and
++    `visit_none` are `Ok(None)`, `visit_some` is `T::deserialize(deserializer).map(Some)`; the
++    other `visit_*` are the provided ones (`invalid_type`, expecting "option"). -/
++def OptionVisitor {T : Type} (i : serde_core.de.Deserialize T) :
++    serde_core.de.Visitor Unit (Option T) :=
++  { expecting := fun _ f => f.append "option"
++    visit_unit := fun _ _ => .ok (.Ok none)
++    visit_none := fun _ _ => .ok (.Ok none)
++    visit_some := fun inst _ deserializer => do
++      match ← i.deserialize inst deserializer with
++      | .Ok v => .ok (.Ok (some v))
++      | .Err e => .ok (.Err e) }
++
++/-- `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Option<T>`:
++    `deserializer.deserialize_option(OptionVisitor { marker: PhantomData })`. -/
++@[rust_fun
++  "serde_core::de::impls::{serde_core::de::Deserialize<'de, core::option::Option<@T>>}::deserialize"]
++def DeserializeOption.deserialize {T D Error : Type} (i : serde_core.de.Deserialize T)
++    (inst : serde_core.de.Deserializer D Error) (deserializer : D) :
++    Result (core.result.Result (Option T) Error) :=
++  inst.deserialize_option (Visitor.wrap (OptionVisitor i)) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, core::option::Option<@T>>"]
++def DeserializeOption {T : Type} (i : serde_core.de.Deserialize T) :
++    serde_core.de.Deserialize (Option T) :=
++  { deserialize := fun inst deserializer => DeserializeOption.deserialize i inst deserializer }
++
+ end serde_core.de.impls
+ 
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Serde/Private.lean b/backends/lean/Aeneas/Std/Serde/Private.lean
+new file mode 100644
+index 0000000..1905d4e
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/Serde/Private.lean
+@@ -0,0 +1,98 @@
++import Aeneas.Std.Serde.De
++import Aeneas.Std.Core.Borrow
++
++/-!
++# `serde::private` and `serde_core::private` (serde 1.0.228): helpers of the derived implementations
++
++`#[derive(Deserialize)]` fills a missing field (no `#[serde(default)]`, no `deserialize_with`) with
++`serde::__private::de::missing_field(name)?` (serde_derive `de.rs` `expr_is_missing`), and reports
++an unknown field or variant name given as bytes with `from_utf8_lossy` (serde_core
++`private/string.rs`).
++-/
++
++namespace Aeneas.Std
++
++open Result
++
++namespace serde.private.de
++
++open serde_core.de
++
++/-- The format types of `missing_field`'s local `MissingFieldDeserializer<E>(&'static str,
++    PhantomData<E>)`: one deserializer, the name of the missing field, with error `E`; no access
++    types. -/
++@[reducible] def MissingFieldTypes (E : Type) : FormatTypes where
++  ιD := Unit
++  D := fun _ => Str
++  DError := fun _ => E
++  ιS := Empty
++  S := fun _ => Unit
++  SError := fun _ => E
++  ιM := Empty
++  M := fun _ => Unit
++  MError := fun _ => E
++  ιE := Empty
++  E := fun _ => Unit
++  EError := fun _ => E
++  EVariant := fun _ => Unit
++  ιV := Empty
++  V := fun _ => Unit
++  VError := fun _ => E
++
++/-- `impl<'de, E: Error> Deserializer<'de> for MissingFieldDeserializer<E>`: `deserialize_any` is
++    `Err(Error::missing_field(self.0))`, `deserialize_option` is `visitor.visit_none()`, and
++    `forward_to_deserialize_any!` makes every other method (`i128` and `u128` included)
++    `deserialize_any`. It never deserializes a nested value, so its encoding at nesting bound 1 is
++    exact. -/
++def MissingFieldFormat {E : Type} (errInst : serde_core.de.Error E) :
++    FormatProgram (MissingFieldTypes E) where
++  base := bottom (DeAt 0) (MissingFieldTypes E)
++  step := fun X _ =>
++    let any : {V Value : Type} → VisitorStep X V Value → Str → V →
++        Result (core.result.Result Value E) :=
++      fun _ field _ => do ok (.Err (← errInst.missing_field field))
++    { des := fun _ =>
++        { serde_coredeErrorInst := errInst
++          deserialize_any := any
++          deserialize_bool := any, deserialize_i8 := any, deserialize_i16 := any
++          deserialize_i32 := any, deserialize_i64 := any, deserialize_i128 := any
++          deserialize_u8 := any, deserialize_u16 := any, deserialize_u32 := any
++          deserialize_u64 := any, deserialize_u128 := any, deserialize_f32 := any
++          deserialize_f64 := any, deserialize_char := any, deserialize_str := any
++          deserialize_string := any, deserialize_bytes := any, deserialize_byte_buf := any
++          deserialize_option := fun visitor _ v => visitor.visit_none errInst v
++          deserialize_unit := any
++          deserialize_unit_struct := fun visitor field _ v => any visitor field v
++          deserialize_newtype_struct := fun visitor field _ v => any visitor field v
++          deserialize_seq := any
++          deserialize_tuple := fun visitor field _ v => any visitor field v
++          deserialize_tuple_struct := fun visitor field _ _ v => any visitor field v
++          deserialize_map := any
++          deserialize_struct := fun visitor field _ _ v => any visitor field v
++          deserialize_enum := fun visitor field _ _ v => any visitor field v
++          deserialize_identifier := any
++          deserialize_ignored_any := any }
++      seqs := fun i => nomatch i
++      maps := fun i => nomatch i
++      enums := fun i => nomatch i
++      variants := fun i => nomatch i }
++
++end serde.private.de
++
++/-- `pub fn missing_field<'de, V: Deserialize<'de>, E: Error>(field: &'static str) -> Result<V, E>`
++    (private/de.rs): `V::deserialize(MissingFieldDeserializer(field, PhantomData))`. A missing
++    `Option<T>` field is `None`; any other type is `Err(E::missing_field(field))` (through `E`'s
++    own `missing_field`). -/
++@[rust_fun "serde::private::de::missing_field"]
++def serde.private.de.missing_field {V E : Type} (deserializeInst : serde_core.de.Deserialize V)
++    (errInst : serde_core.de.Error E) (field : Str) : Result (core.result.Result V E) :=
++  deserializeInst.deserialize ((serde.private.de.MissingFieldFormat errInst).encode 1 ()) field
++
++/-- `pub fn from_utf8_lossy(bytes: &[u8]) -> Cow<'_, str>` (serde_core private/string.rs, with the
++    `std`/`alloc` features): `String::from_utf8_lossy(bytes)`. -/
++@[rust_fun "serde_core::private::string::from_utf8_lossy"]
++def serde_core.private.string.from_utf8_lossy (bytes : Slice U8) :
++    Result (alloc.borrow.Cow Str String) :=
++  alloc.string.String.from_utf8_lossy bytes
++
++end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Slice.lean b/backends/lean/Aeneas/Std/Slice.lean
+index c31daee..2f54ab0 100644
+--- a/backends/lean/Aeneas/Std/Slice.lean
++++ b/backends/lean/Aeneas/Std/Slice.lean
+@@ -738,6 +738,21 @@ def core.slice.Slice.split_first {T : Type} (s : Slice T) : Result (Option (T ×
+   | [] => ok none
+   | x :: rest => ok (some (x, ⟨ rest, by have := s.property; simp [h] at this; omega ⟩))
+ 
++/-- `<[T]>::split_last` (core/src/slice/mod.rs): `if let [init @ .., last] = self {
++    Some((last, init)) } else { None }`, the last element and the others (a shared borrow:
++    the element is copied into the model). -/
++@[rust_fun "core::slice::{[@T]}::split_last"]
++def core.slice.Slice.split_last {T : Type} (s : Slice T) : Result (Option (T × Slice T)) :=
++  match s.val.getLast? with
++  | none => ok none
++  | some last => ok (some (last, ⟨ s.val.dropLast, by have := s.property; simp; omega ⟩))
++
++/-- `core::slice::from_ref` (core/src/slice/raw.rs): the one-element slice of the referenced
++    value (a shared borrow: the value is copied into the model). -/
++@[rust_fun "core::slice::raw::from_ref"]
++def core.slice.raw.from_ref {T : Type} (s : T) : Result (Slice T) :=
++  ok ⟨ [s], by scalar_tac ⟩
++
+ @[rust_fun "core::slice::{[@T]}::split_at"]
+ def core.slice.Slice.split_at {T : Type} (s : Slice T) (n : Usize) :
+   Result ((Slice T) × (Slice T)) :=
+diff --git a/backends/lean/Aeneas/Std/StringIter.lean b/backends/lean/Aeneas/Std/StringIter.lean
+index 6789676..d8ba8fd 100644
+--- a/backends/lean/Aeneas/Std/StringIter.lean
++++ b/backends/lean/Aeneas/Std/StringIter.lean
+@@ -278,6 +278,34 @@ def core.str.Str.strip_suffix {P : Type} (patInst : core.str.pattern.Pattern P)
+       else .ok none
+     | [] => .ok none
+ 
++/-- `str::ends_with` (core/src/str/mod.rs): `pat.is_suffix_of(self)`. `Pattern`'s
++    `is_suffix_of` is `matches!(self.into_searcher(haystack).next_back(), Match(_, j) if
++    haystack.len() == j)`; the overrides of `&str` (`haystack.as_bytes().ends_with(self)`) and
++    `char` (its UTF-8 encoding as a `&str`) decide the same: whether the first match of the
++    reverse searcher ends at the end of the haystack, as for `strip_suffix`. -/
++@[rust_fun "core::str::{str}::ends_with" (keepTraitClauses := [true, false])]
++def core.str.Str.ends_with {P : Type} (patInst : core.str.pattern.Pattern P)
++    (s : Str) (pat : P) : Result Bool :=
++  match patInst.reverse_matches with
++  | none => .fail .panic
++  | some search => do
++    match ← search pat s with
++    | (_, stop) :: _ => .ok (stop = s.val.length)
++    | [] => .ok false
++
++/-- `str::rfind` (core/src/str/mod.rs): `pat.into_searcher(self).next_match_back().map(|(i,
++    _)| i)`, the start of the first match of the reverse searcher (`Pattern.reverse_matches`),
++    a byte index of the haystack. -/
++@[rust_fun "core::str::{str}::rfind" (keepTraitClauses := [true, false])]
++def core.str.Str.rfind {P : Type} (patInst : core.str.pattern.Pattern P)
++    (s : Str) (pat : P) : Result (Option Usize) :=
++  match patInst.reverse_matches with
++  | none => .fail .panic
++  | some search => do
++    match ← search pat s with
++    | [] => .ok none
++    | (start, _) :: _ => .ok (some (← UScalar.tryMk .Usize start))
++
+ /-- The end of the run of adjacent matches from `pos` on, in the searcher's order: where its
+     first `Reject` step starts (`next_reject`), or the end of the haystack if there is none. -/
+ def core.str.pattern.forwardRunEnd : List (Nat × Nat) → Nat → Nat
+diff --git a/backends/lean/Aeneas/Std/Thiserror.lean b/backends/lean/Aeneas/Std/Thiserror.lean
+new file mode 100644
+index 0000000..f09e80c
+--- /dev/null
++++ b/backends/lean/Aeneas/Std/Thiserror.lean
+@@ -0,0 +1,22 @@
++import Aeneas.Std.Core.FmtWithSlice
++
++/-!
++# thiserror (2.0.18)
++
++`#[derive(thiserror::Error)]` formats each interpolated field `{field}` of an error message as
++`field.as_display()` (thiserror-impl `fmt.rs`), with the `AsDisplay` trait of thiserror's
++`src/display.rs`.
++-/
++
++namespace Aeneas.Std
++
++open Result
++
++/-- `impl<'a, T: Display + ?Sized + 'a> AsDisplay<'a> for &T` (`type Target = &'a T`):
++    `as_display(&'a self)` is `*self`, the borrowed field itself (the borrows are erased). -/
++@[rust_fun "thiserror::display::{thiserror::display::AsDisplay<'a, &'0 @T, &'a @T>}::as_display"]
++def thiserror.display.AsDisplayShared.as_display {T : Type} (_displayInst : core.fmt.Display T)
++    (self : T) : Result T :=
++  ok self
++
++end Aeneas.Std
+diff --git a/src/extract/ExtractBuiltin.ml b/src/extract/ExtractBuiltin.ml
+index 3b0e7aa..28fda34 100644
+--- a/src/extract/ExtractBuiltin.ml
++++ b/src/extract/ExtractBuiltin.ml
+@@ -652,7 +652,7 @@ let mk_builtin_funs () : (pattern * Pure.builtin_fun_info) list =
+            (fun ty -> "core::num::{" ^ ty ^ "}::checked_" ^ op)
+            (fun ty -> StringUtils.capitalize_first_letter ty ^ ".checked_" ^ op)
+            ~can_fail:false ())
+-       [ "add"; "sub"; "mul"; "div"; "rem" ])
++       [ "add"; "sub"; "mul"; "div"; "rem"; "div_euclid"; "rem_euclid" ])
+   (* From<INT, bool> *)
+   @ mk_scalar_fun
+       (fun ty ->
+@@ -682,6 +682,12 @@ let mk_builtin_funs () : (pattern * Pure.builtin_fun_info) list =
+       (fun ty ->
+         "core.num." ^ StringUtils.capitalize_first_letter ty ^ ".leading_zeros")
+       ~can_fail:false ()
++  (* Trailing zeros *)
++  @ mk_scalar_fun
++      (fun ty -> "core::num::{" ^ ty ^ "}::trailing_zeros")
++      (fun ty ->
++        "core.num." ^ StringUtils.capitalize_first_letter ty ^ ".trailing_zeros")
++      ~can_fail:false ()
+   (* to_le_bytes *)
+   @ mk_scalar_fun
+       (fun ty -> "core::num::{" ^ ty ^ "}::to_le_bytes")
+@@ -920,6 +926,7 @@ let mk_builtin_funs () : (pattern * Pure.builtin_fun_info) list =
+                  [
+                    (false, "saturating_add");
+                    (false, "saturating_sub");
++                   (false, "saturating_mul");
+                    (false, "wrapping_add");
+                    (false, "wrapping_sub");
+                    (false, "wrapping_mul");
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index eb2330d..01bcfa1 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -182,7 +182,7 @@ let lean_builtin_types = [
+   mk_type "core::slice::iter::IterMut" "_root_.Aeneas.Std.core.slice.iter.IterMut" ~mut_regions:([0]);
+   (* file: "Aeneas/Std/SliceIter.lean", line: 377 *)
+   mk_type "core::slice::iter::Windows" "_root_.Aeneas.Std.core.slice.iter.Windows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 546 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 574 *)
+   mk_type "core::str::iter::Bytes" "_root_.Aeneas.Std.core.str.iter.Bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 7 *)
+   mk_type "core::str::iter::Chars" "_root_.Aeneas.Std.core.str.iter.Chars";
+@@ -286,7 +286,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::fmt::Debug<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBox.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 75 *)
+   mk_fun "alloc::boxed::{core::fmt::Display<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBox.fmt" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Hash.lean", line: 17 *)
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 120 *)
+   mk_fun "alloc::boxed::{core::hash::Hash<Box<@T>>}::hash" "_root_.Aeneas.Std.alloc.boxed.HashBox.hash" ~keep_params:(Some [true; false; true]);
+   (* file: "Aeneas/Std/Alloc.lean", line: 19 *)
+   mk_fun "alloc::boxed::{core::ops::deref::Deref<Box<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.boxed.Box.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+@@ -488,12 +488,14 @@ let lean_builtin_funs = [
+   mk_fun "alloc::str::{core::borrow::Borrow<alloc::string::String, str>}::borrow" "_root_.Aeneas.Std.alloc.str.BorrowString.borrow";
+   (* file: "Aeneas/Std/String.lean", line: 545 *)
+   mk_fun "alloc::str::{str}::repeat" "_root_.Aeneas.Std.alloc.str.Str.repeat";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 362 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 390 *)
+   mk_fun "alloc::str::{str}::replace" "_root_.Aeneas.Std.alloc.str.Str.replace";
+   (* file: "Aeneas/Std/String.lean", line: 108 *)
+   mk_fun "alloc::str::{str}::to_ascii_lowercase" "_root_.Aeneas.Std.alloc.str.Str.to_ascii_lowercase";
+   (* file: "Aeneas/Std/String.lean", line: 209 *)
+   mk_fun "alloc::string::{alloc::string::String}::as_str" "_root_.Aeneas.Std.alloc.string.String.as_str";
++  (* file: "Aeneas/Std/Core/Borrow.lean", line: 154 *)
++  mk_fun "alloc::string::{alloc::string::String}::from_utf8_lossy" "_root_.Aeneas.Std.alloc.string.String.from_utf8_lossy";
+   (* file: "Aeneas/Std/String.lean", line: 212 *)
+   mk_fun "alloc::string::{alloc::string::String}::is_empty" "_root_.Aeneas.Std.alloc.string.String.is_empty";
+   (* file: "Aeneas/Std/String.lean", line: 437 *)
+@@ -540,6 +542,8 @@ let lean_builtin_funs = [
+   mk_fun "alloc::string::{core::fmt::Debug<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugString.fmt";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 60 *)
+   mk_fun "alloc::string::{core::fmt::Display<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayString.fmt";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 224 *)
++  mk_fun "alloc::string::{core::hash::Hash<alloc::string::String>}::hash" "_root_.Aeneas.Std.alloc.string.HashString.hash";
+   (* file: "Aeneas/Std/VecIter.lean", line: 266 *)
+   mk_fun "alloc::string::{core::iter::traits::collect::FromIterator<alloc::string::String, char>}::from_iter" "_root_.Aeneas.Std.alloc.string.FromIteratorStringChar.from_iter";
+   (* file: "Aeneas/Std/String.lean", line: 206 *)
+@@ -780,7 +784,7 @@ let lean_builtin_funs = [
+   mk_fun "core::char::methods::{char}::is_ascii_lowercase" "_root_.Aeneas.Std.core.char.methods.Char.is_ascii_lowercase";
+   (* file: "Aeneas/Std/String.lean", line: 482 *)
+   mk_fun "core::char::methods::{char}::is_ascii_uppercase" "_root_.Aeneas.Std.core.char.methods.Char.is_ascii_uppercase";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 332 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 360 *)
+   mk_fun "core::char::methods::{char}::is_whitespace" "_root_.Aeneas.Std.core.char.methods.Char.is_whitespace";
+   (* file: "Aeneas/Std/String.lean", line: 465 *)
+   mk_fun "core::char::methods::{char}::len_utf8" "_root_.Aeneas.Std.core.char.methods.Char.len_utf8";
+@@ -1046,6 +1050,38 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_fmt" "_root_.Aeneas.Std.core.fmt.Formatter.write_fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 224 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_str" "_root_.Aeneas.Std.core.fmt.Formatter.write_str";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 183 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<&'0 @T>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashShared.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 171 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<bool>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashBool.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 175 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<char>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashChar.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 164 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<i128>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashI128.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 155 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<i16>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashI16.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 158 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<i32>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashI32.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 161 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<i64>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashI64.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 152 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<i8>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashI8.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 167 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<isize>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashIsize.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 179 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<str>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashStr.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 146 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<u128>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashU128.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 137 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<u16>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashU16.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 140 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<u32>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashU32.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 143 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<u64>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashU64.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 134 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<u8>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashU8.hash";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 149 *)
++  mk_fun "core::hash::impls::{core::hash::Hash<usize>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashUsize.hash";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 69 *)
+   mk_fun "core::hint::must_use" "_root_.Aeneas.Std.core.hint.must_use" ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Core.lean", line: 92 *)
+@@ -1546,16 +1582,26 @@ let lean_builtin_funs = [
+   mk_fun "core::num::{i8}::checked_abs" "_root_.Aeneas.Std.core.num.I8.checked_abs" ~can_fail:false;
+   (* file: "Aeneas/Std/Scalar/CheckedOps/Neg.lean", line: 23 *)
+   mk_fun "core::num::{i8}::checked_neg" "_root_.Aeneas.Std.core.num.I8.checked_neg" ~can_fail:false;
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 35 *)
++  mk_fun "core::num::{u128}::pow" "_root_.Aeneas.Std.core.num.U128.pow";
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 29 *)
++  mk_fun "core::num::{u16}::pow" "_root_.Aeneas.Std.core.num.U16.pow";
+   (* file: "Aeneas/Std/Scalar/Misc.lean", line: 28 *)
+   mk_fun "core::num::{u32}::abs_diff" "_root_.Aeneas.Std.core.num.U32.abs_diff" ~can_fail:false;
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 31 *)
++  mk_fun "core::num::{u32}::pow" "_root_.Aeneas.Std.core.num.U32.pow";
+   (* file: "Aeneas/Std/Scalar/Misc.lean", line: 31 *)
+   mk_fun "core::num::{u64}::abs_diff" "_root_.Aeneas.Std.core.num.U64.abs_diff" ~can_fail:false;
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 33 *)
++  mk_fun "core::num::{u64}::pow" "_root_.Aeneas.Std.core.num.U64.pow";
+   (* file: "Aeneas/Std/String.lean", line: 509 *)
+   mk_fun "core::num::{u8}::is_ascii_alphabetic" "_root_.Aeneas.Std.core.num.U8.is_ascii_alphabetic";
+   (* file: "Aeneas/Std/String.lean", line: 515 *)
+   mk_fun "core::num::{u8}::is_ascii_alphanumeric" "_root_.Aeneas.Std.core.num.U8.is_ascii_alphanumeric";
+   (* file: "Aeneas/Std/String.lean", line: 504 *)
+   mk_fun "core::num::{u8}::is_ascii_digit" "_root_.Aeneas.Std.core.num.U8.is_ascii_digit";
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 27 *)
++  mk_fun "core::num::{u8}::pow" "_root_.Aeneas.Std.core.num.U8.pow";
+   (* file: "Aeneas/Std/Scalar/Misc.lean", line: 34 *)
+   mk_fun "core::num::{usize}::abs_diff" "_root_.Aeneas.Std.core.num.Usize.abs_diff" ~can_fail:false;
+   (* file: "Aeneas/Std/Scalar/Ops/Div.lean", line: 25 *)
+@@ -1564,6 +1610,8 @@ let lean_builtin_funs = [
+   mk_fun "core::num::{usize}::is_multiple_of" "_root_.Aeneas.Std.core.num.Usize.is_multiple_of" ~can_fail:false;
+   (* file: "Aeneas/Std/Scalar/Pow.lean", line: 7 *)
+   mk_fun "core::num::{usize}::is_power_of_two" "_root_.Aeneas.Std.core.num.Usize.is_power_of_two";
++  (* file: "Aeneas/Std/Scalar/Pow.lean", line: 37 *)
++  mk_fun "core::num::{usize}::pow" "_root_.Aeneas.Std.core.num.Usize.pow";
+   (* file: "Aeneas/Std/Float.lean", line: 557 *)
+   mk_fun "core::ops::arith::{core::ops::arith::AddAssign<f64, &'a f64>}::add_assign" "_root_.Aeneas.Std.core.ops.arith.AddAssignF64SharedF64.add_assign";
+   (* file: "Aeneas/Std/Scalar/Ops/Mul.lean", line: 34 *)
+@@ -1618,6 +1666,8 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::default::Default<core::option::Option<@T>>}::default" "_root_.Aeneas.Std.core.option.DefaultOption.default";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 149 *)
+   mk_fun "core::option::{core::fmt::Debug<core::option::Option<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugOption.fmt";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 234 *)
++  mk_fun "core::option::{core::hash::Hash<core::option::Option<@T>>}::hash" "_root_.Aeneas.Std.core.option.HashOption.hash";
+   (* file: "Aeneas/Std/ResultIter.lean", line: 167 *)
+   mk_fun "core::option::{core::iter::traits::collect::FromIterator<core::option::Option<@V>, core::option::Option<@A>>}::from_iter" "_root_.Aeneas.Std.core.option.FromIteratorOption.from_iter";
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 431 *)
+@@ -1844,6 +1894,8 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::Windows<'a, @T>, &'a [@T]>}::step_by" "_root_.Aeneas.Std.core.slice.iter.IteratorWindows.step_by";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 415 *)
+   mk_fun "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::Windows<'a, @T>, &'a [@T]>}::take" "_root_.Aeneas.Std.core.slice.iter.IteratorWindows.take";
++  (* file: "Aeneas/Std/Slice.lean", line: 752 *)
++  mk_fun "core::slice::raw::from_ref" "_root_.Aeneas.Std.core.slice.raw.from_ref";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 493 *)
+   mk_fun "core::slice::{[@T]}::chunks" "_root_.Aeneas.Std.core.slice.Slice.chunks";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 711 *)
+@@ -1880,27 +1932,29 @@ let lean_builtin_funs = [
+   mk_fun "core::slice::{[@T]}::sort_unstable" "_root_.Aeneas.Std.core.slice.Slice.sort_unstable";
+   (* file: "Aeneas/Std/Sort.lean", line: 120 *)
+   mk_fun "core::slice::{[@T]}::sort_unstable_by" "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by";
+-  (* file: "Aeneas/Std/Slice.lean", line: 741 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 756 *)
+   mk_fun "core::slice::{[@T]}::split_at" "_root_.Aeneas.Std.core.slice.Slice.split_at";
+-  (* file: "Aeneas/Std/Slice.lean", line: 752 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 767 *)
+   mk_fun "core::slice::{[@T]}::split_at_mut" "_root_.Aeneas.Std.core.slice.Slice.split_at_mut";
+   (* file: "Aeneas/Std/Slice.lean", line: 735 *)
+   mk_fun "core::slice::{[@T]}::split_first" "_root_.Aeneas.Std.core.slice.Slice.split_first";
+-  (* file: "Aeneas/Std/Slice.lean", line: 812 *)
++  (* file: "Aeneas/Std/Slice.lean", line: 744 *)
++  mk_fun "core::slice::{[@T]}::split_last" "_root_.Aeneas.Std.core.slice.Slice.split_last";
++  (* file: "Aeneas/Std/Slice.lean", line: 827 *)
+   mk_fun "core::slice::{[@T]}::swap" "_root_.Aeneas.Std.core.slice.Slice.swap";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 383 *)
+   mk_fun "core::slice::{[@T]}::windows" "_root_.Aeneas.Std.core.slice.Slice.windows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 584 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 612 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::all" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.all";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 576 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 604 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::any" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.any";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 569 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 597 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::count" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.count";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 593 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 621 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::find" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.find";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 555 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 583 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.next";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 562 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 590 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorBytes.size_hint";
+   (* file: "Aeneas/Std/StringIter.lean", line: 73 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>}::advance_by" "_root_.Aeneas.Std.core.str.iter.IteratorChars.advance_by";
+@@ -1916,7 +1970,7 @@ let lean_builtin_funs = [
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorLines.next";
+   (* file: "Aeneas/Std/StringIter.lean", line: 163 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>}::size_hint" "_root_.Aeneas.Std.core.str.iter.IteratorLines.size_hint";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 518 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 546 *)
+   mk_fun "core::str::iter::{core::iter::traits::iterator::Iterator<core::str::iter::Split<'a, @P>, &'a str>}::next" "_root_.Aeneas.Std.core.str.iter.IteratorSplit.next";
+   (* file: "Aeneas/Std/String.lean", line: 379 *)
+   mk_fun "core::str::pattern::{core::str::pattern::Pattern<&'b str>}::is_prefix_of" "_root_.Aeneas.Std.core.str.pattern.PatternSharedStr.is_prefix_of";
+@@ -1936,43 +1990,45 @@ let lean_builtin_funs = [
+   mk_fun "core::str::traits::{core::cmp::PartialEq<str, str>}::ne" "_root_.Aeneas.Std.core.str.traits.PartialEqStr.ne";
+   (* file: "Aeneas/Std/String.lean", line: 171 *)
+   mk_fun "core::str::traits::{core::cmp::PartialOrd<str, str>}::partial_cmp" "_root_.Aeneas.Std.core.str.traits.PartialOrdStr.partial_cmp";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 394 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 422 *)
+   mk_fun "core::str::traits::{core::ops::index::Index<str, @I, @O>}::index" "_root_.Aeneas.Std.core.str.traits.IndexStr.index";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 400 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 428 *)
+   mk_fun "core::str::traits::{core::ops::index::IndexMut<str, @I, @O>}::index_mut" "_root_.Aeneas.Std.core.str.traits.IndexMutStr.index_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 410 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 438 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::get" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.get";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 416 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 444 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::get_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.get_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 425 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 453 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::get_unchecked" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.get_unchecked";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 430 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 458 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::get_unchecked_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.get_unchecked_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 435 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 463 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::index" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.index";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 442 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 470 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>}::index_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeFromUsizeStr.index_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 464 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 492 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::get" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.get";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 470 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 498 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::get_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.get_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 479 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 507 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::get_unchecked" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.get_unchecked";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 484 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 512 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::get_unchecked_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.get_unchecked_mut";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 489 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 517 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::index" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.index";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 495 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 523 *)
+   mk_fun "core::str::traits::{core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>}::index_mut" "_root_.Aeneas.Std.core.str.traits.SliceIndexRangeToUsizeStr.index_mut";
+   (* file: "Aeneas/Std/StringIter.lean", line: 232 *)
+   mk_fun "core::str::{str}::as_bytes" "_root_.Aeneas.Std.core.str.Str.as_bytes";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 551 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 579 *)
+   mk_fun "core::str::{str}::bytes" "_root_.Aeneas.Std.core.str.Str.bytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 99 *)
+   mk_fun "core::str::{str}::chars" "_root_.Aeneas.Std.core.str.Str.chars";
+   (* file: "Aeneas/Std/String.lean", line: 429 *)
+   mk_fun "core::str::{str}::contains" "_root_.Aeneas.Std.core.str.Str.contains";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 381 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 286 *)
++  mk_fun "core::str::{str}::ends_with" "_root_.Aeneas.Std.core.str.Str.ends_with" ~keep_trait_clauses:(Some [true; false]);
++  (* file: "Aeneas/Std/StringIter.lean", line: 409 *)
+   mk_fun "core::str::{str}::is_char_boundary" "_root_.Aeneas.Std.core.str.Str.is_char_boundary";
+   (* file: "Aeneas/Std/String.lean", line: 215 *)
+   mk_fun "core::str::{str}::is_empty" "_root_.Aeneas.Std.core.str.Str.is_empty";
+@@ -1982,6 +2038,8 @@ let lean_builtin_funs = [
+   mk_fun "core::str::{str}::lines" "_root_.Aeneas.Std.core.str.Str.lines";
+   (* file: "Aeneas/Std/Parse.lean", line: 24 *)
+   mk_fun "core::str::{str}::parse" "_root_.Aeneas.Std.core.str.Str.parse";
++  (* file: "Aeneas/Std/StringIter.lean", line: 299 *)
++  mk_fun "core::str::{str}::rfind" "_root_.Aeneas.Std.core.str.Str.rfind" ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/StringIter.lean", line: 218 *)
+   mk_fun "core::str::{str}::rsplit_once" "_root_.Aeneas.Std.core.str.Str.rsplit_once" ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/StringIter.lean", line: 203 *)
+@@ -1994,11 +2052,11 @@ let lean_builtin_funs = [
+   mk_fun "core::str::{str}::strip_prefix" "_root_.Aeneas.Std.core.str.Str.strip_prefix";
+   (* file: "Aeneas/Std/StringIter.lean", line: 269 *)
+   mk_fun "core::str::{str}::strip_suffix" "_root_.Aeneas.Std.core.str.Str.strip_suffix" ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/StringIter.lean", line: 340 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 368 *)
+   mk_fun "core::str::{str}::trim" "_root_.Aeneas.Std.core.str.Str.trim";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 312 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 340 *)
+   mk_fun "core::str::{str}::trim_end_matches" "_root_.Aeneas.Std.core.str.Str.trim_end_matches" ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/StringIter.lean", line: 300 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 328 *)
+   mk_fun "core::str::{str}::trim_start_matches" "_root_.Aeneas.Std.core.str.Str.trim_start_matches";
+   (* file: "Aeneas/Std/Tuple.lean", line: 111 *)
+   mk_fun "core::tuple::{core::cmp::Ord<(@U, @T)>}::cmp" "_root_.Aeneas.Std.core.tuple.OrdPair.cmp";
+@@ -2124,14 +2182,20 @@ let lean_builtin_funs = [
+   mk_fun "num_bigint::biguint::{core::cmp::PartialEq<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::eq" "_root_.Aeneas.Std.num_bigint.BigUint.PartialEqBigUint.eq";
+   (* file: "Aeneas/Std/BigUint.lean", line: 89 *)
+   mk_fun "num_bigint::biguint::{core::cmp::PartialOrd<num_bigint::biguint::BigUint, num_bigint::biguint::BigUint>}::partial_cmp" "_root_.Aeneas.Std.num_bigint.BigUint.PartialOrdBigUint.partial_cmp";
++  (* file: "Aeneas/Std/Serde/Private.lean", line: 86 *)
++  mk_fun "serde::private::de::missing_field" "_root_.Aeneas.Std.serde.private.de.missing_field";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 106 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, (@T0, @T1)>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializePair.deserialize";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 176 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::string::String>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeString.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 201 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, core::option::Option<@T>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption.deserialize";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 148 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u32>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU32.deserialize";
+   (* file: "Aeneas/Std/Serde/De.lean", line: 102 *)
+   mk_fun "serde_core::de::{serde_core::de::Expected<&'0 str>}::fmt" "_root_.Aeneas.Std.serde_core.de.ExpectedSharedStr.fmt";
++  (* file: "Aeneas/Std/Serde/Private.lean", line: 93 *)
++  mk_fun "serde_core::private::string::from_utf8_lossy" "_root_.Aeneas.Std.serde_core.private.string.from_utf8_lossy";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 44 *)
+   mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<&'a @T>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeShared.serialize";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 21 *)
+@@ -2198,6 +2262,8 @@ let lean_builtin_funs = [
+   mk_fun "std::f64::{f64}::trunc" "_root_.Aeneas.Std.F64.trunc";
+   (* file: "Aeneas/Std/Std/Io.lean", line: 5 *)
+   mk_fun "std::io::stdio::_print" "_root_.Aeneas.Std.std.io.stdio._print";
++  (* file: "Aeneas/Std/Thiserror.lean", line: 17 *)
++  mk_fun "thiserror::display::{thiserror::display::AsDisplay<'a, &'0 @T, &'a @T>}::as_display" "_root_.Aeneas.Std.thiserror.display.AsDisplayShared.as_display";
+ ]
+ 
+ let lean_builtin_trait_decls = [
+@@ -2245,10 +2311,10 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::fmt::LowerHex" "_root_.Aeneas.Std.core.fmt.LowerHex" ~methods:[("fmt", "fmt")];
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 124 *)
+   mk_trait_decl "core::fmt::UpperHex" "_root_.Aeneas.Std.core.fmt.UpperHex" ~methods:[("fmt", "fmt")];
+-  (* file: "Aeneas/Std/Core/Hash.lean", line: 11 *)
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 114 *)
+   mk_trait_decl "core::hash::Hash" "_root_.Aeneas.Std.core.hash.Hash" ~methods:[("hash", "hash")];
+-  (* file: "Aeneas/Std/Core/Hash.lean", line: 6 *)
+-  mk_trait_decl "core::hash::Hasher" "_root_.Aeneas.Std.core.hash.Hasher" ~methods:[("finish", "finish"); ("write", "write")];
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 33 *)
++  mk_trait_decl "core::hash::Hasher" "_root_.Aeneas.Std.core.hash.Hasher" ~methods:[("finish", "finish"); ("write", "write"); ("write_u8", "write_u8"); ("write_u16", "write_u16"); ("write_u32", "write_u32"); ("write_u64", "write_u64"); ("write_u128", "write_u128"); ("write_usize", "write_usize"); ("write_i8", "write_i8"); ("write_i16", "write_i16"); ("write_i32", "write_i32"); ("write_i64", "write_i64"); ("write_i128", "write_i128"); ("write_isize", "write_isize"); ("write_length_prefix", "write_length_prefix"); ("write_str", "write_str")] ~default_methods:["write_u8"; "write_u16"; "write_u32"; "write_u64"; "write_u128"; "write_usize"; "write_i8"; "write_i16"; "write_i32"; "write_i64"; "write_i128"; "write_isize"; "write_length_prefix"; "write_str"];
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 50 *)
+   mk_trait_decl "core::iter::adapters::zip::TrustedRandomAccessNoCoerce" "_root_.Aeneas.Std.core.iter.adapters.zip.TrustedRandomAccessNoCoerce" ~consts:[("MAY_HAVE_SIDE_EFFECT", "MAY_HAVE_SIDE_EFFECT")];
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 33 *)
+@@ -2734,8 +2800,44 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::LowerHex<u16>" "_root_.Aeneas.Std.core.fmt.LowerHexU16";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 181 *)
+   mk_trait_impl "core::fmt::UpperHex<u8>" "_root_.Aeneas.Std.core.fmt.UpperHexU8";
+-  (* file: "Aeneas/Std/Core/Hash.lean", line: 22 *)
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 218 *)
++  mk_trait_impl "core::hash::Hash<&'0 @T>" "_root_.Aeneas.Std.core.hash.HashShared";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 125 *)
+   mk_trait_impl "core::hash::Hash<Box<@T>>" "_root_.Aeneas.Std.core.hash.HashBox" ~keep_params:(Some [true; false]);
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 229 *)
++  mk_trait_impl "core::hash::Hash<alloc::string::String>" "_root_.Aeneas.Std.core.hash.HashString";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 212 *)
++  mk_trait_impl "core::hash::Hash<bool>" "_root_.Aeneas.Std.core.hash.HashBool";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 214 *)
++  mk_trait_impl "core::hash::Hash<char>" "_root_.Aeneas.Std.core.hash.HashChar";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 242 *)
++  mk_trait_impl "core::hash::Hash<core::option::Option<@T>>" "_root_.Aeneas.Std.core.hash.HashOption";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 208 *)
++  mk_trait_impl "core::hash::Hash<i128>" "_root_.Aeneas.Std.core.hash.HashI128";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 202 *)
++  mk_trait_impl "core::hash::Hash<i16>" "_root_.Aeneas.Std.core.hash.HashI16";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 204 *)
++  mk_trait_impl "core::hash::Hash<i32>" "_root_.Aeneas.Std.core.hash.HashI32";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 206 *)
++  mk_trait_impl "core::hash::Hash<i64>" "_root_.Aeneas.Std.core.hash.HashI64";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 200 *)
++  mk_trait_impl "core::hash::Hash<i8>" "_root_.Aeneas.Std.core.hash.HashI8";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 210 *)
++  mk_trait_impl "core::hash::Hash<isize>" "_root_.Aeneas.Std.core.hash.HashIsize";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 216 *)
++  mk_trait_impl "core::hash::Hash<str>" "_root_.Aeneas.Std.core.hash.HashStr";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 196 *)
++  mk_trait_impl "core::hash::Hash<u128>" "_root_.Aeneas.Std.core.hash.HashU128";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 190 *)
++  mk_trait_impl "core::hash::Hash<u16>" "_root_.Aeneas.Std.core.hash.HashU16";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 192 *)
++  mk_trait_impl "core::hash::Hash<u32>" "_root_.Aeneas.Std.core.hash.HashU32";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 194 *)
++  mk_trait_impl "core::hash::Hash<u64>" "_root_.Aeneas.Std.core.hash.HashU64";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 188 *)
++  mk_trait_impl "core::hash::Hash<u8>" "_root_.Aeneas.Std.core.hash.HashU8";
++  (* file: "Aeneas/Std/Core/Hash.lean", line: 198 *)
++  mk_trait_impl "core::hash::Hash<usize>" "_root_.Aeneas.Std.core.hash.HashUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 1039 *)
+   mk_trait_impl "core::iter::range::Step<i32>" "_root_.Aeneas.Std.core.iter.range.StepI32";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 1109 *)
+@@ -2890,13 +2992,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Iter<'a, @T>, &'a @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 459 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::slice::iter::Windows<'a, @T>, &'a [@T]>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorWindows";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 601 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 629 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Bytes<'a>, u8>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBytes";
+   (* file: "Aeneas/Std/StringIter.lean", line: 79 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Chars<'a>, char>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChars";
+   (* file: "Aeneas/Std/StringIter.lean", line: 172 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Lines<'a>, &'a str>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorLines";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 535 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 563 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<core::str::iter::Split<'a, @P>, &'a str>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplit";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 141 *)
+   mk_trait_impl "core::marker::Copy<bool>" "_root_.Aeneas.Std.core.core.marker.CopyBool";
+@@ -3040,13 +3142,13 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::Range<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeUsizeSlice";
+   (* file: "Aeneas/Std/Slice.lean", line: 695 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 450 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 478 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeFrom<usize>, str, str>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeStr";
+   (* file: "Aeneas/Std/Slice.lean", line: 543 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeFull, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFullSlice";
+   (* file: "Aeneas/Std/Slice.lean", line: 488 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, [@T], [@T]>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice";
+-  (* file: "Aeneas/Std/StringIter.lean", line: 502 *)
++  (* file: "Aeneas/Std/StringIter.lean", line: 530 *)
+   mk_trait_impl "core::slice::index::SliceIndex<core::ops::range::RangeTo<usize>, str, str>" "_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeStr";
+   (* file: "Aeneas/Std/Slice.lean", line: 605 *)
+   mk_trait_impl "core::slice::index::SliceIndex<usize, [@T], @T>" "_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice";
+@@ -3088,6 +3190,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "serde_core::de::Deserialize<'de, (@T0, @T1)>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializePair";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 182 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, alloc::string::String>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeString";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 208 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, core::option::Option<@T>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption";
+   (* file: "Aeneas/Std/Serde/Impls.lean", line: 153 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, u32>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU32";
+   (* file: "Aeneas/Std/Serde/De.lean", line: 106 *)
+diff --git a/tests/lean/SerdeVisitors/Checks.lean b/tests/lean/SerdeVisitors/Checks.lean
+index 2a98b57..2623b8e 100644
+--- a/tests/lean/SerdeVisitors/Checks.lean
++++ b/tests/lean/SerdeVisitors/Checks.lean
+@@ -1,9 +1,9 @@
+ import SerdeVisitors.SerdeVisitors
+ 
+-/-! Run the extracted data-side implementations of `tests/src/serde-visitors` (`Pairs`, `Entry` and
+-    their visitors) against the in-test format of its `native` test module (a value tree, with
+-    `ValueSer`/`ValueDe`/`SeqDe`/`MapDe`), encoded as `FormatProgram`s, and compare with the native
+-    results. -/
++/-! Run the extracted data-side implementations of `tests/src/serde-visitors` (`Pairs`, `Entry`,
++    `Settings` and their visitors) against the in-test format of its `native` test module (a value
++    tree, with `ValueSer`/`ValueDe`/`SeqDe`/`MapDe`), encoded as `FormatProgram`s, and compare with
++    the native results. -/
+ 
+ namespace serde_visitors.checks
+ open Aeneas Aeneas.Std Result
+@@ -307,6 +307,25 @@ def deEntry (v : TValue) : Out (Nat × String × List (Nat × Nat)) :=
+   (de serde_visitors.Entry.Insts.Serde_coreDeDeserialize v).map
+     fun e => (e.id.val, e.«name», numbers e.pairs)
+ 
++/-- `de_settings`. -/
++def deSettings (v : TValue) : Out (Nat × Option Nat) :=
++  (de serde_visitors.Settings.Insts.Serde_coreDeDeserialize v).map
++    fun s => (s.id.val, s.limit.map (·.val))
++
++/-- The bytes of a string, as a `&[u8]`. -/
++def bytes (ns : List Nat) : Slice U8 :=
++  let l := ns.map fun n => (⟨BitVec.ofNat 8 n⟩ : U8)
++  if h : l.length ≤ Usize.max then ⟨l, h⟩ else ⟨[], by simp⟩
++
++def utf8 (s : String) : List Nat := s.toUTF8.toList.map (·.toNat)
++
++/-- `settings_field_bytes`: `Visitor::visit_bytes(SettingsFieldVisitor, v)`. -/
++def settingsFieldBytes (v : List Nat) : Out Nat :=
++  (out (serde_visitors.SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.visit_bytes
++    deErr () (bytes v))).map fun
++      | .Id => 0
++      | .Limit => 1
++
+ /-- `entry()` -/
+ def entry : serde_visitors.Entry := { id := u32OfNat 7, «name» := "ab", pairs := pairs [(3, 4)] }
+ 
+@@ -338,6 +357,28 @@ def entryValue : TValue :=
+   .err "invalid value: integer `5`, expected field index 0 <= i < 3"
+ #guard deEntry (TValue.u32 3) == .err "invalid type: integer `3`, expected struct Entry"
+ 
++/-! `deserialize_settings_missing_fields`: `serde::__private::de::missing_field` -/
++#guard deSettings (.struct_ "Settings" [("id", .u32 3)]) == .ok (3, none)
++#guard deSettings (.struct_ "Settings" []) == .err "missing field `id`"
++#guard deSettings (.struct_ "Settings" [("limit", .map [])]) ==
++  .err "invalid type: map, expected option"
++#guard deSettings (.struct_ "Settings" [("id", .u32 3), ("id", .u32 4)]) ==
++  .err "duplicate field `id`"
++
++/-! `settings_field_bytes_lossy`: `serde::__private::from_utf8_lossy` -/
++#guard settingsFieldBytes (utf8 "limit") == .ok 1
++#guard settingsFieldBytes (utf8 "id") == .ok 0
++#guard settingsFieldBytes (utf8 "bogus") == .err "unknown field `bogus`, expected `id` or `limit`"
++#guard settingsFieldBytes (utf8 "li" ++ [0xF0, 0x90, 0x80] ++ utf8 "mit") ==
++  .err "unknown field `li\uFFFDmit`, expected `id` or `limit`"
++#guard settingsFieldBytes ([0x61, 0xED, 0xA0, 0x80, 0x62, 0xFF, 0xC3]) ==
++  .err "unknown field `a\uFFFD\uFFFD\uFFFDb\uFFFD\uFFFD`, expected `id` or `limit`"
++
++/-- `"é\u{10348}"`: two- and four-byte characters, valid. -/
++def wide : String := "é" ++ String.singleton (Char.ofNat 0x10348)
++#guard settingsFieldBytes (utf8 wide) ==
++  .err ("unknown field `" ++ wide ++ "`, expected `id` or `limit`")
++
+ /-! `round_trip` -/
+ def roundTrip : Out (Nat × String × List (Nat × Nat)) :=
+   match ser serde_visitors.Entry.Insts.Serde_coreSerSerialize entry with
+diff --git a/tests/lean/SerdeVisitors/SerdeVisitors.lean b/tests/lean/SerdeVisitors/SerdeVisitors.lean
+index de6674b..58ef026 100644
+--- a/tests/lean/SerdeVisitors/SerdeVisitors.lean
++++ b/tests/lean/SerdeVisitors/SerdeVisitors.lean
+@@ -19,13 +19,13 @@ namespace serde_visitors
+ def core.marker.PhantomData (T : Type) := _root_.Unit
+ 
+ /-- [serde_visitors::Pairs]
+-    Source: 'src/lib.rs', lines 23:0-23:40
++    Source: 'src/lib.rs', lines 29:0-29:40
+     Visibility: public -/
+ @[reducible]
+ def Pairs (K : Type) (V : Type) := _root_.Aeneas.Std.alloc.vec.Vec (K × V)
+ 
+ /-- [serde_visitors::contains_key]: loop body 0:
+-    Source: 'src/lib.rs', lines 27:4-34:1 -/
++    Source: 'src/lib.rs', lines 33:4-40:1 -/
+ @[rust_loop_body]
+ def contains_key_loop.body
+   {K : Type} {V : Type} (corecmpPartialEqInst :
+@@ -40,8 +40,8 @@ def contains_key_loop.body
+   then
+     let p ←
+       _root_.Aeneas.Std.alloc.vec.Vec.index
+-        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice (K × V))
+-        pairs i
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice (K × V)) pairs
++        i
+     let (t, _) := p
+     let b ← corecmpPartialEqInst.eq t key
+     if b
+@@ -52,7 +52,7 @@ def contains_key_loop.body
+   else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done false)
+ 
+ /-- [serde_visitors::contains_key]: loop 0:
+-    Source: 'src/lib.rs', lines 27:4-34:1 -/
++    Source: 'src/lib.rs', lines 33:4-40:1 -/
+ @[rust_loop]
+ def contains_key_loop
+   {K : Type} {V : Type} (corecmpPartialEqInst :
+@@ -69,7 +69,7 @@ def contains_key_loop
+     i
+ 
+ /-- [serde_visitors::contains_key]:
+-    Source: 'src/lib.rs', lines 25:0-34:1 -/
++    Source: 'src/lib.rs', lines 31:0-40:1 -/
+ @[reducible]
+ def contains_key
+   {K : Type} {V : Type} (corecmpPartialEqInst :
+@@ -81,7 +81,7 @@ def contains_key
+     0#usize
+ 
+ /-- [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Pairs<K, V>}::serialize]: loop body 0:
+-    Source: 'src/lib.rs', lines 40:8-45:5
++    Source: 'src/lib.rs', lines 46:8-51:5
+     Visibility: public -/
+ @[rust_loop_body]
+ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop.body
+@@ -95,12 +95,11 @@ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop.body
+   _root_.Aeneas.Std.serde_core.ser.Serializer S Clause2_Ok Clause2_Error
+   Clause2_SerializeSeq Clause2_SerializeTuple Clause2_SerializeTupleStruct
+   Clause2_SerializeTupleVariant Clause2_SerializeMap Clause2_SerializeStruct
+-  Clause2_SerializeStructVariant)
+-  (v : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) (map : Clause2_SerializeMap)
+-  (i : _root_.Aeneas.Std.Usize) :
++  Clause2_SerializeStructVariant) (v : _root_.Aeneas.Std.alloc.vec.Vec (K × V))
++  (map : Clause2_SerializeMap) (i : _root_.Aeneas.Std.Usize) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (Clause2_SerializeMap
+-    × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.core.result.Result
+-    Clause2_Ok Clause2_Error))
++    × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.core.result.Result Clause2_Ok
++    Clause2_Error))
+   := do
+   let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len v
+   if i < i1
+@@ -133,7 +132,7 @@ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop.body
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r)
+ 
+ /-- [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Pairs<K, V>}::serialize]: loop 0:
+-    Source: 'src/lib.rs', lines 40:8-45:5
++    Source: 'src/lib.rs', lines 46:8-51:5
+     Visibility: public -/
+ @[rust_loop]
+ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop
+@@ -147,9 +146,8 @@ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop
+   _root_.Aeneas.Std.serde_core.ser.Serializer S Clause2_Ok Clause2_Error
+   Clause2_SerializeSeq Clause2_SerializeTuple Clause2_SerializeTupleStruct
+   Clause2_SerializeTupleVariant Clause2_SerializeMap Clause2_SerializeStruct
+-  Clause2_SerializeStructVariant)
+-  (v : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) (map : Clause2_SerializeMap)
+-  (i : _root_.Aeneas.Std.Usize) :
++  Clause2_SerializeStructVariant) (v : _root_.Aeneas.Std.alloc.vec.Vec (K × V))
++  (map : Clause2_SerializeMap) (i : _root_.Aeneas.Std.Usize) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Clause2_Ok
+     Clause2_Error)
+   := do
+@@ -165,7 +163,7 @@ def Pairs.Insts.Serde_coreSerSerialize.serialize_loop
+     (map, i)
+ 
+ /-- [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Pairs<K, V>}::serialize]:
+-    Source: 'src/lib.rs', lines 37:4-45:5
++    Source: 'src/lib.rs', lines 43:4-51:5
+     Visibility: public -/
+ def Pairs.Insts.Serde_coreSerSerialize.serialize
+   {K : Type} {V : Type} {S : Type} {Clause2_Ok : Type} {Clause2_Error : Type}
+@@ -196,7 +194,7 @@ def Pairs.Insts.Serde_coreSerSerialize.serialize
+       (_root_.Aeneas.Std.core.convert.FromSame Clause2_Error) residual
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Pairs<K, V>}]
+-    Source: 'src/lib.rs', lines 36:0-46:1 -/
++    Source: 'src/lib.rs', lines 42:0-52:1 -/
+ @[reducible]
+ def Pairs.Insts.Serde_coreSerSerialize {K : Type} {V : Type}
+   (serde_coreserSerializeInst : _root_.Aeneas.Std.serde_core.ser.Serialize K)
+@@ -218,14 +216,14 @@ def Pairs.Insts.Serde_coreSerSerialize {K : Type} {V : Type}
+ }
+ 
+ /-- [serde_visitors::PairsVisitor]
+-    Source: 'src/lib.rs', lines 48:0-48:55 -/
++    Source: 'src/lib.rs', lines 54:0-54:55 -/
+ @[reducible]
+ def PairsVisitor (K : Type) (V : Type) :=
+   _root_.serde_visitors.core.marker.PhantomData (_root_.Unit →
+   _root_.Aeneas.Std.Result (K × V))
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Pairs<K, V>> for serde_visitors::PairsVisitor<K, V>}::visit_map]: loop body 0:
+-    Source: 'src/lib.rs', lines 1:0-71:5
++    Source: 'src/lib.rs', lines 1:0-77:5
+     Visibility: public -/
+ @[rust_loop_body]
+ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop.body
+@@ -234,8 +232,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop.body
+   (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq K K)
+   (serde_coredeDeserializeInst1 : _root_.Aeneas.Std.serde_core.de.Deserialize
+   V) (serde_coredeMapAccessInst : _root_.Aeneas.Std.serde_core.de.MapAccess A
+-  Clause3_Error) (map : A) (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V))
+-  :
++  Clause3_Error) (map : A) (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A ×
+     (_root_.Aeneas.Std.alloc.vec.Vec (K × V)))
+     (_root_.Aeneas.Std.core.result.Result (_root_.serde_visitors.Pairs K V)
+@@ -272,8 +269,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop.body
+         let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
+         match cf1 with
+         | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1 =>
+-          let result1 ←
+-            _root_.Aeneas.Std.alloc.vec.Vec.push result (key, val1)
++          let result1 ← _root_.Aeneas.Std.alloc.vec.Vec.push result (key, val1)
+           _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
+             (map2, result1))
+         | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
+@@ -290,7 +286,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop.body
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Pairs<K, V>> for serde_visitors::PairsVisitor<K, V>}::visit_map]: loop 0:
+-    Source: 'src/lib.rs', lines 1:0-71:5
++    Source: 'src/lib.rs', lines 1:0-77:5
+     Visibility: public -/
+ @[rust_loop]
+ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop
+@@ -299,8 +295,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop
+   (corecmpPartialEqInst : _root_.Aeneas.Std.core.cmp.PartialEq K K)
+   (serde_coredeDeserializeInst1 : _root_.Aeneas.Std.serde_core.de.Deserialize
+   V) (serde_coredeMapAccessInst : _root_.Aeneas.Std.serde_core.de.MapAccess A
+-  Clause3_Error) (map : A) (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V))
+-  :
++  Clause3_Error) (map : A) (result : _root_.Aeneas.Std.alloc.vec.Vec (K × V)) :
+   _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
+     (_root_.serde_visitors.Pairs K V) Clause3_Error)
+   := do
+@@ -309,15 +304,14 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop
+        _root_.serde_visitors.PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map_loop.body
+        serde_coredeDeserializeInst corecmpPartialEqInst
+        serde_coredeDeserializeInst1 serde_coredeMapAccessInst map1 result1 : (A
+-      × (_root_.Aeneas.Std.alloc.vec.Vec (K × V))) →
+-      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (A ×
+-      (_root_.Aeneas.Std.alloc.vec.Vec (K × V)))
+-      (_root_.Aeneas.Std.core.result.Result (_root_.serde_visitors.Pairs K V)
+-      Clause3_Error)))
++      × (_root_.Aeneas.Std.alloc.vec.Vec (K × V))) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (A × (_root_.Aeneas.Std.alloc.vec.Vec (K ×
++      V))) (_root_.Aeneas.Std.core.result.Result (_root_.serde_visitors.Pairs K
++      V) Clause3_Error)))
+     (map, result)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Pairs<K, V>> for serde_visitors::PairsVisitor<K, V>}::visit_map]:
+-    Source: 'src/lib.rs', lines 61:4-71:5
++    Source: 'src/lib.rs', lines 67:4-77:5
+     Visibility: public -/
+ @[reducible]
+ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map
+@@ -336,7 +330,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.visit_map
+     (_root_.Aeneas.Std.alloc.vec.Vec.new (K × V))
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Pairs<K, V>> for serde_visitors::PairsVisitor<K, V>}::expecting]:
+-    Source: 'src/lib.rs', lines 57:4-59:5
++    Source: 'src/lib.rs', lines 63:4-65:5
+     Visibility: public -/
+ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.expecting
+   {K : Type} {V : Type} (serde_coredeDeserializeInst :
+@@ -352,7 +346,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs.expecting
+     (_root_.Aeneas.Std.toStr "a map with unique keys")
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Pairs<K, V>> for serde_visitors::PairsVisitor<K, V>}]
+-    Source: 'src/lib.rs', lines 50:0-72:1 -/
++    Source: 'src/lib.rs', lines 56:0-78:1 -/
+ @[reducible]
+ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs {K : Type} {V : Type}
+   (serde_coredeDeserializeInst : _root_.Aeneas.Std.serde_core.de.Deserialize K)
+@@ -373,7 +367,7 @@ def PairsVisitor.Insts.Serde_coreDeVisitorDePairs {K : Type} {V : Type}
+ }
+ 
+ /-- [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Pairs<K, V>}::deserialize]:
+-    Source: 'src/lib.rs', lines 79:4-81:5
++    Source: 'src/lib.rs', lines 85:4-87:5
+     Visibility: public -/
+ def Pairs.Insts.Serde_coreDeDeserialize.deserialize
+   {K : Type} {V : Type} {D : Type} {Clause3_Error : Type}
+@@ -393,7 +387,7 @@ def Pairs.Insts.Serde_coreDeDeserialize.deserialize
+     serde_coredeDeserializeInst1)) deserializer ()
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Pairs<K, V>}]
+-    Source: 'src/lib.rs', lines 74:0-82:1 -/
++    Source: 'src/lib.rs', lines 80:0-88:1 -/
+ @[reducible]
+ def Pairs.Insts.Serde_coreDeDeserialize {K : Type} {V : Type}
+   (serde_coredeDeserializeInst : _root_.Aeneas.Std.serde_core.de.Deserialize K)
+@@ -410,7 +404,7 @@ def Pairs.Insts.Serde_coreDeDeserialize {K : Type} {V : Type}
+ }
+ 
+ /-- [serde_visitors::Entry]
+-    Source: 'src/lib.rs', lines 85:0-89:1
++    Source: 'src/lib.rs', lines 91:0-95:1
+     Visibility: public -/
+ structure Entry where
+   id : _root_.Aeneas.Std.U32
+@@ -419,7 +413,7 @@ structure Entry where
+     _root_.Aeneas.Std.U32
+ 
+ /-- [serde_visitors::FIELDS]
+-    Source: 'src/lib.rs', lines 91:0-91:49 -/
++    Source: 'src/lib.rs', lines 97:0-97:49 -/
+ @[global_simps, irreducible]
+ def FIELDS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
+   _root_.Aeneas.Std.Array.to_slice
+@@ -429,7 +423,7 @@ def FIELDS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
+       ])
+ 
+ /-- [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Entry}::serialize]:
+-    Source: 'src/lib.rs', lines 94:4-100:5
++    Source: 'src/lib.rs', lines 100:4-106:5
+     Visibility: public -/
+ def Entry.Insts.Serde_coreSerSerialize.serialize
+   {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type} {Clause0_SerializeSeq :
+@@ -493,7 +487,7 @@ def Entry.Insts.Serde_coreSerSerialize.serialize
+       (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::ser::Serialize for serde_visitors::Entry}]
+-    Source: 'src/lib.rs', lines 93:0-101:1 -/
++    Source: 'src/lib.rs', lines 99:0-107:1 -/
+ @[reducible]
+ def Entry.Insts.Serde_coreSerSerialize :
+   _root_.Aeneas.Std.serde_core.ser.Serialize _root_.serde_visitors.Entry := {
+@@ -511,7 +505,7 @@ def Entry.Insts.Serde_coreSerSerialize :
+ }
+ 
+ /-- [serde_visitors::Field]
+-    Source: 'src/lib.rs', lines 103:0-107:1 -/
++    Source: 'src/lib.rs', lines 109:0-113:1 -/
+ @[discriminant isize]
+ inductive Field where
+ | Id : Field
+@@ -519,12 +513,12 @@ inductive Field where
+ | Pairs : Field
+ 
+ /-- [serde_visitors::FieldVisitor]
+-    Source: 'src/lib.rs', lines 109:0-109:20 -/
++    Source: 'src/lib.rs', lines 115:0-115:20 -/
+ @[reducible]
+ def FieldVisitor := _root_.Unit
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Field> for serde_visitors::FieldVisitor}::visit_str]:
+-    Source: 'src/lib.rs', lines 127:4-134:5
++    Source: 'src/lib.rs', lines 133:4-140:5
+     Visibility: public -/
+ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.visit_str
+   {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
+@@ -563,7 +557,7 @@ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.visit_str
+           t)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Field> for serde_visitors::FieldVisitor}::visit_u64]:
+-    Source: 'src/lib.rs', lines 118:4-125:5
++    Source: 'src/lib.rs', lines 124:4-131:5
+     Visibility: public -/
+ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.visit_u64
+   {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
+@@ -592,7 +586,7 @@ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.visit_u64
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err t)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Field> for serde_visitors::FieldVisitor}::expecting]:
+-    Source: 'src/lib.rs', lines 114:4-116:5
++    Source: 'src/lib.rs', lines 120:4-122:5
+     Visibility: public -/
+ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.expecting
+   (self : _root_.serde_visitors.FieldVisitor)
+@@ -604,7 +598,7 @@ def FieldVisitor.Insts.Serde_coreDeVisitorDeField.expecting
+     (_root_.Aeneas.Std.toStr "field identifier")
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Field> for serde_visitors::FieldVisitor}]
+-    Source: 'src/lib.rs', lines 111:0-135:1 -/
++    Source: 'src/lib.rs', lines 117:0-141:1 -/
+ @[reducible]
+ def FieldVisitor.Insts.Serde_coreDeVisitorDeField :
+   _root_.Aeneas.Std.serde_core.de.Visitor _root_.serde_visitors.FieldVisitor
+@@ -622,7 +616,7 @@ def FieldVisitor.Insts.Serde_coreDeVisitorDeField :
+ }
+ 
+ /-- [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Field}::deserialize]:
+-    Source: 'src/lib.rs', lines 138:4-140:5
++    Source: 'src/lib.rs', lines 144:4-146:5
+     Visibility: public -/
+ def Field.Insts.Serde_coreDeDeserialize.deserialize
+   {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
+@@ -637,7 +631,7 @@ def Field.Insts.Serde_coreDeDeserialize.deserialize
+     deserializer ()
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Field}]
+-    Source: 'src/lib.rs', lines 137:0-141:1 -/
++    Source: 'src/lib.rs', lines 143:0-147:1 -/
+ @[reducible]
+ def Field.Insts.Serde_coreDeDeserialize :
+   _root_.Aeneas.Std.serde_core.de.Deserialize _root_.serde_visitors.Field := {
+@@ -649,12 +643,12 @@ def Field.Insts.Serde_coreDeDeserialize :
+ }
+ 
+ /-- [serde_visitors::EntryVisitor]
+-    Source: 'src/lib.rs', lines 143:0-143:20 -/
++    Source: 'src/lib.rs', lines 149:0-149:20 -/
+ @[reducible]
+ def EntryVisitor := _root_.Unit
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}::visit_map]: loop body 0:
+-    Source: 'src/lib.rs', lines 1:0-207:5
++    Source: 'src/lib.rs', lines 1:0-213:5
+     Visibility: public -/
+ @[rust_loop_body]
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map_loop.body
+@@ -948,8 +942,8 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map_loop.body
+           ()))) =>
+           _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
+             exit1, exit2, ())) : _root_.Sum (A × (_root_.Option _root_.String)
+-            × (_root_.Option (_root_.serde_visitors.Pairs
+-            _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))) (_root_.Sum
++            × (_root_.Option (_root_.serde_visitors.Pairs _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32))) (_root_.Sum
+             (_root_.serde_visitors.EntryVisitor × A × (_root_.Option
+             _root_.Aeneas.Std.U32) × (_root_.Option _root_.String) ×
+             (_root_.Option (_root_.serde_visitors.Pairs _root_.Aeneas.Std.U32
+@@ -985,7 +979,7 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map_loop.body
+     _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}::visit_map]: loop 0:
+-    Source: 'src/lib.rs', lines 1:0-207:5
++    Source: 'src/lib.rs', lines 1:0-213:5
+     Visibility: public -/
+ @[rust_loop]
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map_loop
+@@ -1007,15 +1001,15 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map_loop
+       _root_.Aeneas.Std.U32) × (_root_.Option _root_.String) × (_root_.Option
+       (_root_.serde_visitors.Pairs _root_.Aeneas.Std.U32
+       _root_.Aeneas.Std.U32))) → _root_.Aeneas.Std.Result
+-      (_root_.Aeneas.Std.ControlFlow (_root_.serde_visitors.EntryVisitor × A
+-      × (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option _root_.String)
+-      × (_root_.Option (_root_.serde_visitors.Pairs _root_.Aeneas.Std.U32
++      (_root_.Aeneas.Std.ControlFlow (_root_.serde_visitors.EntryVisitor × A ×
++      (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option _root_.String) ×
++      (_root_.Option (_root_.serde_visitors.Pairs _root_.Aeneas.Std.U32
+       _root_.Aeneas.Std.U32))) (_root_.Aeneas.Std.core.result.Result
+       _root_.serde_visitors.Entry Clause0_Error)))
+     (self, map, id, name1, pairs)
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}::visit_map]:
+-    Source: 'src/lib.rs', lines 168:4-207:5
++    Source: 'src/lib.rs', lines 174:4-213:5
+     Visibility: public -/
+ @[reducible]
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map
+@@ -1029,7 +1023,7 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_map
+     serde_coredeMapAccessInst self map none none none
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}::visit_seq]:
+-    Source: 'src/lib.rs', lines 152:4-166:5
++    Source: 'src/lib.rs', lines 158:4-172:5
+     Visibility: public -/
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_seq
+   {A : Type} {Clause0_Error : Type} (serde_coredeSeqAccessInst :
+@@ -1116,7 +1110,7 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.visit_seq
+       Clause0_Error) residual
+ 
+ /-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}::expecting]:
+-    Source: 'src/lib.rs', lines 148:4-150:5
++    Source: 'src/lib.rs', lines 154:4-156:5
+     Visibility: public -/
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.expecting
+   (self : _root_.serde_visitors.EntryVisitor)
+@@ -1128,7 +1122,7 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry.expecting
+     (_root_.Aeneas.Std.toStr "struct Entry")
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Entry> for serde_visitors::EntryVisitor}]
+-    Source: 'src/lib.rs', lines 145:0-208:1 -/
++    Source: 'src/lib.rs', lines 151:0-214:1 -/
+ @[reducible]
+ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry :
+   _root_.Aeneas.Std.serde_core.de.Visitor _root_.serde_visitors.EntryVisitor
+@@ -1146,7 +1140,7 @@ def EntryVisitor.Insts.Serde_coreDeVisitorDeEntry :
+ }
+ 
+ /-- [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Entry}::deserialize]:
+-    Source: 'src/lib.rs', lines 211:4-213:5
++    Source: 'src/lib.rs', lines 217:4-219:5
+     Visibility: public -/
+ def Entry.Insts.Serde_coreDeDeserialize.deserialize
+   {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
+@@ -1162,7 +1156,7 @@ def Entry.Insts.Serde_coreDeDeserialize.deserialize
+     ()
+ 
+ /-- Trait implementation: [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Entry}]
+-    Source: 'src/lib.rs', lines 210:0-214:1 -/
++    Source: 'src/lib.rs', lines 216:0-220:1 -/
+ @[reducible]
+ def Entry.Insts.Serde_coreDeDeserialize :
+   _root_.Aeneas.Std.serde_core.de.Deserialize _root_.serde_visitors.Entry := {
+@@ -1173,4 +1167,713 @@ def Entry.Insts.Serde_coreDeDeserialize :
+     serde_coredeDeserializerInst
+ }
+ 
++/-- [serde_visitors::Settings]
++    Source: 'src/lib.rs', lines 224:0-227:1
++    Visibility: public -/
++structure Settings where
++  id : _root_.Aeneas.Std.U32
++  limit : _root_.Option _root_.Aeneas.Std.U32
++
++/-- [serde_visitors::SETTINGS_FIELDS]
++    Source: 'src/lib.rs', lines 229:0-229:50 -/
++@[global_simps, irreducible]
++def SETTINGS_FIELDS : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str :=
++  _root_.Aeneas.Std.Array.to_slice
++    (_root_.Aeneas.Std.Array.make 2#usize [
++      _root_.Aeneas.Std.toStr "id", _root_.Aeneas.Std.toStr "limit"
++      ])
++
++/-- [serde_visitors::SettingsField]
++    Source: 'src/lib.rs', lines 231:0-234:1 -/
++@[discriminant isize]
++inductive SettingsField where
++| Id : SettingsField
++| Limit : SettingsField
++
++/-- [serde_visitors::SettingsFieldVisitor]
++    Source: 'src/lib.rs', lines 236:0-236:28 -/
++@[reducible]
++def SettingsFieldVisitor := _root_.Unit
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::SettingsField> for serde_visitors::SettingsFieldVisitor}::visit_bytes]:
++    Source: 'src/lib.rs', lines 253:4-262:5
++    Visibility: public -/
++def SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.visit_bytes
++  {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
++  (self : _root_.serde_visitors.SettingsFieldVisitor)
++  (value : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.SettingsField E)
++  := do
++  let value1 := _root_.Aeneas.Std.Slice.len value
++  let joined ←
++    if value1 = 2#usize
++    then
++      do
++      let i ← _root_.Aeneas.Std.Slice.index_usize value 0#usize
++      let joined1 ←
++        match i with
++        | 105#uscalar =>
++          do
++          let i1 ← _root_.Aeneas.Std.Slice.index_usize value 1#usize
++          match i1 with
++          | 100#uscalar =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Aeneas.Std.core.result.Result.Ok
++              _root_.serde_visitors.SettingsField.Id)) : _root_.Sum
++              _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++              (_root_.Aeneas.Std.core.result.Result
++              _root_.serde_visitors.SettingsField E)))
++          | _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 105#u8 : _root_.Sum
++              _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++              (_root_.Aeneas.Std.core.result.Result
++              _root_.serde_visitors.SettingsField E)))
++        | _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl i : _root_.Sum
++            _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++            (_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.SettingsField E)))
++      match joined1 with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.serde_visitors.SettingsField E))
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++    else
++      do
++      let value2 := _root_.Aeneas.Std.Slice.len value
++      let joined1 ←
++        if value2 = 5#usize
++        then
++          do
++          let i ← _root_.Aeneas.Std.Slice.index_usize value 0#usize
++          let joined2 ←
++            match i with
++            | 108#uscalar =>
++              do
++              let i1 ← _root_.Aeneas.Std.Slice.index_usize value 1#usize
++              let joined3 ←
++                match i1 with
++                | 105#uscalar =>
++                  do
++                  let i2 ← _root_.Aeneas.Std.Slice.index_usize value 2#usize
++                  let joined4 ←
++                    match i2 with
++                    | 109#uscalar =>
++                      do
++                      let i3 ←
++                        _root_.Aeneas.Std.Slice.index_usize value 3#usize
++                      let joined5 ←
++                        match i3 with
++                        | 105#uscalar =>
++                          do
++                          let i4 ←
++                            _root_.Aeneas.Std.Slice.index_usize value 4#usize
++                          match i4 with
++                          | 116#uscalar =>
++                            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr
++                              (_root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr
++                              (_root_.Sum.inr (_root_.Sum.inr
++                              (_root_.Aeneas.Std.core.result.Result.Ok
++                              _root_.serde_visitors.SettingsField.Limit)))))) :
++                              _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++                              (_root_.Sum _root_.Unit
++                              (_root_.Aeneas.Std.core.result.Result
++                              _root_.serde_visitors.SettingsField E)))))))
++                          | _ =>
++                            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 105#u8
++                              : _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum
++                              _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++                              (_root_.Sum _root_.Unit
++                              (_root_.Aeneas.Std.core.result.Result
++                              _root_.serde_visitors.SettingsField E)))))))
++                        | _ =>
++                          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl i3 :
++                            _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                            _root_.Aeneas.Std.U8 (_root_.Sum
++                            _root_.Aeneas.Std.U8 (_root_.Sum
++                            _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit
++                            (_root_.Sum _root_.Unit
++                            (_root_.Aeneas.Std.core.result.Result
++                            _root_.serde_visitors.SettingsField E)))))))
++                      match joined5 with
++                      | _root_.Sum.inl _ =>
++                        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 109#u8 :
++                          _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                          _root_.Aeneas.Std.U8 (_root_.Sum _root_.Aeneas.Std.U8
++                          (_root_.Sum _root_.Unit (_root_.Sum _root_.Unit
++                          (_root_.Aeneas.Std.core.result.Result
++                          _root_.serde_visitors.SettingsField E))))))
++                      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++                    | _ =>
++                      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl i2 :
++                        _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                        _root_.Aeneas.Std.U8 (_root_.Sum _root_.Aeneas.Std.U8
++                        (_root_.Sum _root_.Unit (_root_.Sum _root_.Unit
++                        (_root_.Aeneas.Std.core.result.Result
++                        _root_.serde_visitors.SettingsField E))))))
++                  match joined4 with
++                  | _root_.Sum.inl _ =>
++                    _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 105#u8 :
++                      _root_.Sum _root_.Aeneas.Std.U8 (_root_.Sum
++                      _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit (_root_.Sum
++                      _root_.Unit (_root_.Aeneas.Std.core.result.Result
++                      _root_.serde_visitors.SettingsField E)))))
++                  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++                | _ =>
++                  _root_.Aeneas.Std.Result.ok (_root_.Sum.inl i1 : _root_.Sum
++                    _root_.Aeneas.Std.U8 (_root_.Sum _root_.Aeneas.Std.U8
++                    (_root_.Sum _root_.Unit (_root_.Sum _root_.Unit
++                    (_root_.Aeneas.Std.core.result.Result
++                    _root_.serde_visitors.SettingsField E)))))
++              match joined3 with
++              | _root_.Sum.inl _ =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl 108#u8 : _root_.Sum
++                  _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit (_root_.Sum
++                  _root_.Unit (_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.SettingsField E))))
++              | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++            | _ =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl i : _root_.Sum
++                _root_.Aeneas.Std.U8 (_root_.Sum _root_.Unit (_root_.Sum
++                _root_.Unit (_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.SettingsField E))))
++          match joined2 with
++          | _root_.Sum.inl _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++              _root_.Unit (_root_.Sum _root_.Unit
++              (_root_.Aeneas.Std.core.result.Result
++              _root_.serde_visitors.SettingsField E)))
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++        else
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum
++            _root_.Unit (_root_.Sum _root_.Unit
++            (_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.SettingsField E)))
++      match joined1 with
++      | _root_.Sum.inl () =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.serde_visitors.SettingsField E))
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  match joined with
++  | _root_.Sum.inl () =>
++    let value2 ←
++      _root_.Aeneas.Std.serde_core.private.string.from_utf8_lossy value
++    let s ←
++      _root_.Aeneas.Std.alloc.borrow.DerefCow.deref
++        _root_.Aeneas.Std.alloc.borrow.ToOwnedStr value2
++    let t ←
++      serde_coredeErrorInst.unknown_field s
++        _root_.serde_visitors.SETTINGS_FIELDS
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err t)
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::SettingsField> for serde_visitors::SettingsFieldVisitor}::visit_str]:
++    Source: 'src/lib.rs', lines 245:4-251:5
++    Visibility: public -/
++def SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.visit_str
++  {E : Type} (serde_coredeErrorInst : _root_.Aeneas.Std.serde_core.de.Error E)
++  (self : _root_.serde_visitors.SettingsFieldVisitor)
++  (value : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.SettingsField E)
++  := do
++  let b ←
++    _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq value
++      (_root_.Aeneas.Std.toStr "id")
++  if b
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      _root_.serde_visitors.SettingsField.Id)
++  else
++    let b1 ←
++      _root_.Aeneas.Std.core.str.traits.PartialEqStr.eq value
++        (_root_.Aeneas.Std.toStr "limit")
++    if b1
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++        _root_.serde_visitors.SettingsField.Limit)
++    else
++      let t ←
++        serde_coredeErrorInst.unknown_field value
++          _root_.serde_visitors.SETTINGS_FIELDS
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err t)
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::SettingsField> for serde_visitors::SettingsFieldVisitor}::expecting]:
++    Source: 'src/lib.rs', lines 241:4-243:5
++    Visibility: public -/
++def SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.expecting
++  (self : _root_.serde_visitors.SettingsFieldVisitor)
++  (formatter : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  _root_.Aeneas.Std.core.fmt.Formatter.write_str formatter
++    (_root_.Aeneas.Std.toStr "field identifier")
++
++/-- Trait implementation: [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::SettingsField> for serde_visitors::SettingsFieldVisitor}]
++    Source: 'src/lib.rs', lines 238:0-263:1 -/
++@[reducible]
++def SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField :
++  _root_.Aeneas.Std.serde_core.de.Visitor
++  _root_.serde_visitors.SettingsFieldVisitor
++  _root_.serde_visitors.SettingsField := {
++  expecting :=
++    _root_.serde_visitors.SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.expecting
++  visit_str := fun {E : Type} (serde_coredeErrorInst :
++    _root_.Aeneas.Std.serde_core.de.Error E) =>
++    _root_.serde_visitors.SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.visit_str
++    serde_coredeErrorInst
++  visit_bytes := fun {E : Type} (serde_coredeErrorInst :
++    _root_.Aeneas.Std.serde_core.de.Error E) =>
++    _root_.serde_visitors.SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField.visit_bytes
++    serde_coredeErrorInst
++}
++
++/-- [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::SettingsField}::deserialize]:
++    Source: 'src/lib.rs', lines 266:4-268:5
++    Visibility: public -/
++def SettingsField.Insts.Serde_coreDeDeserialize.deserialize
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.SettingsField Clause0_Error)
++  := do
++  serde_coredeDeserializerInst.deserialize_identifier
++    (_root_.Aeneas.Std.serde_core.de.Visitor.wrap
++    _root_.serde_visitors.SettingsFieldVisitor.Insts.Serde_coreDeVisitorDeSettingsField)
++    deserializer ()
++
++/-- Trait implementation: [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::SettingsField}]
++    Source: 'src/lib.rs', lines 265:0-269:1 -/
++@[reducible]
++def SettingsField.Insts.Serde_coreDeDeserialize :
++  _root_.Aeneas.Std.serde_core.de.Deserialize
++  _root_.serde_visitors.SettingsField := {
++  deserialize := fun {D : Type} {Clause0_Error : Type}
++    (serde_coredeDeserializerInst :
++    _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error) =>
++    _root_.serde_visitors.SettingsField.Insts.Serde_coreDeDeserialize.deserialize
++    serde_coredeDeserializerInst
++}
++
++/-- [serde_visitors::SettingsVisitor]
++    Source: 'src/lib.rs', lines 271:0-271:23 -/
++@[reducible]
++def SettingsVisitor := _root_.Unit
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Settings> for serde_visitors::SettingsVisitor}::visit_map]: loop body 0:
++    Source: 'src/lib.rs', lines 1:0-308:5
++    Visibility: public -/
++@[rust_loop_body]
++def SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map_loop.body
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error)
++  (self : _root_.serde_visitors.SettingsVisitor) (map : A)
++  (id : _root_.Option _root_.Aeneas.Std.U32)
++  (limit : _root_.Option (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++    _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++    _root_.Aeneas.Std.U32))) (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.Settings Clause0_Error))
++  := do
++  let (r, map1) ←
++    serde_coredeMapAccessInst.next_key
++      (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++      _root_.serde_visitors.SettingsField.Insts.Serde_coreDeDeserialize) map
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let joined ←
++      match val with
++      | none =>
++        do
++        let joined1 ←
++          match id with
++          | none =>
++            do
++            let r1 ←
++              _root_.Aeneas.Std.serde.private.de.missing_field
++                _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32
++                serde_coredeMapAccessInst.serde_coredeErrorInst
++                (_root_.Aeneas.Std.toStr "id")
++            let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++            match cf1 with
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val1
++              =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (map1, val1) :
++                _root_.Sum (A × _root_.Aeneas.Std.U32) (_root_.Sum
++                (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                _root_.Aeneas.Std.U32))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) ×
++                _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) × A))))
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++              residual =>
++              let r2 ←
++                _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                  _root_.serde_visitors.Settings
++                  (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++                  residual
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Sum.inr (r2, map1))) : _root_.Sum (A ×
++                _root_.Aeneas.Std.U32) (_root_.Sum
++                (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                _root_.Aeneas.Std.U32))) (_root_.Sum
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) ×
++                _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) × A))))
++          | some id1 =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (map1, id1) :
++              _root_.Sum (A × _root_.Aeneas.Std.U32) (_root_.Sum
++              (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++              _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++              _root_.Aeneas.Std.U32))) (_root_.Sum
++              ((_root_.Aeneas.Std.core.result.Result
++              _root_.serde_visitors.Settings Clause0_Error) ×
++              _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)
++              ((_root_.Aeneas.Std.core.result.Result
++              _root_.serde_visitors.Settings Clause0_Error) × A))))
++        match joined1 with
++        | _root_.Sum.inl (map2, id1) =>
++          let r1 ←
++            match limit with
++            | none =>
++              do
++              let r2 ←
++                _root_.Aeneas.Std.serde.private.de.missing_field
++                  (_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption
++                  _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32)
++                  serde_coredeMapAccessInst.serde_coredeErrorInst
++                  (_root_.Aeneas.Std.toStr "limit")
++              let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++              match cf1 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                val1 =>
++                _root_.Aeneas.Std.Result.ok
++                  (_root_.Aeneas.Std.core.result.Result.Ok
++                  ({ id := id1, limit := val1 } :
++                  _root_.serde_visitors.Settings))
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                  _root_.serde_visitors.Settings
++                  (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++                  residual
++            | some limit1 =>
++              _root_.Aeneas.Std.Result.ok
++                (_root_.Aeneas.Std.core.result.Result.Ok
++                ({ id := id1, limit := limit1 } :
++                _root_.serde_visitors.Settings))
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r1, map2) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++            exit1, exit2, exit3)) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++          ()))) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
++            exit1, exit2, ())) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit, exit1))) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (exit, exit1) :
++            _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++      | some key =>
++        do
++        let joined1 ←
++          match key with
++          | _root_.serde_visitors.SettingsField.Id =>
++            let b := _root_.Aeneas.Std.core.option.Option.is_some id
++            if b
++            then
++              do
++              let t ←
++                serde_coredeMapAccessInst.serde_coredeErrorInst.duplicate_field
++                  (_root_.Aeneas.Std.toStr "id")
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                (_root_.Aeneas.Std.core.result.Result.Err t, self, map1, ())) :
++                _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) × A ×
++                _root_.Unit) (_root_.Sum (_root_.serde_visitors.SettingsVisitor
++                × A × (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option
++                (_root_.Option _root_.Aeneas.Std.U32)))
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) ×
++                _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++            else
++              do
++              let (r1, map2) ←
++                serde_coredeMapAccessInst.next_value
++                  (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++                  _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32) map1
++              let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++              match cf1 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                val1 =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++                  (self, map2, some val1, limit)) : _root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) × A ×
++                  _root_.Unit) (_root_.Sum
++                  (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                  _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                  _root_.Aeneas.Std.U32)))
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) ×
++                  _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                let r2 ←
++                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                    _root_.serde_visitors.Settings
++                    (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++                    residual
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (r2, self, map2, ())) : _root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) × A ×
++                  _root_.Unit) (_root_.Sum
++                  (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                  _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                  _root_.Aeneas.Std.U32)))
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) ×
++                  _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++          | _root_.serde_visitors.SettingsField.Limit =>
++            let b := _root_.Aeneas.Std.core.option.Option.is_some limit
++            if b
++            then
++              do
++              let t ←
++                serde_coredeMapAccessInst.serde_coredeErrorInst.duplicate_field
++                  (_root_.Aeneas.Std.toStr "limit")
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++                (_root_.Aeneas.Std.core.result.Result.Err t, map1, ()) :
++                _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) × A ×
++                _root_.Unit) (_root_.Sum (_root_.serde_visitors.SettingsVisitor
++                × A × (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option
++                (_root_.Option _root_.Aeneas.Std.U32)))
++                ((_root_.Aeneas.Std.core.result.Result
++                _root_.serde_visitors.Settings Clause0_Error) ×
++                _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++            else
++              do
++              let (r1, map2) ←
++                serde_coredeMapAccessInst.next_value
++                  (_root_.Aeneas.Std.serde_core.de.Deserialize.wrap
++                  (_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption
++                  _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32)) map1
++              let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++              match cf1 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                val1 =>
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++                  (self, map2, id, some val1)) : _root_.Sum
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) × A ×
++                  _root_.Unit) (_root_.Sum
++                  (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                  _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                  _root_.Aeneas.Std.U32)))
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) ×
++                  _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                let r2 ←
++                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                    _root_.serde_visitors.Settings
++                    (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++                    residual
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r2, map2, ()) :
++                  _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) × A ×
++                  _root_.Unit) (_root_.Sum
++                  (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++                  _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++                  _root_.Aeneas.Std.U32)))
++                  ((_root_.Aeneas.Std.core.result.Result
++                  _root_.serde_visitors.Settings Clause0_Error) ×
++                  _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        match joined1 with
++        | _root_.Sum.inl (r1, t, _) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (r1,
++            self, t, ())) : _root_.Sum ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (exit,
++            exit1, exit2, exit3)) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++        | _root_.Sum.inr (_root_.Sum.inr (exit, exit1, exit2, ())) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr (exit,
++            exit1, exit2, ())) : _root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) × A) (_root_.Sum
++            (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++            _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++            _root_.Aeneas.Std.U32))) ((_root_.Aeneas.Std.core.result.Result
++            _root_.serde_visitors.Settings Clause0_Error) ×
++            _root_.serde_visitors.SettingsVisitor × A × _root_.Unit)))
++    match joined with
++    | _root_.Sum.inl (r1, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++        exit1, exit2, exit3))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    let r1 ←
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.serde_visitors.Settings (_root_.Aeneas.Std.core.convert.FromSame
++        Clause0_Error) residual
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Settings> for serde_visitors::SettingsVisitor}::visit_map]: loop 0:
++    Source: 'src/lib.rs', lines 1:0-308:5
++    Visibility: public -/
++@[rust_loop]
++def SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map_loop
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error)
++  (self : _root_.serde_visitors.SettingsVisitor) (map : A)
++  (id : _root_.Option _root_.Aeneas.Std.U32)
++  (limit : _root_.Option (_root_.Option _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.Settings Clause0_Error)
++  := do
++  loop
++    (fun (self1, map1, id1, limit1) =>
++       _root_.serde_visitors.SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map_loop.body
++       serde_coredeMapAccessInst self1 map1 id1 limit1 :
++      (_root_.serde_visitors.SettingsVisitor × A × (_root_.Option
++      _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++      _root_.Aeneas.Std.U32))) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.serde_visitors.SettingsVisitor × A
++      × (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Option (_root_.Option
++      _root_.Aeneas.Std.U32))) (_root_.Aeneas.Std.core.result.Result
++      _root_.serde_visitors.Settings Clause0_Error)))
++    (self, map, id, limit)
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Settings> for serde_visitors::SettingsVisitor}::visit_map]:
++    Source: 'src/lib.rs', lines 280:4-308:5
++    Visibility: public -/
++@[reducible]
++def SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map
++  {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst :
++  _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error)
++  (self : _root_.serde_visitors.SettingsVisitor) (map : A) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.Settings Clause0_Error)
++  := do
++  _root_.serde_visitors.SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map_loop
++    serde_coredeMapAccessInst self map none none
++
++/-- [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Settings> for serde_visitors::SettingsVisitor}::expecting]:
++    Source: 'src/lib.rs', lines 276:4-278:5
++    Visibility: public -/
++def SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.expecting
++  (self : _root_.serde_visitors.SettingsVisitor)
++  (formatter : _root_.Aeneas.Std.core.fmt.Formatter) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.fmt.Error) × _root_.Aeneas.Std.core.fmt.Formatter)
++  := do
++  _root_.Aeneas.Std.core.fmt.Formatter.write_str formatter
++    (_root_.Aeneas.Std.toStr "struct Settings")
++
++/-- Trait implementation: [serde_visitors::{serde_core::de::Visitor<'de, serde_visitors::Settings> for serde_visitors::SettingsVisitor}]
++    Source: 'src/lib.rs', lines 273:0-309:1 -/
++@[reducible]
++def SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings :
++  _root_.Aeneas.Std.serde_core.de.Visitor _root_.serde_visitors.SettingsVisitor
++  _root_.serde_visitors.Settings := {
++  expecting :=
++    _root_.serde_visitors.SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.expecting
++  visit_map := fun {A : Type} {Clause0_Error : Type} (serde_coredeMapAccessInst
++    : _root_.Aeneas.Std.serde_core.de.MapAccess A Clause0_Error) =>
++    _root_.serde_visitors.SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings.visit_map
++    serde_coredeMapAccessInst
++}
++
++/-- [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Settings}::deserialize]:
++    Source: 'src/lib.rs', lines 312:4-314:5
++    Visibility: public -/
++def Settings.Insts.Serde_coreDeDeserialize.deserialize
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.serde_visitors.Settings Clause0_Error)
++  := do
++  serde_coredeDeserializerInst.deserialize_struct
++    (_root_.Aeneas.Std.serde_core.de.Visitor.wrap
++    _root_.serde_visitors.SettingsVisitor.Insts.Serde_coreDeVisitorDeSettings)
++    deserializer (_root_.Aeneas.Std.toStr "Settings")
++    _root_.serde_visitors.SETTINGS_FIELDS ()
++
++/-- Trait implementation: [serde_visitors::{serde_core::de::Deserialize<'de> for serde_visitors::Settings}]
++    Source: 'src/lib.rs', lines 311:0-315:1 -/
++@[reducible]
++def Settings.Insts.Serde_coreDeDeserialize :
++  _root_.Aeneas.Std.serde_core.de.Deserialize _root_.serde_visitors.Settings
++  := {
++  deserialize := fun {D : Type} {Clause0_Error : Type}
++    (serde_coredeDeserializerInst :
++    _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error) =>
++    _root_.serde_visitors.Settings.Insts.Serde_coreDeDeserialize.deserialize
++    serde_coredeDeserializerInst
++}
++
+ end serde_visitors
+diff --git a/tests/src/serde-visitors/src/lib.rs b/tests/src/serde-visitors/src/lib.rs
+index 9408c0a..5f3b345 100644
+--- a/tests/src/serde-visitors/src/lib.rs
++++ b/tests/src/serde-visitors/src/lib.rs
+@@ -10,6 +10,12 @@
+ //! with its visitor, a struct visitor over a map and over a sequence, `Error::invalid_length` and
+ //! `Error::invalid_value` with a `&dyn Expected` built from a `&str`).
+ //!
++//! `Settings` has the hand-written form of `#[derive(Deserialize)]` with `deny_unknown_fields` whose
++//! missing fields go through `serde::__private::de::missing_field` (serde_derive's form for a field
++//! without `#[serde(default)]`): a missing `Option` field is `None`, any other is the error's
++//! `missing_field`. Its field identifier reports an unknown name given as bytes through
++//! `serde::__private::from_utf8_lossy`, as the derive does.
++//!
+ //! `SerdeVisitors/Checks.lean` runs these implementations against the in-test format of the
+ //! `native` test module (a value tree), encoded as a `FormatProgram`, and compares with the native
+ //! results.
+@@ -213,6 +219,101 @@ impl<'de> Deserialize<'de> for Entry {
+     }
+ }
+ 
++/// A struct with the hand-written form of `#[derive(Deserialize)] #[serde(deny_unknown_fields)]`
++/// (serde_derive 1.0.228, the `visit_map` arm; the sequence form is as `Entry`'s).
++pub struct Settings {
++    pub id: u32,
++    pub limit: Option<u32>,
++}
++
++const SETTINGS_FIELDS: &[&str] = &["id", "limit"];
++
++enum SettingsField {
++    Id,
++    Limit,
++}
++
++struct SettingsFieldVisitor;
++
++impl<'de> Visitor<'de> for SettingsFieldVisitor {
++    type Value = SettingsField;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("field identifier")
++    }
++
++    fn visit_str<E: de::Error>(self, value: &str) -> Result<SettingsField, E> {
++        match value {
++            "id" => Ok(SettingsField::Id),
++            "limit" => Ok(SettingsField::Limit),
++            _ => Err(E::unknown_field(value, SETTINGS_FIELDS)),
++        }
++    }
++
++    fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<SettingsField, E> {
++        match value {
++            b"id" => Ok(SettingsField::Id),
++            b"limit" => Ok(SettingsField::Limit),
++            _ => {
++                let value = &serde::__private228::from_utf8_lossy(value);
++                Err(E::unknown_field(value, SETTINGS_FIELDS))
++            }
++        }
++    }
++}
++
++impl<'de> Deserialize<'de> for SettingsField {
++    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<SettingsField, D::Error> {
++        deserializer.deserialize_identifier(SettingsFieldVisitor)
++    }
++}
++
++struct SettingsVisitor;
++
++impl<'de> Visitor<'de> for SettingsVisitor {
++    type Value = Settings;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("struct Settings")
++    }
++
++    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Settings, A::Error> {
++        let mut id: Option<u32> = None;
++        let mut limit: Option<Option<u32>> = None;
++        while let Some(key) = map.next_key::<SettingsField>()? {
++            match key {
++                SettingsField::Id => {
++                    if id.is_some() {
++                        return Err(de::Error::duplicate_field("id"));
++                    }
++                    id = Some(map.next_value::<u32>()?);
++                }
++                SettingsField::Limit => {
++                    if limit.is_some() {
++                        return Err(de::Error::duplicate_field("limit"));
++                    }
++                    limit = Some(map.next_value::<Option<u32>>()?);
++                }
++            }
++        }
++        let id = match id {
++            Some(id) => id,
++            None => serde::__private228::de::missing_field("id")?,
++        };
++        let limit = match limit {
++            Some(limit) => limit,
++            None => serde::__private228::de::missing_field("limit")?,
++        };
++        Ok(Settings { id, limit })
++    }
++}
++
++impl<'de> Deserialize<'de> for Settings {
++    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Settings, D::Error> {
++        deserializer.deserialize_struct("Settings", SETTINGS_FIELDS, SettingsVisitor)
++    }
++}
++
+ #[cfg(test)]
+ mod native {
+     //! The in-test format: an owned value tree, as serde's value (de)serializers.
+@@ -507,6 +608,17 @@ mod native {
+         Entry::deserialize(ValueDe(v)).map(|e| (e.id, e.name, e.pairs.0))
+     }
+ 
++    fn de_settings(v: Value) -> Result<(u32, Option<u32>), TestError> {
++        Settings::deserialize(ValueDe(v)).map(|s| (s.id, s.limit))
++    }
++
++    fn settings_field_bytes(v: &[u8]) -> Result<u32, TestError> {
++        Visitor::visit_bytes(SettingsFieldVisitor, v).map(|field| match field {
++            SettingsField::Id => 0,
++            SettingsField::Limit => 1,
++        })
++    }
++
+     fn err(msg: &str) -> TestError {
+         TestError(msg.to_string())
+     }
+@@ -586,6 +698,48 @@ mod native {
+         );
+     }
+ 
++    #[test]
++    fn deserialize_settings_missing_fields() {
++        // a missing `Option` field is `None` (`visit_none` of `Option`'s visitor)
++        assert_eq!(de_settings(Struct("Settings", vec![("id", U32(3))])), Ok((3, None)));
++        // any other missing field is the error's `missing_field`
++        assert_eq!(
++            de_settings(Struct("Settings", vec![])),
++            Err(err("missing field `id`"))
++        );
++        assert_eq!(
++            de_settings(Struct("Settings", vec![("limit", Map(vec![]))])),
++            Err(err("invalid type: map, expected option"))
++        );
++        assert_eq!(
++            de_settings(Struct("Settings", vec![("id", U32(3)), ("id", U32(4))])),
++            Err(err("duplicate field `id`"))
++        );
++    }
++
++    #[test]
++    fn settings_field_bytes_lossy() {
++        assert_eq!(settings_field_bytes(b"limit"), Ok(1));
++        assert_eq!(settings_field_bytes(b"id"), Ok(0));
++        assert_eq!(
++            settings_field_bytes(b"bogus"),
++            Err(err("unknown field `bogus`, expected `id` or `limit`"))
++        );
++        // `from_utf8_lossy`: one U+FFFD per maximal invalid prefix
++        assert_eq!(
++            settings_field_bytes(b"li\xF0\x90\x80mit"),
++            Err(err("unknown field `li\u{FFFD}mit`, expected `id` or `limit`"))
++        );
++        assert_eq!(
++            settings_field_bytes(b"a\xED\xA0\x80b\xFF\xC3"),
++            Err(err("unknown field `a\u{FFFD}\u{FFFD}\u{FFFD}b\u{FFFD}\u{FFFD}`, expected `id` or `limit`"))
++        );
++        assert_eq!(
++            settings_field_bytes("é\u{10348}".as_bytes()),
++            Err(err("unknown field `é\u{10348}`, expected `id` or `limit`"))
++        );
++    }
++
+     #[test]
+     fn round_trip() {
+         let value = ser(&entry()).unwrap();

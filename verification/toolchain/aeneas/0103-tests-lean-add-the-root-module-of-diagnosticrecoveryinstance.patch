@@ -1,0 +1,17 @@
+# aeneas integration step 103 after cba11f3beb: commit 59baace682d218550ffd90b7d1f9f61d4f4de5ba
+# first parent 7f31dc930c357d2cda46447091fd0526bc975ad7
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# tests/lean: add the root module of DiagnosticRecoveryInstance
+#
+# 6f71980 registered the lean_lib without its root module, so the tests
+# package's default targets did not build (the round-23 sweep stopped on
+# it).
+
+diff --git a/tests/lean/DiagnosticRecoveryInstance.lean b/tests/lean/DiagnosticRecoveryInstance.lean
+new file mode 100644
+index 0000000..e3a7fdc
+--- /dev/null
++++ b/tests/lean/DiagnosticRecoveryInstance.lean
+@@ -0,0 +1 @@
++import DiagnosticRecoveryInstance.Checks

@@ -1,0 +1,401 @@
+# aeneas integration step 136 after cba11f3beb: commit 0b5552db0f3ed4097da31881a181b440ddce215d
+# first parent 494638db4d84502d40585db74f55ace807aa90b5, merged 8c44d12d7d06621155e2f0cd9497061e0bc42787
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-10' (LowerHex/UpperHex of u32/u64 and &T, Debug and Display of char, Formatter::debug_tuple_field3_finish)
+
+diff --git a/backends/lean/Aeneas/Std/Core/Fmt.lean b/backends/lean/Aeneas/Std/Core/Fmt.lean
+index d15b332..79b6c3e 100644
+--- a/backends/lean/Aeneas/Std/Core/Fmt.lean
++++ b/backends/lean/Aeneas/Std/Core/Fmt.lean
+@@ -299,6 +299,13 @@ def DebugShared.fmt {T : Type} (inst : Debug T) (x : T) (fmt : Formatter) : Outc
+ @[reducible, rust_trait_impl "core::fmt::Debug<&'0 @T>"]
+ def DebugShared {T : Type} (inst : Debug T) : Debug T := ⟨DebugShared.fmt inst⟩
+ 
++/-- `impl UpperHex for &T` (core/src/fmt/mod.rs `fmt_ref!`): `UpperHex::fmt(&**self, f)`. -/
++@[rust_fun "core::fmt::{core::fmt::UpperHex<&'0 @T>}::fmt"]
++def UpperHexShared.fmt {T : Type} (inst : UpperHex T) (x : T) (fmt : Formatter) : Outcome :=
++  inst.fmt x fmt
++@[reducible, rust_trait_impl "core::fmt::UpperHex<&'0 @T>"]
++def UpperHexShared {T : Type} (inst : UpperHex T) : UpperHex T := ⟨UpperHexShared.fmt inst⟩
++
+ @[rust_fun "core::fmt::{core::fmt::Debug<bool>}::fmt"]
+ def DebugBool.fmt (x : Bool) (fmt : Formatter) : Outcome :=
+   let text := if x then "true" else "false"
+@@ -355,6 +362,11 @@ def Formatter.debug_tuple_field2_finish (fmt : Formatter) (name : Str)
+     (v0 v1 : DebugValue) : Outcome := do
+   fmt.debugTuple (← decode name.val) [v0, v1]
+ 
++@[rust_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field3_finish"]
++def Formatter.debug_tuple_field3_finish (fmt : Formatter) (name : Str)
++    (v0 v1 v2 : DebugValue) : Outcome := do
++  fmt.debugTuple (← decode name.val) [v0, v1, v2]
++
+ section Monotonicity
+ 
+ open Lean.Order
+@@ -507,6 +519,27 @@ theorem Formatter.debug_tuple_field2_finish.monotone {α : Type u} [Lean.Order.P
+     intro a b h
+     exact Lean.Order.PartialOrder.rel_refl
+ 
++@[partial_fixpoint_monotone]
++theorem Formatter.debug_tuple_field3_finish.monotone {α : Type u} [Lean.Order.PartialOrder α]
++    (fmt : Formatter) (name : Str) (v₀ v₁ v₂ : α → DebugValue)
++    (h₀ : monotone (fun a => debugValue (v₀ a)))
++    (h₁ : monotone (fun a => debugValue (v₁ a)))
++    (h₂ : monotone (fun a => debugValue (v₂ a))) :
++    monotone (fun a => fmt.debug_tuple_field3_finish name (v₀ a) (v₁ a) (v₂ a)) := by
++  unfold Formatter.debug_tuple_field3_finish Formatter.debugTuple
++  simp only [List.isEmpty_cons, List.length_cons, List.length_nil, Bool.false_eq_true,
++    ↓reduceIte, debugEntries]
++  repeat' first
++    | assumption
++    | exact monotone_apply _ _ h₀
++    | exact monotone_apply _ _ h₁
++    | exact monotone_apply _ _ h₂
++    | exact monotone_const _
++    | monotonicity
++  all_goals
++    intro a b h
++    exact Lean.Order.PartialOrder.rel_refl
++
+ end Monotonicity
+ 
+ end core.fmt
+diff --git a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+index d8a8bac..9bf75eb 100644
+--- a/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
++++ b/backends/lean/Aeneas/Std/Core/FmtWithSlice.lean
+@@ -42,6 +42,24 @@ def displayString (s : String) (fmt : Formatter) : Outcome :=
+   let s := if fmt.options.bit 28 then String.ofList (s.toList.take fmt.options.precision) else s
+   fmt.pad s
+ 
++/-- `impl Debug for char` (core/src/fmt/mod.rs, rustc 1.95): `'`, the `escape_debug_ext` of the
++    character with `escape_grapheme_extended` and `escape_single_quote` (not the double quote)
++    written with `Display for EscapeDebug` (a single write, no padding), then `'`. -/
++@[rust_fun "core::fmt::{core::fmt::Debug<char>}::fmt"]
++def DebugChar.fmt (c : Char) (fmt : Formatter) : Outcome :=
++  thenFormat (fmt.append "'") (fun fmt =>
++    thenFormat (fmt.append (escapeDebugChar c '\'')) (fun fmt => fmt.append "'"))
++@[reducible, rust_trait_impl "core::fmt::Debug<char>"]
++def DebugChar : Debug Char := ⟨DebugChar.fmt⟩
++
++/-- `impl Display for char` (core/src/fmt/mod.rs): `write_char` without width and precision,
++    else `pad` of its UTF-8 encoding (the precision truncates, the width pads). -/
++@[rust_fun "core::fmt::{core::fmt::Display<char>}::fmt"]
++def DisplayChar.fmt (c : Char) (fmt : Formatter) : Outcome :=
++  displayString (String.singleton c) fmt
++@[reducible, rust_trait_impl "core::fmt::Display<char>"]
++def DisplayChar : Display Char := ⟨DisplayChar.fmt⟩
++
+ @[rust_fun "core::fmt::{core::fmt::Debug<str>}::fmt"]
+ def DebugStr.fmt (s : Str) (fmt : Formatter) : Outcome := do debugString (← decode s.val) fmt
+ @[reducible, rust_trait_impl "core::fmt::Debug<str>"]
+diff --git a/backends/lean/Aeneas/Std/Scalar/Fmt.lean b/backends/lean/Aeneas/Std/Scalar/Fmt.lean
+index b12aa49..cf0b895 100644
+--- a/backends/lean/Aeneas/Std/Scalar/Fmt.lean
++++ b/backends/lean/Aeneas/Std/Scalar/Fmt.lean
+@@ -173,6 +173,18 @@ def core.fmt.num.LowerHexU16.fmt (x : U16) (fmt : core.fmt.Formatter) : core.fmt
+ @[reducible, rust_trait_impl "core::fmt::LowerHex<u16>"]
+ def core.fmt.LowerHexU16 : core.fmt.LowerHex U16 := ⟨core.fmt.num.LowerHexU16.fmt⟩
+ 
++@[rust_fun "core::fmt::num::{core::fmt::LowerHex<u32>}::fmt"]
++def core.fmt.num.LowerHexU32.fmt (x : U32) (fmt : core.fmt.Formatter) : core.fmt.Outcome :=
++  fmt.padIntegral false "0x" (core.fmt.digits x.val 16)
++@[reducible, rust_trait_impl "core::fmt::LowerHex<u32>"]
++def core.fmt.LowerHexU32 : core.fmt.LowerHex U32 := ⟨core.fmt.num.LowerHexU32.fmt⟩
++
++@[rust_fun "core::fmt::num::{core::fmt::LowerHex<u64>}::fmt"]
++def core.fmt.num.LowerHexU64.fmt (x : U64) (fmt : core.fmt.Formatter) : core.fmt.Outcome :=
++  fmt.padIntegral false "0x" (core.fmt.digits x.val 16)
++@[reducible, rust_trait_impl "core::fmt::LowerHex<u64>"]
++def core.fmt.LowerHexU64 : core.fmt.LowerHex U64 := ⟨core.fmt.num.LowerHexU64.fmt⟩
++
+ /-- `{:X}` (core/src/fmt/num.rs `radix! { UpperHex, 16, "0x", ... 'A'..'F' }`): upper-case
+     digits; the alternate flag's prefix is still `0x`. -/
+ @[rust_fun "core::fmt::num::{core::fmt::UpperHex<u8>}::fmt"]
+@@ -181,4 +193,10 @@ def core.fmt.num.UpperHexU8.fmt (x : U8) (fmt : core.fmt.Formatter) : core.fmt.O
+ @[reducible, rust_trait_impl "core::fmt::UpperHex<u8>"]
+ def core.fmt.UpperHexU8 : core.fmt.UpperHex U8 := ⟨core.fmt.num.UpperHexU8.fmt⟩
+ 
++@[rust_fun "core::fmt::num::{core::fmt::UpperHex<u32>}::fmt"]
++def core.fmt.num.UpperHexU32.fmt (x : U32) (fmt : core.fmt.Formatter) : core.fmt.Outcome :=
++  fmt.padIntegral false "0x" (core.fmt.digits x.val 16 true)
++@[reducible, rust_trait_impl "core::fmt::UpperHex<u32>"]
++def core.fmt.UpperHexU32 : core.fmt.UpperHex U32 := ⟨core.fmt.num.UpperHexU32.fmt⟩
++
+ end Aeneas.Std
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 97e3ac6..db98192 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -290,9 +290,9 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::convert::AsRef<Box<@T>, @T>}::as_ref" "_root_.Aeneas.Std.alloc.boxed.AsRefBox.as_ref" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Default.lean", line: 23 *)
+   mk_fun "alloc::boxed::{core::default::Default<Box<@T>>}::default" "_root_.Aeneas.Std.alloc.boxed.DefaultBox.default";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 70 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 88 *)
+   mk_fun "alloc::boxed::{core::fmt::Debug<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBox.fmt" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 75 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 93 *)
+   mk_fun "alloc::boxed::{core::fmt::Display<alloc::boxed::Box<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBox.fmt" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 120 *)
+   mk_fun "alloc::boxed::{core::hash::Hash<Box<@T>>}::hash" "_root_.Aeneas.Std.alloc.boxed.HashBox.hash" ~keep_params:(Some [true; false; true]);
+@@ -480,7 +480,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::collections::vec_deque::{core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>}::from" "_root_.Aeneas.Std.alloc.collections.vec_deque.FromVecDequeArray.from";
+   (* file: "Aeneas/Std/VecDeque.lean", line: 27 *)
+   mk_fun "alloc::collections::vec_deque::{core::default::Default<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>>}::default" "_root_.Aeneas.Std.alloc.collections.vec_deque.DefaultVecDeque.default";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 171 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 189 *)
+   mk_fun "alloc::fmt::format" "_root_.Aeneas.Std.alloc.fmt.format";
+   (* file: "Aeneas/Std/Sync.lean", line: 38 *)
+   mk_fun "alloc::rc::{alloc::rc::Rc<@T>}::new" "_root_.Aeneas.Std.alloc.rc.Rc.new" ~can_fail:false;
+@@ -540,7 +540,7 @@ let lean_builtin_funs = [
+   mk_fun "alloc::string::{alloc::string::String}::push_str" "_root_.Aeneas.Std.alloc.string.String.push_str";
+   (* file: "Aeneas/Std/String.lean", line: 554 *)
+   mk_fun "alloc::string::{alloc::string::String}::with_capacity" "_root_.Aeneas.Std.alloc.string.String.with_capacity";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 182 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 200 *)
+   mk_fun "alloc::string::{alloc::string::ToString<@T>}::to_string" "_root_.Aeneas.Std.alloc.string.ToStringBlanket.to_string";
+   (* file: "Aeneas/Std/String.lean", line: 204 *)
+   mk_fun "alloc::string::{core::clone::Clone<alloc::string::String>}::clone" "_root_.Aeneas.Std.alloc.string.CloneString.clone";
+@@ -574,9 +574,9 @@ let lean_builtin_funs = [
+   mk_fun "alloc::string::{core::convert::From<alloc::string::String, &'a str>}::from" "_root_.Aeneas.Std.alloc.string.FromStrString.from_";
+   (* file: "Aeneas/Std/String.lean", line: 466 *)
+   mk_fun "alloc::string::{core::default::Default<alloc::string::String>}::default" "_root_.Aeneas.Std.alloc.string.DefaultString.default";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 55 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 73 *)
+   mk_fun "alloc::string::{core::fmt::Debug<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugString.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 60 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 78 *)
+   mk_fun "alloc::string::{core::fmt::Display<alloc::string::String>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayString.fmt";
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 224 *)
+   mk_fun "alloc::string::{core::hash::Hash<alloc::string::String>}::hash" "_root_.Aeneas.Std.alloc.string.HashString.hash";
+@@ -1042,7 +1042,13 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::num::{core::fmt::Debug<usize>}::fmt" "_root_.Aeneas.Std.core.fmt.num.DebugUsize.fmt";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 170 *)
+   mk_fun "core::fmt::num::{core::fmt::LowerHex<u16>}::fmt" "_root_.Aeneas.Std.core.fmt.num.LowerHexU16.fmt";
+-  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 178 *)
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 176 *)
++  mk_fun "core::fmt::num::{core::fmt::LowerHex<u32>}::fmt" "_root_.Aeneas.Std.core.fmt.num.LowerHexU32.fmt";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 182 *)
++  mk_fun "core::fmt::num::{core::fmt::LowerHex<u64>}::fmt" "_root_.Aeneas.Std.core.fmt.num.LowerHexU64.fmt";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 196 *)
++  mk_fun "core::fmt::num::{core::fmt::UpperHex<u32>}::fmt" "_root_.Aeneas.Std.core.fmt.num.UpperHexU32.fmt";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 190 *)
+   mk_fun "core::fmt::num::{core::fmt::UpperHex<u8>}::fmt" "_root_.Aeneas.Std.core.fmt.num.UpperHexU8.fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 170 *)
+   mk_fun "core::fmt::rt::{core::fmt::rt::Argument<'0>}::from_usize" "_root_.Aeneas.Std.core.fmt.rt.Argument.from_usize";
+@@ -1064,42 +1070,50 @@ let lean_builtin_funs = [
+   mk_fun "core::fmt::{core::fmt::Arguments<'a>}::new" "_root_.Aeneas.Std.core.fmt.Arguments.new";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 297 *)
+   mk_fun "core::fmt::{core::fmt::Debug<&'0 @T>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugShared.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 313 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 320 *)
+   mk_fun "core::fmt::{core::fmt::Debug<()>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugUnit.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 157 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 175 *)
+   mk_fun "core::fmt::{core::fmt::Debug<(@A, @B)>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugPair.fmt";
+   (* file: "Aeneas/Std/Vec.lean", line: 799 *)
+   mk_fun "core::fmt::{core::fmt::Debug<[@T]>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugSlice.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 302 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 309 *)
+   mk_fun "core::fmt::{core::fmt::Debug<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugBool.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 45 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 48 *)
++  mk_fun "core::fmt::{core::fmt::Debug<char>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugChar.fmt";
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 63 *)
+   mk_fun "core::fmt::{core::fmt::Debug<str>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugStr.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 65 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 83 *)
+   mk_fun "core::fmt::{core::fmt::Display<&'0 @T>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayShared.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 308 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 315 *)
+   mk_fun "core::fmt::{core::fmt::Display<bool>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayBool.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 50 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 57 *)
++  mk_fun "core::fmt::{core::fmt::Display<char>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayChar.fmt";
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 68 *)
+   mk_fun "core::fmt::{core::fmt::Display<str>}::fmt" "_root_.Aeneas.Std.core.fmt.DisplayStr.fmt";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 318 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 325 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field1_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field1_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 323 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 330 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field2_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field2_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 328 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 335 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field3_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field3_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 334 *)
+-  mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field4_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field4_finish";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 341 *)
++  mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field4_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field4_finish";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 348 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_field5_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_field5_finish";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 12 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_struct_fields_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_struct_fields_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 349 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 356 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field1_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field1_finish";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 353 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 360 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field2_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field2_finish";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 365 *)
++  mk_fun "core::fmt::{core::fmt::Formatter<'a>}::debug_tuple_field3_finish" "_root_.Aeneas.Std.core.fmt.Formatter.debug_tuple_field3_finish";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 228 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_fmt" "_root_.Aeneas.Std.core.fmt.Formatter.write_fmt";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 224 *)
+   mk_fun "core::fmt::{core::fmt::Formatter<'a>}::write_str" "_root_.Aeneas.Std.core.fmt.Formatter.write_str";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 303 *)
++  mk_fun "core::fmt::{core::fmt::UpperHex<&'0 @T>}::fmt" "_root_.Aeneas.Std.core.fmt.UpperHexShared.fmt";
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 183 *)
+   mk_fun "core::hash::impls::{core::hash::Hash<&'0 @T>}::hash" "_root_.Aeneas.Std.core.hash.impls.HashShared.hash";
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 171 *)
+@@ -1600,7 +1614,7 @@ let lean_builtin_funs = [
+   mk_fun "core::num::error::{core::fmt::Debug<core::num::error::IntErrorKind>}::fmt" "_root_.Aeneas.Std.core.num.error.DebugIntErrorKind.fmt";
+   (* file: "Aeneas/Std/Parse.lean", line: 171 *)
+   mk_fun "core::num::error::{core::fmt::Debug<core::num::error::ParseIntError>}::fmt" "_root_.Aeneas.Std.core.num.error.DebugParseIntError.fmt";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 163 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 181 *)
+   mk_fun "core::num::error::{core::fmt::Debug<core::num::error::TryFromIntError>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugTryFromIntError.fmt";
+   (* file: "Aeneas/Std/Parse.lean", line: 335 *)
+   mk_fun "core::num::error::{core::fmt::Display<core::num::error::ParseIntError>}::fmt" "_root_.Aeneas.Std.core.num.error.DisplayParseIntError.fmt";
+@@ -1766,7 +1780,7 @@ let lean_builtin_funs = [
+   mk_fun "core::option::{core::cmp::PartialEq<core::option::Option<@T>, core::option::Option<@T>>}::eq" "_root_.Aeneas.Std.core.option.Option.Insts.CoreCmpPartialEqOption.eq";
+   (* file: "Aeneas/Std/Core/Default.lean", line: 13 *)
+   mk_fun "core::option::{core::default::Default<core::option::Option<@T>>}::default" "_root_.Aeneas.Std.core.option.DefaultOption.default";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 149 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 167 *)
+   mk_fun "core::option::{core::fmt::Debug<core::option::Option<@T>>}::fmt" "_root_.Aeneas.Std.core.fmt.DebugOption.fmt";
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 234 *)
+   mk_fun "core::option::{core::hash::Hash<core::option::Option<@T>>}::hash" "_root_.Aeneas.Std.core.option.HashOption.hash";
+@@ -1810,9 +1824,9 @@ let lean_builtin_funs = [
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::branch" "_root_.Aeneas.Std.core.result.TryResult.branch";
+   (* file: "Aeneas/Std/Core/Result.lean", line: 31 *)
+   mk_fun "core::result::{core::ops::try_trait::Try<core::result::Result<@T, @E>, @T, core::result::Result<core::convert::Infallible, @E>>}::from_output" "_root_.Aeneas.Std.core.result.TryResult.from_output";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 527 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 560 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::expect" "_root_.Aeneas.Std.core.result.Result.expect";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 514 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 547 *)
+   mk_fun "core::result::{core::result::Result<@T, @E>}::unwrap" "_root_.Aeneas.Std.core.result.Result.unwrap";
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 135 *)
+   mk_fun "core::slice::cmp::{core::cmp::Ord<[@T]>}::cmp" "_root_.Aeneas.Std.core.slice.cmp.OrdSlice.cmp";
+@@ -2411,7 +2425,7 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "alloc::borrow::ToOwned" "_root_.Aeneas.Std.alloc.borrow.ToOwned" ~parent_clauses:["coreborrowBorrowInst"] ~methods:[("to_owned", "to_owned"); ("clone_into", "clone_into")] ~default_methods:["clone_into"];
+   (* file: "Aeneas/Std/StringJoin.lean", line: 5 *)
+   mk_trait_decl "alloc::slice::Join" "_root_.Aeneas.Std.alloc.slice.Join" ~methods:[("join", "join")];
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 178 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 196 *)
+   mk_trait_decl "alloc::string::ToString" "_root_.Aeneas.Std.alloc.string.ToString" ~methods:[("to_string", "to_string")];
+   (* file: "Aeneas/Std/Core/Ptr.lean", line: 83 *)
+   mk_trait_decl "core::alloc::global::GlobalAlloc" "_root_.Aeneas.Std.core.alloc.global.GlobalAlloc" ~methods:[("alloc", "alloc"); ("dealloc", "dealloc")];
+@@ -2588,7 +2602,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "alloc::borrow::ToOwned<str, alloc::string::String>" "_root_.Aeneas.Std.alloc.borrow.ToOwnedStr";
+   (* file: "Aeneas/Std/StringJoin.lean", line: 52 *)
+   mk_trait_impl "alloc::slice::Join<[@S], &'a str, alloc::string::String>" "_root_.Aeneas.Std.alloc.slice.JoinStr";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 189 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 207 *)
+   mk_trait_impl "alloc::string::ToString<@T>" "_root_.Aeneas.Std.alloc.string.ToStringBlanket";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 154 *)
+   mk_trait_impl "core::any::Any<@T>" "_root_.Aeneas.Std.core.any.AnyBlanket";
+@@ -2842,24 +2856,26 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::default::Default<core::option::Option<@T>>" "_root_.Aeneas.Std.core.option.DefaultOption";
+   (* file: "Aeneas/Std/Core/Fmt.lean", line: 299 *)
+   mk_trait_impl "core::fmt::Debug<&'0 @T>" "_root_.Aeneas.Std.core.fmt.DebugShared";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 315 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 322 *)
+   mk_trait_impl "core::fmt::Debug<()>" "_root_.Aeneas.Std.core.fmt.DebugUnit";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 160 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 178 *)
+   mk_trait_impl "core::fmt::Debug<(@A, @B)>" "_root_.Aeneas.Std.core.fmt.DebugPair";
+   (* file: "Aeneas/Std/Vec.lean", line: 805 *)
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 72 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 90 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 310 *)
+   mk_trait_impl "core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 57 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 75 *)
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+   (* file: "Aeneas/Std/Sync.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.core.fmt.DebugArc" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 812 *)
+   mk_trait_impl "core::fmt::Debug<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.core.fmt.DebugVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 306 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 313 *)
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 52 *)
++  mk_trait_impl "core::fmt::Debug<char>" "_root_.Aeneas.Std.core.fmt.DebugChar";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 169 *)
+   mk_trait_impl "core::fmt::Debug<core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.fmt.DebugTryFromSliceError";
+   (* file: "Aeneas/Std/Core/Discriminant.lean", line: 125 *)
+@@ -2870,9 +2886,9 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<core::num::error::IntErrorKind>" "_root_.Aeneas.Std.core.fmt.DebugIntErrorKind";
+   (* file: "Aeneas/Std/Parse.lean", line: 176 *)
+   mk_trait_impl "core::fmt::Debug<core::num::error::ParseIntError>" "_root_.Aeneas.Std.core.fmt.DebugParseIntError";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 166 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 184 *)
+   mk_trait_impl "core::fmt::Debug<core::num::error::TryFromIntError>" "_root_.Aeneas.Std.core.fmt.DebugTryFromIntError";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 154 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 172 *)
+   mk_trait_impl "core::fmt::Debug<core::option::Option<@T>>" "_root_.Aeneas.Std.core.fmt.DebugOption";
+   (* file: "Aeneas/Std/FloatFmt.lean", line: 153 *)
+   mk_trait_impl "core::fmt::Debug<f32>" "_root_.Aeneas.Std.core.fmt.DebugF32";
+@@ -2894,7 +2910,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<i8>" "_root_.Aeneas.Std.core.fmt.DebugI8";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 161 *)
+   mk_trait_impl "core::fmt::Debug<isize>" "_root_.Aeneas.Std.core.fmt.DebugIsize";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 47 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 65 *)
+   mk_trait_impl "core::fmt::Debug<str>" "_root_.Aeneas.Std.core.fmt.DebugStr";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 77 *)
+   mk_trait_impl "core::fmt::Debug<u128>" "_root_.Aeneas.Std.core.fmt.DebugU128";
+@@ -2908,14 +2924,16 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<u8>" "_root_.Aeneas.Std.core.fmt.DebugU8";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 89 *)
+   mk_trait_impl "core::fmt::Debug<usize>" "_root_.Aeneas.Std.core.fmt.DebugUsize";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 67 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 85 *)
+   mk_trait_impl "core::fmt::Display<&'0 @T>" "_root_.Aeneas.Std.core.fmt.DisplayShared";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 77 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 95 *)
+   mk_trait_impl "core::fmt::Display<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DisplayBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 62 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 80 *)
+   mk_trait_impl "core::fmt::Display<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DisplayString";
+-  (* file: "Aeneas/Std/Core/Fmt.lean", line: 310 *)
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 317 *)
+   mk_trait_impl "core::fmt::Display<bool>" "_root_.Aeneas.Std.core.fmt.DisplayBool";
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 60 *)
++  mk_trait_impl "core::fmt::Display<char>" "_root_.Aeneas.Std.core.fmt.DisplayChar";
+   (* file: "Aeneas/Std/Parse.lean", line: 313 *)
+   mk_trait_impl "core::fmt::Display<core::num::dec2flt::ParseFloatError>" "_root_.Aeneas.Std.core.fmt.DisplayParseFloatError";
+   (* file: "Aeneas/Std/Parse.lean", line: 345 *)
+@@ -2940,7 +2958,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Display<i8>" "_root_.Aeneas.Std.core.fmt.DisplayI8";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 167 *)
+   mk_trait_impl "core::fmt::Display<isize>" "_root_.Aeneas.Std.core.fmt.DisplayIsize";
+-  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 52 *)
++  (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 70 *)
+   mk_trait_impl "core::fmt::Display<str>" "_root_.Aeneas.Std.core.fmt.DisplayStr";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 83 *)
+   mk_trait_impl "core::fmt::Display<u128>" "_root_.Aeneas.Std.core.fmt.DisplayU128";
+@@ -2956,7 +2974,15 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Display<usize>" "_root_.Aeneas.Std.core.fmt.DisplayUsize";
+   (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 173 *)
+   mk_trait_impl "core::fmt::LowerHex<u16>" "_root_.Aeneas.Std.core.fmt.LowerHexU16";
+-  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 181 *)
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 179 *)
++  mk_trait_impl "core::fmt::LowerHex<u32>" "_root_.Aeneas.Std.core.fmt.LowerHexU32";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 185 *)
++  mk_trait_impl "core::fmt::LowerHex<u64>" "_root_.Aeneas.Std.core.fmt.LowerHexU64";
++  (* file: "Aeneas/Std/Core/Fmt.lean", line: 306 *)
++  mk_trait_impl "core::fmt::UpperHex<&'0 @T>" "_root_.Aeneas.Std.core.fmt.UpperHexShared";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 199 *)
++  mk_trait_impl "core::fmt::UpperHex<u32>" "_root_.Aeneas.Std.core.fmt.UpperHexU32";
++  (* file: "Aeneas/Std/Scalar/Fmt.lean", line: 193 *)
+   mk_trait_impl "core::fmt::UpperHex<u8>" "_root_.Aeneas.Std.core.fmt.UpperHexU8";
+   (* file: "Aeneas/Std/Core/Hash.lean", line: 218 *)
+   mk_trait_impl "core::hash::Hash<&'0 @T>" "_root_.Aeneas.Std.core.hash.HashShared";

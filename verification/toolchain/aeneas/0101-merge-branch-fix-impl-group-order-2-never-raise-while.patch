@@ -1,0 +1,1391 @@
+# aeneas integration step 101 after cba11f3beb: commit 0174454ab55bf6138f2b0a9052a292dcfd3c0910
+# first parent 0aaea9bfb1f79dc2fc0c5733e3836bee794d3034, merged be88f30386cc495d4a8d108648a614fca077e3f0
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/impl-group-order-2' (never raise while reporting a failed declaration; fold a modeled trait's specialized method only if it keeps its backward functions)
+
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 8abb7c2..6ecb963 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1114,20 +1114,19 @@ let decompose_global_accesses (crate : crate) (f : fun_decl) : fun_decl =
+           let fmt_env = Print.crate_to_fmt_env crate in
+           let name = Print.name_to_string fmt_env f.item_meta.name in
+           let name_pattern =
+-            try
+-              let c : Charon.NameMatcher.to_pat_config =
+-                {
+-                  tgt = TkPattern;
+-                  use_trait_decl_refs = ExtractName.match_with_trait_decl_refs;
+-                }
+-              in
+-              let pat =
+-                LlbcAstUtils.name_to_pattern (Some f.item_meta.span) mctx c
+-                  f.item_meta.name
+-              in
+-              Charon.NameMatcher.pattern_to_string { tgt = TkPattern } pat
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            LlbcAstUtils.name_pattern_for_error_message (fun () ->
++                let c : Charon.NameMatcher.to_pat_config =
++                  {
++                    tgt = TkPattern;
++                    use_trait_decl_refs =
++                      ExtractName.match_with_trait_decl_refs;
++                  }
++                in
++                let pat =
++                  LlbcAstUtils.name_to_pattern (Some f.item_meta.span) mctx c
++                    f.item_meta.name
++                in
++                Charon.NameMatcher.pattern_to_string { tgt = TkPattern } pat)
+           in
+           [%save_error_opt_span] error.span
+             ("Failure when pre- processing: " ^ name
+@@ -2554,6 +2553,22 @@ let normalize_modeled_trait_specializations (crate : crate) : crate =
+       | Some _ -> TraitDeclId.Map.mem id traits
+       | None -> Option.is_some (modeled decl.item_meta.name)
+     in
++    (* Whether the model adapts the region-indexed ABI of the implementations of
++       a method of a (possibly specialized) modeled trait to its canonical state
++       ABI (see {!ModelStateABI.trait_contract}) *)
++    let method_has_contract id method_name =
++      let decl = TraitDeclId.Map.find id crate.trait_decls in
++      let name =
++        match specialization decl.item_meta.name with
++        | Some (name, _) -> name
++        | None -> decl.item_meta.name
++      in
++      match modeled name with
++      | Some (info : Pure.builtin_trait_decl_info) ->
++          Option.is_some
++            (ModelStateABI.trait_contract info.extract_name method_name)
++      | None -> false
++    in
+     let methods =
+       FunDeclId.Map.filter_map
+         (fun _ (decl : fun_decl) ->
+@@ -2570,9 +2585,18 @@ let normalize_modeled_trait_specializations (crate : crate) : crate =
+               | Some original ->
+                   let compatible =
+                     match (decl.body, decl.src) with
+-                    | ( OpaqueBody,
+-                        (TraitDeclItem _ | TraitImplItem (_, _, _, true)) ) ->
+-                        true
++                    | OpaqueBody, TraitDeclItem (trait_ref, method_name, _) ->
++                        (* The signature of a trait method is the type of a
++                           field of the trait's record, in which the
++                           implementations of the traits which are not folded
++                           store their methods as they are: e.g., the method
++                           [cloned] of [Iterator::<IterMut<'0, T0>, T1>] is
++                           that of [Iterator::<IterMut<'0, T0>, &'0 mut T1>].
++                           Folding the method must keep its backward
++                           functions, unless the model adapts them. *)
++                        method_has_contract trait_ref.id method_name
++                        || ModelStateABI.shape_is_abi_neutral decl shape
++                    | OpaqueBody, TraitImplItem (_, _, _, true) -> true
+                     | StructuredBody _, _ ->
+                         Option.is_some
+                           (ModelStateInputs.canonical_body_state_inputs crate
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 3d7b25d..c6aa6f7 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -290,11 +290,8 @@ let translate_function_to_pure (trans_ctx : trans_ctx) (marked_ids : marked_ids)
+   with CFailure error ->
+     let name = name_to_string trans_ctx fdef.item_meta.name in
+     let name_pattern =
+-      try
+-        name_to_pattern_string (Some fdef.item_meta.span) trans_ctx
+-          fdef.item_meta.name
+-      with CFailure _ ->
+-        "(could not compute the name pattern due to a different error)"
++      name_to_pattern_string_for_error (Some fdef.item_meta.span) trans_ctx
++        fdef.item_meta.name
+     in
+     [%warn_recovered_opt_span] error.span
+       ("Could not translate the function '" ^ name
+@@ -349,12 +346,8 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+             with CFailure error ->
+               let name = name_to_string trans_ctx global.item_meta.name in
+               let name_pattern =
+-                try
+-                  name_to_pattern_string (Some global.item_meta.span) trans_ctx
+-                    global.item_meta.name
+-                with CFailure _ ->
+-                  "(could not compute the name pattern due to a different \
+-                   error)"
++                name_to_pattern_string_for_error (Some global.item_meta.span)
++                  trans_ctx global.item_meta.name
+               in
+               [%warn_recovered_opt_span] error.span
+                 ("Could not translate the global declaration '" ^ name
+@@ -393,11 +386,8 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+            with CFailure error ->
+              let name = name_to_string trans_ctx fdef.item_meta.name in
+              let name_pattern =
+-               try
+-                 name_to_pattern_string (Some fdef.item_meta.span) trans_ctx
+-                   fdef.item_meta.name
+-               with CFailure _ ->
+-                 "(could not compute the name pattern due to a different error)"
++               name_to_pattern_string_for_error (Some fdef.item_meta.span)
++                 trans_ctx fdef.item_meta.name
+              in
+              [%warn_recovered_opt_span] error.span
+                ("Could not translate the function signature of '" ^ name
+@@ -535,12 +525,8 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+             with CFailure error ->
+               let name = name_to_string trans_ctx d.item_meta.name in
+               let name_pattern =
+-                try
+-                  name_to_pattern_string (Some d.item_meta.span) trans_ctx
+-                    d.item_meta.name
+-                with CFailure _ ->
+-                  "(could not compute the name pattern due to a different \
+-                   error)"
++                name_to_pattern_string_for_error (Some d.item_meta.span)
++                  trans_ctx d.item_meta.name
+               in
+               [%warn_recovered_opt_span] error.span
+                 ("Could not translate the trait declaration '" ^ name
+@@ -570,12 +556,8 @@ let translate_crate_to_pure (crate : crate) (marked_ids : marked_ids) :
+             with CFailure error ->
+               let name = name_to_string trans_ctx d.item_meta.name in
+               let name_pattern =
+-                try
+-                  name_to_pattern_string (Some d.item_meta.span) trans_ctx
+-                    d.item_meta.name
+-                with CFailure _ ->
+-                  "(could not compute the name pattern due to a different \
+-                   error)"
++                name_to_pattern_string_for_error (Some d.item_meta.span)
++                  trans_ctx d.item_meta.name
+               in
+               [%warn_recovered_opt_span] error.span
+                 ("Could not translate the trait instance '" ^ name
+@@ -2013,11 +1995,8 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx def.item_meta.name in
+           let name_pattern =
+-            try
+-              name_to_pattern_string (Some def.item_meta.span) trans_ctx
+-                def.item_meta.name
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            name_to_pattern_string_for_error (Some def.item_meta.span) trans_ctx
++              def.item_meta.name
+           in
+           [%warn_recovered_opt_span] error.span
+             ("Could not generate names for the type declaration '" ^ name
+@@ -2054,11 +2033,8 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx trans.f.item_meta.name in
+           let name_pattern =
+-            try
+-              name_to_pattern_string (Some trans.f.item_meta.span) trans_ctx
+-                trans.f.item_meta.name
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            name_to_pattern_string_for_error (Some trans.f.item_meta.span)
++              trans_ctx trans.f.item_meta.name
+           in
+           [%warn_recovered_opt_span] error.span
+             ("Could not generate names for the function declaration '" ^ name
+@@ -2082,11 +2058,8 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx def.item_meta.name in
+           let name_pattern =
+-            try
+-              name_to_pattern_string (Some def.item_meta.span) trans_ctx
+-                def.item_meta.name
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            name_to_pattern_string_for_error (Some def.item_meta.span) trans_ctx
++              def.item_meta.name
+           in
+           [%warn_recovered_opt_span] error.span
+             ("Could not generate names for the global declaration '" ^ name
+@@ -2108,11 +2081,8 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx def.item_meta.name in
+           let name_pattern =
+-            try
+-              name_to_pattern_string (Some def.item_meta.span) trans_ctx
+-                def.item_meta.name
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            name_to_pattern_string_for_error (Some def.item_meta.span) trans_ctx
++              def.item_meta.name
+           in
+           [%warn_recovered_opt_span] error.span
+             ("Could not generate names for the trait declaration '" ^ name
+@@ -2135,11 +2105,8 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx def.item_meta.name in
+           let name_pattern =
+-            try
+-              name_to_pattern_string (Some def.item_meta.span) trans_ctx
+-                def.item_meta.name
+-            with CFailure _ ->
+-              "(could not compute the name pattern due to a different error)"
++            name_to_pattern_string_for_error (Some def.item_meta.span) trans_ctx
++              def.item_meta.name
+           in
+           [%warn_recovered_opt_span] error.span
+             ("Could not generate names for the trait implementation '" ^ name
+diff --git a/src/TranslateCore.ml b/src/TranslateCore.ml
+index a3a505d..3d1ed95 100644
+--- a/src/TranslateCore.ml
++++ b/src/TranslateCore.ml
+@@ -94,3 +94,11 @@ let name_to_pattern_string (span : Meta.span option) (ctx : trans_ctx)
+       in
+       let pat = LlbcAstUtils.name_to_pattern span mctx c n in
+       Charon.NameMatcher.pattern_to_string { tgt = TkPattern } pat
++
++(** [name_to_pattern_string] for the messages which report that the translation
++    of a declaration failed: never raises (see
++    {!LlbcAstUtils.name_pattern_for_error_message}). *)
++let name_to_pattern_string_for_error (span : Meta.span option)
++    (ctx : trans_ctx) (n : Types.name) : string =
++  LlbcAstUtils.name_pattern_for_error_message (fun () ->
++      name_to_pattern_string span ctx n)
+diff --git a/src/interp/Interp.ml b/src/interp/Interp.ml
+index 66401cf..8e13f40 100644
+--- a/src/interp/Interp.ml
++++ b/src/interp/Interp.ml
+@@ -620,11 +620,8 @@ let evaluate_function_symbolic (synthesize : bool) (decls_ctx : decls_ctx)
+     with CFailure error ->
+       let name = name_to_string () in
+       let name_pattern =
+-        try
+-          TranslateCore.name_to_pattern_string (Some fdef.item_meta.span)
+-            decls_ctx fdef.item_meta.name
+-        with CFailure _ ->
+-          "(could not compute the name pattern due to a different error)"
++        TranslateCore.name_to_pattern_string_for_error
++          (Some fdef.item_meta.span) decls_ctx fdef.item_meta.name
+       in
+       let action = if synthesize then "translate" else "borrow-check" in
+       [%warn_recovered_opt_span] error.span
+diff --git a/src/llbc/LlbcAstUtils.ml b/src/llbc/LlbcAstUtils.ml
+index a35fdb0..18ebdfb 100644
+--- a/src/llbc/LlbcAstUtils.ml
++++ b/src/llbc/LlbcAstUtils.ml
+@@ -137,6 +137,22 @@ let name_with_generics_crate_to_pattern_string (span : Meta.span option)
+   let pat = name_with_generics_to_pattern span mctx c params n args in
+   Charon.NameMatcher.pattern_to_string { tgt = TkPattern } pat
+ 
++(** The name pattern of a declaration in a message which reports that its
++    translation failed ([pattern] computes it). Reporting an error must not
++    raise: when the pattern cannot be computed, we describe why instead. This
++    happens when the pattern is itself the subject of an error (a [CFailure],
++    which is already reported), and when the name matcher raises, e.g., on the
++    names of the partially monomorphized instances of trait implementations,
++    for which its round-trip check ([name_with_generics_to_pattern]) fails. *)
++let name_pattern_for_error_message (pattern : unit -> string) : string =
++  try pattern () with
++  | (Out_of_memory | Sys.Break) as e -> raise e
++  | Errors.CFailure _ ->
++      "(could not compute the name pattern due to a different error)"
++  | e ->
++      "(could not compute the name pattern: uncaught exception "
++      ^ Printexc.exn_slot_name e ^ ")"
++
+ let trait_impl_with_crate_to_pattern_string (span : Meta.span option)
+     (crate : LlbcAst.crate) (trait_decl : LlbcAst.trait_decl)
+     (trait_impl : LlbcAst.trait_impl) : string =
+diff --git a/src/pure/PureMicroPasses.ml b/src/pure/PureMicroPasses.ml
+index d9bebe9..506903f 100644
+--- a/src/pure/PureMicroPasses.ml
++++ b/src/pure/PureMicroPasses.ml
+@@ -712,11 +712,8 @@ let apply_passes_to_pure_fun_translations (crate : LlbcAst.crate)
+     with Errors.CFailure error ->
+       let name = name_to_string trans_ctx f.item_meta.name in
+       let name_pattern =
+-        try
+-          name_to_pattern_string (Some f.item_meta.span) trans_ctx
+-            f.item_meta.name
+-        with Errors.CFailure _ ->
+-          "(could not compute the name pattern due to a different error)"
++        name_to_pattern_string_for_error (Some f.item_meta.span) trans_ctx
++          f.item_meta.name
+       in
+       [%save_error_opt_span] error.span
+         ("Ignoring the body of function '" ^ name
+diff --git a/src/pure/PureMicroPassesAnnots.ml b/src/pure/PureMicroPassesAnnots.ml
+index 7e5328a..ff31792 100644
+--- a/src/pure/PureMicroPassesAnnots.ml
++++ b/src/pure/PureMicroPassesAnnots.ml
+@@ -475,11 +475,8 @@ let add_type_annotations (trans_ctx : trans_ctx)
+     with Errors.CFailure error ->
+       let name = name_to_string trans_ctx decl.item_meta.name in
+       let name_pattern =
+-        try
+-          name_to_pattern_string (Some decl.item_meta.span) trans_ctx
+-            decl.item_meta.name
+-        with Errors.CFailure _ ->
+-          "(could not compute the name pattern due to a different error)"
++        name_to_pattern_string_for_error (Some decl.item_meta.span) trans_ctx
++          decl.item_meta.name
+       in
+       [%warn_recovered_opt_span] error.span
+         ("Could not add type annotations to the fun declaration '" ^ name
+diff --git a/src/pure/PureNestedCollections.ml b/src/pure/PureNestedCollections.ml
+index f932674..8f10b24 100644
+--- a/src/pure/PureNestedCollections.ml
++++ b/src/pure/PureNestedCollections.ml
+@@ -676,11 +676,8 @@ let apply (trans_ctx : trans_ctx) (type_decls : type_decl list)
+       with Errors.CFailure error ->
+         let name = name_to_string trans_ctx t.f.item_meta.name in
+         let name_pattern =
+-          try
+-            name_to_pattern_string (Some t.f.item_meta.span) trans_ctx
+-              t.f.item_meta.name
+-          with Errors.CFailure _ ->
+-            "(could not compute the name pattern due to a different error)"
++          name_to_pattern_string_for_error (Some t.f.item_meta.span) trans_ctx
++            t.f.item_meta.name
+         in
+         [%save_error_opt_span] error.span
+           ("Ignoring the body of function '" ^ name
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index d310e16..cfb7096 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -400,31 +400,18 @@ let closure_state_models =
+       ("_root_.Aeneas.Std.alloc.vec.Vec.retain_mut_with", 1) );
+   ]
+ 
+-(** Whether a partial-monomorphization instance of a modeled function (its
+-    [shape] instantiates the generic function's parameters) has the ABI of the
+-    generic model. A canonical model ABI adapts the instance's region-indexed
+-    ABI at every call. Otherwise a call uses the instance's own translated ABI
+-    under the model's name, so the shape must be ABI-neutral: the regions it
+-    introduces (e.g. ['1] and ['2] in [&'1 mut Counter<'2>]) occur in the
++(** Whether a partial-monomorphization [shape] (it instantiates the parameters
++    of a generic function) is ABI-neutral for the instance [decl]: the regions
++    it introduces (e.g. ['1] and ['2] in [&'1 mut Counter<'2>]) occur in the
+     instance's signature only beneath shared references, and not in its trait
+     clauses (whose dictionaries would be those of the borrows). Such borrows are
+     read-only: they add no backward function nor state output, and erasing them
+-    gives the model's forward types at the erased shape. For instance
++    gives the generic function's forward types at the erased shape, so the
++    instance has the ABI of the generic function. For instance
+     [Option::is_some] on an [Option<&mut T>] is neutral, [core::mem::swap] on
+-    two [&mut T] is not. The instances of a model consuming a closure (see
+-    [closure_state_models]) are admitted only if their bounds are modeled
+-    traits (schemas): a bound specific to a closure capturing mutable borrows
+-    has the closure's region-indexed ABI (see [closure_state_instance]). *)
+-let fun_instance_is_compatible (crate : A.crate) (decl : A.fun_decl)
+-    (info : builtin_fun_info) (shape : T.generic_args T.binder) =
+-  (Option.is_some (modeled_fun_abi crate decl info)
+-  && ((not (List.mem_assoc info.extract_name closure_state_models))
+-     || List.for_all
+-          (fun (c : T.trait_param) ->
+-            Option.is_some
+-              (crate_trait_model_name crate c.trait.binder_value.id))
+-          decl.generics.trait_clauses))
+-  ||
++    two [&mut T] is not. *)
++let shape_is_abi_neutral (decl : A.fun_decl) (shape : T.generic_args T.binder)
++    =
+   let params = shape.binder_params in
+   let args = shape.binder_value in
+   (* Over-approximate the introduced regions: any region bound in the shape's
+@@ -466,6 +453,26 @@ let fun_instance_is_compatible (crate : A.crate) (decl : A.fun_decl)
+   && List.length params.types = List.length decl.generics.types
+   && not !visible
+ 
++(** Whether a partial-monomorphization instance of a modeled function (its
++    [shape] instantiates the generic function's parameters) has the ABI of the
++    generic model. A canonical model ABI adapts the instance's region-indexed
++    ABI at every call. Otherwise a call uses the instance's own translated ABI
++    under the model's name, so the shape must be ABI-neutral (see
++    {!shape_is_abi_neutral}). The instances of a model consuming a closure (see
++    [closure_state_models]) are admitted only if their bounds are modeled
++    traits (schemas): a bound specific to a closure capturing mutable borrows
++    has the closure's region-indexed ABI (see [closure_state_instance]). *)
++let fun_instance_is_compatible (crate : A.crate) (decl : A.fun_decl)
++    (info : builtin_fun_info) (shape : T.generic_args T.binder) =
++  (Option.is_some (modeled_fun_abi crate decl info)
++  && ((not (List.mem_assoc info.extract_name closure_state_models))
++     || List.for_all
++          (fun (c : T.trait_param) ->
++            Option.is_some
++              (crate_trait_model_name crate c.trait.binder_value.id))
++          decl.generics.trait_clauses))
++  || shape_is_abi_neutral decl shape
++
+ (** {1 Modeled functions at borrowing states}
+ 
+     A modeled function which threads a state [S] through closures, such as
+diff --git a/src/symbolic/SymbolicToPure.ml b/src/symbolic/SymbolicToPure.ml
+index 9ab9116..c826c3c 100644
+--- a/src/symbolic/SymbolicToPure.ml
++++ b/src/symbolic/SymbolicToPure.ml
+@@ -179,11 +179,8 @@ let translate_type_decls (ctx : Contexts.decls_ctx) : type_decl list =
+         let env = PrintPure.decls_ctx_to_fmt_env ctx in
+         let name = PrintPure.name_to_string env d.item_meta.name in
+         let name_pattern =
+-          try
+-            TranslateCore.name_to_pattern_string (Some d.item_meta.span) ctx
+-              d.item_meta.name
+-          with CFailure _ ->
+-            "(could not compute the name pattern due to a different error)"
++          TranslateCore.name_to_pattern_string_for_error (Some d.item_meta.span)
++            ctx d.item_meta.name
+         in
+         [%warn_recovered_opt_span] error.span
+           ("Could not translate type decl '" ^ name
+diff --git a/tests/lean/DiagnosticRecoveryInstance/Checks.lean b/tests/lean/DiagnosticRecoveryInstance/Checks.lean
+new file mode 100644
+index 0000000..95d30c1
+--- /dev/null
++++ b/tests/lean/DiagnosticRecoveryInstance/Checks.lean
+@@ -0,0 +1,16 @@
++import DiagnosticRecoveryInstance.DiagnosticRecoveryInstance
++
++/-! The functions that the diagnostic run of
++    `tests/src/diagnostic-recovery-instance.rs` still translates, evaluated on
++    the inputs of its `native` test module and compared with the native
++    results. -/
++namespace diagnostic_recovery_instance.checks
++open Aeneas Aeneas.Std Result
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def nat (r : Result U32) : Option Nat :=
++  match r with | ok v => some v.val | _ => none
++#guard nat (incr (u 41)) == some 42
++#guard nat (incr (u 4294967295)) == some 0
++#guard nat (incr_twice (u 40)) == some 42
++#guard nat (incr_twice (u 4294967295)) == some 1
++end diagnostic_recovery_instance.checks
+diff --git a/tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean b/tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
+new file mode 100644
+index 0000000..164ab8e
+--- /dev/null
++++ b/tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
+@@ -0,0 +1,121 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [diagnostic_recovery_instance]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace diagnostic_recovery_instance
++
++/-- Trait declaration: [core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 41:0-41:24
++    Name pattern: [core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>"]
++structure
++  core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_1130f3d308b022d58692caa83be0c6ae
++  (T0 : Type) (T1 : Type) where
++  next : _root_.Aeneas.Std.core.slice.iter.IterMut T0 →
++    _root_.Aeneas.Std.Result ((_root_.Option T1) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0 → _root_.Option T1 →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++
++/-- Trait implementation: [core::slice::iter::{core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)><'a, T> for T}]
++    Source: '/rustc/library/core/src/slice/iter/macros.rs', lines 153:8-153:45
++    Name pattern: [core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>] -/
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>"]
++def
++  core.iter.traits.iterator.IteratorIterMutMutAT_specialized_1130f3d308b022d58692caa83be0c6ae.Blanket
++  (T : Type) :
++  _root_.diagnostic_recovery_instance.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_1130f3d308b022d58692caa83be0c6ae
++  T T := {
++  next := _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next
++}
++
++/-- Trait declaration: [diagnostic_recovery_instance::Tag]
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 19:0-21:1
++    Visibility: public -/
++structure Tag (Self : Type) (F : Type) where
++  tag : Self → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × Self)
++
++/-- [diagnostic_recovery_instance::Wrap]
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 23:0-25:1
++    Visibility: public -/
++structure Wrap (I : Type) where
++  inner : I
++
++/-- Trait declaration: [diagnostic_recovery_instance::Tag::<diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<0, T0>>, T1>]
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 19:0-21:1
++    Visibility: public -/
++structure TagWrapIterMutT1_specialized_a994e56ba2257b31501119b25904eada (T0 :
++  Type) (T1 : Type) where
++  tag : _root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.U32 × (_root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<(u32) -> u32> for diagnostic_recovery_instance::Wrap<I>}::tag]:
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 28:4-30:5
++    Visibility: public -/
++def Wrap.Insts.Diagnostic_recovery_instanceTagArrowU32U32.tag
++  {I : Type} {Clause0_Item : Type} (coreitertraitsiteratorIteratorInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator I Clause0_Item)
++  (self : _root_.diagnostic_recovery_instance.Wrap I) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.diagnostic_recovery_instance.Wrap I))
++  := do
++  _root_.Aeneas.Std.Result.ok (7#u32, self)
++
++/-- [diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<(u32) -> u32> for diagnostic_recovery_instance::Wrap<I>}::tag::<1, core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]:
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 28:4-30:5
++    Visibility: public -/
++def
++  TagWrapIterMutArrowU32U32_specialized_a994e56ba2257b31501119b25904eada.Blanket_specialized_16eccaa5bdedbf8ca4082b2566f509b3.tag_specialized_30adfd347972ca73e8774d08c9f5ed07
++  {T0 : Type} {T1 : Type}
++  (coreitertraitsiteratorIteratorIterMutMut0T1_specialized_1130f3d308b022d58692caa83be0c6aeInst
++  :
++  _root_.diagnostic_recovery_instance.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_1130f3d308b022d58692caa83be0c6ae
++  T0 T1)
++  (self : _root_.diagnostic_recovery_instance.Wrap
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.diagnostic_recovery_instance.Wrap
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++  := do
++  _root_.Aeneas.Std.Result.ok (7#u32, self, fun self1 => self1)
++
++/-- [diagnostic_recovery_instance::incr]:
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 43:0-45:1
++    Visibility: public -/
++def incr
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add x 1#u32)
++
++/-- [diagnostic_recovery_instance::incr_twice]:
++    Source: 'tests/src/diagnostic-recovery-instance.rs', lines 47:0-49:1
++    Visibility: public -/
++def incr_twice
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.diagnostic_recovery_instance.incr x
++  _root_.diagnostic_recovery_instance.incr i
++
++end diagnostic_recovery_instance
+diff --git a/tests/lean/SpecializedTraitMethodAbi/Checks.lean b/tests/lean/SpecializedTraitMethodAbi/Checks.lean
+new file mode 100644
+index 0000000..94e6319
+--- /dev/null
++++ b/tests/lean/SpecializedTraitMethodAbi/Checks.lean
+@@ -0,0 +1,24 @@
++import SpecializedTraitMethodAbi.SpecializedTraitMethodAbi
++
++/-! Evaluate the model of `sum_cloned` (`tests/src/specialized-trait-method-abi.rs`)
++    on the inputs of the `native` test module and compare with the native
++    results. `bump_after` iterates over `Skip<IterMut<'_, u32>>`, whose `next`
++    is an external definition: it is not evaluated. -/
++
++namespace specialized_trait_method_abi.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def slice (xs : List Nat) : Slice U32 :=
++  let xs := xs.map u
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++def nat (r : Result U32) : Option Nat :=
++  match r with | ok v => some v.val | _ => none
++
++#guard nat (sum_cloned (slice [])) == some 0
++#guard nat (sum_cloned (slice [1, 2, 3])) == some 6
++#guard nat (sum_cloned (slice [4294967295, 2])) == some 1
++
++end specialized_trait_method_abi.checks
+diff --git a/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean b/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
+new file mode 100644
+index 0000000..b783689
+--- /dev/null
++++ b/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
+@@ -0,0 +1,521 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [specialized_trait_method_abi]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++/- You can remove the following line by using the CLI option `-all-computable`: -/
++noncomputable section
++
++namespace specialized_trait_method_abi
++
++/-- Trait declaration: [core::iter::traits::iterator::Iterator::<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<0, T0>>, &0 mut (T1)>]
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 41:0-41:24
++    Name pattern: [core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>"]
++structure
++  core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320
++  (T0 : Type) (T1 : Type) where
++  next : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Option T1) × (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Option T1 →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++  skip : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Usize
++    → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++  cloned : forall {T : Type} (cloneCloneInst :
++    _root_.Aeneas.Std.core.clone.Clone T) (IteratorSkipIterMutSharedPInst :
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) T),
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- Trait declaration: [core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 41:0-41:24
++    Name pattern: [core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_trait
++  "core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>"]
++structure
++  core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  (T0 : Type) (T1 : Type) where
++  next : _root_.Aeneas.Std.core.slice.iter.IterMut T0 →
++    _root_.Aeneas.Std.Result ((_root_.Option T1) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0 → _root_.Option T1 →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++  skip : _root_.Aeneas.Std.core.slice.iter.IterMut T0 →
++    _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++  cloned : forall {T : Type} (cloneCloneInst :
++    _root_.Aeneas.Std.core.clone.Clone T) (IteratorIterMutSharedPInst :
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) T),
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0 → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++
++/-- [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<Clause0_Item> for core::iter::adapters::skip::Skip<I>}::next::<1, core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]:
++    Source: '/rustc/library/core/src/iter/adapters/skip.rs', lines 40:4-40:41
++    Name pattern: [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::next<'1, core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::next<'1, core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>"]
++axiom
++  core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.next_specialized_dd41614e66cdb86e0d7c6fd72758d2d9
++  {T0 : Type} {T1 : Type}
++  (traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++  :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T0 T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Option T1) × (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Option T1 →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<Clause0_Item> for core::iter::adapters::skip::Skip<I>}::cloned::<1, core::slice::iter::IterMut<0, T0>, T1, &0 mut (T2)>]:
++    Source: '/rustc/library/core/src/iter/adapters/skip.rs', lines 33:0-35:16
++    Name pattern: [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::cloned<'1, core::slice::iter::IterMut<'0, @T0>, @T1, &'0 mut @T2>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::cloned<'1, core::slice::iter::IterMut<'0, @T0>, @T1, &'0 mut @T2>"]
++axiom
++  core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.cloned_specialized_bd75ec5b716d688e729b92f24fb78374
++  {T0 : Type} {T1 : Type} {T2 : Type}
++  (traitsiteratorIteratorIterMutMut0T2_specialized_8b61929fcccff91989959e41ff32d745Inst
++  :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T0 T2) (cloneCloneInst : _root_.Aeneas.Std.core.clone.Clone T1)
++  (traitsiteratorIteratorSkipIterMutShared1T1Inst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<Clause0_Item> for core::iter::adapters::skip::Skip<I>}::skip::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]:
++    Source: '/rustc/library/core/src/iter/adapters/skip.rs', lines 33:0-35:16
++    Name pattern: [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::skip<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<@I>, @Clause0_Item>}::skip<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>"]
++axiom
++  core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.skip_specialized_86e6436d5336ec447ac987fedabf3430
++  {T0 : Type} {T1 : Type}
++  (traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++  :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T0 T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Usize
++    → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- Trait implementation: [core::iter::adapters::skip::{core::iter::traits::iterator::Iterator<Clause0_Item> for core::iter::adapters::skip::Skip<I>}::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]
++    Source: '/rustc/library/core/src/iter/adapters/skip.rs', lines 33:0-35:16
++    Name pattern: [core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>] -/
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>"]
++def
++  core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5
++  {T0 : Type} {T1 : Type}
++  (traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++  :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T0 T1) :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320
++  T0 T1 := {
++  next :=
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.next_specialized_dd41614e66cdb86e0d7c6fd72758d2d9
++    traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++  skip :=
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.skip_specialized_86e6436d5336ec447ac987fedabf3430
++    traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++  cloned := fun {T : Type} (cloneCloneInst : _root_.Aeneas.Std.core.clone.Clone
++    T) (traitsiteratorIteratorSkipIterMutSharedPInst :
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) T) =>
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.cloned_specialized_bd75ec5b716d688e729b92f24fb78374
++    traitsiteratorIteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst
++    cloneCloneInst traitsiteratorIteratorSkipIterMutSharedPInst
++}
++
++/-- [core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<Clause0_Item, I> for I}::into_iter::<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<0, T0>>, &0 mut (T1)>]:
++    Source: '/rustc/library/core/src/iter/traits/collect.rs', lines 322:4-322:27
++    Name pattern: [core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<@I, @Clause0_Item, @I>}::into_iter<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<@I, @Clause0_Item, @I>}::into_iter<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>"]
++axiom
++  core.iter.traits.collect.IntoIteratorSkipIterMutMut0T1SkipIterMut_specialized_6517455b6159b1c53496207026ed4418.Blanket_specialized_8499f4591150105252e3ffc6f631a9e4.into_iter_specialized_3198e5e1a75c6eb7f548e3bed12fc576
++  {T0 : Type} {T1 : Type}
++  (iteratorIteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320Inst
++  :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320
++  T0 T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [core::iter::traits::iterator::Iterator::skip::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]:
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 1341:4-1343:20
++    Name pattern: [core::iter::traits::iterator::Iterator::skip<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::traits::iterator::Iterator::skip<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>"]
++axiom
++  core.iter.traits.iterator.Iterator.skip.default_specialized_f213a8d5d147767ca852778e43929ea3
++  {T0 : Type} {T1 : Type}
++  (IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745Inst :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T0 T1) :
++  _root_.Aeneas.Std.core.slice.iter.IterMut T0 → _root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++
++/-- [core::iter::traits::iterator::Iterator::skip::<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<0, T0>>, &0 mut (T1)>]:
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 1341:4-1343:20
++    Name pattern: [core::iter::traits::iterator::Iterator::skip<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::traits::iterator::Iterator::skip<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>"]
++axiom
++  core.iter.traits.iterator.Iterator.skip.default_specialized_9f72c157464bb636a4607a2c8408f5db
++  {T0 : Type} {T1 : Type}
++  (IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320Inst :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320
++  T0 T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Usize
++    → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [core::iter::traits::iterator::Iterator::cloned::<1, core::slice::iter::IterMut<0, T0>, T1>]:
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 3540:4-3543:45
++    Name pattern: [core::iter::traits::iterator::Iterator::cloned<'1, core::slice::iter::IterMut<'0, @T0>, @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::traits::iterator::Iterator::cloned<'1, core::slice::iter::IterMut<'0, @T0>, @T1>"]
++axiom
++  core.iter.traits.iterator.Iterator.cloned.default_specialized_a6fff047d4230cb7a16ebc2677d4f4bd
++  {T0 : Type} {T1 : Type} (IteratorIterMutShared1T1Inst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0) T1) (cloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone T1) (IteratorIterMutShared1T1Inst1 :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0) T1) :
++  _root_.Aeneas.Std.core.slice.iter.IterMut T0 → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T0))
++
++/-- [core::iter::traits::iterator::Iterator::cloned::<1, core::iter::adapters::skip::Skip<core::slice::iter::IterMut<0, T0>>, T1>]:
++    Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 3540:4-3543:45
++    Name pattern: [core::iter::traits::iterator::Iterator::cloned<'1, core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, @T1>]
++    Visibility: public -/
++@[rust_fun
++  "core::iter::traits::iterator::Iterator::cloned<'1, core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, @T1>"]
++axiom
++  core.iter.traits.iterator.Iterator.cloned.default_specialized_db3644cbf38a53c6254f867e15df9332
++  {T0 : Type} {T1 : Type} (IteratorSkipIterMutShared1T1Inst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) T1) (cloneCloneInst :
++  _root_.Aeneas.Std.core.clone.Clone T1) (IteratorSkipIterMutShared1T1Inst1 :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) T1) :
++  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0))) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) →
++    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
++
++/-- [core::slice::iter::{core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)><'a, T> for T}::cloned]:
++    Source: '/rustc/library/core/src/slice/iter/macros.rs', lines 153:8-153:45
++    Name pattern: [core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>}::cloned]
++    Visibility: public -/
++@[rust_fun
++  "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>}::cloned"]
++axiom
++  core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.cloned
++  {T : Type} {T1 : Type} (cloneCloneInst : _root_.Aeneas.Std.core.clone.Clone
++  T1) (itertraitsiteratorIteratorIterMutSharedATInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++  (_root_.Aeneas.Std.core.slice.iter.IterMut T) T1) :
++  _root_.Aeneas.Std.core.slice.iter.IterMut T → _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T))
++
++/-- [core::slice::iter::{core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)><'a, T> for T}::skip]:
++    Source: '/rustc/library/core/src/slice/iter/macros.rs', lines 153:8-153:45
++    Name pattern: [core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>}::skip]
++    Visibility: public -/
++@[rust_fun
++  "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>}::skip"]
++axiom
++  core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.skip
++  {T : Type} :
++  _root_.Aeneas.Std.core.slice.iter.IterMut T → _root_.Aeneas.Std.Usize →
++    _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T) →
++    _root_.Aeneas.Std.core.slice.iter.IterMut T))
++
++/-- Trait implementation: [core::slice::iter::{core::iter::traits::iterator::Iterator::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)><'a, T> for T}]
++    Source: '/rustc/library/core/src/slice/iter/macros.rs', lines 153:8-153:45
++    Name pattern: [core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>] -/
++@[reducible, rust_trait_impl
++  "core::iter::traits::iterator::Iterator<core::slice::iter::IterMut<'a, @T>, &'a mut @T>"]
++def
++  core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket
++  (T : Type) :
++  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMut0T1_specialized_8b61929fcccff91989959e41ff32d745
++  T T := {
++  next := _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next
++  skip :=
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.skip
++  cloned := fun {T1 : Type} (cloneCloneInst :
++    _root_.Aeneas.Std.core.clone.Clone T1)
++    (itertraitsiteratorIteratorIterMutSharedPInst :
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator
++    (_root_.Aeneas.Std.core.slice.iter.IterMut T) T1) =>
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.cloned
++    cloneCloneInst itertraitsiteratorIteratorIterMutSharedPInst
++}
++
++/-- [specialized_trait_method_abi::bump_after]: loop body 0:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 32:4-35:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_after_loop.body
++  (d : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32))
++  (back : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5.next_specialized_dd41614e66cdb86e0d7c6fd72758d2d9
++      (_root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket
++      _root_.Aeneas.Std.U32) iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (n,
++      let s := next_back iter1 none
++      back s))
++  | some x =>
++    let x1 ← lift (core.num.U32.wrapping_add x d)
++    let n1 ← lift (core.num.U32.wrapping_add n 1#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun s => let s1 := next_back s (some x1)
++               back s1, n1))
++
++/-- [specialized_trait_method_abi::bump_after]: loop 0:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 32:4-35:5
++    Visibility: public -/
++@[rust_loop]
++def bump_after_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32))
++  (back : _root_.Aeneas.Std.core.iter.adapters.skip.Skip
++  (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) (d : _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, n1) =>
++       _root_.specialized_trait_method_abi.bump_after_loop.body d iter1 back1
++       n1 : ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      → _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32))))
++    (iter, back, n)
++
++/-- [specialized_trait_method_abi::bump_after]:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 30:0-37:1
++    Visibility: public -/
++def bump_after
++  (v : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (k : _root_.Aeneas.Std.Usize) (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  let (im, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut v
++  let (s, skip_back) ←
++    _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.skip
++      im k
++  let (iter, into_iter_back) ←
++    _root_.specialized_trait_method_abi.core.iter.traits.collect.IntoIteratorSkipIterMutMut0T1SkipIterMut_specialized_6517455b6159b1c53496207026ed4418.Blanket_specialized_8499f4591150105252e3ffc6f631a9e4.into_iter_specialized_3198e5e1a75c6eb7f548e3bed12fc576
++      (_root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5
++      (_root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket
++      _root_.Aeneas.Std.U32)) s
++  _root_.specialized_trait_method_abi.bump_after_loop iter
++    (fun s1 =>
++      let s2 := into_iter_back s1
++      let im1 := skip_back s2
++      iter_mut_back im1) d 0#u32
++
++/-- [specialized_trait_method_abi::sum_cloned]: loop body 0:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 41:4-43:5
++    Visibility: public -/
++@[rust_loop_body]
++def sum_cloned_loop.body
++  (iter : _root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++  (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++  (s : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)) ×
++    _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.adapters.cloned.IteratorCloned.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) core.clone.CloneU32 iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++  | some x =>
++    let s1 ← lift (core.num.U32.wrapping_add s x)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, s1))
++
++/-- [specialized_trait_method_abi::sum_cloned]: loop 0:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 41:4-43:5
++    Visibility: public -/
++@[rust_loop]
++def sum_cloned_loop
++  (iter : _root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++  (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++  (s : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, s1) =>
++       _root_.specialized_trait_method_abi.sum_cloned_loop.body iter1 s1 :
++      ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.iter.adapters.cloned.Cloned
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, s)
++
++/-- [specialized_trait_method_abi::sum_cloned]:
++    Source: 'tests/src/specialized-trait-method-abi.rs', lines 39:0-45:1
++    Visibility: public -/
++def sum_cloned
++  (v : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter v
++  let iter ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.cloned.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) core.clone.CloneU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  _root_.specialized_trait_method_abi.sum_cloned_loop iter 0#u32
++
++end specialized_trait_method_abi
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 11cf901..0cbab35 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -74,6 +74,7 @@ package «tests» {}
+ @[default_target] lean_lib Demo
+ @[default_target] lean_lib Deref
+ @[default_target] lean_lib DiagnosticRecovery
++@[default_target] lean_lib DiagnosticRecoveryInstance
+ @[default_target] lean_lib Discriminant
+ @[default_target] lean_lib DiscriminantNames
+ @[default_target] lean_lib DiscriminantNames2
+@@ -167,6 +168,7 @@ package «tests» {}
+ @[default_target] lean_lib SliceElementRegions
+ @[default_target] lean_lib SlicePatterns
+ @[default_target] lean_lib Slices
++@[default_target] lean_lib SpecializedTraitMethodAbi
+ @[default_target] lean_lib StartFromCanonical
+ @[default_target] lean_lib Static
+ @[default_target] lean_lib StaticRefs
+diff --git a/tests/src/diagnostic-recovery-instance.lean.out b/tests/src/diagnostic-recovery-instance.lean.out
+new file mode 100644
+index 0000000..9107acc
+--- /dev/null
++++ b/tests/src/diagnostic-recovery-instance.lean.out
+@@ -0,0 +1,71 @@
++[[92mInfo[39m ] Imported: tests/llbc/diagnostic_recovery_instance.llbc
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
++[[91mError[39m] Could not translate the function signature of 'diagnostic_recovery_instance::use_tag because of previous error
++Name pattern: 'diagnostic_recovery_instance::use_tag'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: Translate.ml, line 392
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function signature of 'diagnostic_recovery_instance::tag_slice because of previous error
++Name pattern: 'diagnostic_recovery_instance::tag_slice'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Compiler source: Translate.ml, line 392
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
++[[91mError[39m] Could not translate the function signature of 'diagnostic_recovery_instance::use_tag::<0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<1, T0>>> because of previous error
++Name pattern: 'diagnostic_recovery_instance::use_tag<'0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<'1, @T0>>>'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: Translate.ml, line 392
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
++[[91mError[39m] Could not translate the function 'diagnostic_recovery_instance::use_tag because of previous error.
++Name pattern: 'diagnostic_recovery_instance::use_tag'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: Translate.ml, line 296
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the function 'diagnostic_recovery_instance::tag_slice because of previous error.
++Name pattern: 'diagnostic_recovery_instance::tag_slice'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 38:0-41:1
++Compiler source: Translate.ml, line 296
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 207
++[[91mError[39m] Could not translate the function 'diagnostic_recovery_instance::use_tag::<0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<1, T0>>> because of previous error.
++Name pattern: 'diagnostic_recovery_instance::use_tag<'0, diagnostic_recovery_instance::Wrap<core::slice::iter::IterMut<'1, @T0>>>'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 33:0-35:1
++Compiler source: Translate.ml, line 296
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the trait instance 'diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<(u32) -> u32> for diagnostic_recovery_instance::Wrap<I>} because of previous error
++Name pattern: 'diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<diagnostic_recovery_instance::Wrap<@I>, fn (u32) -> u32>}'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Compiler source: Translate.ml, line 562
++[[91mError[39m] Function pointer types are supported only in the type arguments of PhantomData: values of function pointer type are not supported
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Compiler source: symbolic/SymbolicToPureTypes.ml, line 427
++[[91mError[39m] Could not translate the trait instance 'diagnostic_recovery_instance::{diagnostic_recovery_instance::Tag<(u32) -> u32> for diagnostic_recovery_instance::Wrap<I>}::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)> because of previous error
++Name pattern: '(could not compute the name pattern: uncaught exception Assert_failure)'
++Definition span: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Source: 'tests/src/diagnostic-recovery-instance.rs', lines 27:0-31:1
++Compiler source: Translate.ml, line 562
++[[91mError[39m] Internal error: please file an issue
++Compiler source: Translate.ml, line 1332
++[[91mError[39m] Internal error: please file an issue
++Compiler source: Translate.ml, line 1332
++[[92mInfo[39m ] Generated the partial file (because of 18 errors, including 6 unique errors): tests/lean/DiagnosticRecoveryInstance/DiagnosticRecoveryInstance.lean
++[[92mInfo[39m ] Total execution time: 0.227757 seconds
+diff --git a/tests/src/diagnostic-recovery-instance.rs b/tests/src/diagnostic-recovery-instance.rs
+new file mode 100644
+index 0000000..5018f32
+--- /dev/null
++++ b/tests/src/diagnostic-recovery-instance.rs
+@@ -0,0 +1,64 @@
++//@ [!lean] skip
++//@ [lean] recover-errors
++//@ [lean] subdir=DiagnosticRecoveryInstance
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Reporting that a declaration could not be translated must not raise. The
++//! messages of the recovery handlers give the name pattern of the declaration,
++//! and the name matcher fails its round-trip check on the names of the
++//! partially monomorphized instances of trait implementations, such as
++//! `{Tag<fn(u32) -> u32> for Wrap<I>}::<IterMut<'0, T0>, &'0 mut T1>` below
++//! (`--monomorphize-mut` instantiates the implementation at
++//! `Wrap<IterMut<'_, u32>>`). The trait argument of the implementation is a
++//! function pointer type, which is not supported: neither the implementation
++//! nor its instance is translated. The run reports every error, gives the
++//! reason instead of the name pattern of the instance, still emits `incr` and
++//! `incr_twice`, and exits with status 1 (before, the name matcher's
++//! `Assert_failure` escaped from the handler: status 2).
++
++pub trait Tag<F> {
++    fn tag(&mut self) -> u32;
++}
++
++pub struct Wrap<I> {
++    pub inner: I,
++}
++
++impl<I: Iterator> Tag<fn(u32) -> u32> for Wrap<I> {
++    fn tag(&mut self) -> u32 {
++        7
++    }
++}
++
++pub fn use_tag<T: Tag<fn(u32) -> u32>>(t: &mut T) -> u32 {
++    t.tag()
++}
++
++/// Its signature is not translated either.
++pub fn tag_slice(v: &mut [u32], _f: fn(u32) -> u32) -> u32 {
++    let mut w = Wrap { inner: v.iter_mut() };
++    use_tag(&mut w)
++}
++
++pub fn incr(x: u32) -> u32 {
++    x.wrapping_add(1)
++}
++
++pub fn incr_twice(x: u32) -> u32 {
++    incr(incr(x))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn values() {
++        assert_eq!(incr(41), 42);
++        assert_eq!(incr(u32::MAX), 0);
++        assert_eq!(incr_twice(40), 42);
++        assert_eq!(incr_twice(u32::MAX), 1);
++        let mut v = [1u32, 2];
++        assert_eq!(tag_slice(&mut v, incr), 7);
++    }
++}
+diff --git a/tests/src/specialized-trait-method-abi.lean.out b/tests/src/specialized-trait-method-abi.lean.out
+new file mode 100644
+index 0000000..f00e7f0
+--- /dev/null
++++ b/tests/src/specialized-trait-method-abi.lean.out
+@@ -0,0 +1,4 @@
++[[92mInfo[39m ] Imported: tests/llbc/specialized_trait_method_abi.llbc
++[[92mInfo[39m ] Generated: tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
++[[91mError[39m] The crate contains extracted external, unknown definitions: we advise using the option -split-files to allow manually providing these definitions in separate files.
++[[92mInfo[39m ] Total execution time: 0.390528 seconds
+diff --git a/tests/src/specialized-trait-method-abi.rs b/tests/src/specialized-trait-method-abi.rs
+new file mode 100644
+index 0000000..248f15a
+--- /dev/null
++++ b/tests/src/specialized-trait-method-abi.rs
+@@ -0,0 +1,62 @@
++//@ [!lean] skip
++//@ [lean] recover-errors
++//@ [lean] subdir=SpecializedTraitMethodAbi
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The specializations of a modeled trait are folded into the model only if
++//! this keeps the backward functions of their methods. `sum_cloned` uses
++//! `Iterator::cloned`, so every translated `Iterator` implementation has a
++//! `cloned` method, and `bump_after` iterates over `Skip<IterMut<'a, u32>>`
++//! (the shape of `chelis_deep::authoring`), whose implementation of `Iterator`
++//! uses that of `IterMut<'a, u32>`. With `--monomorphize-mut`, the traits of
++//! these two implementations are specializations, e.g.
++//! `Iterator::<IterMut<'0, T0>, &'0 mut T1>`, whose `cloned` method is the
++//! method of another specialization, `Iterator::<IterMut<'0, T0>, T1>` (the
++//! item of the bound `Self: Iterator<Item = &'a T>` of `cloned`):
++//! `cloned::<IterMut<'0, T0>, ..>(self: IterMut<'0, T0>) -> Cloned<IterMut<'0,
++//! T0>>` gives back the borrows of `'0`. The model of `Iterator` adapts the
++//! methods it represents, not `cloned`, and the generic `Iterator::cloned`
++//! (`Self -> Cloned<Self>`) gives back nothing: folding the method changed the
++//! field of the record of the first specialization, which no longer matched the
++//! `cloned` methods of the implementations (the check of the backward functions
++//! of trait-implementation methods rejected both implementations). The method
++//! is now left specialized. The loop of `bump_after` over `Skip<IterMut<..>>`
++//! and the `cloned` methods of the implementations are not modeled: the run
++//! reports them as external definitions (exit status 1); it reported the two
++//! implementations as untranslatable, then raised an uncaught exception.
++//! `SpecializedTraitMethodAbi/Checks.lean` evaluates `sum_cloned` on the inputs
++//! of the `native` test module below.
++
++pub fn bump_after(v: &mut [u32], k: usize, d: u32) -> u32 {
++    let mut n = 0u32;
++    for x in v.iter_mut().skip(k) {
++        *x = x.wrapping_add(d);
++        n = n.wrapping_add(1);
++    }
++    n
++}
++
++pub fn sum_cloned(v: &[u32]) -> u32 {
++    let mut s = 0u32;
++    for x in v.iter().cloned() {
++        s = s.wrapping_add(x);
++    }
++    s
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn values() {
++        let mut v = [1u32, 2, 3, 4];
++        assert_eq!(bump_after(&mut v, 1, 10), 3);
++        assert_eq!(v, [1, 12, 13, 14]);
++        assert_eq!(bump_after(&mut v, 4, 10), 0);
++        assert_eq!(v, [1, 12, 13, 14]);
++        assert_eq!(sum_cloned(&[]), 0);
++        assert_eq!(sum_cloned(&[1, 2, 3]), 6);
++        assert_eq!(sum_cloned(&[u32::MAX, 2]), 1);
++    }
++}

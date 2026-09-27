@@ -1,0 +1,3015 @@
+# aeneas integration step 118 after cba11f3beb: commit cdf003c59e17bbe78a30fa146c9ab8d4a0156bcb
+# first parent 1f468287a73dc5bfd3a77db375331e1c21dde380, merged af0580e80cb1d27afeb76ee01182c102a59cb252
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-collections-2' (PureTypeCheck compares variable types modulo the aliases of one-field tuple structures)
+
+diff --git a/src/pure/PureTypeCheck.ml b/src/pure/PureTypeCheck.ml
+index 74360a4..3cbaa8c 100644
+--- a/src/pure/PureTypeCheck.ml
++++ b/src/pure/PureTypeCheck.ml
+@@ -98,6 +98,49 @@ let ty_to_string (ctx : tc_ctx) (x : ty) : string =
+   let fmt = PrintPure.decls_ctx_to_fmt_env ctx.decls_ctx in
+   PrintPure.ty_to_string fmt false x
+ 
++(** Unfold the structures which the backends extract as aliases of their field
++    type: the tuple structures with exactly one field (see
++    [ExtractTypes.extract_type_decl_gen]; they are reducible in Lean). The
++    micro-passes rely on this identification: e.g.,
++    [PureMicroPassesGeneral.inline_useless_var_assignments] substitutes the
++    variable bound to the field of such a structure with the variable bound to
++    the structure (the uses keep the field type). A tuple structure is not
++    recursive, so the unfolding terminates. *)
++let unfold_tuple_struct_aliases (ctx : tc_ctx) (ty : ty) : ty =
++  let visitor =
++    object (self)
++      inherit [_] map_ty
++
++      method! visit_TAdt env id generics =
++        let generics = self#visit_generic_args env generics in
++        let unfolded =
++          match id with
++          | TAdtId def_id -> (
++              match TypeDeclId.Map.find_opt def_id ctx.type_decls with
++              | Some ({ kind = Struct [ _ ]; _ } as def)
++                when TypesUtils.type_decl_from_decl_id_is_tuple_struct
++                       ctx.decls_ctx.type_ctx.type_infos def_id -> (
++                  match
++                    type_decl_get_instantiated_fields_types def None generics
++                  with
++                  | [ field_ty ] -> Some (self#visit_ty env field_ty)
++                  | _ -> None)
++              | _ -> None)
++          | _ -> None
++        in
++        match unfolded with
++        | Some ty -> ty
++        | None -> TAdt (id, generics)
++    end
++  in
++  visitor#visit_ty () ty
++
++(** Are two types equal once the aliases of the tuple structures with one field
++    are unfolded? *)
++let equal_types_modulo_aliases (ctx : tc_ctx) (ty0 : ty) (ty1 : ty) : bool =
++  ty0 = ty1
++  || unfold_tuple_struct_aliases ctx ty0 = unfold_tuple_struct_aliases ctx ty1
++
+ (** Check the type of a literal (string literals have the type [Str], which is
+     not a literal type) *)
+ let check_literal (span : Meta.span) (v : literal) (ty : ty) : unit =
+@@ -170,10 +213,10 @@ let rec check_texpr (span : Meta.span) (ctx : tc_ctx) (e : texpr) : unit =
+         [%silent_unwrap] span (Collections.List.nth_opt ctx.benv var.scope)
+       in
+       let ty = [%silent_unwrap] span (BVarId.Map.find_opt var.id tys) in
+-      [%pure_type_check] span (ty = e.ty)
++      [%pure_type_check] span (equal_types_modulo_aliases ctx ty e.ty)
+   | FVar fid ->
+       let ty = [%silent_unwrap] span (FVarId.Map.find_opt fid ctx.fenv) in
+-      [%pure_type_check] span (ty = e.ty)
++      [%pure_type_check] span (equal_types_modulo_aliases ctx ty e.ty)
+   | CVar cg_id ->
+       let ty = T.ConstGenericVarId.Map.find cg_id ctx.const_generics in
+       [%pure_type_check] span (ty = e.ty)
+diff --git a/tests/lean/NestedCollectionsAliases.lean b/tests/lean/NestedCollectionsAliases.lean
+new file mode 100644
+index 0000000..bedba33
+--- /dev/null
++++ b/tests/lean/NestedCollectionsAliases.lean
+@@ -0,0 +1 @@
++import NestedCollectionsAliases.Checks
+diff --git a/tests/lean/NestedCollectionsAliases/Checks.lean b/tests/lean/NestedCollectionsAliases/Checks.lean
+new file mode 100644
+index 0000000..79d7fa4
+--- /dev/null
++++ b/tests/lean/NestedCollectionsAliases/Checks.lean
+@@ -0,0 +1,57 @@
++import NestedCollectionsAliases.NestedCollectionsAliases
++
++/-! Evaluate the model of `tests/src/nested-collections-aliases.rs` on the inputs
++    of its `native` test module and compare with the native results (including
++    the values given back through the closures' mutable captures and through the
++    mutable borrow of the recursive type). -/
++
++namespace nested_collections_aliases.checks
++open Aeneas Aeneas.Std Result
++
++def ok4 : Result (U32 × U32 × U64 × Usize) → Option (Nat × Nat × Nat × Nat)
++  | ok (a, b, c, d) => some (a.val, b.val, c.val, d.val)
++  | _ => none
++
++def ok3 : Result (U32 × U64 × U64) → Option (Nat × Nat × Nat)
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++def ok2 : Result (U32 × U64) → Option (Nat × Nat)
++  | ok (a, b) => some (a.val, b.val)
++  | _ => none
++
++#guard ok4 (analyze_scenario 3#u32) == some (7620, 4, 137167999, 5)
++#guard ok4 (analyze_scenario 7#u32) == some (14320, 4, 941467546, 5)
++#guard ok4 (analyze_wrap_scenario 2#u32) == some (20, 1, 20, 1)
++#guard ok4 (analyze_wrap_scenario 5#u32) == some (1, 1, 1, 1)
++
++#guard ok4 (analyze_until_scenario 4#u32) == some (0, 0, 0, 1)
++#guard ok4 (analyze_until_scenario 3#u32) == some (3, 3, 701080418, 4)
++#guard ok4 (analyze_until_scenario 1#u32) == some (99, 4, 308467055, 5)
++
++#guard ok3 (owner_cost_scenario 1#u32 5#u64) == some (1, 60, 0)
++#guard ok3 (owner_cost_scenario 1#u32 9223372036854775807#u64) ==
++  some (3, 1, 9223372036854775807)
++#guard ok3 (owner_cost_scenario 2#u32 5#u64) == some (0, 0, 0)
++#guard ok3 (owner_cost_scenario 3#u32 5#u64) == some (0, 0, 0)
++#guard ok3 (owner_cost_scenario 4#u32 5#u64) == some (1, 0, 0)
++#guard ok3 (owner_cost_scenario 9#u32 5#u64) == some (2, 9, 0)
++
++#guard ok2 (rename_scenario 10#u32) == some (3, 282650872)
++#guard ok2 (rename_scenario 0#u32) == some (3, 74245960)
++
++/-! The carriers and the aliases add no axioms. -/
++
++/-- info: 'nested_collections_aliases.analyze_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms analyze_scenario
++
++/-- info: 'nested_collections_aliases.analyze_until_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms analyze_until_scenario
++
++/-- info: 'nested_collections_aliases.owner_cost_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms owner_cost_scenario
++
++/-- info: 'nested_collections_aliases.rename_scenario' depends on axioms: [propext, Classical.choice, Quot.sound] -/
++#guard_msgs in #print axioms rename_scenario
++
++end nested_collections_aliases.checks
+diff --git a/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean b/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean
+new file mode 100644
+index 0000000..8f5748c
+--- /dev/null
++++ b/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean
+@@ -0,0 +1,2508 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_collections_aliases]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_collections_aliases
++
++/-- Trait declaration: [core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 242:0-242:35
++    Name pattern: [core::ops::function::FnOnce<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnOnce<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>"]
++structure
++  core.ops.function.FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) where
++  call_once : T0 → (T1 × T2 × T3) → _root_.Aeneas.Std.Result (T4 × T1 ×
++    T3)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>"
++  (parentClauses := ["FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09Inst"])]
++structure
++  core.ops.function.FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eed
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) where
++  FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09Inst
++    :
++    _root_.nested_collections_aliases.core.ops.function.FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09
++    T0 T1 T2 T3 T4
++  call_mut : T0 → (T1 × T2 × T3) → _root_.Aeneas.Std.Result (T4 × T1 ×
++    T3 × T0)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>]
++    Visibility: public -/
++@[rust_trait
++  "core::ops::function::Fn<@T0, (&'0 mut @T1, @T2, &'1 mut @T3), @T4>"
++  (parentClauses := ["FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eedInst"])]
++structure
++  core.ops.function.FnT0TupleMut0T1T2Mut1T3T4_specialized_de43bd76262bff9cb5c27c512445c876
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) (T4 : Type) where
++  FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eedInst
++    :
++    _root_.nested_collections_aliases.core.ops.function.FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eed
++    T0 T1 T2 T3 T4
++  call : T0 → (T1 × T2 × T3) → _root_.Aeneas.Std.Result (T4 × T1 × T3)
++
++/-- Trait declaration: [core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 163:0-163:48
++    Name pattern: [core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::FnMut<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst"])]
++structure
++  core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :
++    _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair T0 T1 T2 T3
++  call_mut : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1 × T0)
++
++/-- Trait declaration: [core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3>]
++    Source: '/rustc/library/core/src/ops/function.rs', lines 76:0-76:52
++    Name pattern: [core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>]
++    Visibility: public -/
++@[rust_trait "core::ops::function::Fn<@T0, (&'0 mut @T1, @T2), @T3>"
++  (parentClauses := ["FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst"])]
++structure
++  core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  (T0 : Type) (T1 : Type) (T2 : Type) (T3 : Type) where
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :
++    _root_.nested_collections_aliases.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++    T0 T1 T2 T3
++  call : T0 → (T1 × T2) → _root_.Aeneas.Std.Result (T3 × T1)
++
++/-- [nested_collections_aliases::analyze::closure]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++@[reducible]
++def analyze.closure :=
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32
++
++/-- [nested_collections_aliases::analyze::closure#1]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 63:38-67:5 -/
++def analyze.closure_1 :=
++  _root_.nested_collections_aliases.analyze.closure × _root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.U32
++
++/-- [nested_collections_aliases::analyze_until::closure]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++@[reducible]
++def analyze_until.closure := _root_.Aeneas.Std.U32
++
++/-- [nested_collections_aliases::analyze_until::closure#1]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 78:38-85:5 -/
++def analyze_until.closure_1 :=
++  _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++  _root_.nested_collections_aliases.analyze_until.closure ×
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [core::option::{core::option::Option<T>}::map]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::map"]
++def core.option.Option.map
++  {T : Type} {U : Type} {F : Type} (opsfunctionFnOnceFTupleTUInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T U) (self : _root_.Option T)
++  (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceFTupleTUInst.call_once f x
++    _root_.Aeneas.Std.Result.ok (some model_state)
++
++/-- [nested_collections_aliases::Expr]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 23:0-27:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom : _root_.Aeneas.Std.U32 → Expr
++| List : _root_.Aeneas.Std.NestedVec Expr → Expr
++| Wrap : Expr → Expr
++
++/-- [nested_collections_aliases::visit_children]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop_body]
++def visit_children_loop.body
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1TupleSharedExprResultTupleEInst
++  : _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit E))
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr) (visit : T1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Expr)
++    × T1 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Expr))
++    (_root_.Aeneas.Std.core.result.Result _root_.Unit E))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  let joined ←
++    match model_state with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        (_root_.Aeneas.Std.core.result.Result.Ok (), visit) : _root_.Sum
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) × T1)
++        (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) × T1 ×
++        (_root_.Aeneas.Std.core.slice.iter.Iter
++        _root_.nested_collections_aliases.Expr) × _root_.Unit)
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) × T1 × _root_.Unit ×
++        _root_.Unit × _root_.Unit)))
++    | some child =>
++      do
++      let (model_state2, model_state3) ←
++        coreopsfunctionFnMutT1TupleSharedExprResultTupleEInst.call_mut visit
++          child
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (items,
++          model_state3, model_state1, ())) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) × T1)
++          (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) × T1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) × T1 × _root_.Unit ×
++          _root_.Unit × _root_.Unit)))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame E) residual
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r, model_state3) :
++          _root_.Sum ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) ×
++          T1) (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) × T1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit E) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) × T1 × _root_.Unit ×
++          _root_.Unit × _root_.Unit)))
++  match joined with
++  | _root_.Sum.inl (r, _) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r)
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, ())) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, (), (), ())) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [nested_collections_aliases::visit_children]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop]
++def visit_children_loop
++  {E : Type} {T1 : Type} (coreopsfunctionFnMutT1TupleSharedExprResultTupleEInst
++  : _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit E))
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr) (visit : T1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit E)
++  := do
++  loop
++    (fun (items1, visit1, iter1) =>
++       _root_.nested_collections_aliases.visit_children_loop.body
++       coreopsfunctionFnMutT1TupleSharedExprResultTupleEInst items1 visit1
++       iter1 : ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Expr) × T1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Expr) × T1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr))
++      (_root_.Aeneas.Std.core.result.Result _root_.Unit E)))
++    (items, visit, iter)
++
++/-- [nested_collections_aliases::visit_children]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 29:0-40:1 -/
++def visit_children
++  {E : Type} {T1 : Type}
++  (coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit E)) (expr : _root_.nested_collections_aliases.Expr) (visit : T1)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit E)
++  := do
++  match expr with
++  | _root_.nested_collections_aliases.Expr.Atom _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok ())
++  | _root_.nested_collections_aliases.Expr.List items =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let (model_state, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter items1
++    _root_.nested_collections_aliases.visit_children_loop
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst items1 visit
++      model_state
++  | _root_.nested_collections_aliases.Expr.Wrap inner =>
++    let (model_state, _) ←
++      coreopsfunctionFnMutT1TupleShared0ExprResultTupleEInst.call_mut visit
++        inner
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok ())
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++        _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame E) residual
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze::closure#1<1, 2, 3, 4, 5>>]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop_body]
++def
++  visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda_loop.body
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0))
++  (back : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (back1 : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back2 : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections_aliases.Expr) ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Expr))
++    ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32)))
++  := do
++  let (c, i, v, i1) := visit
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  let joined ←
++    match model_state with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        (_root_.Aeneas.Std.core.result.Result.Ok (), (c, i, v, i1),
++        fun c1 => let (_, _, _, i2) := c1
++                  back2 (c, i, v, i2),
++        fun c1 => let (_, _, v1, _) := c1
++                  back1 (c, i, v1, i1),
++        fun c1 => let (_, i2, _, _) := c1
++                  back (c, i2, v, i1)) : _root_.Sum
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++        _root_.nested_collections_aliases.analyze.closure_1 ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32)) (_root_.Sum
++        ((_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) ×
++        _root_.nested_collections_aliases.analyze.closure_1 ×
++        (_root_.Aeneas.Std.core.slice.iter.Iter
++        _root_.nested_collections_aliases.Expr) × _root_.Unit)
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) ×
++        _root_.nested_collections_aliases.analyze.closure_1 × _root_.Unit ×
++        _root_.Unit × _root_.Unit ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze.closure_1 →
++        _root_.Aeneas.Std.U32))))
++    | some child =>
++      do
++      let (model_state2, model_state3) ←
++        coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst.call_mut
++          (c, i, v, i1) child
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++          (fun c1 => let (_, i2, _, _) := c1
++                     back (c, i2, v, i1),
++          fun c1 => let (_, _, v1, _) := c1
++                    back1 (c, i, v1, i1),
++          fun c1 => let (_, _, _, i2) := c1
++                    back2 (c, i, v, i2), items, model_state3, model_state1,
++          ())) : _root_.Sum ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++          T0) × _root_.nested_collections_aliases.analyze.closure_1 ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32)) (_root_.Sum
++          ((_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze.closure_1 × _root_.Unit ×
++          _root_.Unit × _root_.Unit ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32))))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r, model_state3,
++          fun c1 => let (_, _, _, i2) := c1
++                    back2 (c, i, v, i2),
++          fun c1 => let (_, _, v1, _) := c1
++                    back1 (c, i, v1, i1),
++          fun c1 => let (_, i2, _, _) := c1
++                    back (c, i2, v, i1)) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          _root_.nested_collections_aliases.analyze.closure_1 ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32)) (_root_.Sum
++          ((_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze.closure_1 × _root_.Unit ×
++          _root_.Unit × _root_.Unit ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze.closure_1 →
++          _root_.Aeneas.Std.U32))))
++  match joined with
++  | _root_.Sum.inl (r, c1, back3, back4, back5) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, c1,
++      back5, back4, back3))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5,
++    ())) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3, exit4, exit5))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, (), (), (), exit2, exit3,
++    exit4)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit1, exit2, exit3, exit4))
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze::closure#1<1, 2, 3, 4, 5>>]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop]
++def
++  visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda_loop
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0))
++  (back : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (back1 : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back2 : _root_.nested_collections_aliases.analyze.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × _root_.nested_collections_aliases.analyze.closure_1 ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (back3, back4, back5, items1, visit1, iter1) =>
++       _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda_loop.body
++       coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst back3
++       back4 back5 items1 visit1 iter1 :
++      ((_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Expr) ×
++      _root_.nested_collections_aliases.analyze.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Expr) ×
++      _root_.nested_collections_aliases.analyze.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr))
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      _root_.nested_collections_aliases.analyze.closure_1 ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.Aeneas.Std.U32))))
++    (back, back1, back2, items, visit, iter)
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze::closure#1<1, 2, 3, 4, 5>>]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 29:0-40:1 -/
++def visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0)) (expr : _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze.closure_1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × _root_.nested_collections_aliases.analyze.closure_1 ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    _root_.nested_collections_aliases.analyze.closure_1)
++  := do
++  let (c, i, v, i1) := visit
++  match expr with
++  | _root_.nested_collections_aliases.Expr.Atom _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      visit, visit, visit)
++  | _root_.nested_collections_aliases.Expr.List items =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let (model_state, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter items1
++    let (r, visit1, back, back1, back2) ←
++      _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda_loop
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst
++        (fun c1 => let (_, i2, _, _) := c1
++                   i2) (fun c1 => let (_, _, v1, _) := c1
++                                  v1) (fun c1 => let (_, _, _, i2) := c1
++                                                 i2) items1 (c, i, v, i1)
++        model_state
++    let i2 := back visit1
++    let v1 := back1 visit1
++    let i3 := back2 visit1
++    _root_.Aeneas.Std.Result.ok (r, (c, i2, v, i1), (c, i, v1, i1), (c, i, v,
++      i3))
++  | _root_.nested_collections_aliases.Expr.Wrap inner =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst.call_mut
++        (c, i, v, i1) inner
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      let (_, i2, _, _) := model_state1
++      let (_, _, v1, _) := model_state1
++      let (_, _, _, i3) := model_state1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++        (c, i2, v, i1), (c, i, v1, i1), (c, i, v, i3))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let (_, i2, _, _) := model_state1
++      let (_, _, v1, _) := model_state1
++      let (_, _, _, i3) := model_state1
++      _root_.Aeneas.Std.Result.ok (r, (c, i2, v, i1), (c, i, v1, i1), (c, i, v,
++        i3))
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze_until::closure#1<1, 2, 3, 4, 5>>]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop_body]
++def
++  visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70_loop.body
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze_until.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0))
++  (back : _root_.nested_collections_aliases.analyze_until.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (back1 : _root_.nested_collections_aliases.analyze_until.closure_1 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze_until.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Expr) ×
++    _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Expr))
++    ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++    _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (i, i1, c, v) := visit
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  let joined ←
++    match model_state with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl
++        (_root_.Aeneas.Std.core.result.Result.Ok (), (i, i1, c, v),
++        fun c1 => let (_, _, _, v1) := c1
++                  back1 (i, i1, c, v1),
++        fun c1 => let (_, i2, _, _) := c1
++                  back (i, i2, c, v)) : _root_.Sum
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++        _root_.nested_collections_aliases.analyze_until.closure_1 ×
++        (_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.U32)) (_root_.Sum
++        ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) ×
++        _root_.nested_collections_aliases.analyze_until.closure_1 ×
++        (_root_.Aeneas.Std.core.slice.iter.Iter
++        _root_.nested_collections_aliases.Expr) × _root_.Unit)
++        ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.Expr) ×
++        _root_.nested_collections_aliases.analyze_until.closure_1 ×
++        _root_.Unit × _root_.Unit × _root_.Unit ×
++        (_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.U32) ×
++        (_root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    | some child =>
++      do
++      let (model_state2, model_state3) ←
++        coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst.call_mut
++          (i, i1, c, v) child
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state2
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++          (fun c1 => let (_, i2, _, _) := c1
++                     back (i, i2, c, v),
++          fun c1 => let (_, _, _, v1) := c1
++                    back1 (i, i1, c, v1), items, model_state3, model_state1,
++          ())) : _root_.Sum ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++          T0) × _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32)) (_root_.Sum
++          ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          _root_.Unit × _root_.Unit × _root_.Unit ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (r, model_state3,
++          fun c1 => let (_, _, _, v1) := c1
++                    back1 (i, i1, c, v1),
++          fun c1 => let (_, i2, _, _) := c1
++                    back (i, i2, c, v)) : _root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32)) (_root_.Sum
++          ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Expr) × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++          (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Expr) ×
++          _root_.nested_collections_aliases.analyze_until.closure_1 ×
++          _root_.Unit × _root_.Unit × _root_.Unit ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.U32) ×
++          (_root_.nested_collections_aliases.analyze_until.closure_1 →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++  match joined with
++  | _root_.Sum.inl (r, c1, back2, back3) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r, c1,
++      back3, back2))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, ())) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3, exit4))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, exit1, (), (), (), exit2, exit3))
++    =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++      exit1, exit2, exit3))
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze_until::closure#1<1, 2, 3, 4, 5>>]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 33:12-40:1 -/
++@[rust_loop]
++def
++  visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70_loop
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze_until.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0))
++  (back : _root_.nested_collections_aliases.analyze_until.closure_1 →
++  _root_.Aeneas.Std.U32)
++  (back1 : _root_.nested_collections_aliases.analyze_until.closure_1 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (items : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze_until.closure_1)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.U32) ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (back2, back3, items1, visit1, iter1) =>
++       _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70_loop.body
++       coreopsfunctionFnMutclosure_1TupleSharedExprResultTupleT0Inst back2
++       back3 items1 visit1 iter1 :
++      ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Expr)
++      × _root_.nested_collections_aliases.analyze_until.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Expr)
++      × _root_.nested_collections_aliases.analyze_until.closure_1 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Expr))
++      ((_root_.Aeneas.Std.core.result.Result _root_.Unit T0) ×
++      _root_.nested_collections_aliases.analyze_until.closure_1 ×
++      (_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.U32) ×
++      (_root_.nested_collections_aliases.analyze_until.closure_1 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (back, back1, items, visit, iter)
++
++/-- [nested_collections_aliases::visit_children::<0, T0, nested_collections_aliases::analyze_until::closure#1<1, 2, 3, 4, 5>>]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 29:0-40:1 -/
++def visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70
++  {T0 : Type} (coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze_until.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit T0)) (expr : _root_.nested_collections_aliases.Expr)
++  (visit : _root_.nested_collections_aliases.analyze_until.closure_1) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    T0) × _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    _root_.nested_collections_aliases.analyze_until.closure_1)
++  := do
++  let (i, i1, c, v) := visit
++  match expr with
++  | _root_.nested_collections_aliases.Expr.Atom _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      visit, visit)
++  | _root_.nested_collections_aliases.Expr.List items =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let (model_state, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter items1
++    let (r, visit1, back, back1) ←
++      _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70_loop
++        coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst
++        (fun c1 => let (_, i2, _, _) := c1
++                   i2) (fun c1 => let (_, _, _, v1) := c1
++                                  v1) items1 (i, i1, c, v) model_state
++    let i2 := back visit1
++    let v1 := back1 visit1
++    _root_.Aeneas.Std.Result.ok (r, (i, i2, c, v), (i, i1, c, v1))
++  | _root_.nested_collections_aliases.Expr.Wrap inner =>
++    let (model_state, model_state1) ←
++      coreopsfunctionFnMutclosure_1TupleShared0ExprResultTupleT0Inst.call_mut
++        (i, i1, c, v) inner
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch model_state
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      let (_, i2, _, _) := model_state1
++      let (_, _, _, v1) := model_state1
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++        (i, i2, c, v), (i, i1, c, v1))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Unit (_root_.Aeneas.Std.core.convert.FromSame T0) residual
++      let (_, i2, _, _) := model_state1
++      let (_, _, _, v1) := model_state1
++      _root_.Aeneas.Std.Result.ok (r, (i, i2, c, v), (i, i1, c, v1))
++
++/-- [nested_collections_aliases::leaf]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 42:0-48:1 -/
++def leaf
++  (expr : _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match expr with
++  | _root_.nested_collections_aliases.Expr.Atom n =>
++    _root_.Aeneas.Std.Result.ok n
++  | _root_.nested_collections_aliases.Expr.List items =>
++    let items1 := _root_.Aeneas.Std.NestedVec.toVec items
++    let i := _root_.Aeneas.Std.alloc.vec.Vec.len items1
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.UScalar.cast .U32 i)
++  | _root_.nested_collections_aliases.Expr.Wrap _ =>
++    _root_.Aeneas.Std.Result.ok 7#u32
++
++/-- [nested_collections_aliases::analyze::{core::ops::function::Fn::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}::call]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnTupleMutU32SharedExprMutVecU32Tuple_specialized_de43bd76262bff9cb5c27c512445c876.call
++  (c : _root_.nested_collections_aliases.analyze.closure)
++  (tupled_args : (_root_.Aeneas.Std.U32 ×
++  _root_.nested_collections_aliases.Expr × (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (total, child, out) := tupled_args
++  let i ← _root_.nested_collections_aliases.leaf child
++  let o ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get
++      (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++      _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32 c i
++  let w ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 1#u32
++    | some w1 => _root_.Aeneas.Std.Result.ok w1
++  let tupled_args1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out w
++  let total1 ← total + w
++  _root_.Aeneas.Std.Result.ok ((), total1, tupled_args1)
++
++/-- [nested_collections_aliases::analyze::{core::ops::function::FnMut<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_collections_aliases::analyze::closure#1<0, 1, 2, 3, 4>}::call_mut]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 63:38-67:5 -/
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++  (c : _root_.nested_collections_aliases.analyze.closure_1)
++  (tupled_args : _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.nested_collections_aliases.analyze.closure_1) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.nested_collections_aliases.analyze.closure_1) ×
++    (_root_.nested_collections_aliases.analyze.closure_1 →
++    _root_.nested_collections_aliases.analyze.closure_1))
++  := do
++  let (c1, i, v, i1) := c
++  let (_, i2, v1) ←
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnTupleMutU32SharedExprMutVecU32Tuple_specialized_de43bd76262bff9cb5c27c512445c876.call
++      c1 (i, tupled_args, v)
++  let i3 ← i1 + 1#u32
++  let back :=
++    (fun c2 => let (_, i4, _, _) := c2
++               (c1, i4, v, i1) :
++      _root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.nested_collections_aliases.analyze.closure_1)
++  let back1 :=
++    (fun c2 => let (_, _, v2, _) := c2
++               (c1, i, v2, i1) :
++      _root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.nested_collections_aliases.analyze.closure_1)
++  let back2 :=
++    (fun c2 => let (_, _, _, i4) := c2
++               (c1, i, v, i4) :
++      _root_.nested_collections_aliases.analyze.closure_1 →
++      _root_.nested_collections_aliases.analyze.closure_1)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (), (c1,
++    i2, v1, i3), back, back1, back2)
++
++/-- [nested_collections_aliases::analyze::{core::ops::function::FnOnce<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_collections_aliases::analyze::closure#1<0, 1, 2, 3, 4>}::call_once]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 63:38-67:5 -/
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible.call_once
++  (c : _root_.nested_collections_aliases.analyze.closure_1)
++  (e : _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.core.convert.Infallible) ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    _root_.nested_collections_aliases.analyze.closure_1 ×
++    _root_.nested_collections_aliases.analyze.closure_1)
++  := do
++  let (c1, i, v, i1) := c
++  let (r, c2, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_collections_aliases.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++      (c1, i, v, i1) e
++  let c3 := call_mut_back c2
++  let (_, i2, _, _) := c3
++  let c4 := call_mut_back1 c2
++  let (_, _, v1, _) := c4
++  let c5 := call_mut_back2 c2
++  let (_, _, _, i3) := c5
++  _root_.Aeneas.Std.Result.ok (r, (c1, i2, v, i1), (c1, i, v1, i1), (c1, i, v,
++    i3))
++
++/-- Trait implementation: [nested_collections_aliases::analyze::{core::ops::function::FnOnce<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_collections_aliases::analyze::closure#1<0, 1, 2, 3, 4>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 63:38-67:5 -/
++@[reducible]
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_collections_aliases.analyze.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit _root_.Aeneas.Std.core.convert.Infallible) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_collections_aliases.analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let capture_state2 := captured2
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1,
++        capture_state1.#2, capture_state2.#3))
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze::{core::ops::function::FnMut<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), core::convert::Infallible>> for nested_collections_aliases::analyze::closure#1<0, 1, 2, 3, 4>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 63:38-67:5 -/
++@[reducible]
++def
++  analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit _root_.Aeneas.Std.core.convert.Infallible) := {
++  FnOnceInst :=
++    _root_.nested_collections_aliases.analyze.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleInfallible
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_collections_aliases.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let capture_state2 := captured3 captured
++      _root_.Aeneas.Std.Result.ok (output, (captured.#0, capture_state.#1,
++        capture_state1.#2, capture_state2.#3))
++}
++
++/-- [nested_collections_aliases::analyze]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 52:0-69:1
++    Visibility: public -/
++def analyze
++  (expr : _root_.nested_collections_aliases.Expr)
++  (weights1 : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (_, c, c1, c2) ←
++    _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_f91eefd5ec8deb24d6d166e77140ebda
++      _root_.nested_collections_aliases.analyze.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleInfallible
++      expr (weights1, 0#u32, out, 0#u32)
++  let (_, total, _, _) := c
++  let (_, _, _, index) := c2
++  let (_, _, out1, _) := c1
++  _root_.Aeneas.Std.Result.ok ((total, index), out1)
++
++/-- [nested_collections_aliases::analyze::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutU32SharedExprMutVecU32Tuple_specialized_372e254f88a9f3513340d838755e7eed.call_mut
++  (state : _root_.nested_collections_aliases.analyze.closure)
++  (args : (_root_.Aeneas.Std.U32 × _root_.nested_collections_aliases.Expr ×
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.nested_collections_aliases.analyze.closure)
++  := do
++  let (_, args1, args2) ←
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnTupleMutU32SharedExprMutVecU32Tuple_specialized_de43bd76262bff9cb5c27c512445c876.call
++      state args
++  _root_.Aeneas.Std.Result.ok ((), args1, args2, state)
++
++/-- [nested_collections_aliases::analyze::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}::call_once]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++def
++  analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32SharedExprMutVecU32Tuple_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09.call_once
++  (c : _root_.nested_collections_aliases.analyze.closure)
++  (t : (_root_.Aeneas.Std.U32 × _root_.nested_collections_aliases.Expr ×
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))) :
++  _root_.Aeneas.Std.Result (_root_.Unit × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (_, i, v, _) ←
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutU32SharedExprMutVecU32Tuple_specialized_372e254f88a9f3513340d838755e7eed.call_mut
++      c t
++  _root_.Aeneas.Std.Result.ok ((), i, v)
++
++/-- Trait implementation: [nested_collections_aliases::analyze::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32SharedExprMutVecU32Tuple_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09
++  :
++  _root_.nested_collections_aliases.core.ops.function.FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09
++  _root_.nested_collections_aliases.analyze.closure _root_.Aeneas.Std.U32
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) _root_.Unit := {
++  call_once :=
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32SharedExprMutVecU32Tuple_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09.call_once
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutU32SharedExprMutVecU32Tuple_specialized_372e254f88a9f3513340d838755e7eed
++  :
++  _root_.nested_collections_aliases.core.ops.function.FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eed
++  _root_.nested_collections_aliases.analyze.closure _root_.Aeneas.Std.U32
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) _root_.Unit := {
++  FnOnceT0TupleMut0T1T2Mut1T3T4_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09Inst
++    :=
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnOnceTupleMutU32SharedExprMutVecU32Tuple_specialized_2bd72b501ee0b1b813ef6e0e5d7d4c09
++  call_mut :=
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutU32SharedExprMutVecU32Tuple_specialized_372e254f88a9f3513340d838755e7eed.call_mut
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze::{core::ops::function::Fn::<T0, (&0 mut (T1), T2, &1 mut (T3)), T4><'_, '_, u32, &'_ (nested_collections_aliases::Expr), alloc::vec::Vec<u32>, ()> for nested_collections_aliases::analyze::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 54:16-61:5 -/
++@[reducible]
++def
++  analyze.closure.Insts.CoreOpsFunctionFnTupleMutU32SharedExprMutVecU32Tuple_specialized_de43bd76262bff9cb5c27c512445c876
++  :
++  _root_.nested_collections_aliases.core.ops.function.FnT0TupleMut0T1T2Mut1T3T4_specialized_de43bd76262bff9cb5c27c512445c876
++  _root_.nested_collections_aliases.analyze.closure _root_.Aeneas.Std.U32
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32) _root_.Unit := {
++  FnMutT0TupleMut0T1T2Mut1T3T4_specialized_372e254f88a9f3513340d838755e7eedInst
++    :=
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnMutTupleMutU32SharedExprMutVecU32Tuple_specialized_372e254f88a9f3513340d838755e7eed
++  call :=
++    _root_.nested_collections_aliases.analyze.closure.Insts.CoreOpsFunctionFnTupleMutU32SharedExprMutVecU32Tuple_specialized_de43bd76262bff9cb5c27c512445c876.call
++}
++
++/-- [nested_collections_aliases::analyze_until::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}::call]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnPairMutVecU32SharedExprTuple_specialized_1b57b25c37009051a1184d723a4cd435.call
++  (c : _root_.nested_collections_aliases.analyze_until.closure)
++  (tupled_args : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++  _root_.nested_collections_aliases.Expr)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (out, child) := tupled_args
++  let i ← _root_.nested_collections_aliases.leaf child
++  let i1 ← i + c
++  let tupled_args1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out i1
++  _root_.Aeneas.Std.Result.ok ((), tupled_args1)
++
++/-- [nested_collections_aliases::analyze_until::{core::ops::function::FnMut<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), u32>> for nested_collections_aliases::analyze_until::closure#1<0, 1, 2, 3, 4>}::call_mut]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 78:38-85:5 -/
++def
++  analyze_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleU32.call_mut
++  (c : _root_.nested_collections_aliases.analyze_until.closure_1)
++  (tupled_args : _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.nested_collections_aliases.analyze_until.closure_1) ×
++    (_root_.nested_collections_aliases.analyze_until.closure_1 →
++    _root_.nested_collections_aliases.analyze_until.closure_1))
++  := do
++  let (i, i1, c1, v) := c
++  let i2 ← _root_.nested_collections_aliases.leaf tupled_args
++  if i2 = i
++  then
++    let back :=
++      (fun c2 => let (_, i3, _, _) := c2
++                 (i, i3, c1, v) :
++        _root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.nested_collections_aliases.analyze_until.closure_1)
++    let back1 :=
++      (fun c2 => let (_, _, _, v1) := c2
++                 (i, i1, c1, v1) :
++        _root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.nested_collections_aliases.analyze_until.closure_1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err i1,
++      (i, i1, c1, v), back, back1)
++  else
++    let (_, v1) ←
++      _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnPairMutVecU32SharedExprTuple_specialized_1b57b25c37009051a1184d723a4cd435.call
++        c1 (v, tupled_args)
++    let i3 ← i1 + 1#u32
++    let back :=
++      (fun c2 => let (_, i4, _, _) := c2
++                 (i, i4, c1, v) :
++        _root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.nested_collections_aliases.analyze_until.closure_1)
++    let back1 :=
++      (fun c2 => let (_, _, _, v2) := c2
++                 (i, i1, c1, v2) :
++        _root_.nested_collections_aliases.analyze_until.closure_1 →
++        _root_.nested_collections_aliases.analyze_until.closure_1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok (),
++      (i, i3, c1, v1), back, back1)
++
++/-- [nested_collections_aliases::analyze_until::{core::ops::function::FnOnce<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), u32>> for nested_collections_aliases::analyze_until::closure#1<0, 1, 2, 3, 4>}::call_once]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 78:38-85:5 -/
++def
++  analyze_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleU32.call_once
++  (c : _root_.nested_collections_aliases.analyze_until.closure_1)
++  (e : _root_.nested_collections_aliases.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_collections_aliases.analyze_until.closure_1 ×
++    _root_.nested_collections_aliases.analyze_until.closure_1)
++  := do
++  let (i, i1, c1, v) := c
++  let (r, c2, call_mut_back, call_mut_back1) ←
++    _root_.nested_collections_aliases.analyze_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleU32.call_mut
++      (i, i1, c1, v) e
++  let c3 := call_mut_back c2
++  let (_, i2, _, _) := c3
++  let c4 := call_mut_back1 c2
++  let (_, _, _, v1) := c4
++  _root_.Aeneas.Std.Result.ok (r, (i, i2, c1, v), (i, i1, c1, v1))
++
++/-- Trait implementation: [nested_collections_aliases::analyze_until::{core::ops::function::FnOnce<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), u32>> for nested_collections_aliases::analyze_until::closure#1<0, 1, 2, 3, 4>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 78:38-85:5 -/
++@[reducible]
++def
++  analyze_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleU32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_collections_aliases.analyze_until.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_collections_aliases.analyze_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleU32.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1, 
++        arg.#2, capture_state1.#3))
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze_until::{core::ops::function::FnMut<(&'_ (nested_collections_aliases::Expr)), core::result::Result<(), u32>> for nested_collections_aliases::analyze_until::closure#1<0, 1, 2, 3, 4>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 78:38-85:5 -/
++@[reducible]
++def
++  analyze_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleU32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_collections_aliases.analyze_until.closure_1
++  _root_.nested_collections_aliases.Expr (_root_.Aeneas.Std.core.result.Result
++  _root_.Unit _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_collections_aliases.analyze_until.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedExprResultTupleU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_collections_aliases.analyze_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleU32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (captured.#0, capture_state.#1,
++        captured.#2, capture_state1.#3))
++}
++
++/-- [nested_collections_aliases::analyze_until]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 73:0-87:1
++    Visibility: public -/
++def analyze_until
++  (expr : _root_.nested_collections_aliases.Expr)
++  (stop : _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (((_root_.Aeneas.Std.core.result.Result _root_.Unit
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (result, c, c1) ←
++    _root_.nested_collections_aliases.visit_children0T0closure_1_specialized_da714f920842edc69d9cd8cfda1e9c70
++      _root_.nested_collections_aliases.analyze_until.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedExprResultTupleU32
++      expr (stop, 0#u32, stop, out)
++  let (_, seen, _, _) := c
++  let (_, _, _, out1) := c1
++  _root_.Aeneas.Std.Result.ok ((result, seen), out1)
++
++/-- [nested_collections_aliases::analyze_until::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}::call_mut]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnMutPairMutVecU32SharedExprTuple_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++  (state : _root_.nested_collections_aliases.analyze_until.closure)
++  (args : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++  _root_.nested_collections_aliases.Expr)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_collections_aliases.analyze_until.closure)
++  := do
++  let (_, args1) ←
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnPairMutVecU32SharedExprTuple_specialized_1b57b25c37009051a1184d723a4cd435.call
++      state args
++  _root_.Aeneas.Std.Result.ok ((), args1, state)
++
++/-- [nested_collections_aliases::analyze_until::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}::call_once]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnOncePairMutVecU32SharedExprTuple_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++  (c : _root_.nested_collections_aliases.analyze_until.closure)
++  (p : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++  _root_.nested_collections_aliases.Expr)) :
++  _root_.Aeneas.Std.Result (_root_.Unit × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (_, v, _) ←
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnMutPairMutVecU32SharedExprTuple_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok ((), v)
++
++/-- Trait implementation: [nested_collections_aliases::analyze_until::{core::ops::function::FnOnce::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++@[reducible]
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnOncePairMutVecU32SharedExprTuple_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgPair
++  _root_.nested_collections_aliases.analyze_until.closure
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  _root_.nested_collections_aliases.Expr _root_.Unit := {
++  call_once :=
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnOncePairMutVecU32SharedExprTuple_specialized_0bd89e66281241a411b8b1985d5f4cc1.call_once
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze_until::{core::ops::function::FnMut::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++@[reducible]
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnMutPairMutVecU32SharedExprTuple_specialized_f6c258c007f6ef4b68b676eb0292141b
++  :
++  _root_.nested_collections_aliases.core.ops.function.FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141b
++  _root_.nested_collections_aliases.analyze_until.closure
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  _root_.nested_collections_aliases.Expr _root_.Unit := {
++  FnOnceT0PairMut0T1T2T3_specialized_0bd89e66281241a411b8b1985d5f4cc1Inst :=
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnOncePairMutVecU32SharedExprTuple_specialized_0bd89e66281241a411b8b1985d5f4cc1
++  call_mut :=
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnMutPairMutVecU32SharedExprTuple_specialized_f6c258c007f6ef4b68b676eb0292141b.call_mut
++}
++
++/-- Trait implementation: [nested_collections_aliases::analyze_until::{core::ops::function::Fn::<T0, (&0 mut (T1), T2), T3><'_, alloc::vec::Vec<u32>, &'_ (nested_collections_aliases::Expr), ()> for nested_collections_aliases::analyze_until::closure<0>}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 75:17-77:5 -/
++@[reducible]
++def
++  analyze_until.closure.Insts.CoreOpsFunctionFnPairMutVecU32SharedExprTuple_specialized_1b57b25c37009051a1184d723a4cd435
++  :
++  _root_.nested_collections_aliases.core.ops.function.FnT0PairMut0T1T2T3_specialized_1b57b25c37009051a1184d723a4cd435
++  _root_.nested_collections_aliases.analyze_until.closure
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  _root_.nested_collections_aliases.Expr _root_.Unit := {
++  FnMutT0PairMut0T1T2T3_specialized_f6c258c007f6ef4b68b676eb0292141bInst :=
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnMutPairMutVecU32SharedExprTuple_specialized_f6c258c007f6ef4b68b676eb0292141b
++  call :=
++    _root_.nested_collections_aliases.analyze_until.closure.Insts.CoreOpsFunctionFnPairMutVecU32SharedExprTuple_specialized_1b57b25c37009051a1184d723a4cd435.call
++}
++
++/-- [nested_collections_aliases::OwnerId]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 90:0-90:28
++    Visibility: public -/
++@[reducible]
++def OwnerId := _root_.Aeneas.Std.U32
++
++/-- [nested_collections_aliases::{core::clone::Clone for nested_collections_aliases::OwnerId}::clone]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:9-89:14
++    Visibility: public -/
++def OwnerId.Insts.CoreCloneClone.clone
++  (self : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result _root_.nested_collections_aliases.OwnerId
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [nested_collections_aliases::{core::clone::Clone for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:9-89:14 -/
++@[reducible]
++def OwnerId.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.nested_collections_aliases.OwnerId := {
++  clone := _root_.nested_collections_aliases.OwnerId.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [nested_collections_aliases::{core::marker::Copy for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:16-89:20 -/
++@[reducible]
++def OwnerId.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.nested_collections_aliases.OwnerId := {
++  cloneInst := _root_.nested_collections_aliases.OwnerId.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [nested_collections_aliases::{core::marker::StructuralPartialEq for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:22-89:31 -/
++@[reducible]
++def OwnerId.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.nested_collections_aliases.OwnerId := {
++}
++
++/-- [nested_collections_aliases::{core::cmp::PartialEq<nested_collections_aliases::OwnerId> for nested_collections_aliases::OwnerId}::eq]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:22-89:31
++    Visibility: public -/
++def OwnerId.Insts.CoreCmpPartialEqOwnerId.eq
++  (self : _root_.nested_collections_aliases.OwnerId)
++  (other : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (self = other)
++
++/-- Trait implementation: [nested_collections_aliases::{core::cmp::PartialEq<nested_collections_aliases::OwnerId> for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:22-89:31 -/
++@[reducible]
++def OwnerId.Insts.CoreCmpPartialEqOwnerId :
++  _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.nested_collections_aliases.OwnerId
++  _root_.nested_collections_aliases.OwnerId := {
++  eq :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpPartialEqOwnerId.eq
++}
++
++/-- [nested_collections_aliases::{core::cmp::Eq for nested_collections_aliases::OwnerId}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:33-89:35
++    Visibility: public -/
++def OwnerId.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [nested_collections_aliases::{core::cmp::Eq for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:33-89:35 -/
++@[reducible]
++def OwnerId.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.nested_collections_aliases.OwnerId := {
++  partialEqInst :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpPartialEqOwnerId
++  assert_receiver_is_total_eq :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [nested_collections_aliases::{core::cmp::PartialOrd<nested_collections_aliases::OwnerId> for nested_collections_aliases::OwnerId}::partial_cmp]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:37-89:47
++    Visibility: public -/
++def OwnerId.Insts.CoreCmpPartialOrdOwnerId.partial_cmp
++  (self : _root_.nested_collections_aliases.OwnerId)
++  (other : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Ordering)
++  := do
++  _root_.Aeneas.Std.Result.ok
++    (_root_.Aeneas.Std.core.cmp.impls.PartialOrdU32.partial_cmp self other)
++
++/-- Trait implementation: [nested_collections_aliases::{core::cmp::PartialOrd<nested_collections_aliases::OwnerId> for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:37-89:47 -/
++@[reducible]
++def OwnerId.Insts.CoreCmpPartialOrdOwnerId :
++  _root_.Aeneas.Std.core.cmp.PartialOrd
++  _root_.nested_collections_aliases.OwnerId
++  _root_.nested_collections_aliases.OwnerId := {
++  partialEqInst :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpPartialEqOwnerId
++  partial_cmp :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpPartialOrdOwnerId.partial_cmp
++}
++
++/-- [nested_collections_aliases::{core::cmp::Ord for nested_collections_aliases::OwnerId}::cmp]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:49-89:52
++    Visibility: public -/
++def OwnerId.Insts.CoreCmpOrd.cmp
++  (self : _root_.nested_collections_aliases.OwnerId)
++  (other : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result _root_.Ordering
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.cmp.impls.OrdU32.cmp self
++    other)
++
++/-- Trait implementation: [nested_collections_aliases::{core::cmp::Ord for nested_collections_aliases::OwnerId}]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 89:49-89:52 -/
++@[reducible]
++def OwnerId.Insts.CoreCmpOrd : _root_.Aeneas.Std.core.cmp.Ord
++  _root_.nested_collections_aliases.OwnerId := {
++  eqInst := _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpEq
++  partialOrdInst :=
++    _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpPartialOrdOwnerId
++  cmp := _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd.cmp
++}
++
++/-- [nested_collections_aliases::Dim]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 92:0-95:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Dim where
++| Lit : _root_.Aeneas.Std.U64 → Dim
++| Named : _root_.Aeneas.Std.U32 → _root_.Option _root_.Aeneas.Std.U64 → Dim
++
++/-- [nested_collections_aliases::HostType]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 98:0-103:1
++    Visibility: public -/
++@[discriminant isize]
++inductive HostType where
++| Scalar : _root_.Aeneas.Std.U32 → HostType
++| Tuple : _root_.Aeneas.Std.NestedVec HostType → HostType
++| Adt :
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.NestedVec HostType →
++  HostType
++| Tensor :
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim →
++  _root_.Aeneas.Std.U64 →
++  HostType
++
++/-- [nested_collections_aliases::OwnerInfo]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 105:0-108:1
++    Visibility: public -/
++structure OwnerInfo where
++  ty : _root_.nested_collections_aliases.HostType
++  heap : _root_.Bool
++
++/-- [nested_collections_aliases::CostError]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 110:0-113:1
++    Visibility: public -/
++@[discriminant isize]
++inductive CostError where
++| Missing : _root_.Aeneas.Std.U32 → CostError
++| Overflow : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U64 → CostError
++
++/-- [nested_collections_aliases::ByteBound]
++    Source: 'tests/src/nested-collections-aliases.rs', lines 115:0-118:1
++    Visibility: public -/
++@[discriminant isize]
++inductive ByteBound where
++| Unknown : ByteBound
++| Exact : _root_.Aeneas.Std.U64 → ByteBound
++
++/-- [nested_collections_aliases::ByteBound::Exact]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 117:4-117:14 -/
++def ByteBound.Exact.ctor
++  (i : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.nested_collections_aliases.ByteBound
++  := do
++  _root_.Aeneas.Std.Result.ok
++    (_root_.nested_collections_aliases.ByteBound.Exact i)
++
++/-- [nested_collections_aliases::owner_byte_cost]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 1:0-146:1
++    Visibility: public -/
++@[rust_loop_body]
++def owner_byte_cost_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Dim)
++  (owners1 : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.nested_collections_aliases.OwnerId
++  _root_.nested_collections_aliases.OwnerInfo) (i : _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim) (width : _root_.Aeneas.Std.U64)
++  (b : _root_.Bool) (elements : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Dim) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.nested_collections_aliases.OwnerId
++    _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim) ×
++    _root_.Aeneas.Std.U64 × _root_.Bool × _root_.Aeneas.Std.U64)
++    ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_collections_aliases.ByteBound
++    _root_.nested_collections_aliases.CostError) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.nested_collections_aliases.OwnerId
++    _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    let o ← lift (_root_.Aeneas.Std.U64.checked_mul elements width)
++    let o1 ←
++      _root_.nested_collections_aliases.core.option.Option.map (BuiltinFnOnce
++        _root_.Aeneas.Std.U64 _root_.nested_collections_aliases.ByteBound) o
++        (_root_.nested_collections_aliases.ByteBound.Exact.ctor)
++    let r ←
++      _root_.Aeneas.Std.core.option.Option.ok_or o1
++        (_root_.nested_collections_aliases.CostError.Overflow i width)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r,
++      owners1, i, (), (), (), (), (), (), (), ()))
++  | some dim =>
++    let joined ←
++      match dim with
++      | _root_.nested_collections_aliases.Dim.Lit value =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (model_state1, dim, value)
++          : _root_.Sum ((_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Dim) ×
++          _root_.nested_collections_aliases.Dim × _root_.Aeneas.Std.U64)
++          (_root_.Sum ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++          _root_.nested_collections_aliases.OwnerId
++          _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32
++          × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64 ×
++          _root_.Bool × _root_.Aeneas.Std.U64 ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit
++          × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++          ((_root_.Aeneas.Std.core.result.Result
++          _root_.nested_collections_aliases.ByteBound
++          _root_.nested_collections_aliases.CostError) ×
++          (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++          _root_.nested_collections_aliases.OwnerId
++          _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32
++          × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++      | _root_.nested_collections_aliases.Dim.Named _ o =>
++        match o with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++            (_root_.Aeneas.Std.core.result.Result.Ok
++            _root_.nested_collections_aliases.ByteBound.Unknown, owners1, i,
++            (), (), (), (), (), (), (), ())) : _root_.Sum
++            ((_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.nested_collections_aliases.Dim) ×
++            _root_.nested_collections_aliases.Dim × _root_.Aeneas.Std.U64)
++            (_root_.Sum
++            ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++            _root_.nested_collections_aliases.OwnerId
++            _root_.nested_collections_aliases.OwnerInfo) ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64 ×
++            _root_.Bool × _root_.Aeneas.Std.U64 ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.nested_collections_aliases.Dim) × _root_.Unit ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_collections_aliases.ByteBound
++            _root_.nested_collections_aliases.CostError) ×
++            (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++            _root_.nested_collections_aliases.OwnerId
++            _root_.nested_collections_aliases.OwnerInfo) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit
++            × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit)))
++        | some value =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (model_state1, dim,
++            value) : _root_.Sum ((_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.nested_collections_aliases.Dim) ×
++            _root_.nested_collections_aliases.Dim × _root_.Aeneas.Std.U64)
++            (_root_.Sum
++            ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++            _root_.nested_collections_aliases.OwnerId
++            _root_.nested_collections_aliases.OwnerInfo) ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64 ×
++            _root_.Bool × _root_.Aeneas.Std.U64 ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.nested_collections_aliases.Dim) × _root_.Unit ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit) ((_root_.Aeneas.Std.core.result.Result
++            _root_.nested_collections_aliases.ByteBound
++            _root_.nested_collections_aliases.CostError) ×
++            (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++            _root_.nested_collections_aliases.OwnerId
++            _root_.nested_collections_aliases.OwnerInfo) ×
++            _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit
++            × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit)))
++    match joined with
++    | _root_.Sum.inl (iter1, _, value) =>
++      let o ← lift (_root_.Aeneas.Std.U64.checked_mul elements value)
++      let r ←
++        _root_.Aeneas.Std.core.option.Option.ok_or o
++          (_root_.nested_collections_aliases.CostError.Overflow i value)
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++          owners1, i, dims, width, b, val))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r1 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.nested_collections_aliases.ByteBound
++            (_root_.Aeneas.Std.core.convert.FromSame
++            _root_.nested_collections_aliases.CostError) residual
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r1,
++          owners1, i, (), (), (), (), (), (), (), ()))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5,
++      exit6, (), (), (), (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit6,
++        exit, exit1, exit2, exit3, exit4, exit5))
++    | _root_.Sum.inr (_root_.Sum.inr (exit, exit1, exit2, (), (), (), (), (),
++      (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit,
++        exit1, exit2, (), (), (), (), (), (), (), ()))
++
++/-- [nested_collections_aliases::owner_byte_cost]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 1:0-146:1
++    Visibility: public -/
++@[rust_loop]
++def owner_byte_cost_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Dim)
++  (owners1 : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.nested_collections_aliases.OwnerId
++  _root_.nested_collections_aliases.OwnerInfo) (i : _root_.Aeneas.Std.U32)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim) (width : _root_.Aeneas.Std.U64)
++  (b : _root_.Bool) (elements : _root_.Aeneas.Std.U64) (t : _root_.Unit)
++  (t1 : _root_.Unit) (t2 : _root_.Unit) (t3 : _root_.Unit) (t4 : _root_.Unit)
++  (t5 : _root_.Unit) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.nested_collections_aliases.ByteBound
++    _root_.nested_collections_aliases.CostError) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.nested_collections_aliases.OwnerId
++    _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)
++  := do
++  loop
++    (fun (iter1, owners2, i1, dims1, width1, b1, elements1) =>
++       _root_.nested_collections_aliases.owner_byte_cost_loop.body iter1
++       owners2 i1 dims1 width1 b1 elements1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Dim) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.nested_collections_aliases.OwnerId
++      _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim)
++      × _root_.Aeneas.Std.U64 × _root_.Bool × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Dim) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.nested_collections_aliases.OwnerId
++      _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim)
++      × _root_.Aeneas.Std.U64 × _root_.Bool × _root_.Aeneas.Std.U64)
++      ((_root_.Aeneas.Std.core.result.Result
++      _root_.nested_collections_aliases.ByteBound
++      _root_.nested_collections_aliases.CostError) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.nested_collections_aliases.OwnerId
++      _root_.nested_collections_aliases.OwnerInfo) × _root_.Aeneas.Std.U32 ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit × _root_.Unit)))
++    (iter, owners1, i, dims, width, b, elements)
++
++/-- [nested_collections_aliases::owner_byte_cost]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 120:0-146:1
++    Visibility: public -/
++def owner_byte_cost
++  (owners1 : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.nested_collections_aliases.OwnerId
++  _root_.nested_collections_aliases.OwnerInfo)
++  (owner : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.nested_collections_aliases.ByteBound
++    _root_.nested_collections_aliases.CostError)
++  := do
++  let o ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get
++      (_root_.Aeneas.Std.core.borrow.BorrowSelf
++      _root_.nested_collections_aliases.OwnerId)
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd owners1 owner
++  let r ←
++    _root_.Aeneas.Std.core.option.Option.ok_or o
++      (_root_.nested_collections_aliases.CostError.Missing owner)
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let joined ←
++      match val.ty with
++      | _root_.nested_collections_aliases.HostType.Scalar _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl val.ty : _root_.Sum
++          _root_.nested_collections_aliases.HostType
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.nested_collections_aliases.ByteBound
++          _root_.nested_collections_aliases.CostError))
++      | _root_.nested_collections_aliases.HostType.Tuple _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl val.ty : _root_.Sum
++          _root_.nested_collections_aliases.HostType
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.nested_collections_aliases.ByteBound
++          _root_.nested_collections_aliases.CostError))
++      | _root_.nested_collections_aliases.HostType.Adt _ _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl val.ty : _root_.Sum
++          _root_.nested_collections_aliases.HostType
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.nested_collections_aliases.ByteBound
++          _root_.nested_collections_aliases.CostError))
++      | _root_.nested_collections_aliases.HostType.Tensor dims width =>
++        do
++        let (model_state, _) ←
++          _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter dims
++        let (r1, _, _, _, _, _, _, _, _, _, _) ←
++          _root_.nested_collections_aliases.owner_byte_cost_loop model_state
++            owners1 owner dims width val.heap 1#u64 () () () () () ()
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr r1 : _root_.Sum
++          _root_.nested_collections_aliases.HostType
++          (_root_.Aeneas.Std.core.result.Result
++          _root_.nested_collections_aliases.ByteBound
++          _root_.nested_collections_aliases.CostError))
++    match joined with
++    | _root_.Sum.inl _ =>
++      if val.heap
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          _root_.nested_collections_aliases.ByteBound.Unknown)
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++          (_root_.nested_collections_aliases.ByteBound.Exact 0#u64))
++    | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++      _root_.nested_collections_aliases.ByteBound
++      (_root_.Aeneas.Std.core.convert.FromSame
++      _root_.nested_collections_aliases.CostError) residual
++
++/-- [nested_collections_aliases::rename_dims]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 163:12-168:13
++    Visibility: public -/
++@[rust_loop_body]
++def rename_dims_loop0.body
++  (i : _root_.Aeneas.Std.U64)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.Dim)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim)
++  (owner : _root_.nested_collections_aliases.OwnerId)
++  (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections_aliases.Dim) ×
++    _root_.nested_collections_aliases.OwnerId × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U64 × _root_.nested_collections_aliases.OwnerId ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections_aliases.Dim)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, owner,
++      count, iter1, (), (), (),
++      fun im => let im1 := next_back im none
++                back im1))
++  | some dim =>
++    let (owner1, count1, back1) ←
++      match dim with
++      | _root_.nested_collections_aliases.Dim.Lit _ =>
++        _root_.Aeneas.Std.Result.ok (owner, count,
++          (fun im => let im1 := next_back im o
++                     back im1 : _root_.Aeneas.Std.core.slice.iter.IterMut
++          _root_.nested_collections_aliases.Dim →
++          _root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Dim))
++      | _root_.nested_collections_aliases.Dim.Named name1 o1 =>
++        do
++        let name2 ← name1 + owner
++        let count2 ← count + 1#u32
++        _root_.Aeneas.Std.Result.ok (owner, count2,
++          (fun im =>
++             let im1 :=
++               next_back im (some (_root_.nested_collections_aliases.Dim.Named
++                 name2 o1))
++             back im1 : _root_.Aeneas.Std.core.slice.iter.IterMut
++          _root_.nested_collections_aliases.Dim →
++          _root_.Aeneas.Std.alloc.vec.Vec
++          _root_.nested_collections_aliases.Dim))
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      back1, owner1, count1))
++
++/-- [nested_collections_aliases::rename_dims]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 163:12-168:13
++    Visibility: public -/
++@[rust_loop]
++def rename_dims_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.Dim)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim) (i : _root_.Aeneas.Std.U64)
++  (owner : _root_.nested_collections_aliases.OwnerId)
++  (count : _root_.Aeneas.Std.U32) (t : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U64 ×
++    _root_.nested_collections_aliases.OwnerId × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections_aliases.Dim))
++  := do
++  loop
++    (fun (iter1, back1, owner1, count1) =>
++       _root_.nested_collections_aliases.rename_dims_loop0.body i iter1 back1
++       owner1 count1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Dim) ×
++      _root_.nested_collections_aliases.OwnerId × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Dim) ×
++      _root_.nested_collections_aliases.OwnerId × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U64 × _root_.nested_collections_aliases.OwnerId ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.Dim → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.nested_collections_aliases.Dim))))
++    (iter, back, owner, count)
++
++mutual
++
++/-- [nested_collections_aliases::rename_dims]: loop 1:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 156:12-158:13
++    Visibility: public -/
++@[rust_loop]
++def rename_dims_loop1
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.HostType)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.HostType →
++  _root_.nested_collections_aliases.HostType)
++  (owner : _root_.nested_collections_aliases.OwnerId)
++  (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_collections_aliases.HostType)
++  := do
++  loop
++    (fun (iter1, back1, count1) => rename_dims_loop1.body owner iter1 back1
++       count1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.HostType) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.HostType →
++      _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.HostType) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.nested_collections_aliases.HostType →
++      _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U32 × _root_.nested_collections_aliases.HostType)))
++    (iter, back, count)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections_aliases::rename_dims]: loop body 1:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 156:12-158:13
++    Visibility: public -/
++@[rust_loop_body]
++def rename_dims_loop1.body
++  (owner : _root_.nested_collections_aliases.OwnerId)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.HostType)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.nested_collections_aliases.HostType →
++  _root_.nested_collections_aliases.HostType) (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.HostType) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.nested_collections_aliases.HostType →
++    _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U32 × _root_.nested_collections_aliases.HostType))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (count,
++      let im := next_back iter1 none
++      back im))
++  | some child =>
++    let (i, ht) ← rename_dims child owner
++    let count1 ← count + i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some ht)
++                back im1, count1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections_aliases::rename_dims]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 151:0-172:1
++    Visibility: public -/
++def rename_dims
++  (ty : _root_.nested_collections_aliases.HostType)
++  (owner : _root_.nested_collections_aliases.OwnerId) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_collections_aliases.HostType)
++  := do
++  let joined ←
++    match ty with
++    | _root_.nested_collections_aliases.HostType.Scalar _ =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (0#u32, ty) : _root_.Sum
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType →
++        _root_.nested_collections_aliases.HostType)) (_root_.Aeneas.Std.U32 ×
++        _root_.nested_collections_aliases.HostType))
++    | _root_.nested_collections_aliases.HostType.Tuple children =>
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (children1,
++        fun v => _root_.nested_collections_aliases.HostType.Tuple
++          (_root_.Aeneas.Std.alloc.vec.Vec.toNested v)) : _root_.Sum
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType →
++        _root_.nested_collections_aliases.HostType)) (_root_.Aeneas.Std.U32 ×
++        _root_.nested_collections_aliases.HostType))
++    | _root_.nested_collections_aliases.HostType.Adt i children =>
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (children1,
++        fun v => _root_.nested_collections_aliases.HostType.Adt i
++          (_root_.Aeneas.Std.alloc.vec.Vec.toNested v)) : _root_.Sum
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType →
++        _root_.nested_collections_aliases.HostType)) (_root_.Aeneas.Std.U32 ×
++        _root_.nested_collections_aliases.HostType))
++    | _root_.nested_collections_aliases.HostType.Tensor dims i =>
++      do
++      let (iter, into_iter_back) ←
++        _root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter dims
++      let (i1, _, count, im, _, _, _, back) ←
++        _root_.nested_collections_aliases.rename_dims_loop0 iter into_iter_back
++          i owner 0#u32 ()
++      let v := back im
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (count,
++        _root_.nested_collections_aliases.HostType.Tensor v i1) : _root_.Sum
++        ((_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType) ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType →
++        _root_.nested_collections_aliases.HostType)) (_root_.Aeneas.Std.U32 ×
++        _root_.nested_collections_aliases.HostType))
++  match joined with
++  | _root_.Sum.inl (children, back) =>
++    let (iter, into_iter_back) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter children
++    rename_dims_loop1 iter (fun im => let v := into_iter_back im
++                                      back v) owner 0#u32
++  | _root_.Sum.inr (exit, exit1) => _root_.Aeneas.Std.Result.ok (exit, exit1)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_collections_aliases::sample]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 174:0-181:1 -/
++def sample
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.nested_collections_aliases.Expr
++  := do
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.nested_collections_aliases.Expr.Atom 1#u32,
++         _root_.nested_collections_aliases.Expr.Atom n
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Expr
++      2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let s1 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 4#usize [
++         _root_.nested_collections_aliases.Expr.Atom n,
++         _root_.nested_collections_aliases.Expr.Wrap
++         (_root_.nested_collections_aliases.Expr.Atom 2#u32),
++         _root_.nested_collections_aliases.Expr.List
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v),
++         _root_.nested_collections_aliases.Expr.Atom 3#u32
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Expr
++      4#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  _root_.Aeneas.Std.Result.ok (_root_.nested_collections_aliases.Expr.List
++    (_root_.Aeneas.Std.alloc.vec.Vec.toNested v1))
++
++/-- [nested_collections_aliases::weights]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 183:0-189:1 -/
++def weights
++  :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let weights1 ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32
++  let (_, weights2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.Aeneas.Std.core.cmp.OrdU32 weights1 2#u32 20#u32
++  let (_, weights3) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.Aeneas.Std.core.cmp.OrdU32 weights2 3#u32 300#u32
++  let (_, weights4) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.Aeneas.Std.core.cmp.OrdU32 weights3 7#u32 7000#u32
++  _root_.Aeneas.Std.Result.ok weights4
++
++/-- [nested_collections_aliases::checksum]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 194:4-196:5 -/
++@[rust_loop_body]
++def checksum_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++  | some v =>
++    let i ← acc * 10007#u64
++    let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U64 v)
++    let i2 ← i + i1
++    let acc1 ← i2 % 1000000007#u64
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, acc1))
++
++/-- [nested_collections_aliases::checksum]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 194:4-196:5 -/
++@[rust_loop]
++def checksum_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, acc1) => _root_.nested_collections_aliases.checksum_loop.body
++       iter1 acc1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U64) _root_.Aeneas.Std.U64))
++    (iter, acc)
++
++/-- [nested_collections_aliases::checksum]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 192:0-198:1 -/
++def checksum
++  (values : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref values
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.nested_collections_aliases.checksum_loop iter 0#u64
++
++/-- [nested_collections_aliases::analyze_scenario]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 202:0-206:1
++    Visibility: public -/
++def analyze_scenario
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.Usize)
++  := do
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 1#usize [ 5#u32 ] : _root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 1#usize))
++  let out := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let e ← _root_.nested_collections_aliases.sample n
++  let bm ← _root_.nested_collections_aliases.weights
++  let (p, out1) ← _root_.nested_collections_aliases.analyze e bm out
++  let (total, index) := p
++  let i ← _root_.nested_collections_aliases.checksum out1
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len out1
++  _root_.Aeneas.Std.Result.ok (total, index, i, i1)
++
++/-- [nested_collections_aliases::analyze_wrap_scenario]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 209:0-213:1
++    Visibility: public -/
++def analyze_wrap_scenario
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.Usize)
++  := do
++  let bm ← _root_.nested_collections_aliases.weights
++  let (p, out) ←
++    _root_.nested_collections_aliases.analyze
++      (_root_.nested_collections_aliases.Expr.Wrap
++      (_root_.nested_collections_aliases.Expr.Atom n)) bm
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++  let (total, index) := p
++  let i ← _root_.nested_collections_aliases.checksum out
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len out
++  _root_.Aeneas.Std.Result.ok (total, index, i, i1)
++
++/-- [nested_collections_aliases::analyze_until_scenario]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 216:0-224:1
++    Visibility: public -/
++def analyze_until_scenario
++  (stop : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.Usize)
++  := do
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 1#usize [ 0#u32 ] : _root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 1#usize))
++  let out := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let e ← _root_.nested_collections_aliases.sample 4#u32
++  let (p, out1) ← _root_.nested_collections_aliases.analyze_until e stop out
++  let (result, seen) := p
++  let stopped ←
++    match result with
++    | _root_.Aeneas.Std.core.result.Result.Ok _ =>
++      _root_.Aeneas.Std.Result.ok 99#u32
++    | _root_.Aeneas.Std.core.result.Result.Err at1 =>
++      _root_.Aeneas.Std.Result.ok at1
++  let i ← _root_.nested_collections_aliases.checksum out1
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len out1
++  _root_.Aeneas.Std.Result.ok (stopped, seen, i, i1)
++
++/-- [nested_collections_aliases::owners]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 226:0-251:1 -/
++def owners
++  (extent : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.nested_collections_aliases.OwnerId
++    _root_.nested_collections_aliases.OwnerInfo)
++  := do
++  let owners1 ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new
++      _root_.nested_collections_aliases.OwnerId
++      _root_.nested_collections_aliases.OwnerInfo
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.nested_collections_aliases.Dim.Lit 3#u64,
++         _root_.nested_collections_aliases.Dim.Named 9#u32 (some extent)
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Dim
++      2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let (_, owners2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd owners1 1#u32
++      ({
++         ty := (_root_.nested_collections_aliases.HostType.Tensor v 4#u64),
++         heap := true
++       } : _root_.nested_collections_aliases.OwnerInfo)
++  let s1 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.nested_collections_aliases.Dim.Lit extent,
++         _root_.nested_collections_aliases.Dim.Named 8#u32 none
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Dim
++      2#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let (_, owners3) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd owners2 2#u32
++      ({
++         ty := (_root_.nested_collections_aliases.HostType.Tensor v1 8#u64),
++         heap := true
++       } : _root_.nested_collections_aliases.OwnerInfo)
++  let s2 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.nested_collections_aliases.HostType.Scalar 1#u32,
++         _root_.nested_collections_aliases.HostType.Tuple
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++         (_root_.Aeneas.Std.alloc.vec.Vec.new
++         _root_.nested_collections_aliases.HostType))
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.HostType
++      2#usize))
++  let v2 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let (_, owners4) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd owners3 3#u32
++      ({
++         ty :=
++           (_root_.nested_collections_aliases.HostType.Tuple
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++             v2)),
++         heap := true
++       } : _root_.nested_collections_aliases.OwnerInfo)
++  let (_, owners5) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++      _root_.nested_collections_aliases.OwnerId.Insts.CoreCmpOrd owners4 4#u32
++      ({
++         ty := (_root_.nested_collections_aliases.HostType.Scalar 0#u32),
++         heap := false
++       } : _root_.nested_collections_aliases.OwnerInfo)
++  _root_.Aeneas.Std.Result.ok owners5
++
++/-- [nested_collections_aliases::owner_cost_scenario]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 255:0-262:1
++    Visibility: public -/
++def owner_cost_scenario
++  (owner : _root_.Aeneas.Std.U32) (extent : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64 ×
++    _root_.Aeneas.Std.U64)
++  := do
++  let bm ← _root_.nested_collections_aliases.owners extent
++  let r ← _root_.nested_collections_aliases.owner_byte_cost bm owner
++  match r with
++  | _root_.Aeneas.Std.core.result.Result.Ok bb =>
++    match bb with
++    | _root_.nested_collections_aliases.ByteBound.Unknown =>
++      _root_.Aeneas.Std.Result.ok (0#u32, 0#u64, 0#u64)
++    | _root_.nested_collections_aliases.ByteBound.Exact bytes =>
++      _root_.Aeneas.Std.Result.ok (1#u32, bytes, 0#u64)
++  | _root_.Aeneas.Std.core.result.Result.Err ce =>
++    match ce with
++    | _root_.nested_collections_aliases.CostError.Missing id =>
++      let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 id)
++      _root_.Aeneas.Std.Result.ok (2#u32, i, 0#u64)
++    | _root_.nested_collections_aliases.CostError.Overflow id factor =>
++      let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 id)
++      _root_.Aeneas.Std.Result.ok (3#u32, i, factor)
++
++/-- [nested_collections_aliases::dims_checksum]: loop body 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 276:12-283:13 -/
++@[rust_loop_body]
++def dims_checksum_loop0.body
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim) (width : _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.Slice _root_.nested_collections_aliases.Dim)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Dim) (acc : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64)
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim) ×
++    _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.Slice
++    _root_.nested_collections_aliases.Dim) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (dims,
++      width, acc, s, model_state1, (), (), (), (), ()))
++  | some dim =>
++    let (iter1, code) ←
++      match dim with
++      | _root_.nested_collections_aliases.Dim.Lit v =>
++        _root_.Aeneas.Std.Result.ok (model_state1, v)
++      | _root_.nested_collections_aliases.Dim.Named name1 o =>
++        do
++        let i ←
++          match o with
++          | none =>
++            do
++            let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U64 name1)
++            1000#u64 + i1
++          | some v =>
++            do
++            let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .U64 name1)
++            let i2 ← 100000#u64 * i1
++            i2 + v
++        _root_.Aeneas.Std.Result.ok (model_state1, i)
++    let i ← acc * 1009#u64
++    let i1 ← i + code
++    let acc1 ← i1 % 1000000007#u64
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      acc1))
++
++/-- [nested_collections_aliases::dims_checksum]: loop 0:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 276:12-283:13 -/
++@[rust_loop]
++def dims_checksum_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.Dim)
++  (dims : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.nested_collections_aliases.Dim) (width : _root_.Aeneas.Std.U64)
++  (acc : _root_.Aeneas.Std.U64)
++  (s : _root_.Aeneas.Std.Slice _root_.nested_collections_aliases.Dim)
++  (t : _root_.Unit) (t1 : _root_.Unit) (t2 : _root_.Unit) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64 ×
++    _root_.Aeneas.Std.U64 × (_root_.Aeneas.Std.Slice
++    _root_.nested_collections_aliases.Dim) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)
++  := do
++  loop
++    (fun (iter1, acc1) =>
++       _root_.nested_collections_aliases.dims_checksum_loop0.body dims width s
++       iter1 acc1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Dim) × _root_.Aeneas.Std.U64)
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.nested_collections_aliases.Dim)
++      × _root_.Aeneas.Std.U64 × _root_.Aeneas.Std.U64 ×
++      (_root_.Aeneas.Std.Slice _root_.nested_collections_aliases.Dim) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.Dim) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit)))
++    (iter, acc)
++
++mutual
++
++/-- [nested_collections_aliases::dims_checksum]: loop 1:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 269:12-271:13 -/
++@[rust_loop]
++def dims_checksum_loop1
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.HostType) (acc : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  loop
++    (fun (iter1, acc1) => dims_checksum_loop1.body iter1 acc1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U64) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U64)
++      _root_.Aeneas.Std.U64))
++    (iter, acc)
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections_aliases::dims_checksum]: loop body 1:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 269:12-271:13 -/
++@[rust_loop_body]
++def dims_checksum_loop1.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.nested_collections_aliases.HostType) (acc : _root_.Aeneas.Std.U64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.nested_collections_aliases.HostType) × _root_.Aeneas.Std.U64)
++    _root_.Aeneas.Std.U64)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++  | some child =>
++    let i ← acc * 101#u64
++    let i1 ← dims_checksum child
++    let i2 ← i + i1
++    let acc1 ← i2 % 1000000007#u64
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, acc1))
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [nested_collections_aliases::dims_checksum]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 264:0-287:1 -/
++def dims_checksum
++  (ty : _root_.nested_collections_aliases.HostType) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U64
++  := do
++  let joined ←
++    match ty with
++    | _root_.nested_collections_aliases.HostType.Scalar n =>
++      do
++      let acc ← lift (_root_.Aeneas.Std.UScalar.cast .U64 n)
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr acc : _root_.Sum
++        (_root_.nested_collections_aliases.HostType ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType)) _root_.Aeneas.Std.U64)
++    | _root_.nested_collections_aliases.HostType.Tuple children =>
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (ty, children1) : _root_.Sum
++        (_root_.nested_collections_aliases.HostType ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType)) _root_.Aeneas.Std.U64)
++    | _root_.nested_collections_aliases.HostType.Adt _ children =>
++      let children1 := _root_.Aeneas.Std.NestedVec.toVec children
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (ty, children1) : _root_.Sum
++        (_root_.nested_collections_aliases.HostType ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType)) _root_.Aeneas.Std.U64)
++    | _root_.nested_collections_aliases.HostType.Tensor dims width =>
++      do
++      let s := _root_.Aeneas.Std.alloc.vec.Vec.deref dims
++      let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++      let (_, _, acc, _, _, _, _, _, _, _) ←
++        _root_.nested_collections_aliases.dims_checksum_loop0 iter dims width
++          width s () () ()
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inr acc : _root_.Sum
++        (_root_.nested_collections_aliases.HostType ×
++        (_root_.Aeneas.Std.alloc.vec.Vec
++        _root_.nested_collections_aliases.HostType)) _root_.Aeneas.Std.U64)
++  match joined with
++  | _root_.Sum.inl (_, children) =>
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref children
++    let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++    dims_checksum_loop1 iter 7#u64
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [nested_collections_aliases::rename_scenario]:
++    Source: 'tests/src/nested-collections-aliases.rs', lines 290:0-304:1
++    Visibility: public -/
++def rename_scenario
++  (owner : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U64)
++  := do
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 3#usize [
++         _root_.nested_collections_aliases.Dim.Named 1#u32 (some 2#u64),
++         _root_.nested_collections_aliases.Dim.Lit 3#u64,
++         _root_.nested_collections_aliases.Dim.Named 4#u32 none
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Dim
++      3#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let s1 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 1#usize [
++         _root_.nested_collections_aliases.Dim.Named 7#u32 none
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.Dim
++      1#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let s2 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.nested_collections_aliases.HostType.Scalar 6#u32,
++         _root_.nested_collections_aliases.HostType.Tensor v1 4#u64
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.HostType
++      2#usize))
++  let v2 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let s3 ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 3#usize [
++         _root_.nested_collections_aliases.HostType.Tensor v 2#u64,
++         _root_.nested_collections_aliases.HostType.Adt 5#u32
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested v2),
++         _root_.nested_collections_aliases.HostType.Tuple
++         (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++         (_root_.Aeneas.Std.alloc.vec.Vec.new
++         _root_.nested_collections_aliases.HostType))
++         ] : _root_.Aeneas.Std.Array _root_.nested_collections_aliases.HostType
++      3#usize))
++  let v3 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s3
++  let (count, ty) ←
++    _root_.nested_collections_aliases.rename_dims
++      (_root_.nested_collections_aliases.HostType.Tuple
++      (_root_.Aeneas.Std.alloc.vec.Vec.toNested v3)) owner
++  let i ← _root_.nested_collections_aliases.dims_checksum ty
++  _root_.Aeneas.Std.Result.ok (count, i)
++
++end nested_collections_aliases
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index b359af3..776b601 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -163,6 +163,7 @@ package «tests» {}
+ @[default_target] lean_lib Names
+ @[default_target] lean_lib NestedBorrows
+ @[default_target] lean_lib NestedCollections
++@[default_target] lean_lib NestedCollectionsAliases
+ @[default_target] lean_lib NestedLoopExits
+ @[default_target] lean_lib NestedRecursiveDerives
+ @[default_target] lean_lib RecursiveOrdDerives
+diff --git a/tests/src/nested-collections-aliases.rs b/tests/src/nested-collections-aliases.rs
+new file mode 100644
+index 0000000..f170c8c
+--- /dev/null
++++ b/tests/src/nested-collections-aliases.rs
+@@ -0,0 +1,340 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedCollectionsAliases
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Bodies which use a type recursive through a collection (the Lean backend
++//! stores the collection in a nested carrier and type-checks the bodies it
++//! updates) together with a tuple structure with exactly one field, which the
++//! backends extract as an alias of the field type (the micro-passes then
++//! substitute the field with the structure):
++//! - a visitor over the children of an `Expr`, called with a closure which
++//!   captures, by reference, a closure whose state is one reference, plus
++//!   mutable state (the shape of the preflight analysis of
++//!   chelis_ir::host::analyze_tensor_helper_preflight_scoped);
++//! - the byte cost of an owner whose id is a newtype (the shape of
++//!   chelis_ir::ownership::verify::owner_byte_cost);
++//! - writes through `&mut` into the collections of the recursive type, after
++//!   loops and recursive calls.
++//! `NestedCollectionsAliases/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results,
++//! including the values given back through the mutable borrows.
++use std::collections::BTreeMap;
++
++pub enum Expr {
++    Atom(u32),
++    List(Vec<Expr>),
++    Wrap(Box<Expr>),
++}
++
++fn visit_children<E>(expr: &Expr, mut visit: impl FnMut(&Expr) -> Result<(), E>) -> Result<(), E> {
++    match expr {
++        Expr::Atom(_) => {}
++        Expr::List(items) => {
++            for child in items {
++                visit(child)?;
++            }
++        }
++        Expr::Wrap(inner) => visit(inner)?,
++    }
++    Ok(())
++}
++
++fn leaf(expr: &Expr) -> u32 {
++    match expr {
++        Expr::Atom(n) => *n,
++        Expr::List(items) => items.len() as u32,
++        Expr::Wrap(_) => 7,
++    }
++}
++
++/// The closure `merge` captures only `weights` (one field); the visitor's
++/// closure captures `merge` by reference, `total`, `out` and `index`.
++pub fn analyze(expr: &Expr, weights: &BTreeMap<u32, u32>, out: &mut Vec<u32>) -> (u32, u32) {
++    let mut total = 0;
++    let merge = |total: &mut u32, child: &Expr, out: &mut Vec<u32>| {
++        let w = match weights.get(&leaf(child)) {
++            Some(w) => *w,
++            None => 1,
++        };
++        out.push(w);
++        *total += w;
++    };
++    let mut index = 0;
++    let Ok(()) = visit_children(expr, |child| -> Result<(), std::convert::Infallible> {
++        merge(&mut total, child, out);
++        index += 1;
++        Ok(())
++    });
++    (total, index)
++}
++
++/// Stops at the first child whose leaf is `stop`: the values given back
++/// through the captures are those of the visited prefix.
++pub fn analyze_until(expr: &Expr, stop: u32, out: &mut Vec<u32>) -> (Result<(), u32>, u32) {
++    let mut seen = 0;
++    let record = |out: &mut Vec<u32>, child: &Expr| {
++        out.push(leaf(child) + stop);
++    };
++    let result = visit_children(expr, |child| {
++        if leaf(child) == stop {
++            return Err(seen);
++        }
++        record(out, child);
++        seen += 1;
++        Ok(())
++    });
++    (result, seen)
++}
++
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++pub struct OwnerId(pub u32);
++
++pub enum Dim {
++    Lit(u64),
++    Named(u32, Option<u64>),
++}
++
++/// Recursive through `Vec<Self>`; `Tensor` holds a collection of another type.
++pub enum HostType {
++    Scalar(u32),
++    Tuple(Vec<HostType>),
++    Adt(u32, Vec<HostType>),
++    Tensor(Vec<Dim>, u64),
++}
++
++pub struct OwnerInfo {
++    pub ty: HostType,
++    pub heap: bool,
++}
++
++pub enum CostError {
++    Missing(u32),
++    Overflow(u32, u64),
++}
++
++pub enum ByteBound {
++    Unknown,
++    Exact(u64),
++}
++
++pub fn owner_byte_cost(
++    owners: &BTreeMap<OwnerId, OwnerInfo>,
++    owner: OwnerId,
++) -> Result<ByteBound, CostError> {
++    let info = owners.get(&owner).ok_or(CostError::Missing(owner.0))?;
++    let HostType::Tensor(dims, width) = &info.ty else {
++        return Ok(if info.heap {
++            ByteBound::Unknown
++        } else {
++            ByteBound::Exact(0)
++        });
++    };
++    let mut elements = 1u64;
++    for dim in dims {
++        let value = match dim {
++            Dim::Lit(value) | Dim::Named(_, Some(value)) => *value,
++            Dim::Named(_, None) => return Ok(ByteBound::Unknown),
++        };
++        elements = elements
++            .checked_mul(value)
++            .ok_or(CostError::Overflow(owner.0, value))?;
++    }
++    elements
++        .checked_mul(*width)
++        .map(ByteBound::Exact)
++        .ok_or(CostError::Overflow(owner.0, *width))
++}
++
++/// Writes through `&mut` into the collections of the recursive type: the
++/// dimensions of every tensor, and (recursively) the children of every tuple
++/// and ADT. Returns the number of updated dimensions.
++pub fn rename_dims(ty: &mut HostType, owner: OwnerId) -> u32 {
++    match ty {
++        HostType::Scalar(_) => 0,
++        HostType::Tuple(children) | HostType::Adt(_, children) => {
++            let mut count = 0;
++            for child in children {
++                count += rename_dims(child, owner);
++            }
++            count
++        }
++        HostType::Tensor(dims, _) => {
++            let mut count = 0;
++            for dim in dims {
++                if let Dim::Named(name, _) = dim {
++                    *name += owner.0;
++                    count += 1;
++                }
++            }
++            count
++        }
++    }
++}
++
++fn sample(n: u32) -> Expr {
++    Expr::List(vec![
++        Expr::Atom(n),
++        Expr::Wrap(Box::new(Expr::Atom(2))),
++        Expr::List(vec![Expr::Atom(1), Expr::Atom(n)]),
++        Expr::Atom(3),
++    ])
++}
++
++fn weights() -> BTreeMap<u32, u32> {
++    let mut weights = BTreeMap::new();
++    weights.insert(2, 20);
++    weights.insert(3, 300);
++    weights.insert(7, 7000);
++    weights
++}
++
++/// A checksum of a list of numbers (order-sensitive).
++fn checksum(values: &Vec<u32>) -> u64 {
++    let mut acc = 0u64;
++    for v in values.iter() {
++        acc = (acc * 10_007 + *v as u64) % 1_000_000_007;
++    }
++    acc
++}
++
++/// `analyze` on a list: the total, the number of visited children and the
++/// weights pushed to `out` (given back through the captures).
++pub fn analyze_scenario(n: u32) -> (u32, u32, u64, usize) {
++    let mut out = vec![5];
++    let (total, index) = analyze(&sample(n), &weights(), &mut out);
++    (total, index, checksum(&out), out.len())
++}
++
++/// `analyze` on a wrapped expression (the visitor's direct call).
++pub fn analyze_wrap_scenario(n: u32) -> (u32, u32, u64, usize) {
++    let mut out = Vec::new();
++    let (total, index) = analyze(&Expr::Wrap(Box::new(Expr::Atom(n))), &weights(), &mut out);
++    (total, index, checksum(&out), out.len())
++}
++
++/// `analyze_until` on a list: where it stopped, and what it recorded.
++pub fn analyze_until_scenario(stop: u32) -> (u32, u32, u64, usize) {
++    let mut out = vec![0];
++    let (result, seen) = analyze_until(&sample(4), stop, &mut out);
++    let stopped = match result {
++        Ok(()) => 99,
++        Err(at) => at,
++    };
++    (stopped, seen, checksum(&out), out.len())
++}
++
++fn owners(extent: u64) -> BTreeMap<OwnerId, OwnerInfo> {
++    let mut owners = BTreeMap::new();
++    owners.insert(
++        OwnerId(1),
++        OwnerInfo {
++            ty: HostType::Tensor(vec![Dim::Lit(3), Dim::Named(9, Some(extent))], 4),
++            heap: true,
++        },
++    );
++    owners.insert(
++        OwnerId(2),
++        OwnerInfo {
++            ty: HostType::Tensor(vec![Dim::Lit(extent), Dim::Named(8, None)], 8),
++            heap: true,
++        },
++    );
++    owners.insert(
++        OwnerId(3),
++        OwnerInfo {
++            ty: HostType::Tuple(vec![HostType::Scalar(1), HostType::Tuple(Vec::new())]),
++            heap: true,
++        },
++    );
++    owners.insert(OwnerId(4), OwnerInfo { ty: HostType::Scalar(0), heap: false });
++    owners
++}
++
++/// The byte cost of an owner: 0 = unknown, 1 = exact (with the bound),
++/// 2 = missing (with the owner), 3 = overflow (with the owner and the factor).
++pub fn owner_cost_scenario(owner: u32, extent: u64) -> (u32, u64, u64) {
++    match owner_byte_cost(&owners(extent), OwnerId(owner)) {
++        Ok(ByteBound::Unknown) => (0, 0, 0),
++        Ok(ByteBound::Exact(bytes)) => (1, bytes, 0),
++        Err(CostError::Missing(id)) => (2, id as u64, 0),
++        Err(CostError::Overflow(id, factor)) => (3, id as u64, factor),
++    }
++}
++
++fn dims_checksum(ty: &HostType) -> u64 {
++    match ty {
++        HostType::Scalar(n) => *n as u64,
++        HostType::Tuple(children) | HostType::Adt(_, children) => {
++            let mut acc = 7u64;
++            for child in children.iter() {
++                acc = (acc * 101 + dims_checksum(child)) % 1_000_000_007;
++            }
++            acc
++        }
++        HostType::Tensor(dims, width) => {
++            let mut acc = *width;
++            for dim in dims.iter() {
++                let code = match dim {
++                    Dim::Lit(v) => *v,
++                    Dim::Named(name, None) => 1_000 + *name as u64,
++                    Dim::Named(name, Some(v)) => 100_000 * *name as u64 + *v,
++                };
++                acc = (acc * 1_009 + code) % 1_000_000_007;
++            }
++            acc
++        }
++    }
++}
++
++/// `rename_dims` on a nested type: the count, and the renamed type.
++pub fn rename_scenario(owner: u32) -> (u32, u64) {
++    let mut ty = HostType::Tuple(vec![
++        HostType::Tensor(vec![Dim::Named(1, Some(2)), Dim::Lit(3), Dim::Named(4, None)], 2),
++        HostType::Adt(
++            5,
++            vec![
++                HostType::Scalar(6),
++                HostType::Tensor(vec![Dim::Named(7, None)], 4),
++            ],
++        ),
++        HostType::Tuple(Vec::new()),
++    ]);
++    let count = rename_dims(&mut ty, OwnerId(owner));
++    (count, dims_checksum(&ty))
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn analyze_lists() {
++        assert_eq!(analyze_scenario(3), (7620, 4, 137167999, 5));
++        assert_eq!(analyze_scenario(7), (14320, 4, 941467546, 5));
++        assert_eq!(analyze_wrap_scenario(2), (20, 1, 20, 1));
++        assert_eq!(analyze_wrap_scenario(5), (1, 1, 1, 1));
++    }
++
++    #[test]
++    fn analyze_until_stops() {
++        assert_eq!(analyze_until_scenario(4), (0, 0, 0, 1));
++        assert_eq!(analyze_until_scenario(3), (3, 3, 701080418, 4));
++        assert_eq!(analyze_until_scenario(1), (99, 4, 308467055, 5));
++    }
++
++    #[test]
++    fn owner_costs() {
++        assert_eq!(owner_cost_scenario(1, 5), (1, 60, 0));
++        assert_eq!(owner_cost_scenario(1, u64::MAX / 2), (3, 1, u64::MAX / 2));
++        assert_eq!(owner_cost_scenario(2, 5), (0, 0, 0));
++        assert_eq!(owner_cost_scenario(3, 5), (0, 0, 0));
++        assert_eq!(owner_cost_scenario(4, 5), (1, 0, 0));
++        assert_eq!(owner_cost_scenario(9, 5), (2, 9, 0));
++    }
++
++    #[test]
++    fn renames() {
++        assert_eq!(rename_scenario(10), (3, 282650872));
++        assert_eq!(rename_scenario(0), (3, 74245960));
++    }
++}

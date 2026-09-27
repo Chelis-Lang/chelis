@@ -1,0 +1,744 @@
+# aeneas integration step 107 after cba11f3beb: commit 96f4ef54100f460b2cb24c448127b105da83aa78
+# first parent dca0480ab242f9257abce98fa412b6416e8cc0d9, merged 460537db3db09102e211651bce91b3019ba1514a
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-7' (stable sort and sort_by_key admitted only on total orders and pure key functions; sum/product give back the consumed iterator; batch 2 std models; ExtractBuiltinLean.ml regenerated next)
+
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index a07b5ce..ddd5f3d 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -75,6 +75,15 @@ def BTreeMap.Ordered {K V : Type} (ord : core.cmp.Ord K) (map : BTreeMap K V) :
+ @[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>}::new"]
+ def BTreeMap.new (K V : Type) : Result (BTreeMap K V) := .ok ⟨[]⟩
+ 
++/-- `impl<K, V> Default for BTreeMap<K, V>` (btree/map.rs): `BTreeMap::new()`. -/
++@[rust_fun "alloc::collections::btree::map::{core::default::Default<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::default"]
++def DefaultBTreeMap.default (K V : Type) : Result (BTreeMap K V) := .ok ⟨[]⟩
++
++@[reducible, rust_trait_impl "core::default::Default<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>"]
++def DefaultBTreeMap (K V : Type) : core.default.Default (BTreeMap K V) := {
++  default := DefaultBTreeMap.default K V
++}
++
+ def insertList {K V : Type} (ord : core.cmp.Ord K) (key : K) (value : V) :
+     List (K × V) → Result (Option V × List (K × V))
+   | [] => .ok (none, [(key, value)])
+@@ -129,6 +138,29 @@ def BTreeMap.get {K V Q : Type} (borrow : core.borrow.Borrow K Q)
+     (_keyOrd : core.cmp.Ord K) (ord : core.cmp.Ord Q) (map : BTreeMap K V)
+     (query : Q) : Result (Option V) := getList borrow ord query map.entries
+ 
++def getKeyValueList {K V Q : Type} (borrow : core.borrow.Borrow K Q) (ord : core.cmp.Ord Q)
++    (query : Q) : List (K × V) → Result (Option (K × V))
++  | [] => .ok none
++  | (key, value) :: rest => do
++    match ← ord.cmp query (← borrow.borrow key) with
++    | .lt => .ok none
++    | .eq => .ok (some (key, value))
++    | .gt => getKeyValueList borrow ord query rest
++
++/-- `BTreeMap::get_key_value` (btree/map.rs): `search_tree` as for `get`; the stored key
++    and the value of the found entry. -/
++@[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get_key_value"
++  (keepParams := [true, true, false, true]) (keepTraitClauses := [false, true, true, true])]
++def BTreeMap.get_key_value {K V Q : Type} (borrow : core.borrow.Borrow K Q)
++    (_keyOrd : core.cmp.Ord K) (ord : core.cmp.Ord Q) (map : BTreeMap K V)
++    (query : Q) : Result (Option (K × V)) := getKeyValueList borrow ord query map.entries
++
++/-- `BTreeMap::clear` (btree/map.rs): the map is replaced by an empty one. -/
++@[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::clear"
++  (keepParams := [true, true, false]) (keepTraitClauses := [false])]
++def BTreeMap.clear {K V : Type} (_map : BTreeMap K V) : Result (BTreeMap K V) :=
++  .ok ⟨[]⟩
++
+ /-- The entries around the value selected by `get`'s search: the entries before it
+     (in order), its key and value, and the entries after it. -/
+ def getMutList {K V Q : Type} (borrow : core.borrow.Borrow K Q) (ord : core.cmp.Ord Q)
+diff --git a/backends/lean/Aeneas/Std/BTreeSet.lean b/backends/lean/Aeneas/Std/BTreeSet.lean
+index a9158d2..283eec9 100644
+--- a/backends/lean/Aeneas/Std/BTreeSet.lean
++++ b/backends/lean/Aeneas/Std/BTreeSet.lean
+@@ -42,6 +42,58 @@ def BTreeSet.contains {T Q : Type} (borrow : core.borrow.Borrow T Q)
+ def BTreeSet.is_empty {T : Type} (set : BTreeSet T) : Result Bool :=
+   .ok set.map.entries.isEmpty
+ 
++/-- `BTreeSet::len` (alloc/src/collections/btree/set.rs): `self.map.len()`. -/
++@[rust_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, @A>}::len"
++  (keepParams := [true, false]) (keepTraitClauses := [false])]
++def BTreeSet.len {T : Type} (set : BTreeSet T) : Result Usize :=
++  alloc.collections.btree.map.BTreeMap.len set.map
++
++/-- `BTreeSet::clear` (alloc/src/collections/btree/set.rs): `self.map.clear()` (its
++    `A: Clone` bound is the method's second clause). -/
++@[rust_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, @A>}::clear"
++  (keepParams := [true, false]) (keepTraitClauses := [false, false])]
++def BTreeSet.clear {T : Type} (_set : BTreeSet T) : Result (BTreeSet T) :=
++  .ok ⟨⟨[]⟩⟩
++
++/-- `impl<T: Clone, A: Allocator + Clone> Clone for BTreeSet<T, A>` (set.rs):
++    `BTreeSet { map: self.map.clone() }`, each element cloned in order. -/
++@[rust_fun "alloc::collections::btree::set::{core::clone::Clone<alloc::collections::btree::set::BTreeSet<@T, @A>>}::clone"
++  (keepParams := [true, false]) (keepTraitClauses := [true, false])]
++def CloneBTreeSet.clone {T : Type} (cloneInst : core.clone.Clone T) (set : BTreeSet T) :
++    Result (BTreeSet T) := do
++  let entries ← set.map.entries.mapM fun (key, _) => do .ok (← cloneInst.clone key, ())
++  .ok ⟨⟨entries⟩⟩
++
++/-- `impl<T: PartialEq, A: Allocator + Clone> PartialEq for BTreeSet<T, A>` (set.rs):
++    `self.map.eq(&other.map)`: equal lengths, then the elements pairwise in order. -/
++@[rust_fun "alloc::collections::btree::set::{core::cmp::PartialEq<alloc::collections::btree::set::BTreeSet<@T, @A>, alloc::collections::btree::set::BTreeSet<@T, @A>>}::eq"
++  (keepParams := [true, false]) (keepTraitClauses := [true, false])]
++def PartialEqBTreeSet.eq {T : Type} (eqInst : core.cmp.PartialEq T T) (left right : BTreeSet T) :
++    Result Bool :=
++  alloc.collections.btree.map.PartialEqBTreeMap.eq eqInst
++    { eq := fun _ _ => .ok true, ne := fun _ _ => .ok false } left.map right.map
++
++@[reducible, rust_trait_impl "core::clone::Clone<alloc::collections::btree::set::BTreeSet<@T, @A>>"
++  (keepParams := [true, false]) (keepTraitClauses := [true, false])]
++def CloneBTreeSet {T : Type} (cloneInst : core.clone.Clone T) : core.clone.Clone (BTreeSet T) := {
++  clone := CloneBTreeSet.clone cloneInst
++}
++
++/-- `ne` is `PartialEq`'s default, `!self.eq(other)`. -/
++@[rust_fun "alloc::collections::btree::set::{core::cmp::PartialEq<alloc::collections::btree::set::BTreeSet<@T, @A>, alloc::collections::btree::set::BTreeSet<@T, @A>>}::ne"
++  (keepParams := [true, false]) (keepTraitClauses := [true, false])]
++def PartialEqBTreeSet.ne {T : Type} (eqInst : core.cmp.PartialEq T T) (left right : BTreeSet T) :
++    Result Bool := do
++  .ok (not (← PartialEqBTreeSet.eq eqInst left right))
++
++@[reducible, rust_trait_impl "core::cmp::PartialEq<alloc::collections::btree::set::BTreeSet<@T, @A>, alloc::collections::btree::set::BTreeSet<@T, @A>>"
++  (keepParams := [true, false]) (keepTraitClauses := [true, false])]
++def PartialEqBTreeSet {T : Type} (eqInst : core.cmp.PartialEq T T) :
++    core.cmp.PartialEq (BTreeSet T) (BTreeSet T) := {
++  eq := PartialEqBTreeSet.eq eqInst
++  ne := PartialEqBTreeSet.ne eqInst
++}
++
+ /-- set.rs: `BTreeSet { map: BTreeMap::new() }`. -/
+ @[rust_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>}::new"]
+ def BTreeSet.new (T : Type) : Result (BTreeSet T) := do
+diff --git a/backends/lean/Aeneas/Std/Core/Default.lean b/backends/lean/Aeneas/Std/Core/Default.lean
+index 7ba4ee3..168dcf5 100644
+--- a/backends/lean/Aeneas/Std/Core/Default.lean
++++ b/backends/lean/Aeneas/Std/Core/Default.lean
+@@ -18,6 +18,17 @@ def core.option.DefaultOption (T : Type) : core.default.Default (Option T) := {
+   default := core.option.DefaultOption.default T
+ }
+ 
++/-- `impl<T: Default> Default for Box<T>` (alloc/src/boxed.rs): a box of `T::default()`
++    (a box is its contents in the model). -/
++@[rust_fun "alloc::boxed::{core::default::Default<Box<@T>>}::default"]
++def alloc.boxed.DefaultBox.default {T : Type} (inst : core.default.Default T) : Result T :=
++  inst.default
++
++@[reducible, rust_trait_impl "core::default::Default<Box<@T>>"]
++def alloc.boxed.DefaultBox {T : Type} (inst : core.default.Default T) : core.default.Default T := {
++  default := alloc.boxed.DefaultBox.default inst
++}
++
+ /-- `core::mem::take` (core/src/mem/mod.rs): `replace(dest, T::default())`, i.e. the
+     old value, and `T::default()` as the new value of `*dest`. -/
+ @[rust_fun "core::mem::take"]
+diff --git a/backends/lean/Aeneas/Std/Core/Iter.lean b/backends/lean/Aeneas/Std/Core/Iter.lean
+index 8975a00..9cd7c3d 100644
+--- a/backends/lean/Aeneas/Std/Core/Iter.lean
++++ b/backends/lean/Aeneas/Std/Core/Iter.lean
+@@ -717,20 +717,24 @@ def core.iter.traits.iterator.IteratorStepBy {I : Type} {Item : Type}
+   take := core.iter.adapters.step_by.IteratorStepBy.take IteratorInst
+ }
+ 
++/-- `Sum::sum(iter)` consumes the iterator: the model also returns its final state
++    (the state contract of `ModelStateInputs.for_method`), which gives back what
++    the iterator borrows mutably, e.g. through a mapping closure. -/
+ @[rust_trait "core::iter::traits::accum::Sum"]
+ structure core.iter.traits.accum.Sum (Self : Type) (A : Type) where
+-  sum : forall {I : Type} (_ : core.iter.traits.iterator.Iterator I A), I → Result Self
++  sum : forall {I : Type} (_ : core.iter.traits.iterator.Iterator I A), I → Result (Self × I)
+ 
++/-- `Product::product(iter)`, with the final state of the iterator as for `Sum`. -/
+ @[rust_trait "core::iter::traits::accum::Product"]
+ structure core.iter.traits.accum.Product (Self : Type) (A : Type) where
+-  product : forall {I : Type} (_ : core.iter.traits.iterator.Iterator I A), I → Result Self
++  product : forall {I : Type} (_ : core.iter.traits.iterator.Iterator I A), I → Result (Self × I)
+ 
+ /-- `Iterator::product` (core/src/iter/traits/iterator.rs, rustc 1.95):
+     `Product::product(self)`. No core iterator overrides it. -/
+ @[rust_fun "core::iter::traits::iterator::Iterator::product"]
+ def core.iter.traits.iterator.Iterator.product.default
+   {Self P Item : Type} (IteratorInst : core.iter.traits.iterator.Iterator Self Item)
+-  (productInst : core.iter.traits.accum.Product P Item) (self : Self) : Result P :=
++  (productInst : core.iter.traits.accum.Product P Item) (self : Self) : Result (P × Self) :=
+   productInst.product IteratorInst self
+ 
+ /-- `impl<'a> Product<&'a usize> for usize` (core/src/iter/traits/accum.rs,
+@@ -741,13 +745,13 @@ def core.iter.traits.iterator.Iterator.product.default
+ @[rust_fun
+   "core::iter::traits::accum::{core::iter::traits::accum::Product<usize, &'a usize>}::product"]
+ def core.iter.traits.accum.ProductUsizeSharedUsize.product {I : Type}
+-  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result Usize := do
++  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result (Usize × I) := do
+   let mulInst : core.ops.function.FnMut Unit (Usize × Usize) Usize := {
+     FnOnceInst := { call_once := fun _ x => do return (← x.1 * x.2, ()) }
+     call_mut := fun _ x => do return (← x.1 * x.2, ())
+   }
+-  let (product, _, _) ← iteratorInst.fold mulInst iter 1#usize ()
+-  ok product
++  let (product, iter, _) ← iteratorInst.fold mulInst iter 1#usize ()
++  ok (product, iter)
+ 
+ @[reducible, rust_trait_impl "core::iter::traits::accum::Product<usize, &'a usize>"]
+ def core.iter.traits.accum.ProductUsizeSharedUsize :
+@@ -755,12 +759,31 @@ def core.iter.traits.accum.ProductUsizeSharedUsize :
+   product := core.iter.traits.accum.ProductUsizeSharedUsize.product
+ }
+ 
++/-- `impl Product for usize` (core/src/iter/traits/accum.rs, `integer_sum_product!`,
++    rustc 1.95): `iter.fold(1, |a, b| a * b)`, checked as `Product<&usize>`. -/
++@[rust_fun
++  "core::iter::traits::accum::{core::iter::traits::accum::Product<usize, usize>}::product"]
++def core.iter.traits.accum.ProductUsizeUsize.product {I : Type}
++  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result (Usize × I) := do
++  let mulInst : core.ops.function.FnMut Unit (Usize × Usize) Usize := {
++    FnOnceInst := { call_once := fun _ x => do return (← x.1 * x.2, ()) }
++    call_mut := fun _ x => do return (← x.1 * x.2, ())
++  }
++  let (product, iter, _) ← iteratorInst.fold mulInst iter 1#usize ()
++  ok (product, iter)
++
++@[reducible, rust_trait_impl "core::iter::traits::accum::Product<usize, usize>"]
++def core.iter.traits.accum.ProductUsizeUsize :
++  core.iter.traits.accum.Product Usize Usize := {
++  product := core.iter.traits.accum.ProductUsizeUsize.product
++}
++
+ /-- `Iterator::sum` (core/src/iter/traits/iterator.rs, rustc 1.95): `Sum::sum(self)`.
+     No core iterator overrides it. -/
+ @[rust_fun "core::iter::traits::iterator::Iterator::sum"]
+ def core.iter.traits.iterator.Iterator.sum.default
+   {Self S Item : Type} (IteratorInst : core.iter.traits.iterator.Iterator Self Item)
+-  (sumInst : core.iter.traits.accum.Sum S Item) (self : Self) : Result S :=
++  (sumInst : core.iter.traits.accum.Sum S Item) (self : Self) : Result (S × Self) :=
+   sumInst.sum IteratorInst self
+ 
+ /-- `impl Sum for usize` (core/src/iter/traits/accum.rs, `integer_sum_product!`,
+@@ -769,13 +792,13 @@ def core.iter.traits.iterator.Iterator.sum.default
+     the first overflowing step, left to right. -/
+ @[rust_fun "core::iter::traits::accum::{core::iter::traits::accum::Sum<usize, usize>}::sum"]
+ def core.iter.traits.accum.SumUsizeUsize.sum {I : Type}
+-  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result Usize := do
++  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result (Usize × I) := do
+   let addInst : core.ops.function.FnMut Unit (Usize × Usize) Usize := {
+     FnOnceInst := { call_once := fun _ x => do return (← x.1 + x.2, ()) }
+     call_mut := fun _ x => do return (← x.1 + x.2, ())
+   }
+-  let (sum, _, _) ← iteratorInst.fold addInst iter 0#usize ()
+-  ok sum
++  let (sum, iter, _) ← iteratorInst.fold addInst iter 0#usize ()
++  ok (sum, iter)
+ 
+ @[reducible, rust_trait_impl "core::iter::traits::accum::Sum<usize, usize>"]
+ def core.iter.traits.accum.SumUsizeUsize :
+@@ -783,6 +806,25 @@ def core.iter.traits.accum.SumUsizeUsize :
+   sum := core.iter.traits.accum.SumUsizeUsize.sum
+ }
+ 
++/-- `impl<'a> Sum<&'a usize> for usize` (core/src/iter/traits/accum.rs,
++    `integer_sum_product!`, rustc 1.95): `iter.fold(0, |a, b| a + b)`, checked as
++    `Sum<usize>`. -/
++@[rust_fun "core::iter::traits::accum::{core::iter::traits::accum::Sum<usize, &'a usize>}::sum"]
++def core.iter.traits.accum.SumUsizeSharedUsize.sum {I : Type}
++  (iteratorInst : core.iter.traits.iterator.Iterator I Usize) (iter : I) : Result (Usize × I) := do
++  let addInst : core.ops.function.FnMut Unit (Usize × Usize) Usize := {
++    FnOnceInst := { call_once := fun _ x => do return (← x.1 + x.2, ()) }
++    call_mut := fun _ x => do return (← x.1 + x.2, ())
++  }
++  let (sum, iter, _) ← iteratorInst.fold addInst iter 0#usize ()
++  ok (sum, iter)
++
++@[reducible, rust_trait_impl "core::iter::traits::accum::Sum<usize, &'a usize>"]
++def core.iter.traits.accum.SumUsizeSharedUsize :
++  core.iter.traits.accum.Sum Usize Usize := {
++  sum := core.iter.traits.accum.SumUsizeSharedUsize.sum
++}
++
+ @[rust_trait "core::iter::traits::collect::IntoIterator"
+   (parentClauses := ["iteratorInst"])
+   (auxiliaryFields := ["const_size"])]
+diff --git a/backends/lean/Aeneas/Std/IteratorAdapters.lean b/backends/lean/Aeneas/Std/IteratorAdapters.lean
+index 0e8d269..68ca7a5 100644
+--- a/backends/lean/Aeneas/Std/IteratorAdapters.lean
++++ b/backends/lean/Aeneas/Std/IteratorAdapters.lean
+@@ -577,9 +577,19 @@ def core.iter.adapters.map.IteratorMap.sum
+   {B I F S Item : Type} (iterInst : core.iter.traits.iterator.Iterator I Item)
+   (fnInst : core.ops.function.FnMut F Item B)
+   (sumInst : core.iter.traits.accum.Sum S B)
+-  (self : core.iter.adapters.map.Map I F) : Result S :=
++  (self : core.iter.adapters.map.Map I F) : Result (S × core.iter.adapters.map.Map I F) :=
+   sumInst.sum (core.iter.traits.iterator.IteratorMap iterInst fnInst) self
+ 
++/-- `Map`'s inherited `Iterator::product`: `Product::product(self)` over the mapped items. -/
++@[rust_fun
++  "core::iter::adapters::map::{core::iter::traits::iterator::Iterator<core::iter::adapters::map::Map<@I, @F>, @B>}::product"]
++def core.iter.adapters.map.IteratorMap.product
++  {B I F P Item : Type} (iterInst : core.iter.traits.iterator.Iterator I Item)
++  (fnInst : core.ops.function.FnMut F Item B)
++  (productInst : core.iter.traits.accum.Product P B)
++  (self : core.iter.adapters.map.Map I F) : Result (P × core.iter.adapters.map.Map I F) :=
++  productInst.product (core.iter.traits.iterator.IteratorMap iterInst fnInst) self
++
+ /-! `DoubleEndedIterator for Map<I, F>` (core map.rs, rustc 1.95), for
+     `I: DoubleEndedIterator` and `F: FnMut(I::Item) -> B`: `next_back` is
+     `self.iter.next_back().map(&mut self.f)`, and the back folds fold the inner
+diff --git a/backends/lean/Aeneas/Std/SliceIter.lean b/backends/lean/Aeneas/Std/SliceIter.lean
+index b3ac1af..919f63e 100644
+--- a/backends/lean/Aeneas/Std/SliceIter.lean
++++ b/backends/lean/Aeneas/Std/SliceIter.lean
+@@ -270,9 +270,18 @@ def core.iter.traits.iterator.IteratorSliceIter (T : Type) :
+   "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::Iter<'a, @T>, &'a @T>}::product"]
+ def core.slice.iter.IteratorSliceIter.product {T P : Type}
+   (productInst : core.iter.traits.accum.Product P T) (self : core.slice.iter.Iter T) :
+-  Result P :=
++  Result (P × core.slice.iter.Iter T) :=
+   productInst.product (core.iter.traits.iterator.IteratorSliceIter T) self
+ 
++/-- The slice `Iter` inherits `Iterator::sum` (core/src/slice/iter/macros.rs does not
++    override it): `Sum::sum(self)` with this implementation. -/
++@[rust_fun
++  "core::slice::iter::{core::iter::traits::iterator::Iterator<core::slice::iter::Iter<'a, @T>, &'a @T>}::sum"]
++def core.slice.iter.IteratorSliceIter.sum {T S : Type}
++  (sumInst : core.iter.traits.accum.Sum S T) (self : core.slice.iter.Iter T) :
++  Result (S × core.slice.iter.Iter T) :=
++  sumInst.sum (core.iter.traits.iterator.IteratorSliceIter T) self
++
+ @[rust_fun
+   "core::slice::iter::{core::iter::traits::double_ended::DoubleEndedIterator<core::slice::iter::Iter<'a, @T>, &'_ @T>}::advance_back_by"]
+ def core.slice.iter.DoubleEndedIteratorSliceIter.advance_back_by {T : Type}
+diff --git a/backends/lean/Aeneas/Std/String.lean b/backends/lean/Aeneas/Std/String.lean
+index 11a3846..16263ec 100644
+--- a/backends/lean/Aeneas/Std/String.lean
++++ b/backends/lean/Aeneas/Std/String.lean
+@@ -3,6 +3,8 @@ import Aeneas.Std.Slice
+ import Aeneas.Std.Alloc
+ import Aeneas.Std.Core.Core
+ import Aeneas.Std.Core.Cmp
++import Aeneas.Std.Core.Default
++import Aeneas.Std.Scalar.Notations
+ 
+ namespace Aeneas.Std
+ 
+@@ -436,6 +438,62 @@ def core.str.Str.contains {P : Type} (patInst : core.str.pattern.Pattern P)
+ def alloc.string.String.len (value : String) : Result Usize := do
+   .ok (Slice.len (← Str.ofString value))
+ 
++/-- `String::new` (string.rs): `String { vec: Vec::new() }`, the empty string. -/
++@[rust_fun "alloc::string::{alloc::string::String}::new"]
++def alloc.string.String.new : Result String := .ok ""
++
++/-- `Default for String` (string.rs): `String::new()`. -/
++@[rust_fun "alloc::string::{core::default::Default<alloc::string::String>}::default"]
++def alloc.string.DefaultString.default : Result String := .ok ""
++
++@[reducible, rust_trait_impl "core::default::Default<alloc::string::String>"]
++def core.default.DefaultString : core.default.Default String := {
++  default := alloc.string.DefaultString.default
++}
++
++/-- `String::pop` (string.rs): `let ch = self.chars().rev().next()?`, then the byte
++    vector is shortened by `ch.len_utf8()`: the last char, removed; `None` (and the
++    string unchanged) when it is empty. -/
++@[rust_fun "alloc::string::{alloc::string::String}::pop"]
++def alloc.string.String.pop (value : String) : Result (Option Char × String) :=
++  match value.toList.getLast? with
++  | none => .ok (none, value)
++  | some ch => .ok (some ch, String.ofList value.toList.dropLast)
++
++/-- `char::len_utf8` (core/src/char/methods.rs, rustc 1.95): the length of the UTF-8
++    encoding, 1 below `0x80`, 2 below `0x800`, 3 below `0x10000`, else 4. -/
++@[rust_fun "core::char::methods::{char}::len_utf8"]
++def core.char.methods.Char.len_utf8 (c : Char) : Result Usize :=
++  .ok (if c.val < 0x80 then 1#usize else if c.val < 0x800 then 2#usize
++    else if c.val < 0x10000 then 3#usize else 4#usize)
++
++/-- `char::is_ascii_digit` (core/src/char/methods.rs): `matches!(*self, '0'..='9')`. -/
++@[rust_fun "core::char::methods::{char}::is_ascii_digit"]
++def core.char.methods.Char.is_ascii_digit (c : Char) : Result Bool :=
++  .ok ('0' ≤ c && c ≤ '9')
++
++/-- `char::is_ascii_alphanumeric` (core/src/char/methods.rs): `'0'..='9'`, `'A'..='Z'` or
++    `'a'..='z'`. -/
++@[rust_fun "core::char::methods::{char}::is_ascii_alphanumeric"]
++def core.char.methods.Char.is_ascii_alphanumeric (c : Char) : Result Bool :=
++  .ok (('0' ≤ c && c ≤ '9') || ('A' ≤ c && c ≤ 'Z') || ('a' ≤ c && c ≤ 'z'))
++
++/-- `u8::is_ascii_digit` (core/src/num/mod.rs): `matches!(*self, b'0'..=b'9')`. -/
++@[rust_fun "core::num::{u8}::is_ascii_digit"]
++def core.num.U8.is_ascii_digit (b : U8) : Result Bool :=
++  .ok (48 ≤ b.val && b.val ≤ 57)
++
++/-- `u8::is_ascii_alphabetic` (core/src/num/mod.rs): `b'A'..=b'Z'` or `b'a'..=b'z'`. -/
++@[rust_fun "core::num::{u8}::is_ascii_alphabetic"]
++def core.num.U8.is_ascii_alphabetic (b : U8) : Result Bool :=
++  .ok ((65 ≤ b.val && b.val ≤ 90) || (97 ≤ b.val && b.val ≤ 122))
++
++/-- `u8::is_ascii_alphanumeric` (core/src/num/mod.rs): `b'0'..=b'9'`, `b'A'..=b'Z'` or
++    `b'a'..=b'z'`. -/
++@[rust_fun "core::num::{u8}::is_ascii_alphanumeric"]
++def core.num.U8.is_ascii_alphanumeric (b : U8) : Result Bool :=
++  .ok ((48 ≤ b.val && b.val ≤ 57) || (65 ≤ b.val && b.val ≤ 90) || (97 ≤ b.val && b.val ≤ 122))
++
+ /-- `String::with_capacity` (string.rs): `String { vec: Vec::with_capacity(capacity) }`,
+     an empty string. The capacity is not part of the model, except that `RawVec` panics
+     with "capacity overflow" when it exceeds `isize::MAX` bytes; allocation failure
+diff --git a/backends/lean/Aeneas/Std/Vec.lean b/backends/lean/Aeneas/Std/Vec.lean
+index ef03272..56c78d4 100644
+--- a/backends/lean/Aeneas/Std/Vec.lean
++++ b/backends/lean/Aeneas/Std/Vec.lean
+@@ -183,6 +183,16 @@ def Vec.pop {T : Type} (v : Vec T) : Result (Option T × Vec T) :=
+   | none => ok (none, v)
+   | some x => ok (some x, ⟨v.val.dropLast, by have := v.property; simp only [List.length_dropLast]; omega⟩)
+ 
++/-- `Vec::split_off` (vec/mod.rs): panics when `at > len`; otherwise the elements from
++    `at` on move to the returned vector, and `self` keeps the first `at`. -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::split_off"
++  (keepParams := [true, false]) (keepTraitClauses := [false])]
++def Vec.split_off {T : Type} (v : Vec T) (at_ : Usize) : Result (Vec T × Vec T) :=
++  if at_.val ≤ v.length then
++    ok (⟨v.val.drop at_.val, by have := v.property; simp only [List.length_drop]; omega⟩,
++      ⟨v.val.take at_.val, by have := v.property; simp only [List.length_take]; omega⟩)
++  else fail .panic
++
+ /-- `Vec::into_boxed_slice` (vec/mod.rs): shrink the buffer and reinterpret it;
+     the elements are unchanged. -/
+ @[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::into_boxed_slice" (keepParams := [true, false])]
+@@ -509,6 +519,18 @@ def alloc.vec.Vec.retain_mut {T F : Type} (fnInst : core.ops.function.FnMutMutAr
+       ok (keep, f, x))
+     v f
+ 
++/-- `Vec::retain` (alloc/src/vec/mod.rs): `self.retain_mut(|elem| f(elem))`, the closure
++    called once on every element, in order, which it cannot change; the elements for
++    which it returns `true` are kept, in order, and its final state is returned. -/
++@[rust_fun "alloc::vec::{alloc::vec::Vec<@T>}::retain" (keepParams := [true, false, true])]
++def alloc.vec.Vec.retain {T F : Type} (fnInst : core.ops.function.FnMut F T Bool)
++    (v : alloc.vec.Vec T) (f : F) : Result (Unit × alloc.vec.Vec T × F) :=
++  alloc.vec.Vec.retain_mut_with
++    (fun f x => do
++      let (keep, f) ← fnInst.call_mut f x
++      ok (keep, f, x))
++    v f
++
+ @[rust_fun "alloc::vec::{core::ops::deref::Deref<alloc::vec::Vec<@T>, [@T]>}::deref"
+            -canFail -lift (keepParams := [true, false])]
+ def alloc.vec.Vec.deref {T : Type} (v : alloc.vec.Vec T) : Slice T :=
+diff --git a/src/llbc/ModelStateInputs.ml b/src/llbc/ModelStateInputs.ml
+index 0fcaa9c..5a16dbf 100644
+--- a/src/llbc/ModelStateInputs.ml
++++ b/src/llbc/ModelStateInputs.ml
+@@ -21,8 +21,11 @@ let for_method name method_name =
+   | "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator", ("fold" | "try_fold")
+   | ( "_root_.Aeneas.Std.core.iter.traits.double_ended.DoubleEndedIterator",
+       ("rfold" | "try_rfold") ) -> Some [ 0; 2 ]
+-  | "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator", ("collect" | "count")
+-  | "_root_.Aeneas.Std.core.iter.traits.collect.FromIterator", "from_iter" ->
++  | ( "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator",
++      ("collect" | "count" | "sum" | "product") )
++  | "_root_.Aeneas.Std.core.iter.traits.collect.FromIterator", "from_iter"
++  | "_root_.Aeneas.Std.core.iter.traits.accum.Sum", "sum"
++  | "_root_.Aeneas.Std.core.iter.traits.accum.Product", "product" ->
+       Some [ 0 ]
+   | "_root_.Aeneas.Std.core.iter.traits.collect.Extend", "extend" ->
+       Some [ 0; 1 ]
+diff --git a/src/llbc/SortContracts.ml b/src/llbc/SortContracts.ml
+index ac18356..33ab7b2 100644
+--- a/src/llbc/SortContracts.ml
++++ b/src/llbc/SortContracts.ml
+@@ -1,19 +1,22 @@
+ (** Admission for the models of [<[T]>::sort_unstable],
+-    [<[T]>::sort_unstable_by] and [<[T]>::sort_by] (Aeneas.Std.Sort).
++    [<[T]>::sort_unstable_by], [<[T]>::sort], [<[T]>::sort_by] and
++    [<[T]>::sort_by_key] (Aeneas.Std.Sort).
+ 
+     Natively, the order of the elements that compare [Equal], and the sequence of
+     comparisons, are unspecified. The models (a stable sort) return the native
+     result exactly when the comparison is pure and total and returns [Equal] only
+     for indistinguishable values: then every sorted permutation is the same list.
+ 
+-    [sort_unstable] compares with the element type's [Ord]. By coherence a type
+-    has a single [Ord] impl, so this is a property of the element type. It holds
+-    for the integer types, [bool], [char], [str] and [String], for references,
+-    boxes and tuples of such types, and for non-generic crate types whose [Ord]
+-    impl is derived and whose fields all have such types (the derived [cmp]
+-    compares the variants, then the fields in order). A derived impl is the one
+-    rustc marks [#[automatically_derived]], which Charon keeps as an unknown
+-    attribute.
++    [sort_unstable] compares with the element type's [Ord] ([T::lt]). By
++    coherence a type has a single [Ord] impl, so this is a property of the
++    element type. It holds for the integer types, [bool], [char], [str],
++    [String] and [BigUint], for references, boxes, slices, arrays, tuples,
++    [Option] and [Reverse] of such types, and for non-generic crate types whose
++    [Ord] and [PartialOrd] impls are derived and whose fields all have such
++    types (the derived [cmp] and [partial_cmp] compare the variants, then the
++    fields in order; the models call [lt] of the [PartialOrd] impl, as the
++    native entry points do). A derived impl is the one rustc marks
++    [#[automatically_derived]], which Charon keeps as an unknown attribute.
+ 
+     [sort_unstable_by] is admitted when its comparator is a closure whose body
+     returns [Ord::cmp(a, b)] (ascending) or [Ord::cmp(b, a)] (descending) of its
+@@ -22,15 +25,33 @@
+     (equal keys may hide distinct elements), is rejected with
+     [E_UNSUPPORTED_SORT].
+ 
+-    [sort_by] is stable: natively its result is unique when the comparator is a
+-    pure total preorder (only the sequence of comparisons is unspecified), and
+-    unspecified, or a panic, otherwise. It is admitted when its comparator is a
+-    closure whose body returns [Ord::cmp] of the same key of its two arguments
+-    (in either order): a key only reads its argument, as a shared reference to
+-    or a copy of a place reached by struct and tuple fields and dereferences of
+-    shared references and boxes, a tuple of keys, or a shared reference to a
+-    local holding a key; and the key type is one of the types above, whose
+-    [Ord] is a total order. Every other comparator is rejected with
++    The stable sorts ([sort], [sort_by], [sort_by_key]) keep the input order of
++    the elements that compare [Equal]: natively their result is unique when the
++    comparison is a pure total preorder (only the sequence of comparisons is
++    unspecified), and unspecified, or a panic, otherwise.
++
++    [sort] compares with [T::lt]: it is admitted on the element types above,
++    whose [lt] is a strict total order.
++
++    [sort_by] is admitted when its comparator is a closure whose body returns
++    [Ord::cmp] of the same key of its two arguments (in either order): a key
++    only reads its argument, as a shared reference to or a copy of a place
++    reached by struct and tuple fields and dereferences of shared references
++    and boxes, a tuple of keys, or a shared reference to a local holding a key;
++    and the key type is one of the types above, whose [Ord] is a total order.
++
++    [sort_by_key] compares [f(a).lt(&f(b))], recomputing the keys. It is
++    admitted when the key function [f] is a closure that captures only shared
++    references (its body does not assign, mutably borrow or move a captured
++    variable, which would capture it by mutable reference or by value;
++    interior mutability has no model, so it mutates nothing) or a function
++    item or pointer (no state), and its key type [K] is one of the types
++    above: then [f] is a function of the element (the model threads its
++    unchanged state), a panic in [f] on an element happens in both sorts (a
++    sort of two or more elements compares every element), and the comparison
++    is a total preorder.
++
++    Every other comparator, key function or type is rejected with
+     [E_UNSUPPORTED_SORT]. *)
+ 
+ open Types
+@@ -70,28 +91,50 @@ let check (crate : crate) : crate =
+     let sort_unstable = pattern "core::slice::{[@T]}::sort_unstable" in
+     let sort_by = pattern "core::slice::{[@T]}::sort_unstable_by" in
+     let sort_by_key = pattern "core::slice::{[@T]}::sort_unstable_by_key" in
++    let stable_sort = pattern "alloc::slice::{[@T]}::sort" in
+     let stable_sort_by = pattern "alloc::slice::{[@T]}::sort_by" in
++    let stable_sort_by_key = pattern "alloc::slice::{[@T]}::sort_by_key" in
+     let matches pat (name : name) = NameMatcher.match_name mctx config pat name in
+     let name_of (name : name) = Print.name_to_string env name in
++    let total_types =
++      "integers, bool, char, str, String, BigUint, references, boxes, slices, \
++       arrays, tuples, Option, Reverse and #[derive(PartialOrd, Ord)] types of \
++       those"
++    in
+     let unstable_message reason =
+-        "E_UNSUPPORTED_SORT: " ^ reason
+-       ^ ". The sort_unstable models are admitted only where the comparison is \
+-          Ord::cmp on a type whose Equal holds exactly for indistinguishable \
+-          values (integers, bool, char, str, String, references, boxes, tuples \
+-          and #[derive(Ord)] types of those), where every sorted permutation is \
+-          the same list."
++      "E_UNSUPPORTED_SORT: " ^ reason
++      ^ ". The sort_unstable models are admitted only where the comparison is \
++         Ord::cmp on a type whose Equal holds exactly for indistinguishable \
++         values (" ^ total_types
++      ^ "), where every sorted permutation is the same list."
+     in
+     let reject span reason = [%craise] span (unstable_message reason) in
+     let stable_message reason =
+-        "E_UNSUPPORTED_SORT: " ^ reason
+-       ^ ". The sort_by model is admitted only where the comparator returns \
+-          Ord::cmp of the same key of both elements, projected from each without \
+-          computation (fields, dereferences, tuples), on a key type whose Ord is \
+-          a total order (integers, bool, char, str, String, references, boxes, \
+-          tuples and #[derive(Ord)] types of those): then the comparator is a \
+-          total preorder and the stable order is unique."
++      "E_UNSUPPORTED_SORT: " ^ reason
++      ^ ". The sort_by model is admitted only where the comparator returns \
++         Ord::cmp of the same key of both elements, projected from each without \
++         computation (fields, dereferences, tuples), on a key type whose Ord is \
++         a total order (" ^ total_types
++      ^ "): then the comparator is a total preorder and the stable order is \
++         unique."
+     in
+     let reject_stable span reason = [%craise] span (stable_message reason) in
++    let sort_message reason =
++      "E_UNSUPPORTED_SORT: " ^ reason
++      ^ ". The sort model is admitted only on an element type whose Ord is a \
++         total order (" ^ total_types
++      ^ "): then T::lt is a strict total order and the stable order is unique."
++    in
++    let key_message reason =
++      "E_UNSUPPORTED_SORT: " ^ reason
++      ^ ". The sort_by_key model is admitted only where the key function is a \
++         closure that captures only shared references (it mutates nothing) or \
++         a function item, and the key type's Ord is a total order ("
++      ^ total_types
++      ^ "): then the key is a function of the element, the comparison is a \
++         total preorder and the stable order is unique."
++    in
++    let reject_key span reason = [%craise] span (key_message reason) in
+     let trait_name id =
+       name_of (TraitDeclId.Map.find id crate.trait_decls).item_meta.name
+     in
+@@ -116,24 +159,52 @@ let check (crate : crate) : crate =
+                 | _ -> None))
+         crate.trait_impls None
+     in
++    (* The [PartialOrd] impl that an [Ord] impl extends (its supertrait clause):
++       the models, like the native entry points, call its [lt]. *)
++    let partial_ord_impl (impl : trait_impl) =
++      List.find_map
++        (fun (tr : trait_ref) ->
++          match tr.kind with
++          | TraitImpl impl_ref
++            when trait_name tr.trait_decl_ref.binder_value.id
++                 = "core::cmp::PartialOrd" ->
++              TraitImplId.Map.find_opt impl_ref.id crate.trait_impls
++          | _ -> None)
++        impl.implied_trait_refs
++    in
++    (* Generic std types whose [Ord] and [PartialOrd] are total orders with
++       [Equal] exactly for indistinguishable values when their type arguments'
++       are: [Option] (derived: [None] first, then the payloads) and [Reverse]
++       (the payloads' order, reversed). *)
++    let reviewed_generic = [ "core::option::Option"; "core::cmp::Reverse" ] in
++    (* Non-generic types with such hand-written impls: [String] (its bytes, as
++       [str]) and [BigUint] (num-bigint 0.4.6 biguint.rs: the digits carry no
++       leading zero, and [cmp] compares their counts, then the digits from the
++       most significant, the numeric order; [partial_cmp] is [Some (cmp)]). *)
++    let reviewed_total = [ "alloc::string::String"; "num_bigint::biguint::BigUint" ] in
+     (* [visiting]: the crate types under examination (a recursive type is
+        structural if its other fields are). *)
+     let rec structural_with message span visiting (ty : ty) : unit =
+       let structural = structural_with message in
+       let unsupported why =
+         [%craise] span
+-          (message ("the element type " ^ Print.ty_to_string env ty ^ " " ^ why))
++          (message ("the type " ^ Print.ty_to_string env ty ^ " " ^ why))
+       in
+       match ty with
+       | TLiteral (TInt _ | TUInt _ | TBool | TChar) -> ()
+       | TLiteral (TFloat _) -> unsupported "has no total order"
+-      | TRef (_, inner, _) -> structural span visiting inner
++      | TRef (_, inner, _) | TSlice inner | TArray (inner, _) ->
++          (* Slices and arrays: lexicographic, then by length *)
++          structural span visiting inner
+       | TAdt { id = TTuple; generics } | TAdt { id = TBuiltin TBox; generics } ->
+           List.iter (structural span visiting) generics.types
+       | TAdt { id = TBuiltin TStr; _ } -> ()
+       | TAdt { id = TAdtId id; generics } -> (
+           let decl = TypeDeclId.Map.find id crate.type_decls in
+-          if name_of decl.item_meta.name = "alloc::string::String" then ()
++          let name = name_of decl.item_meta.name in
++          if List.mem name reviewed_total then ()
++          else if List.mem name reviewed_generic && generics.const_generics = []
++          then List.iter (structural span visiting) generics.types
+           else if List.mem id visiting then ()
+           else if generics.types <> [] || generics.const_generics <> [] then
+             unsupported "is generic"
+@@ -144,7 +215,14 @@ let check (crate : crate) : crate =
+                 unsupported
+                   "has an Ord impl without #[automatically_derived] (a \
+                    hand-written Equal may hold between distinct values)"
+-            | Some _ -> (
++            | Some impl -> (
++                (match partial_ord_impl impl with
++                | Some partial when derived partial -> ()
++                | Some _ ->
++                    unsupported
++                      "has a PartialOrd impl without #[automatically_derived] \
++                       (its lt may disagree with the derived cmp)"
++                | None -> unsupported "has no PartialOrd impl in the crate");
+                 let fields =
+                   match decl.kind with
+                   | Struct fields -> fields
+@@ -210,6 +288,45 @@ let check (crate : crate) : crate =
+       in
+       body
+     in
++    (* The key function of [sort_by_key], by its [FnMut] impl [tr]: a closure,
++       whose [FnMut] impl this is, that captures only shared references, or the
++       built-in impl of a function item or pointer (no state). Either is a
++       function of its argument. The closure kind is no evidence (rustc takes
++       the [FnMut] of the expected bound for a closure passed to [sort_by_key]),
++       but the capture modes are: a closure body that assigns, mutably borrows
++       or moves a captured variable captures it by mutable reference or by
++       value, and nothing is mutable behind a shared reference (interior
++       mutability has no model). *)
++    let pure_key_function span (tr : trait_ref) =
++      let unsupported why =
++        reject_key span ("sort_by_key: the key function " ^ why)
++      in
++      match tr.kind with
++      | BuiltinOrAuto ((BuiltinFnMut | BuiltinFn), _, _) -> ()
++      | TraitImpl impl_ref -> (
++          let impl = TraitImplId.Map.find impl_ref.id crate.trait_impls in
++          match impl.impl_trait.generics.types with
++          | TAdt { id = TAdtId id; _ } :: _ -> (
++              let decl = TypeDeclId.Map.find id crate.type_decls in
++              match (decl.src, decl.kind) with
++              | ClosureItem { fn_mut_impl = Some fn_mut; _ }, Struct captures
++                when fn_mut.binder_value.id = impl_ref.id ->
++                  List.iter
++                    (fun (capture : field) ->
++                      match capture.field_ty with
++                      | TRef (_, _, RShared) -> ()
++                      | ty ->
++                          unsupported
++                            ("is a closure that captures a "
++                            ^ Print.ty_to_string env ty
++                            ^ " (by mutable reference or by value): its keys \
++                               and final state may depend on the sequence of \
++                               calls"))
++                    captures
++              | _ -> unsupported "is not a closure or a function item")
++          | _ -> unsupported "is not a closure or a function item")
++      | _ -> unsupported "is not a closure or a function item"
++    in
+     let comparator span (elem : ty) (tr : trait_ref) =
+       let unsupported why =
+         reject span ("sort_unstable_by: the comparator " ^ why)
+@@ -473,6 +590,21 @@ let check (crate : crate) : crate =
+             match generics.trait_refs with
+             | [ compare ] -> key_comparator span compare
+             | _ -> reject_stable span "unexpected generics of sort_by"
++          else if matches stable_sort_by_key name then
++            match (generics.types, generics.trait_refs) with
++            | [ _; key; _ ], [ key_fn; ord ]
++              when trait_name key_fn.trait_decl_ref.binder_value.id
++                   = "core::ops::function::FnMut"
++                   && trait_name ord.trait_decl_ref.binder_value.id
++                      = "core::cmp::Ord" ->
++                pure_key_function span key_fn;
++                structural_with key_message span [] key
++            | _ -> reject_key span "unexpected generics of sort_by_key"
++          else if matches stable_sort name then
++            match generics.types with
++            | [ element ] -> structural_with sort_message span [] element
++            | _ ->
++                [%craise] span (sort_message "unexpected generics of sort")
+           else if matches sort_by_key name then
+             reject span
+               "sort_unstable_by_key: equal keys may hide distinct elements"
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index cfb7096..46a1f74 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -372,6 +372,7 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+   | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by_key"
+   | "_root_.Aeneas.Std.alloc.slice.Slice.sort_by"
+   | "_root_.Aeneas.Std.core.slice.Slice.sort_unstable_by"
++  | "_root_.Aeneas.Std.alloc.vec.Vec.retain"
+   | "_root_.Aeneas.Std.alloc.vec.Vec.retain_mut" ->
+       Some (Canonical (State [ 0; 1 ]))
+   | "_root_.Aeneas.Std.core.hint.must_use"

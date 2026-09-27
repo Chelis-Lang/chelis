@@ -1,0 +1,318 @@
+# aeneas integration step 144 after cba11f3beb: commit 21151937782fe969f6452e853a3f9313b3463100
+# first parent 69ac7207de6dfcb93e83d7d39909ebea7a73d67a, merged 20c524b0c3e51540b699918ea596b688f93ddfc9
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (the fixed-point iterations skip the paths which cannot reach a continue: byte-identical outputs, the eval root 2.3x faster)
+
+diff --git a/src/interp/InterpLoops.ml b/src/interp/InterpLoops.ml
+index 9b8345a..a6c2793 100644
+--- a/src/interp/InterpLoops.ml
++++ b/src/interp/InterpLoops.ml
+@@ -450,20 +450,186 @@ let drop_dead_locals_at_continue (config : config) (span : Meta.span)
+   in
+   (List.map fst resl, fun el -> cf (List.map2 (fun (_, cc) e -> cc e) resl el))
+ 
++(** {1 The loop body evaluated by the fixed-point iterations}
++
++    The fixed-point iterations of a loop
++    ({!InterpLoopsFixedPoint.compute_loop_entry_fixed_point}) keep only the
++    contexts which reach a [continue] of the loop. The contexts at its other
++    outcomes (its exits, the returns and the panics) are discarded, and the loop
++    body is evaluated again from the fixed point to compute them
++    ({!InterpLoopsFixedPoint.compute_loop_exit_contexts}, then the synthesis of
++    the loop body). The paths which cannot reach a [continue] of the loop are
++    thus evaluated by the iterations only to be discarded. This is costly when
++    the code after the loop is nested in its body, like the continuation of a
++    returning loop, which [PrePasses.update_loops] copies onto its breaks: the
++    loops nested in such continuations are evaluated a number of times
++    exponential in the nesting depth.
++
++    [fixed_point_body body] is the body evaluated by the iterations. It cuts
++    every path of [body] at the first position from which no [continue] of the
++    loop is reachable ({!fixed_point_cut}), and marks the loops nested in the
++    body ({!fixed_point_filtered_loop}) so that only the outcomes of them which
++    may reach such a [continue] (their own [break], the [continue]s of the loop)
++    are kept. The reachability is syntactic and over-approximates the control
++    flow: every statement may complete, except [return], [break], [continue],
++    panics and the switches whose branches cannot complete, and a nested loop
++    may complete if it contains a [break] to it.
++
++    The contexts at the [continue]s of the loop, in the same order, and thus the
++    fixed point, are the same as with [body]. The evaluation of a path depends
++    only on its context until it is joined with other paths
++    ({!InterpStatements.join_contexts_by_destination}): after a switch, the
++    paths with the same outcome (fall-through, or a [continue] or [break] of a
++    given loop), and in a match, the constructors selecting the same arm, before
++    evaluating the arm. A path which reaches a [continue] of the loop is never
++    cut nor dropped, and neither are the paths joined with it on the way, as
++    they continue from the same position: the joins leading to a [continue]
++    join the same contexts, and a nested loop on the way is evaluated as with
++    [body]. The joins of the other outcomes are not performed at all, as the
++    paths reaching them produce no outcome. Their only effect on the other
++    paths is on the ids they generate (the generators are shared): the ids
++    generated for the other paths are the same, up to a renaming which
++    preserves their order, and the translation only compares ids. This requires
++    [-strict-joins]: a join which fails then fails the translation, while a
++    recovered failure abandons all the joins of the switch, including those of
++    the [continue]s, so without it the iterations evaluate [body] unchanged. *)
++
++(** The statement ids of the markers of {!fixed_point_body} (the statement ids
++    of a body are nonnegative) *)
++let fixed_point_cut_id = LlbcAst.StatementId.of_int (-1)
++
++let fixed_point_filtered_loop_id = LlbcAst.StatementId.of_int (-2)
++
++(** Whether a statement of a {!fixed_point_body} cuts the path: its evaluation
++    produces no outcome *)
++let fixed_point_cut (st : LlbcAst.statement) : bool =
++  st.statement_id = fixed_point_cut_id
++
++(** Whether a statement of a {!fixed_point_body} is a nested loop whose
++    outcomes must be filtered with {!fixed_point_loop_outcomes} *)
++let fixed_point_filtered_loop (st : LlbcAst.statement) : bool =
++  st.statement_id = fixed_point_filtered_loop_id
++
++(** Keep the outcomes of a nested loop of a {!fixed_point_body} which may lead
++    to a [continue] of the loop: its own [break] (the fall-through after it) and
++    the [continue]s of the loop. The iterations discard the synthesized
++    expressions, so the continuation is never applied. *)
++let fixed_point_loop_outcomes (span : Meta.span)
++    ((resl, _) :
++      (eval_ctx * statement_eval_res) list * (SA.expr list -> SA.expr)) :
++    (eval_ctx * statement_eval_res) list * (SA.expr list -> SA.expr) =
++  ( List.filter
++      (fun (_, res) ->
++        match res with
++        | Unit | Continue 0 | Panic -> true
++        | Break _ | Continue _ | Return -> false)
++      resl,
++    fun _ -> [%internal_error] span )
++
++(** Whether a loop nested in the body contains a [continue] of the loop, and a
++    [break] of itself (the depth of a statement is the number of loops between
++    it and the body of the loop) *)
++let nested_loop_exits (body : LlbcAst.block) : bool * bool =
++  let continues = ref false in
++  let breaks = ref false in
++  let visitor =
++    object (self)
++      inherit [_] LlbcAst.iter_statement
++      method! visit_Loop depth body = self#visit_block (depth + 1) body
++      method! visit_Continue depth i = if i = depth then continues := true
++      method! visit_Break depth i = if i = depth - 1 then breaks := true
++    end
++  in
++  visitor#visit_block 1 body;
++  (!continues, !breaks)
++
++let fixed_point_body (body : LlbcAst.block) : LlbcAst.block =
++  let open LlbcAst in
++  let cut span : statement =
++    {
++      span;
++      statement_id = fixed_point_cut_id;
++      kind = Abort UndefinedBehavior;
++      comments_before = [];
++    }
++  in
++  (* [k]: whether the position after the statements reaches a [continue] of the
++     loop. Also returns whether the position before them reaches one. *)
++  let rec statements span (k : bool) (sts : statement list) :
++      statement list * bool =
++    match sts with
++    | [] -> ((if k then [] else [ cut span ]), k)
++    | st :: rest ->
++        let rest, k = statements span k rest in
++        let st, reaches = statement k st in
++        if reaches then (st :: rest, true) else ([ cut st.span ], false)
++  and block (k : bool) (b : block) : block * bool =
++    let sts, reaches = statements b.span k b.statements in
++    ({ b with statements = sts }, reaches)
++  and statement (k : bool) (st : statement) : statement * bool =
++    match st.kind with
++    | Continue 0 -> (st, true)
++    | Continue _ | Break _ | Return | Abort _ -> (st, false)
++    | Loop body ->
++        let continues, breaks = nested_loop_exits body in
++        ( { st with statement_id = fixed_point_filtered_loop_id },
++          continues || (breaks && k) )
++    | Switch switch ->
++        let reaches = ref false in
++        let branch (b : block) : block =
++          let b, r = block k b in
++          reaches := !reaches || r;
++          b
++        in
++        let switch =
++          match switch with
++          | If (op, b0, b1) ->
++              let b0 = branch b0 in
++              If (op, b0, branch b1)
++          | SwitchInt (op, ty, targets, otherwise) ->
++              let targets = List.map (fun (v, b) -> (v, branch b)) targets in
++              SwitchInt (op, ty, targets, branch otherwise)
++          | Match (p, targets, otherwise) ->
++              let targets = List.map (fun (v, b) -> (v, branch b)) targets in
++              Match (p, targets, Option.map branch otherwise)
++        in
++        ({ st with kind = Switch switch }, !reaches)
++    | Assign _
++    | SetDiscriminant _
++    | CopyNonOverlapping _
++    | StorageLive _
++    | StorageDead _
++    | PlaceMention _
++    | Drop _
++    | Assert _
++    | Call _
++    | Nop
++    | Error _ -> (st, k)
++  in
++  fst (block false body)
++
+ (** Evaluate a loop in symbolic mode.
+ 
+     A loop can be left through its own [break], but also through a [break] or a
+     [continue] of an enclosing loop. Every such exit has its own (joined)
+     environment and continuation: we output one context per exit, and the
+-    continuation receives one expression per exit, in the same order. *)
++    continuation receives one expression per exit, in the same order.
++
++    [eval_fixed_point_body] evaluates the body during the fixed-point
++    iterations: see {!fixed_point_body}. *)
+ let eval_loop_symbolic (config : config) (span : span)
+-    (eval_loop_body : stl_cm_fun) : stl_cm_fun =
++    ~(eval_fixed_point_body : stl_cm_fun) (eval_loop_body : stl_cm_fun) :
++    stl_cm_fun =
+  fun ctx ->
+   (* Debug *)
+   [%ltrace "Context:\n" ^ eval_ctx_to_string ~span:(Some span) ctx ^ "\n"];
+   (* Discard the values of the locals which are dead at the continues *)
++  let dead = bottom_locals ctx in
+   let eval_loop_body =
+-    drop_dead_locals_at_continue config span (bottom_locals ctx) eval_loop_body
++    drop_dead_locals_at_continue config span dead eval_loop_body
++  in
++  let eval_fixed_point_body =
++    drop_dead_locals_at_continue config span dead eval_fixed_point_body
+   in
+ 
+   (* Generate a fresh loop id *)
+@@ -471,7 +637,8 @@ let eval_loop_symbolic (config : config) (span : span)
+ 
+   (* Compute the fixed point at the loop entrance *)
+   let fp_ctx, fixed_ids =
+-    compute_loop_entry_fixed_point config span loop_id eval_loop_body ctx
++    compute_loop_entry_fixed_point config span loop_id eval_fixed_point_body
++      ctx
+   in
+   let input_abs_list =
+     List.rev
+@@ -649,7 +816,8 @@ let eval_loop_symbolic (config : config) (span : span)
+   in
+   (List.map (fun (exit, break_ctx, _, _) -> (break_ctx, exit)) exits, cc)
+ 
+-let eval_loop (config : config) (span : span) (eval_loop_body : stl_cm_fun) :
++let eval_loop (config : config) (span : span)
++    ~(eval_fixed_point_body : stl_cm_fun) (eval_loop_body : stl_cm_fun) :
+     stl_cm_fun =
+  fun ctx ->
+   match config.mode with
+@@ -684,5 +852,8 @@ let eval_loop (config : config) (span : span) (eval_loop_body : stl_cm_fun) :
+           (reborrow_ashared_loans_symbolic_borrows span None
+              ~with_abs_conts:true ctx)
+       in
+-      let ctx_resl, cf = eval_loop_symbolic config span eval_loop_body ctx in
++      let ctx_resl, cf =
++        eval_loop_symbolic config span ~eval_fixed_point_body eval_loop_body
++          ctx
++      in
+       (ctx_resl, cc_comp cc cf)
+diff --git a/src/interp/InterpLoops.mli b/src/interp/InterpLoops.mli
+index 274e9a6..3237bd3 100644
+--- a/src/interp/InterpLoops.mli
++++ b/src/interp/InterpLoops.mli
+@@ -63,5 +63,29 @@ open Meta
+ (** Evaluate a loop.
+ 
+     The `stl_cm_fun` required as input must be the function to evaluate the loop
+-    body (i.e., `eval_statement` applied to the loop body). *)
+-val eval_loop : config -> span -> stl_cm_fun -> stl_cm_fun
++    body (i.e., `eval_statement` applied to the loop body).
++    [eval_fixed_point_body] evaluates the body during the fixed-point
++    iterations: [eval_statement] applied to {!fixed_point_body} of the loop
++    body, or to the loop body. *)
++val eval_loop :
++  config -> span -> eval_fixed_point_body:stl_cm_fun -> stl_cm_fun -> stl_cm_fun
++
++(** The loop body evaluated by the fixed-point iterations of a loop: the paths
++    which cannot reach a [continue] of the loop are cut (see the implementation
++    for the proof that the fixed point is the same). Requires [-strict-joins]. *)
++val fixed_point_body : LlbcAst.block -> LlbcAst.block
++
++(** Whether a statement of a {!fixed_point_body} cuts the path: its evaluation
++    produces no outcome *)
++val fixed_point_cut : LlbcAst.statement -> bool
++
++(** Whether a statement of a {!fixed_point_body} is a nested loop whose
++    outcomes must be filtered with {!fixed_point_loop_outcomes} *)
++val fixed_point_filtered_loop : LlbcAst.statement -> bool
++
++(** Keep the outcomes of a nested loop of a {!fixed_point_body} which may lead
++    to a [continue] of the loop *)
++val fixed_point_loop_outcomes :
++  span ->
++  (eval_ctx * statement_eval_res) list * (SymbolicAst.expr list -> SymbolicAst.expr) ->
++  (eval_ctx * statement_eval_res) list * (SymbolicAst.expr list -> SymbolicAst.expr)
+diff --git a/src/interp/InterpStatements.ml b/src/interp/InterpStatements.ml
+index 9a0aecf..d2a7ff6 100644
+--- a/src/interp/InterpStatements.ml
++++ b/src/interp/InterpStatements.ml
+@@ -1124,6 +1124,15 @@ let rec join_contexts_by_destination (config : config) (span : Meta.span)
+ 
+ (** Evaluate a statement. *)
+ let rec eval_statement (config : config) (st : statement) : stl_cm_fun =
++ fun ctx ->
++  (* The path cannot reach a [continue] of the loop whose fixed point is being
++     computed: see {!InterpLoops.fixed_point_body} *)
++  if InterpLoops.fixed_point_cut st then
++    ([], fun _ -> [%internal_error] st.span)
++  else eval_statement_with_snapshot config st ctx
++
++and eval_statement_with_snapshot (config : config) (st : statement) :
++    stl_cm_fun =
+  fun ctx ->
+   (* Debugging *)
+   [%ltrace
+@@ -1290,7 +1299,17 @@ and eval_statement_raw (config : config) (st : statement) : stl_cm_fun =
+       [%craise] st.span "CopyNonOverlapping is not supported yet"
+   | Loop loop_body ->
+       let eval_loop_body = eval_block config loop_body in
+-      InterpLoops.eval_loop config st.span eval_loop_body ctx
++      let eval_fixed_point_body =
++        if !Config.recover_joins then eval_loop_body
++        else eval_block config (InterpLoops.fixed_point_body loop_body)
++      in
++      let outcomes =
++        InterpLoops.eval_loop config st.span ~eval_fixed_point_body
++          eval_loop_body ctx
++      in
++      if InterpLoops.fixed_point_filtered_loop st then
++        InterpLoops.fixed_point_loop_outcomes st.span outcomes
++      else outcomes
+   | Switch switch -> eval_switch config st.span switch ctx
+   | Error s -> [%craise] st.span s
+ 
+diff --git a/tests/src/diagnostic-recovery.lean.out b/tests/src/diagnostic-recovery.lean.out
+index 023c142..f0efed3 100644
+--- a/tests/src/diagnostic-recovery.lean.out
++++ b/tests/src/diagnostic-recovery.lean.out
+@@ -16,7 +16,7 @@ Source: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1
+ Compiler source: Translate.ml, line 430
+ [[91mError[39m] Function pointers are not supported yet
+ Source: 'tests/src/diagnostic-recovery.rs', lines 21:4-21:8
+-Compiler source: interp/InterpStatements.ml, line 1605
++Compiler source: interp/InterpStatements.ml, line 1624
+ [[91mError[39m] Could not translate the body of function 'diagnostic_recovery::apply because of previous error
+ Name pattern: 'diagnostic_recovery::apply'
+ Definition span: 'tests/src/diagnostic-recovery.rs', lines 20:0-22:1

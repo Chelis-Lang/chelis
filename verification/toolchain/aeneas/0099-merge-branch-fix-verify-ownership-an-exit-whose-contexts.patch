@@ -1,0 +1,1323 @@
+# aeneas integration step 99 after cba11f3beb: commit 237ce1cf7ceb86d85bebdc6cc543485d4cddab53
+# first parent 48c6c23c845efa1ecc71461d718514be8e5ef97c, merged 837b86a8470c3f6b9325cf163de1f709afd29dd5
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/verify-ownership' (an exit whose contexts share a fresh loan held by a local joins them over two evaluations: check_operation_ids)
+
+diff --git a/src/interp/InterpLoopsFixedPoint.ml b/src/interp/InterpLoopsFixedPoint.ml
+index e92a943..6839355 100644
+--- a/src/interp/InterpLoopsFixedPoint.ml
++++ b/src/interp/InterpLoopsFixedPoint.ml
+@@ -413,8 +413,8 @@ let compute_loop_exit_contexts (config : config) (span : Meta.span)
+   in
+ 
+   (* Evaluate the loop body to register the different contexts upon exit *)
+-  let ctx_resl, _ = eval_loop_body fp_ctx in
+-  let exits =
++  let eval_exit_ctxs () : (statement_eval_res * eval_ctx list ref) list =
++    let ctx_resl, _ = eval_loop_body fp_ctx in
+     List.fold_left
+       (fun exits (ctx, res) ->
+         match res with
+@@ -432,6 +432,68 @@ let compute_loop_exit_contexts (config : config) (span : Meta.span)
+                     exits)))
+       [] ctx_resl
+   in
++  let exits = eval_exit_ctxs () in
++  (* Within one evaluation, the paths reaching an exit may fork after creating a
++     loan held by a local, and then share its ids (e.g., [a = *y; let x = &a;]
++     followed by two [return]s out of an inner loop: both contexts contain
++     [a -> SL@8] and [x -> SB@8]). Their join keeps this loan in the local as
++     it is, while the evaluation which synthesizes the loop body creates it
++     with fresh ids: joining the exit context with the context at such an exit
++     then introduces a region abstraction which is missing from the exit
++     context, and the two do not match. In that case, we evaluate the body a
++     second time, which refreshes the ids of everything the iteration creates,
++     and join the contexts of both evaluations: this introduces the necessary
++     abstractions (upstream Aeneas 86158eb, applied to the exits of this fork).
++
++     Loans created by the iteration which are held by anonymous values or
++     region abstractions do not need this (the joins move them to region
++     abstractions, which the synthesis matches up to their ids), and the join
++     over two evaluations is not always possible for them (e.g., the shared
++     loans of a static global read in the iteration: "Markers remain after
++     ownership reduction"), so we only refresh the exits which need it.
++
++     An exit reached by a single context is not joined (see
++     {!join_loop_exit_contexts}): it keeps the context of the first evaluation. *)
++  let fp_blids = (fst (compute_ctx_ids fp_ctx)).blids in
++  let fresh_local_loans (ctx : eval_ctx) : BorrowId.Set.t =
++    let locals =
++      List.filter_map
++        (function
++          | EBinding (BVar _, v) -> Some v
++          | EBinding (BDummy _, _) | EAbs _ | EFrame -> None)
++        ctx.env
++    in
++    BorrowId.Set.diff (fst (compute_tvalues_ids locals)).loan_ids fp_blids
++  in
++  (* Whether two of the contexts reaching an exit share a fresh loan held by a
++     local *)
++  let share_fresh_local_loan (ctxs : eval_ctx list) : bool =
++    let rec go seen = function
++      | [] -> false
++      | loans :: rest ->
++          (not (BorrowId.Set.disjoint seen loans))
++          || go (BorrowId.Set.union seen loans) rest
++    in
++    go BorrowId.Set.empty (List.map fresh_local_loans ctxs)
++  in
++  let refresh =
++    List.map
++      (fun (_, ctxs) -> List.length !ctxs > 1 && share_fresh_local_loan !ctxs)
++      exits
++  in
++  (if List.mem true refresh then
++     let exits' = eval_exit_ctxs () in
++     [%cassert] span
++       (List.length exits = List.length exits'
++       && List.for_all2
++            (fun (exit, ctxs) (exit', ctxs') ->
++              exit = exit' && List.length !ctxs = List.length !ctxs')
++            exits exits')
++       "The two evaluations of the loop body reach different exits";
++     List.iteri
++       (fun i ((_, ctxs), (_, ctxs')) ->
++         if List.nth refresh i then ctxs := !ctxs @ !ctxs')
++       (List.combine exits exits'));
+   let exits =
+     List.filter (fun (exit, _) -> exit = Unit) exits
+     @ List.filter (fun (exit, _) -> exit <> Unit) exits
+diff --git a/tests/lean/LoopExitIterationLoans.lean b/tests/lean/LoopExitIterationLoans.lean
+new file mode 100644
+index 0000000..b444870
+--- /dev/null
++++ b/tests/lean/LoopExitIterationLoans.lean
+@@ -0,0 +1 @@
++import LoopExitIterationLoans.Checks
+diff --git a/tests/lean/LoopExitIterationLoans/Checks.lean b/tests/lean/LoopExitIterationLoans/Checks.lean
+new file mode 100644
+index 0000000..1f97dfe
+--- /dev/null
++++ b/tests/lean/LoopExitIterationLoans/Checks.lean
+@@ -0,0 +1,85 @@
++import LoopExitIterationLoans.LoopExitIterationLoans
++
++/-! Evaluate the model of `tests/src/loop-exit-iteration-loans.rs` on the
++    inputs of its `native` test module and compare with the native results. For
++    `check_ids` and `check_ids_or`, the second component is the vector given
++    back through the `&mut` (the caller then pushes `push` through it, if any,
++    and reads it). -/
++
++namespace loop_exit_iteration_loans.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def U := 4294967295
++
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by simp <;> scalar_tac) :
++    alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++
++def sl {α} (xs : List α) (h : xs.length ≤ Usize.max := by simp <;> scalar_tac) : Slice α := ⟨xs, h⟩
++
++/-- A block whose edges have the given ids -/
++def block (ids : List Nat) (h : ids.length ≤ Usize.max := by simp <;> scalar_tac) : Block :=
++  { edges := ⟨ids.map (fun i => { id := u i }), by simpa using h⟩ }
++
++def res (r : Result U32) : Option Nat :=
++  match r with
++  | ok x => some x.val
++  | _ => none
++
++def list (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++/-- `run(&mut seen)`, then the caller pushes `push` (if any) through the
++    reference given back, then reads the vector -/
++def onSeen (run : alloc.vec.Vec U32 → Result (core.result.Result U32 U32 × alloc.vec.Vec U32))
++    (seen : List Nat) (push : Option Nat := none)
++    (h : seen.length ≤ Usize.max := by simp <;> scalar_tac) : Option (Except Nat Nat × List Nat) :=
++  match run (vec seen h) with
++  | ok (r, s1) =>
++    let r := match r with
++      | .Ok x => Except.ok x.val
++      | .Err e => Except.error e.val
++    match push with
++    | none => some (r, list s1)
++    | some v =>
++      match alloc.vec.Vec.push s1 (u v) with
++      | ok s2 => some (r, list s2)
++      | _ => none
++  | _ => none
++
++-- first_hit_native
++#guard res (first_hit (sl []) (u 5)) == some 0
++#guard res (first_hit (sl [vec [1, 2], vec [], vec [3]]) (u 5)) == some 0
++#guard res (first_hit (sl [vec [1, 2], vec [5, 9]]) (u 5)) == some 1
++#guard res (first_hit (sl [vec [1], vec [], vec [4, 7, 5]]) (u 5)) == some 7
++#guard res (first_hit (sl [vec [6]]) (u 5)) == some 6
++
++-- static_native
++#guard res (static_member (u 3)) == some 3
++#guard res (static_member (u 11)) == some 11
++#guard res (static_member (u 5)) == some 0
++#guard res (static_hit (sl [])) == some 0
++#guard res (static_hit (sl [vec [1, 2], vec [], vec [4]])) == some 0
++#guard res (static_hit (sl [vec [1], vec [2, 3, 9]])) == some 1
++#guard res (static_hit (sl [vec [4], vec [], vec [8, 3]])) == some 8
++
++-- check_ids_native
++#guard onSeen (check_ids (sl [])) [] == some (.ok 0, [])
++#guard onSeen (check_ids (sl [block [1, 2], block [], block [3]])) [] == some (.ok 3, [1, 2, 3])
++#guard onSeen (check_ids (sl [block [1], block [2, 1, 3]])) [7] (push := some 8)
++  == some (.error 1, [7, 1, 2, 8])
++#guard onSeen (check_ids (sl [block [1], block [U, 2]])) [] (push := some 8) == some (.error 0, [1, 8])
++#guard onSeen (check_ids (sl [block [1], block [2]])) [2] == some (.error 2, [2, 1])
++#guard onSeen (check_ids (sl [block [5, 6]])) [9] (push := some 4) == some (.ok 2, [9, 5, 6, 4])
++
++-- check_ids_or_native
++#guard onSeen (check_ids_or (sl [])) [] == some (.ok 0, [])
++#guard onSeen (check_ids_or (sl [block [1, 2], block [], block [3]])) [] == some (.ok 3, [1, 2, 3])
++#guard onSeen (check_ids_or (sl [block [1], block [2, 1, 3]])) [7] (push := some 8)
++  == some (.error 1, [7, 1, 2, 8])
++#guard onSeen (check_ids_or (sl [block [1], block [U, 2]])) [] (push := some 8)
++  == some (.error U, [1, 8])
++#guard onSeen (check_ids_or (sl [block [5, 6]])) [9] (push := some 4) == some (.ok 2, [9, 5, 6, 4])
++
++end loop_exit_iteration_loans.checks
+diff --git a/tests/lean/LoopExitIterationLoans/LoopExitIterationLoans.lean b/tests/lean/LoopExitIterationLoans/LoopExitIterationLoans.lean
+new file mode 100644
+index 0000000..6f355d2
+--- /dev/null
++++ b/tests/lean/LoopExitIterationLoans/LoopExitIterationLoans.lean
+@@ -0,0 +1,875 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_exit_iteration_loans]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_exit_iteration_loans
++
++/-- [loop_exit_iteration_loans::EdgeId]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 29:0-29:27
++    Visibility: public -/
++@[reducible]
++def EdgeId := _root_.Aeneas.Std.U32
++
++/-- [loop_exit_iteration_loans::{core::clone::Clone for loop_exit_iteration_loans::EdgeId}::clone]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:9-28:14
++    Visibility: public -/
++def EdgeId.Insts.CoreCloneClone.clone
++  (self : _root_.loop_exit_iteration_loans.EdgeId) :
++  _root_.Aeneas.Std.Result _root_.loop_exit_iteration_loans.EdgeId
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [loop_exit_iteration_loans::{core::clone::Clone for loop_exit_iteration_loans::EdgeId}]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:9-28:14 -/
++@[reducible]
++def EdgeId.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.loop_exit_iteration_loans.EdgeId := {
++  clone := _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [loop_exit_iteration_loans::{core::marker::Copy for loop_exit_iteration_loans::EdgeId}]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:16-28:20 -/
++@[reducible]
++def EdgeId.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.loop_exit_iteration_loans.EdgeId := {
++  cloneInst := _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [loop_exit_iteration_loans::{core::marker::StructuralPartialEq for loop_exit_iteration_loans::EdgeId}]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:22-28:31 -/
++@[reducible]
++def EdgeId.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.loop_exit_iteration_loans.EdgeId := {
++}
++
++/-- [loop_exit_iteration_loans::{core::cmp::PartialEq<loop_exit_iteration_loans::EdgeId> for loop_exit_iteration_loans::EdgeId}::eq]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:22-28:31
++    Visibility: public -/
++def EdgeId.Insts.CoreCmpPartialEqEdgeId.eq
++  (self : _root_.loop_exit_iteration_loans.EdgeId)
++  (other : _root_.loop_exit_iteration_loans.EdgeId) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (self = other)
++
++/-- Trait implementation: [loop_exit_iteration_loans::{core::cmp::PartialEq<loop_exit_iteration_loans::EdgeId> for loop_exit_iteration_loans::EdgeId}]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:22-28:31 -/
++@[reducible]
++def EdgeId.Insts.CoreCmpPartialEqEdgeId : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.loop_exit_iteration_loans.EdgeId
++  _root_.loop_exit_iteration_loans.EdgeId := {
++  eq := _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCmpPartialEqEdgeId.eq
++}
++
++/-- [loop_exit_iteration_loans::{core::cmp::Eq for loop_exit_iteration_loans::EdgeId}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:33-28:35
++    Visibility: public -/
++def EdgeId.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.loop_exit_iteration_loans.EdgeId) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [loop_exit_iteration_loans::{core::cmp::Eq for loop_exit_iteration_loans::EdgeId}]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 28:33-28:35 -/
++@[reducible]
++def EdgeId.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.loop_exit_iteration_loans.EdgeId := {
++  partialEqInst :=
++    _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCmpPartialEqEdgeId
++  assert_receiver_is_total_eq :=
++    _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [loop_exit_iteration_loans::{loop_exit_iteration_loans::EdgeId}::UNASSIGNED]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 32:4-32:48
++    Visibility: public -/
++@[global_simps, irreducible]
++def EdgeId.UNASSIGNED : _root_.loop_exit_iteration_loans.EdgeId :=
++  core.num.U32.MAX
++
++/-- [loop_exit_iteration_loans::Edge]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 35:0-37:1
++    Visibility: public -/
++structure Edge where
++  id : _root_.loop_exit_iteration_loans.EdgeId
++
++/-- [loop_exit_iteration_loans::Block]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 39:0-41:1
++    Visibility: public -/
++structure Block where
++  edges : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge
++
++/-- [loop_exit_iteration_loans::first_hit]: loop body 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-57:5
++    Visibility: public -/
++@[rust_loop_body]
++def first_hit_loop0_loop0.body
++  (key : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inr (key, iter, (), (), (), ())))
++  | some y =>
++    if y = key
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (1#u32, key, y, iter, model_state1, (), (), (), (),
++        ())))
++    else
++      if y > key
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inl (y, key, y, iter, model_state1, (), (), (), (), ())))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          model_state1)
++
++/-- [loop_exit_iteration_loans::first_hit]: loop 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-57:5
++    Visibility: public -/
++@[rust_loop]
++def first_hit_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (key : _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit))
++  := do
++  loop
++    (fun iter2 => _root_.loop_exit_iteration_loans.first_hit_loop0_loop0.body
++       key iter1 iter2 : _root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit))))
++    iter
++
++/-- [loop_exit_iteration_loans::first_hit]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-59:1
++    Visibility: public -/
++@[rust_loop_body]
++def first_hit_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done 0#u32)
++  | some xs =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter xs
++    let exit ←
++      _root_.loop_exit_iteration_loans.first_hit_loop0_loop0 model_state2 key
++        model_state1
++    match exit with
++    | _root_.Sum.inl (i, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done i)
++    | _root_.Sum.inr (key1, iter1, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        key1))
++
++/-- [loop_exit_iteration_loans::first_hit]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-59:1
++    Visibility: public -/
++@[rust_loop]
++def first_hit_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (iter1, key1) => _root_.loop_exit_iteration_loans.first_hit_loop0.body
++       iter1 key1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (iter, key)
++
++/-- [loop_exit_iteration_loans::first_hit]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 44:0-59:1
++    Visibility: public -/
++def first_hit
++  (xss : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) (key : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter xss
++  _root_.loop_exit_iteration_loans.first_hit_loop0 model_state key
++
++/-- [loop_exit_iteration_loans::VALUES]
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 61:0-61:36 -/
++@[global_simps, irreducible]
++def VALUES : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 :=
++  Array.to_slice
++    (_root_.Aeneas.Std.Array.make 3#usize [ 3#u32, 7#u32, 11#u32 ])
++
++/-- [loop_exit_iteration_loans::static_member]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 66:4-73:1
++    Visibility: public -/
++@[rust_loop_body]
++def static_member_loop.body
++  (number : _root_.Aeneas.Std.U32) (index : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Aeneas.Std.U32)
++  := do
++  let i := _root_.Aeneas.Std.Slice.len _root_.loop_exit_iteration_loans.VALUES
++  if index < i
++  then
++    let i1 ← Slice.index_usize _root_.loop_exit_iteration_loans.VALUES index
++    if number = i1
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done number)
++    else
++      let index1 ← index + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont index1)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done 0#u32)
++
++/-- [loop_exit_iteration_loans::static_member]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 66:4-73:1
++    Visibility: public -/
++@[rust_loop]
++def static_member_loop
++  (number : _root_.Aeneas.Std.U32) (index : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun index1 => _root_.loop_exit_iteration_loans.static_member_loop.body
++       number index1 : _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize
++      _root_.Aeneas.Std.U32))
++    index
++
++/-- [loop_exit_iteration_loans::static_member]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 64:0-73:1
++    Visibility: public -/
++@[reducible]
++def static_member
++  (number : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.loop_exit_iteration_loans.static_member_loop number 0#usize
++
++/-- [loop_exit_iteration_loans::static_hit]: loop body 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-89:5
++    Visibility: public -/
++@[rust_loop_body]
++def static_hit_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Unit)
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inr (iter, (), (), (), ())))
++  | some y =>
++    let i ← Slice.index_usize _root_.loop_exit_iteration_loans.VALUES 0#usize
++    if y = i
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (1#u32, y, iter, model_state1, i, (), (), (), (), (),
++        _root_.loop_exit_iteration_loans.VALUES, ())))
++    else
++      let i1 ←
++        Slice.index_usize _root_.loop_exit_iteration_loans.VALUES 1#usize
++      if y > i1
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inl (y, y, iter, model_state1, i, (), (), (), (), (),
++          _root_.loop_exit_iteration_loans.VALUES, ())))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          model_state1)
++
++/-- [loop_exit_iteration_loans::static_hit]: loop 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-89:5
++    Visibility: public -/
++@[rust_loop]
++def static_hit_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32) × _root_.Unit)
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit))
++  := do
++  loop
++    (fun iter2 => _root_.loop_exit_iteration_loans.static_hit_loop0_loop0.body
++       iter1 iter2 : _root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32) × _root_.Unit)
++      ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit))))
++    iter
++
++/-- [loop_exit_iteration_loans::static_hit]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-91:1
++    Visibility: public -/
++@[rust_loop_body]
++def static_hit_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done 0#u32)
++  | some xs =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter xs
++    let exit ←
++      _root_.loop_exit_iteration_loans.static_hit_loop0_loop0 model_state2
++        model_state1
++    match exit with
++    | _root_.Sum.inl (i, _, _, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done i)
++    | _root_.Sum.inr (iter1, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont iter1)
++
++/-- [loop_exit_iteration_loans::static_hit]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 1:0-91:1
++    Visibility: public -/
++@[rust_loop]
++def static_hit_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun iter1 => _root_.loop_exit_iteration_loans.static_hit_loop0.body iter1
++      : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      _root_.Aeneas.Std.U32))
++    iter
++
++/-- [loop_exit_iteration_loans::static_hit]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 76:0-91:1
++    Visibility: public -/
++def static_hit
++  (xss : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter xss
++  _root_.loop_exit_iteration_loans.static_hit_loop0 model_state
++
++/-- [loop_exit_iteration_loans::contains]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 95:4-102:1 -/
++@[rust_loop_body]
++def contains_loop.body
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    _root_.Aeneas.Std.Usize _root_.Bool)
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++  if i < i1
++  then
++    let i2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) xs i
++    if i2 = x
++    then _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done true)
++    else
++      let i3 ← i + 1#usize
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont i3)
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done false)
++
++/-- [loop_exit_iteration_loans::contains]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 95:4-102:1 -/
++@[rust_loop]
++def contains_loop
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  loop
++    (fun i1 => _root_.loop_exit_iteration_loans.contains_loop.body xs x i1 :
++      _root_.Aeneas.Std.Usize → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow _root_.Aeneas.Std.Usize _root_.Bool))
++    i
++
++/-- [loop_exit_iteration_loans::contains]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 93:0-102:1 -/
++@[reducible]
++def contains
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.loop_exit_iteration_loans.contains_loop xs x 0#usize
++
++/-- [loop_exit_iteration_loans::check_ids]: loop body 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-119:5
++    Visibility: public -/
++@[rust_loop_body]
++def check_ids_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Edge)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_iteration_loans.Edge) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) ×
++    _root_.loop_exit_iteration_loans.EdgeId ×
++    _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inr (seen, n, iter, (), (), (), (), ())))
++  | some edge =>
++    let b ←
++      _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCmpPartialEqEdgeId.eq
++        edge.id _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (0#u32, seen, n, iter, v, model_state1, edge.id,
++        _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED, (), (), (), (), (),
++        (), (), ())))
++    else
++      let i := edge.id
++      let b1 ← _root_.loop_exit_iteration_loans.contains seen i
++      if b1
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inl (i, seen, n, iter, v, model_state1, edge.id,
++          _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED, (), (), (), (),
++          (), (), (), ())))
++      else
++        let seen1 ← _root_.Aeneas.Std.alloc.vec.Vec.push seen i
++        let n1 ← lift (core.num.U32.wrapping_add n 1#u32)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, seen1, n1))
++
++/-- [loop_exit_iteration_loans::check_ids]: loop 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-119:5
++    Visibility: public -/
++@[rust_loop]
++def check_ids_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Edge)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_iteration_loans.Edge) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) ×
++    _root_.loop_exit_iteration_loans.EdgeId ×
++    _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter2, seen1, n1) =>
++       _root_.loop_exit_iteration_loans.check_ids_loop0_loop0.body iter1 v
++       iter2 seen1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge)
++      × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      _root_.loop_exit_iteration_loans.EdgeId ×
++      _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit))))
++    (iter, seen, n)
++
++/-- [loop_exit_iteration_loans::check_ids]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-121:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_ids_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n, seen))
++  | some block =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter block.edges
++    let exit ←
++      _root_.loop_exit_iteration_loans.check_ids_loop0_loop0 model_state2 seen
++        n model_state1 block.edges
++    match exit with
++    | _root_.Sum.inl (i, seen1, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err i, seen1))
++    | _root_.Sum.inr (seen1, n1, iter1, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        seen1, n1))
++
++/-- [loop_exit_iteration_loans::check_ids]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-121:1
++    Visibility: public -/
++@[rust_loop]
++def check_ids_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, seen1, n1) =>
++       _root_.loop_exit_iteration_loans.check_ids_loop0.body iter1 seen1 n1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, seen, n)
++
++/-- [loop_exit_iteration_loans::check_ids]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 106:0-121:1
++    Visibility: public -/
++def check_ids
++  (blocks : _root_.Aeneas.Std.Slice _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter blocks
++  _root_.loop_exit_iteration_loans.check_ids_loop0 model_state seen 0#u32
++
++/-- [loop_exit_iteration_loans::check_ids_or]: loop body 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-134:5
++    Visibility: public -/
++@[rust_loop_body]
++def check_ids_or_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Edge)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Sum
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_iteration_loans.Edge) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) ×
++    _root_.loop_exit_iteration_loans.EdgeId ×
++    _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter1
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inr (seen, n, iter, (), (), (), (), ())))
++  | some edge =>
++    let b ←
++      _root_.loop_exit_iteration_loans.EdgeId.Insts.CoreCmpPartialEqEdgeId.eq
++        edge.id _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED
++    if b
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (seen, n, iter, v, model_state1, edge.id,
++        _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED, (), (), (), (), (),
++        (), (), ())))
++    else
++      let i := edge.id
++      let b1 ← _root_.loop_exit_iteration_loans.contains seen i
++      if b1
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inl (seen, n, iter, v, model_state1, edge.id,
++          _root_.loop_exit_iteration_loans.EdgeId.UNASSIGNED, (), (), (), (),
++          (), (), (), ())))
++      else
++        let seen1 ← _root_.Aeneas.Std.alloc.vec.Vec.push seen i
++        let n1 ← lift (core.num.U32.wrapping_add n 1#u32)
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++          (model_state1, seen1, n1))
++
++/-- [loop_exit_iteration_loans::check_ids_or]: loop 1:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-134:5
++    Visibility: public -/
++@[rust_loop]
++def check_ids_or_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Edge)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_iteration_loans.Edge) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Edge) ×
++    _root_.loop_exit_iteration_loans.EdgeId ×
++    _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter2, seen1, n1) =>
++       _root_.loop_exit_iteration_loans.check_ids_or_loop0_loop0.body iter1 v
++       iter2 seen1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Sum ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_iteration_loans.Edge)
++      × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Edge) ×
++      _root_.loop_exit_iteration_loans.EdgeId ×
++      _root_.loop_exit_iteration_loans.EdgeId × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit) ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit))))
++    (iter, seen, n)
++
++/-- [loop_exit_iteration_loans::check_ids_or]: loop body 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-136:1
++    Visibility: public -/
++@[rust_loop_body]
++def check_ids_or_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_iteration_loans.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok n, seen))
++  | some block =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter block.edges
++    let exit ←
++      _root_.loop_exit_iteration_loans.check_ids_or_loop0_loop0 model_state2
++        seen n model_state1 block.edges
++    match exit with
++    | _root_.Sum.inl (seen1, _, _, _, _, ei, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Err ei, seen1))
++    | _root_.Sum.inr (seen1, n1, iter1, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        seen1, n1))
++
++/-- [loop_exit_iteration_loans::check_ids_or]: loop 0:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 0:0-136:1
++    Visibility: public -/
++@[rust_loop]
++def check_ids_or_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, seen1, n1) =>
++       _root_.loop_exit_iteration_loans.check_ids_or_loop0.body iter1 seen1 n1
++      : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_iteration_loans.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, seen, n)
++
++/-- [loop_exit_iteration_loans::check_ids_or]:
++    Source: 'tests/src/loop-exit-iteration-loans.rs', lines 124:0-136:1
++    Visibility: public -/
++def check_ids_or
++  (blocks : _root_.Aeneas.Std.Slice _root_.loop_exit_iteration_loans.Block)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter blocks
++  _root_.loop_exit_iteration_loans.check_ids_or_loop0 model_state seen 0#u32
++
++end loop_exit_iteration_loans
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 66525fa..11cf901 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -110,6 +110,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopEndedSharedInput
+ @[default_target] lean_lib LoopEntrySharedPayload
+ @[default_target] lean_lib LoopExitBindings
++@[default_target] lean_lib LoopExitIterationLoans
+ @[default_target] lean_lib LoopExitSharedChildren
+ @[default_target] lean_lib LoopFixedPointAbsIds
+ @[default_target] lean_lib LoopJoinBorrows
+diff --git a/tests/src/loop-exit-iteration-loans.rs b/tests/src/loop-exit-iteration-loans.rs
+new file mode 100644
+index 0000000..57b55fe
+--- /dev/null
++++ b/tests/src/loop-exit-iteration-loans.rs
+@@ -0,0 +1,236 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopExitIterationLoans
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loan created by an iteration of an inner loop, still alive at two exits
++//! of that loop, in the shape of chelis-ir's
++//! `ownership::verify::check_operation_ids`. Charon structures the returns out
++//! of the inner loop as breaks of that loop, followed by the code which ends
++//! the borrow after the loops, so both break contexts contain the same loan.
++//! Their join kept that loan as it is, while the evaluation which synthesizes
++//! the loop body creates it with fresh ids: matching the break context with the
++//! context at a break then failed ("Could not match the contexts"). The
++//! contexts at such an exit are now joined over two evaluations of the body.
++//!
++//! The loan is a borrow of a local declared before the loops (`first_hit`,
++//! `static_hit`), or the borrow of the local into which Charon inlines a
++//! promoted constant (`&EdgeId::UNASSIGNED` in `check_ids` and `check_ids_or`).
++//! The shared loans of a static read by the iteration are held by anonymous
++//! values: the exits of `static_member` keep a single evaluation (joining the
++//! contexts of two evaluations fails there: "Markers remain after ownership
++//! reduction"), while `static_hit` combines both kinds of loans.
++//!
++//! LoopExitIterationLoans/Checks.lean compares the model with the native
++//! results asserted in the native test module, including the vector given back
++//! through the `&mut` (`check_ids`, `check_ids_or`), to which the caller then
++//! pushes a value.
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub struct EdgeId(pub u32);
++
++impl EdgeId {
++    pub const UNASSIGNED: Self = Self(u32::MAX);
++}
++
++pub struct Edge {
++    pub id: EdgeId,
++}
++
++pub struct Block {
++    pub edges: Vec<Edge>,
++}
++
++/// A borrow of `a`, created by each inner iteration, alive at both returns.
++pub fn first_hit(xss: &[Vec<u32>], key: u32) -> u32 {
++    let mut a: u32;
++    for xs in xss {
++        for y in xs {
++            a = *y;
++            let x = &a;
++            if *x == key {
++                return 1;
++            }
++            if *x > key {
++                return *x;
++            }
++        }
++    }
++    0
++}
++
++static VALUES: &[u32] = &[3, 7, 11];
++
++/// A static read by every iteration, and two exits.
++pub fn static_member(number: u32) -> u32 {
++    let mut index = 0;
++    while index < VALUES.len() {
++        if number == VALUES[index] {
++            return number;
++        }
++        index += 1;
++    }
++    0
++}
++
++/// `first_hit` comparing with a static.
++pub fn static_hit(xss: &[Vec<u32>]) -> u32 {
++    let mut a: u32;
++    for xs in xss {
++        for y in xs {
++            a = *y;
++            let x = &a;
++            if *x == VALUES[0] {
++                return 1;
++            }
++            if *x > VALUES[1] {
++                return *x;
++            }
++        }
++    }
++    0
++}
++
++fn contains(xs: &Vec<u32>, x: u32) -> bool {
++    let mut i = 0;
++    while i < xs.len() {
++        if xs[i] == x {
++            return true;
++        }
++        i += 1;
++    }
++    false
++}
++
++/// `check_operation_ids`: a comparison with a promoted constant, then two
++/// returns; the ids seen are pushed to `seen`, which is given back.
++pub fn check_ids(blocks: &[Block], seen: &mut Vec<u32>) -> Result<u32, u32> {
++    let mut n = 0u32;
++    for block in blocks {
++        for edge in &block.edges {
++            if edge.id == EdgeId::UNASSIGNED {
++                return Err(0);
++            }
++            if contains(seen, edge.id.0) {
++                return Err(edge.id.0);
++            }
++            seen.push(edge.id.0);
++            n = n.wrapping_add(1);
++        }
++    }
++    Ok(n)
++}
++
++/// The same with both conditions in one `||`, and a single return.
++pub fn check_ids_or(blocks: &[Block], seen: &mut Vec<u32>) -> Result<u32, u32> {
++    let mut n = 0u32;
++    for block in blocks {
++        for edge in &block.edges {
++            if edge.id == EdgeId::UNASSIGNED || contains(seen, edge.id.0) {
++                return Err(edge.id.0);
++            }
++            seen.push(edge.id.0);
++            n = n.wrapping_add(1);
++        }
++    }
++    Ok(n)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    const U: u32 = u32::MAX;
++
++    fn blocks(ids: &[&[u32]]) -> Vec<Block> {
++        ids.iter()
++            .map(|b| Block {
++                edges: b.iter().map(|id| Edge { id: EdgeId(*id) }).collect(),
++            })
++            .collect()
++    }
++
++    /// `run(&mut seen)`, then the caller pushes `push` (if any) through the
++    /// reference given back, then reads the vector
++    fn on_seen<R>(
++        seen: &[u32],
++        push: Option<u32>,
++        run: impl FnOnce(&mut Vec<u32>) -> R,
++    ) -> (R, Vec<u32>) {
++        let mut s = seen.to_vec();
++        let r = {
++            let rs = &mut s;
++            let r = run(&mut *rs);
++            if let Some(v) = push {
++                rs.push(v);
++            }
++            r
++        };
++        (r, s)
++    }
++
++    #[test]
++    fn first_hit_native() {
++        assert_eq!(first_hit(&[], 5), 0);
++        assert_eq!(first_hit(&[vec![1, 2], vec![], vec![3]], 5), 0);
++        assert_eq!(first_hit(&[vec![1, 2], vec![5, 9]], 5), 1);
++        assert_eq!(first_hit(&[vec![1], vec![], vec![4, 7, 5]], 5), 7);
++        assert_eq!(first_hit(&[vec![6]], 5), 6);
++    }
++
++    #[test]
++    fn static_native() {
++        assert_eq!(static_member(3), 3);
++        assert_eq!(static_member(11), 11);
++        assert_eq!(static_member(5), 0);
++        assert_eq!(static_hit(&[]), 0);
++        assert_eq!(static_hit(&[vec![1, 2], vec![], vec![4]]), 0);
++        assert_eq!(static_hit(&[vec![1], vec![2, 3, 9]]), 1);
++        assert_eq!(static_hit(&[vec![4], vec![], vec![8, 3]]), 8);
++    }
++
++    #[test]
++    fn check_ids_native() {
++        assert_eq!(on_seen(&[], None, |s| check_ids(&blocks(&[]), s)), (Ok(0), vec![]));
++        assert_eq!(
++            on_seen(&[], None, |s| check_ids(&blocks(&[&[1, 2], &[], &[3]]), s)),
++            (Ok(3), vec![1, 2, 3])
++        );
++        assert_eq!(
++            on_seen(&[7], Some(8), |s| check_ids(&blocks(&[&[1], &[2, 1, 3]]), s)),
++            (Err(1), vec![7, 1, 2, 8])
++        );
++        assert_eq!(
++            on_seen(&[], Some(8), |s| check_ids(&blocks(&[&[1], &[U, 2]]), s)),
++            (Err(0), vec![1, 8])
++        );
++        assert_eq!(
++            on_seen(&[2], None, |s| check_ids(&blocks(&[&[1], &[2]]), s)),
++            (Err(2), vec![2, 1])
++        );
++        assert_eq!(
++            on_seen(&[9], Some(4), |s| check_ids(&blocks(&[&[5, 6]]), s)),
++            (Ok(2), vec![9, 5, 6, 4])
++        );
++    }
++
++    #[test]
++    fn check_ids_or_native() {
++        assert_eq!(on_seen(&[], None, |s| check_ids_or(&blocks(&[]), s)), (Ok(0), vec![]));
++        assert_eq!(
++            on_seen(&[], None, |s| check_ids_or(&blocks(&[&[1, 2], &[], &[3]]), s)),
++            (Ok(3), vec![1, 2, 3])
++        );
++        assert_eq!(
++            on_seen(&[7], Some(8), |s| check_ids_or(&blocks(&[&[1], &[2, 1, 3]]), s)),
++            (Err(1), vec![7, 1, 2, 8])
++        );
++        assert_eq!(
++            on_seen(&[], Some(8), |s| check_ids_or(&blocks(&[&[1], &[U, 2]]), s)),
++            (Err(U), vec![1, 8])
++        );
++        assert_eq!(
++            on_seen(&[9], Some(4), |s| check_ids_or(&blocks(&[&[5, 6]]), s)),
++            (Ok(2), vec![9, 5, 6, 4])
++        );
++    }
++}

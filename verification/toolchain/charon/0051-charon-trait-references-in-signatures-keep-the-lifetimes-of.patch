@@ -1,0 +1,924 @@
+# charon integration step 51 after 546078ea5d: commit e0a15d7a06a89c3609e19e565de7ac3b841c0c13
+# first parent c3b42d30b55077287274c1ffee41db558c0aa37a
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: trait references in signatures keep the lifetimes of the clauses they prove
+#
+# hax resolves the trait references of an item's clauses on predicates whose lifetimes are erased
+# (solve_item_traits_inner). In bodies these lifetimes are unified afterwards; in signatures and
+# type declarations they stay erased, both in the predicate a trait reference proves and in the
+# arguments of the impl it names. Aeneas rejects the result ("Expected a runtime region type"):
+# - lifted associated types are computed from those impls, so they lose the lifetime they borrow
+#   from: `Metadata::values` (chelis_deep annotations.rs:669) returned
+#   `FlatMap<Iter<'a, _>, Values<'a, _, _>, F, &'_ u64, Values<'_, _, _>>`;
+# - closure types keep their clauses (remove_adt_clauses exempts them), and in a signature the
+#   trait reference of the clause `V: FnMut(u32, Option<&'a str>)` of `closure<'a, V>` proved
+#   `V: FnMut(u32, Option<&'_ str>)`.
+#
+# expand_associated_types now snapshots the trait clauses of every item and the header of every
+# impl before the pass (PristineClauses). Before it computes the associated types of an item
+# reference, it fills the erased lifetimes of each of its trait references from the clause the
+# reference proves, instantiated with the arguments of the item reference: those of the proved
+# predicate and, for an impl, those of the impl arguments (matching the impl header against the
+# clause), then recursively those of the trait references proving the impl's clauses (depth at
+# most 32). Only erased positions are filled; other lifetimes are kept.
+#
+# Test: ui/lift-assoc-types-signature-regions (new; `&'_ u64` and `Values<'_>` before, `'a` now).
+# Other UI outputs (14 files): only trait references that had an erased lifetime change, which
+# now carries the lifetime of the argument whose clause they prove (`{built_in impl Sized for &'_ T}`
+# becomes `&'a T`, `{impl Clone for &'_0 T}<'_, U>` becomes `<'_0, U>`), in signatures, in the
+# names of impls whose header contains one, and in one body type of associated-types.
+
+diff --git a/src/transform/normalize/expand_associated_types.rs b/src/transform/normalize/expand_associated_types.rs
+index e7592e3..45de0fb 100644
+--- a/src/transform/normalize/expand_associated_types.rs
++++ b/src/transform/normalize/expand_associated_types.rs
+@@ -75,7 +75,11 @@ use itertools::Itertools;
+ use std::collections::{HashMap, HashSet};
+ 
+ use crate::{
+-    ast::*, common::CycleDetector, formatter::IntoFormatter, ids::IndexMap, pretty::FmtWithCtx,
++    ast::*,
++    common::CycleDetector,
++    formatter::IntoFormatter,
++    ids::{IndexMap, IndexVec},
++    pretty::FmtWithCtx,
+     register_error,
+ };
+ 
+@@ -895,6 +899,262 @@ impl<'a> ComputeItemModifications<'a> {
+     }
+ }
+ 
++/// The trait clauses of the items and the headers of the impls, as translated (before this pass
++/// adds parameters to them).
++///
++/// Trait references are resolved on predicates whose lifetimes are erased (hax's
++/// `solve_item_traits_inner`). In a body, these lifetimes are later unified with those of the
++/// surrounding types, but outside bodies a trait reference keeps erased lifetimes in the
++/// predicate it proves and in the arguments of the impl it names, even where the arguments of
++/// the item that requires the clause carry them. For example, the return type
++/// `FlatMap<Iter<'a, X>, Values<'a, K, V>, F>` of a signature proves `U: IntoIterator` with
++/// `{impl IntoIterator for I}<Values<'_, K, V>>`, so the associated types we compute from that
++/// impl (`Item = &'_ V`, `IntoIter = Values<'_, K, V>`) would lose the lifetime they borrow from;
++/// and a closure type `closure<'a, T>[@TraitClause0]` in a signature proves its clause
++/// `T: FnMut(&'a X)` with the predicate `T: FnMut(&'_ X)`. `refine_args` recovers these
++/// lifetimes from the clauses of the item, instantiated with its arguments.
++#[derive(Default)]
++struct PristineClauses {
++    /// The trait clauses of each item which has some.
++    clauses: HashMap<ItemId, IndexVec<TraitClauseId, PolyTraitDeclRef>>,
++    /// The implemented trait of each impl, in terms of the impl parameters.
++    impl_headers: HashMap<TraitImplId, TraitDeclRef>,
++}
++
++impl PristineClauses {
++    /// Bound on the depth of the impl references we refine.
++    const MAX_DEPTH: usize = 32;
++
++    fn new(krate: &TranslatedCrate) -> Self {
++        let mut this = Self::default();
++        for (id, item) in krate.all_items_with_ids() {
++            let clauses = &item.generic_params().trait_clauses;
++            if !clauses.is_empty() {
++                this.clauses
++                    .insert(id, clauses.map_ref(|clause| clause.trait_.clone()));
++            }
++            if let ItemRef::TraitImpl(timpl) = item {
++                this.impl_headers
++                    .insert(timpl.def_id, timpl.impl_trait.clone());
++            }
++        }
++        this
++    }
++
++    /// Replace the erased lifetimes of the trait references in `args`, which instantiate `item`,
++    /// by those of the clauses they prove, instantiated with `args` (see `refine_trait_ref`).
++    fn refine_args(&self, item: ItemId, args: &mut GenericArgs) {
++        // Cheap check first: in bodies, the lifetimes are already there.
++        if !args.trait_refs.iter().any(|tref| has_erased_regions(tref)) {
++            return;
++        }
++        let Some(clauses) = self.clauses.get(&item) else {
++            return;
++        };
++        for (clause_id, clause) in clauses.iter_enumerated() {
++            let Some(tref) = args.trait_refs.get(clause_id) else {
++                continue;
++            };
++            if !has_erased_regions(tref) {
++                continue;
++            }
++            let Ok(expected) = clause.clone().try_substitute(args) else {
++                continue;
++            };
++            if let Some(tref) = self.refine_trait_ref(tref, &expected, Self::MAX_DEPTH) {
++                args.trait_refs[clause_id] = tref;
++            }
++        }
++    }
++
++    /// `tref`, which proves `expected`, with the erased lifetimes of the predicate it proves
++    /// replaced by those of `expected`, and those of the arguments of the impl it names by the
++    /// lifetimes that matching the impl header against `expected` assigns to the impl parameters
++    /// (recursively for the trait references proving the clauses of that impl). Other lifetimes
++    /// are kept. `None` when nothing changes.
++    fn refine_trait_ref(
++        &self,
++        tref: &TraitRef,
++        expected: &PolyTraitDeclRef,
++        depth: usize,
++    ) -> Option<TraitRef> {
++        if depth == 0 {
++            return None;
++        }
++        let mut trait_decl_ref = tref.trait_decl_ref.clone();
++        if trait_decl_ref.skip_binder.id == expected.skip_binder.id
++            && trait_decl_ref.regions.len() == expected.regions.len()
++        {
++            trait_decl_ref.skip_binder.generics = Box::new(fill_erased_regions_in_args(
++                &trait_decl_ref.skip_binder.generics,
++                &expected.skip_binder.generics,
++            ));
++        }
++        let kind = match &tref.kind {
++            TraitRefKind::TraitImpl(impl_ref) => TraitRefKind::TraitImpl(
++                self.refine_impl_ref(impl_ref, &expected.clone().erase(), depth)
++                    .unwrap_or_else(|| impl_ref.clone()),
++            ),
++            kind => kind.clone(),
++        };
++        let refined = TraitRef::new(kind, trait_decl_ref);
++        (refined != *tref).then_some(refined)
++    }
++
++    /// `impl_ref`, which proves `expected`, with the erased lifetimes of its arguments refined
++    /// (see `refine_trait_ref`). `None` when nothing changes.
++    fn refine_impl_ref(
++        &self,
++        impl_ref: &TraitImplRef,
++        expected: &TraitDeclRef,
++        depth: usize,
++    ) -> Option<TraitImplRef> {
++        if !has_erased_regions(&*impl_ref.generics) {
++            return None;
++        }
++        let header = self.impl_headers.get(&impl_ref.id)?;
++        if header.id != expected.id {
++            return None;
++        }
++        let mut bindings = HeaderBindings::default();
++        bindings.match_args(&header.generics, &expected.generics);
++        let mut generics = (*impl_ref.generics).clone();
++        for (id, region) in generics.regions.iter_mut_enumerated() {
++            if region.is_erased()
++                && let Some(bound) = bindings.regions.get(&id)
++            {
++                *region = bound.clone();
++            }
++        }
++        for (id, ty) in generics.types.iter_mut_enumerated() {
++            if let Some(bound) = bindings.types.get(&id) {
++                *ty = fill_erased_regions(ty, bound);
++            }
++        }
++        // The clauses of the impl, instantiated with its refined arguments.
++        if let Some(clauses) = self.clauses.get(&ItemId::TraitImpl(impl_ref.id)) {
++            for (clause_id, clause) in clauses.iter_enumerated() {
++                let Some(nested) = generics.trait_refs.get(clause_id) else {
++                    continue;
++                };
++                if !has_erased_regions(nested) {
++                    continue;
++                }
++                let Ok(expected) = clause.clone().try_substitute(&generics) else {
++                    continue;
++                };
++                if let Some(nested) = self.refine_trait_ref(nested, &expected, depth - 1) {
++                    generics.trait_refs[clause_id] = nested;
++                }
++            }
++        }
++        (generics != *impl_ref.generics).then(|| TraitImplRef {
++            id: impl_ref.id,
++            generics: Box::new(generics),
++        })
++    }
++}
++
++fn has_erased_regions(x: &impl AstVisitable) -> bool {
++    let mut found = false;
++    x.dyn_visit(|region: &Region| found |= region.is_erased());
++    found
++}
++
++/// The parameters of an impl (at binder depth zero in its header) bound by matching the header
++/// against a trait predicate. We don't go under binders.
++#[derive(Default)]
++struct HeaderBindings {
++    regions: HashMap<RegionId, Region>,
++    types: HashMap<TypeVarId, Ty>,
++}
++
++impl HeaderBindings {
++    fn match_region(&mut self, pat: &Region, target: &Region) {
++        if let Region::Var(DeBruijnVar::Bound(dbid, id)) = pat
++            && *dbid == DeBruijnId::zero()
++            && !target.is_erased()
++        {
++            self.regions.entry(*id).or_insert_with(|| target.clone());
++        }
++    }
++
++    fn match_ty(&mut self, pat: &Ty, target: &Ty) {
++        match (pat.kind(), target.kind()) {
++            (TyKind::TypeVar(DeBruijnVar::Bound(dbid, id)), _) if *dbid == DeBruijnId::zero() => {
++                self.types.entry(*id).or_insert_with(|| target.clone());
++            }
++            (TyKind::Adt(pat), TyKind::Adt(target)) if pat.id == target.id => {
++                self.match_args(&pat.generics, &target.generics)
++            }
++            (TyKind::Ref(pat_region, pat, pat_kind), TyKind::Ref(region, target, kind))
++                if pat_kind == kind =>
++            {
++                self.match_region(pat_region, region);
++                self.match_ty(pat, target);
++            }
++            (TyKind::RawPtr(pat, pat_kind), TyKind::RawPtr(target, kind)) if pat_kind == kind => {
++                self.match_ty(pat, target)
++            }
++            (TyKind::Array(pat, _), TyKind::Array(target, _))
++            | (TyKind::Slice(pat), TyKind::Slice(target)) => self.match_ty(pat, target),
++            _ => {}
++        }
++    }
++
++    fn match_args(&mut self, pat: &GenericArgs, target: &GenericArgs) {
++        for (pat, target) in pat.regions.iter().zip(target.regions.iter()) {
++            self.match_region(pat, target);
++        }
++        for (pat, target) in pat.types.iter().zip(target.types.iter()) {
++            self.match_ty(pat, target);
++        }
++    }
++}
++
++/// `ty` with its erased lifetimes replaced by those at the same positions in `from`, a type equal
++/// to `ty` up to lifetimes. Other lifetimes, and the parts where the two types differ, are kept.
++fn fill_erased_regions(ty: &Ty, from: &Ty) -> Ty {
++    let kind = match (ty.kind(), from.kind()) {
++        (TyKind::Adt(tref), TyKind::Adt(from)) if tref.id == from.id => TyKind::Adt(TypeDeclRef {
++            id: tref.id,
++            generics: Box::new(fill_erased_regions_in_args(&tref.generics, &from.generics)),
++        }),
++        (TyKind::Ref(region, ty, kind), TyKind::Ref(from_region, from, from_kind))
++            if kind == from_kind =>
++        {
++            let region = if region.is_erased() {
++                from_region.clone()
++            } else {
++                region.clone()
++            };
++            TyKind::Ref(region, fill_erased_regions(ty, from), *kind)
++        }
++        (TyKind::RawPtr(ty, kind), TyKind::RawPtr(from, from_kind)) if kind == from_kind => {
++            TyKind::RawPtr(fill_erased_regions(ty, from), *kind)
++        }
++        (TyKind::Array(ty, len), TyKind::Array(from, _)) => {
++            TyKind::Array(fill_erased_regions(ty, from), len.clone())
++        }
++        (TyKind::Slice(ty), TyKind::Slice(from)) => TyKind::Slice(fill_erased_regions(ty, from)),
++        _ => return ty.clone(),
++    };
++    kind.into_ty()
++}
++
++fn fill_erased_regions_in_args(args: &GenericArgs, from: &GenericArgs) -> GenericArgs {
++    let mut args = args.clone();
++    for (region, from) in args.regions.iter_mut().zip(from.regions.iter()) {
++        if region.is_erased() {
++            *region = from.clone();
++        }
++    }
++    for (ty, from) in args.types.iter_mut().zip(from.types.iter()) {
++        *ty = fill_erased_regions(ty, from);
++    }
++    args
++}
++
+ /// Visitor that will traverse item bodies and update `GenericArgs` to match the new item
+ /// signatures. This also replaces `TyKind::TraitType`s for which we have a replacement.
+ ///
+@@ -910,6 +1170,7 @@ struct UpdateItemBody<'a> {
+     // Whether the current item is a type alias, which affects error messages.
+     is_type_alias: bool,
+     item_modifications: &'a HashMap<GenericsSource, ItemModifications>,
++    pristine: &'a PristineClauses,
+     // It's a reversed stack, for when we go under binders.
+     type_replacements: BindingStack<TypeConstraintSet>,
+ }
+@@ -1067,6 +1328,10 @@ impl UpdateItemBody<'_> {
+         }
+     }
+     fn update_item_generics(&mut self, id: impl Into<ItemId>, args: &mut GenericArgs) {
++        let id = id.into();
++        // Recover the lifetimes of the trait references before computing associated types from
++        // them (see `PristineClauses`).
++        self.pristine.refine_args(id, args);
+         self.update_generics(args, GenericsSource::item(id), None);
+     }
+ 
+@@ -1351,6 +1616,9 @@ impl TransformPass for Transform {
+             })
+             .collect();
+ 
++        // Snapshot the clauses before we modify the items.
++        let pristine = PristineClauses::new(&ctx.translated);
++
+         // Apply the computed modifications to each item.
+         ctx.for_each_item_mut(|ctx, mut item| {
+             trace!(
+@@ -1419,6 +1687,7 @@ impl TransformPass for Transform {
+                 span,
+                 is_type_alias,
+                 item_modifications: &item_modifications,
++                pristine: &pristine,
+                 type_replacements: BindingStack::new(type_replacements),
+             });
+         });
+diff --git a/tests/ui/associated_types/associated-types.out b/tests/ui/associated_types/associated-types.out
+index 573cc4a..6974b83 100644
+--- a/tests/ui/associated_types/associated-types.out
++++ b/tests/ui/associated_types/associated-types.out
+@@ -184,8 +184,8 @@ where
+     return
+ }
+ 
+-// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_required
+-fn {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_required<'a, T>(x_1: Option<&'a T>[{built_in impl Sized for &'_ T}]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_required
++fn {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_required<'a, T>(x_1: Option<&'a T>[{built_in impl Sized for &'a T}]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ {
+@@ -196,21 +196,21 @@ where
+     return
+ }
+ 
+-// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_provided
+-fn {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_provided<'a, T, Clause1_Item>(x_1: Option<&'a T>[{built_in impl Sized for &'_ T}]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_provided
++fn {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_provided<'a, T, Clause1_Item>(x_1: Option<&'a T>[{built_in impl Sized for &'a T}]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+-    [@TraitClause1]: test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}], Clause1_Item>,
++    [@TraitClause1]: test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}], Clause1_Item>,
+ {
+-    let _0: Option<&'a T>[{built_in impl Sized for &'_ T}]; // return
+-    let x_1: Option<&'a T>[{built_in impl Sized for &'_ T}]; // arg #1
++    let _0: Option<&'a T>[{built_in impl Sized for &'a T}]; // return
++    let x_1: Option<&'a T>[{built_in impl Sized for &'a T}]; // arg #1
+ 
+     _0 = copy x_1
+     return
+ }
+ 
+-// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}
+-impl<'a, T> test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T
++// Full name: test_crate::{impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}
++impl<'a, T> test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T
+ where
+     [@TraitClause0]: Sized<T>,
+ {
+@@ -218,8 +218,8 @@ where
+     parent_clause1 = {impl Copy for &'_0 T}<'_, T>
+     parent_clause2 = {built_in impl Sized for Option<&'_ T>[{built_in impl Sized for &'_ T}]}
+     parent_clause3 = {impl Clone for Option<T>[@TraitClause0]}<&'_ T>[{built_in impl Sized for &'_ T}, {impl Clone for &'_0 T}<'_, T>, {built_in impl Destruct for &'_ T}]
+-    fn use_item_required = {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_required<'a, T>[@TraitClause0]
+-    fn use_item_provided<Clause0_Item, [@TraitClause0_1]: test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}], Clause0_Item>> = {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}::use_item_provided<'a, T, Clause0_Item>[@TraitClause0, @TraitClause0_1]
++    fn use_item_required = {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_required<'a, T>[@TraitClause0]
++    fn use_item_provided<Clause0_Item, [@TraitClause0_1]: test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}], Clause0_Item>> = {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}::use_item_provided<'a, T, Clause0_Item>[@TraitClause0, @TraitClause0_1]
+     non-dyn-compatible
+ }
+ 
+@@ -305,7 +305,7 @@ fn call_fn()
+     storage_live(_1)
+     storage_live(_2)
+     _2 = Option::None {  }
+-    _1 = external_use_item<'18, &'18 bool, Option<&'18 bool>[{built_in impl Sized for &'_ bool}], &'33 bool>[{built_in impl Sized for &'18 bool}, {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'_ T}]> for &'a T}<'18, bool>[{built_in impl Sized for bool}], {impl test_crate::Foo<'a, T> for Option<T>[@TraitClause0]}<'18, &'33 bool>[{built_in impl Sized for &'33 bool}, {impl Copy for &'_0 T}<'33, bool>]](move _2)
++    _1 = external_use_item<'18, &'18 bool, Option<&'18 bool>[{built_in impl Sized for &'18 bool}], &'33 bool>[{built_in impl Sized for &'18 bool}, {impl test_crate::Foo<'a, Option<&'a T>[{built_in impl Sized for &'a T}]> for &'a T}<'18, bool>[{built_in impl Sized for bool}], {impl test_crate::Foo<'a, T> for Option<T>[@TraitClause0]}<'18, &'33 bool>[{built_in impl Sized for &'33 bool}, {impl Copy for &'_0 T}<'33, bool>]](move _2)
+     storage_dead(_2)
+     storage_dead(_1)
+     _0 = ()
+diff --git a/tests/ui/box-init-early-exit.out b/tests/ui/box-init-early-exit.out
+index 60017cc..a54ad49 100644
+--- a/tests/ui/box-init-early-exit.out
++++ b/tests/ui/box-init-early-exit.out
+@@ -126,7 +126,7 @@ where
+     T : 'a,
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+diff --git a/tests/ui/control-flow/issue-297-cfg.out b/tests/ui/control-flow/issue-297-cfg.out
+index 455588f..f2113a9 100644
+--- a/tests/ui/control-flow/issue-297-cfg.out
++++ b/tests/ui/control-flow/issue-297-cfg.out
+@@ -54,7 +54,7 @@ where
+     T : 'a,
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+diff --git a/tests/ui/control-flow/switch-exits-after-early-return.out b/tests/ui/control-flow/switch-exits-after-early-return.out
+index f40b6f4..3f9720a 100644
+--- a/tests/ui/control-flow/switch-exits-after-early-return.out
++++ b/tests/ui/control-flow/switch-exits-after-early-return.out
+@@ -245,7 +245,7 @@ where
+     T : 'a,
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+diff --git a/tests/ui/gosim-demo.out b/tests/ui/gosim-demo.out
+index 7b38f76..36320ce 100644
+--- a/tests/ui/gosim-demo.out
++++ b/tests/ui/gosim-demo.out
+@@ -102,7 +102,7 @@ where
+     T : 'a,
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+diff --git a/tests/ui/impl-trait.out b/tests/ui/impl-trait.out
+index 2253179..a5cef74 100644
+--- a/tests/ui/impl-trait.out
++++ b/tests/ui/impl-trait.out
+@@ -292,7 +292,7 @@ where
+ }
+ 
+ // Full name: test_crate::wrap::{impl FnOnce<(&'_ U,)> for closure<U>[@TraitClause0]}::call_once
+-fn {impl FnOnce<(&'_ U,)> for closure<U>[@TraitClause0]}::call_once<'_0, U>(_1: closure<U>[@TraitClause0], tupled_args_2: (&'_0 U,)) -> WrapClone<&'_0 U>[{built_in impl Sized for &'_0 U}, {impl Clone for &'_0 T}<'_, U>]
++fn {impl FnOnce<(&'_ U,)> for closure<U>[@TraitClause0]}::call_once<'_0, U>(_1: closure<U>[@TraitClause0], tupled_args_2: (&'_0 U,)) -> WrapClone<&'_0 U>[{built_in impl Sized for &'_0 U}, {impl Clone for &'_0 T}<'_0, U>]
+ where
+     [@TraitClause0]: Sized<U>,
+ {
+diff --git a/tests/ui/issue-394-rpit-with-lifetime.out b/tests/ui/issue-394-rpit-with-lifetime.out
+index 69235b6..aefce09 100644
+--- a/tests/ui/issue-394-rpit-with-lifetime.out
++++ b/tests/ui/issue-394-rpit-with-lifetime.out
+@@ -163,7 +163,7 @@ impl<'a> FnMut<()> for closure<'a> {
+ }
+ 
+ // Full name: test_crate::sparse_transitions
+-fn sparse_transitions<'a>() -> FromFn<closure<'a>>[{built_in impl Sized for closure<'_>}]
++fn sparse_transitions<'a>() -> FromFn<closure<'a>>[{built_in impl Sized for closure<'a>}]
+ {
+     let _0: FromFn<closure<'6>>[{built_in impl Sized for closure<'6>}]; // return
+     let _1: closure<'9>; // anonymous local
+diff --git a/tests/ui/iterator.out b/tests/ui/iterator.out
+index f0adf57..32c1f48 100644
+--- a/tests/ui/iterator.out
++++ b/tests/ui/iterator.out
+@@ -2569,7 +2569,7 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::find
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::find<'a, '_1, T, P>(_1: &'_1 mut Iter<'a, T>[@TraitClause0], _2: P) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::find<'a, '_1, T, P>(_1: &'_1 mut Iter<'a, T>[@TraitClause0], _2: P) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+     [@TraitClause1]: Sized<P>,
+@@ -2619,7 +2619,7 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::last
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::last<'a, T>(_1: Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::last<'a, T>(_1: Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -2631,7 +2631,7 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::nth
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0], _2: usize) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0], _2: usize) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -2649,13 +2649,13 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next_chunk
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next_chunk<'a, '_1, T, const N : usize>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Result<[&'a T; N], IntoIter<&'a T, N>[{built_in impl Sized for &'_ T}]>[{built_in impl Sized for [&'_ T; N]}, {built_in impl Sized for IntoIter<&'_ T, N>[{built_in impl Sized for &'_ T}]}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next_chunk<'a, '_1, T, const N : usize>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Result<[&'a T; N], IntoIter<&'a T, N>[{built_in impl Sized for &'a T}]>[{built_in impl Sized for [&'a T; N]}, {built_in impl Sized for IntoIter<&'a T, N>[{built_in impl Sized for &'a T}]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -3380,13 +3380,13 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::last
+-pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::last<'a, T>(_1: Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::last<'a, T>(_1: Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::nth
+-pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0], _2: usize) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0], _2: usize) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -3404,7 +3404,7 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for Chunks<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for Chunks<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Chunks<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -4236,13 +4236,13 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::last
+-pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::last<'a, T>(_1: ChunksExact<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::last<'a, T>(_1: ChunksExact<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::nth
+-pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut ChunksExact<'a, T>[@TraitClause0], _2: usize) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::nth<'a, '_1, T>(_1: &'_1 mut ChunksExact<'a, T>[@TraitClause0], _2: usize) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+@@ -4260,7 +4260,7 @@ where
+ = <opaque>
+ 
+ // Full name: core::slice::iter::{impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut ChunksExact<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'_ [T]}]
++pub fn {impl Iterator for ChunksExact<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut ChunksExact<'a, T>[@TraitClause0]) -> Option<&'a [T]>[{built_in impl Sized for &'a [T]}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>
+diff --git a/tests/ui/lift-assoc-types-signature-regions.out b/tests/ui/lift-assoc-types-signature-regions.out
+new file mode 100644
+index 0000000..a9e3d43
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-signature-regions.out
+@@ -0,0 +1,149 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  None,
++  Some(T),
++}
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Seq
++pub trait Seq<Self, Self_Item>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Item>
++    vtable: test_crate::Seq::{vtable}<Self_Item>
++}
++
++// Full name: test_crate::Values
++pub struct Values<'a> {
++  &'a u64,
++}
++
++// Full name: test_crate::{impl Seq<&'a u64> for Values<'a>}
++impl<'a> Seq<&'a u64> for Values<'a> {
++    parent_clause0 = {built_in impl MetaSized for Values<'_>}
++    parent_clause1 = {built_in impl Sized for &'_ u64}
++    vtable: {impl Seq<&'a u64> for Values<'a>}::{vtable}<'a>
++}
++
++// Full name: test_crate::IntoSeq
++pub trait IntoSeq<Self, Self_Item, Self_IntoSeq>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Item>
++    parent_clause2 : [@TraitClause2]: Sized<Self_IntoSeq>
++    parent_clause3 : [@TraitClause3]: Seq<Self_IntoSeq, Self_Item>
++    vtable: test_crate::IntoSeq::{vtable}<Self_Item, Self_IntoSeq>
++}
++
++// Full name: test_crate::{impl IntoSeq<Clause1_Item, I> for I}
++impl<I, Clause1_Item> IntoSeq<Clause1_Item, I> for I
++where
++    [@TraitClause0]: Sized<I>,
++    [@TraitClause1]: Seq<I, Clause1_Item>,
++{
++    parent_clause0 = @TraitClause0::parent_clause0
++    parent_clause1 = @TraitClause1::parent_clause1
++    parent_clause2 = @TraitClause0
++    parent_clause3 = @TraitClause1
++    vtable: {impl IntoSeq<Clause1_Item, I> for I}::{vtable}<I>[@TraitClause0, @TraitClause1]
++}
++
++// Full name: test_crate::Flat
++pub struct Flat<U, Clause1_Item>
++where
++    [@TraitClause0]: Sized<U>,
++    [@TraitClause1]: Seq<U, Clause1_Item>,
++{
++  item: Option<Clause1_Item>[@TraitClause1::parent_clause1],
++}
++
++// Full name: test_crate::FlatMap
++pub struct FlatMap<U, Clause1_Item, Clause1_IntoSeq>
++where
++    [@TraitClause0]: Sized<U>,
++    [@TraitClause1]: IntoSeq<U, Clause1_Item, Clause1_IntoSeq>,
++{
++  front: Option<Clause1_IntoSeq>[@TraitClause1::parent_clause2],
++  item: Option<Clause1_Item>[@TraitClause1::parent_clause1],
++}
++
++// Full name: test_crate::flat
++pub fn flat<'a>(v_1: Values<'a>) -> Flat<Values<'a>, &'a u64>[{built_in impl Sized for Values<'a>}, {impl Seq<&'a u64> for Values<'a>}<'a>]
++{
++    let _0: Flat<Values<'9>, &'9 u64>[{built_in impl Sized for Values<'9>}, {impl Seq<&'a u64> for Values<'a>}<'9>]; // return
++    let v_1: Values<'14>; // arg #1
++    let _2: Option<&'21 u64>[{built_in impl Sized for &'21 u64}]; // anonymous local
++    let _3: &'24 u64; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*(v_1).0)
++    _2 = Option::Some { 0: move _3 }
++    storage_dead(_3)
++    _0 = Flat { item: move _2 }
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::flat_map
++pub fn flat_map<'a>(v_1: Values<'a>) -> FlatMap<Values<'a>, &'a u64, Values<'a>>[{built_in impl Sized for Values<'a>}, {impl IntoSeq<Clause1_Item, I> for I}<Values<'a>, &'a u64>[{built_in impl Sized for Values<'a>}, {impl Seq<&'a u64> for Values<'a>}<'a>]]
++{
++    let _0: FlatMap<Values<'15>, &'15 u64, Values<'15>>[{built_in impl Sized for Values<'15>}, {impl IntoSeq<Clause1_Item, I> for I}<Values<'15>, &'15 u64>[{built_in impl Sized for Values<'15>}, {impl Seq<&'a u64> for Values<'a>}<'15>]]; // return
++    let v_1: Values<'24>; // arg #1
++    let _2: Option<&'31 u64>[{built_in impl Sized for &'31 u64}]; // anonymous local
++    let _3: &'34 u64; // anonymous local
++    let _4: Option<Values<'40>>[{built_in impl Sized for Values<'40>}]; // anonymous local
++    let _5: Values<'43>; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*(v_1).0)
++    _2 = Option::Some { 0: move _3 }
++    storage_dead(_3)
++    storage_live(_4)
++    storage_live(_5)
++    _5 = move v_1
++    _4 = Option::Some { 0: move _5 }
++    storage_dead(_5)
++    _0 = FlatMap { front: move _4, item: move _2 }
++    storage_dead(_4)
++    storage_dead(_2)
++    return
++}
++
++// Full name: test_crate::Holder
++pub struct Holder<'a> {
++  inner: FlatMap<Values<'a>, &'a u64, Values<'a>>[{built_in impl Sized for Values<'a>}, {impl IntoSeq<Clause1_Item, I> for I}<Values<'a>, &'a u64>[{built_in impl Sized for Values<'a>}, {impl Seq<&'a u64> for Values<'a>}<'a>]],
++}
++
++
++
+diff --git a/tests/ui/lift-assoc-types-signature-regions.rs b/tests/ui/lift-assoc-types-signature-regions.rs
+new file mode 100644
+index 0000000..d7ff7a6
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-signature-regions.rs
+@@ -0,0 +1,46 @@
++//@ charon-arg=--lift-associated-types=*
++// The lifted associated types of an ADT in a signature keep the lifetimes of the ADT arguments.
++// The trait references of signatures are resolved with erased lifetimes, so the associated types
++// computed from the impls they name used to be `&'_ u64` and `Values<'_>` below (the
++// `FlatMap<option::Iter<'a, _>, btree_map::Values<'a, _, _>, _>` returned by
++// `chelis_deep::annotations::Metadata::values`), which Aeneas rejects.
++pub trait Seq {
++    type Item;
++}
++pub struct Values<'a>(pub &'a u64);
++impl<'a> Seq for Values<'a> {
++    type Item = &'a u64;
++}
++
++pub trait IntoSeq {
++    type Item;
++    type IntoSeq: Seq<Item = Self::Item>;
++}
++impl<I: Seq> IntoSeq for I {
++    type Item = I::Item;
++    type IntoSeq = I;
++}
++
++pub struct Flat<U: Seq> {
++    pub item: Option<U::Item>,
++}
++
++pub struct FlatMap<U: IntoSeq> {
++    pub front: Option<U::IntoSeq>,
++    pub item: Option<U::Item>,
++}
++
++pub fn flat<'a>(v: Values<'a>) -> Flat<Values<'a>> {
++    Flat { item: Some(v.0) }
++}
++
++pub fn flat_map<'a>(v: Values<'a>) -> FlatMap<Values<'a>> {
++    FlatMap {
++        item: Some(v.0),
++        front: Some(v),
++    }
++}
++
++pub struct Holder<'a> {
++    pub inner: FlatMap<Values<'a>>,
++}
+diff --git a/tests/ui/monomorphize-mut.out b/tests/ui/monomorphize-mut.out
+index 41ed12d..8ef089c 100644
+--- a/tests/ui/monomorphize-mut.out
++++ b/tests/ui/monomorphize-mut.out
+@@ -266,7 +266,7 @@ where
+     T : 'a,
+ {
+   head: &'a mut T,
+-  tail: core::option::Option::<&_ mut _><'a, T>[{built_in impl core::marker::Sized::<&_ mut _><'_> for T}],
++  tail: core::option::Option::<&_ mut _><'a, T>[{built_in impl core::marker::Sized::<&_ mut _><'a> for T}],
+ }
+ 
+ #[lang_item("Option")]
+@@ -666,7 +666,7 @@ where
+ // Full name: test_crate::Example
+ type Example<'a, 'b, T>
+ where
+-    [@TraitClause0]: Sized<T>, = test_crate::Triple::<_, &_ mut &_ mut _, core::option::Option::<&_ mut _><_, _>[@TraitClause2]><'a, 'b, 'a, u32, T, bool>[{built_in impl Sized for u32}, {built_in impl core::marker::Sized::<&_ mut &_ mut _><'_, '_> for T}, {built_in impl core::marker::Sized::<&_ mut _><'_> for bool}, {built_in impl core::marker::Sized::<core::option::Option::<&_ mut _><_, _>[@TraitClause0]><'_>[{built_in impl core::marker::Sized::<&_ mut _><'_> for bool}] for bool}]
++    [@TraitClause0]: Sized<T>, = test_crate::Triple::<_, &_ mut &_ mut _, core::option::Option::<&_ mut _><_, _>[@TraitClause2]><'a, 'b, 'a, u32, T, bool>[{built_in impl Sized for u32}, {built_in impl core::marker::Sized::<&_ mut &_ mut _><'a, 'b> for T}, {built_in impl core::marker::Sized::<&_ mut _><'a> for bool}, {built_in impl core::marker::Sized::<core::option::Option::<&_ mut _><_, _>[@TraitClause0]><'a>[{built_in impl core::marker::Sized::<&_ mut _><'a> for bool}] for bool}]
+ 
+ // Full name: test_crate::use_example
+ fn use_example<'a, 'b, T>(_1: test_crate::Triple::<_, &_ mut &_ mut _, core::option::Option::<&_ mut _><_, _>[@TraitClause2]><'a, 'b, 'a, u32, T, bool>[{built_in impl Sized for u32}, {built_in impl core::marker::Sized::<&_ mut &_ mut _><'a, 'b> for T}, {built_in impl core::marker::Sized::<&_ mut _><'a> for bool}, {built_in impl core::marker::Sized::<core::option::Option::<&_ mut _><_, _>[@TraitClause0]><'a>[{built_in impl core::marker::Sized::<&_ mut _><'a> for bool}] for bool}])
+diff --git a/tests/ui/params.out b/tests/ui/params.out
+index e9eeeee..70747db 100644
+--- a/tests/ui/params.out
++++ b/tests/ui/params.out
+@@ -142,7 +142,7 @@ where
+     'd : 'a,
+     'c : 'b,
+ {
+-  x: E1<'a, 'b, &'c mut u32, &'d u32>[{built_in impl Sized for &'_ mut u32}, {built_in impl Sized for &'_ u32}],
++  x: E1<'a, 'b, &'c mut u32, &'d u32>[{built_in impl Sized for &'c mut u32}, {built_in impl Sized for &'d u32}],
+ }
+ 
+ 
+diff --git a/tests/ui/predicates-on-late-bound-vars.out b/tests/ui/predicates-on-late-bound-vars.out
+index a01a8ad..be8aab2 100644
+--- a/tests/ui/predicates-on-late-bound-vars.out
++++ b/tests/ui/predicates-on-late-bound-vars.out
+@@ -132,7 +132,7 @@ fn wrap<'a>(x_1: &'a u32) -> Option<&'a u32>[{built_in impl Sized for &'a u32}]
+ }
+ 
+ // Full name: test_crate::wrap2
+-fn wrap2<'a>(x_1: &'a u32) -> Option<&'a u32>[{built_in impl Sized for &'_ u32}]
++fn wrap2<'a>(x_1: &'a u32) -> Option<&'a u32>[{built_in impl Sized for &'a u32}]
+ where
+     [@TraitClause0]: Clone<&'a ()>,
+ {
+diff --git a/tests/ui/simple/lending-iterator-gat.out b/tests/ui/simple/lending-iterator-gat.out
+index 3c3d171..a0c623b 100644
+--- a/tests/ui/simple/lending-iterator-gat.out
++++ b/tests/ui/simple/lending-iterator-gat.out
+@@ -151,8 +151,8 @@ where
+     [@TraitClause0]: LendingIterator<Self>,
+ = <method_without_default_body>
+ 
+-// Full name: test_crate::{impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]}::next
+-pub fn {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]}::next<'a, 'b, T>(self_1: &'b mut Option<&'a T>[{built_in impl Sized for &'_ T}]) -> Option<&'b T>[{built_in impl Sized for &'b T}]
++// Full name: test_crate::{impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]}::next
++pub fn {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]}::next<'a, 'b, T>(self_1: &'b mut Option<&'a T>[{built_in impl Sized for &'a T}]) -> Option<&'b T>[{built_in impl Sized for &'b T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ {
+@@ -188,14 +188,14 @@ where
+     return
+ }
+ 
+-// Full name: test_crate::{impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]}
+-impl<'a, T> LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]
++// Full name: test_crate::{impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]}
++impl<'a, T> LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ {
+     parent_clause0 = {built_in impl MetaSized for Option<&'_ T>[{built_in impl Sized for &'_ T}]}
+-    type Item<'b, Option<&'a T>[{built_in impl Sized for &'_ T}] : 'b> = &'b T
+-    fn next<'b> = {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]}::next<'a, 'b, T>[@TraitClause0]
++    type Item<'b, Option<&'a T>[{built_in impl Sized for &'a T}] : 'b> = &'b T
++    fn next<'b> = {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]}::next<'a, 'b, T>[@TraitClause0]
+     non-dyn-compatible
+ }
+ 
+@@ -395,7 +395,7 @@ pub fn main()
+     _8 = &mut sum_4
+     _7 = closure { 0: move _8 }
+     storage_dead(_8)
+-    _5 = for_each<Option<&'47 i32>[{built_in impl Sized for &'47 i32}], closure<'50>>[{built_in impl Sized for Option<&'47 i32>[{built_in impl Sized for &'47 i32}]}, {built_in impl Sized for closure<'50>}, {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'_ T}]}<'47, i32>[{built_in impl Sized for i32}], {impl FnMut<(&'_ i32,)> for closure<'_0>}<'50, '86>](move _6, move _7)
++    _5 = for_each<Option<&'47 i32>[{built_in impl Sized for &'47 i32}], closure<'50>>[{built_in impl Sized for Option<&'47 i32>[{built_in impl Sized for &'47 i32}]}, {built_in impl Sized for closure<'50>}, {impl LendingIterator for Option<&'a T>[{built_in impl Sized for &'a T}]}<'47, i32>[{built_in impl Sized for i32}], {impl FnMut<(&'_ i32,)> for closure<'_0>}<'50, '86>](move _6, move _7)
+     storage_live(_28)
+     storage_live(_29)
+     _29 = const 42 : i32
+diff --git a/tests/ui/simple/well-formedness-bound.out b/tests/ui/simple/well-formedness-bound.out
+index c8c70ba..840d48f 100644
+--- a/tests/ui/simple/well-formedness-bound.out
++++ b/tests/ui/simple/well-formedness-bound.out
+@@ -35,7 +35,7 @@ fn UNIT_METADATA()
+ const UNIT_METADATA: () = UNIT_METADATA()
+ 
+ // Full name: test_crate::get
+-pub fn get<'a>(x_1: &'a u32) -> Option<&'a u32>[{built_in impl Sized for &'_ u32}]
++pub fn get<'a>(x_1: &'a u32) -> Option<&'a u32>[{built_in impl Sized for &'a u32}]
+ {
+     let _0: Option<&'6 u32>[{built_in impl Sized for &'6 u32}]; // return
+     let x_1: &'9 u32; // arg #1
+diff --git a/tests/ui/traits.out b/tests/ui/traits.out
+index 7ba1c3a..f031459 100644
+--- a/tests/ui/traits.out
++++ b/tests/ui/traits.out
+@@ -1395,7 +1395,7 @@ pub fn test_crate::call<'a, F>(_1: F)
+ where
+     [@TraitClause0]: Sized<F>,
+     [@TraitClause1]: Fn<F, (&'a (),)>,
+-    @TraitClause1::parent_clause1::parent_clause1::Output = Wrapper<(bool, &'a ())>[{built_in impl Sized for (bool, &'_ ())}],
++    @TraitClause1::parent_clause1::parent_clause1::Output = Wrapper<(bool, &'a ())>[{built_in impl Sized for (bool, &'a ())}],
+ {
+     let _0: (); // return
+     let _1: F; // arg #1
+diff --git a/tests/ui/unsupported/issue-79-bound-regions.out b/tests/ui/unsupported/issue-79-bound-regions.out
+index dae4b97..47410bb 100644
+--- a/tests/ui/unsupported/issue-79-bound-regions.out
++++ b/tests/ui/unsupported/issue-79-bound-regions.out
+@@ -31,7 +31,7 @@ where
+     T : 'a,
+ 
+ // Full name: core::slice::iter::{impl Iterator for Iter<'a, T>[@TraitClause0]}::next
+-pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'_ T}]
++pub fn {impl Iterator for Iter<'a, T>[@TraitClause0]}::next<'a, '_1, T>(_1: &'_1 mut Iter<'a, T>[@TraitClause0]) -> Option<&'a T>[{built_in impl Sized for &'a T}]
+ where
+     [@TraitClause0]: Sized<T>,
+ = <opaque>

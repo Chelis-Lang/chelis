@@ -1,0 +1,4097 @@
+# aeneas integration step 116 after cba11f3beb: commit 0162f13bab8190d6fdab460c5f5b9e4626ffc966
+# first parent e57002185d256d2f44e501ee20eaacea216ab5a7, merged 05c18f54adf7b916153f5bf9dd3751e86dd2c282
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/nested-loops' (register_deftype; frozen ADT regions: Option-combinator closures; mutable borrows in shared payloads; static-only shared projections; dead index_mut borrows at continue; globals whose initializer has a loop)
+#
+# The six committed test outputs the branch regenerated for the alx change
+# (Arrays, Issue807MissingSymbolicValue, Iterators, LoopSharedLoanInJoin,
+# LoopsNested, LoopsNestedRec) keep main's version (builtin references from
+# the root); the branch's regeneration only renamed variables. Stale outputs
+# are regenerated together after this round.
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index 346248f..eceedd5 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -1070,49 +1070,6 @@ let export_types_group (fmt : Format.formatter) (config : gen_config)
+       (fun (def : Pure.type_decl) -> sc_record ctx (IdType def.def_id))
+       defs)
+ 
+-(** Export a global declaration.
+-
+-    TODO: check correct behavior with opaque globals. *)
+-let export_global (fmt : Format.formatter) (config : gen_config) (ctx : gen_ctx)
+-    (id : GlobalDeclId.id) : unit =
+-  let global_decls = ctx.trans_ctx.crate.global_decls in
+-  let global = GlobalDeclId.Map.find id global_decls in
+-  let trans =
+-    [%silent_unwrap_opt_span] None
+-      (FunDeclId.Map.find_opt global.init ctx.trans_funs)
+-  in
+-  [%sanity_check] global.item_meta.span (trans.loops = [] && trans.bodies = []);
+-  let body = trans.f in
+-
+-  let is_opaque = Option.is_none body.Pure.body in
+-
+-  (* Check if we extract the global *)
+-  let extract =
+-    config.extract_globals
+-    && (((not is_opaque) && config.extract_transparent)
+-       || (is_opaque && config.extract_opaque))
+-  in
+-  (* Check if it is a builtin global - if yes, we ignore it because we
+-     map the definition to one in the standard library *)
+-  let open ExtractBuiltin in
+-  let extract =
+-    extract
+-    && match_name_find_opt ctx.trans_ctx global.item_meta.name
+-         (builtin_globals_map ())
+-       = None
+-  in
+-  if extract then (
+-    (* Save the fact that we extract opaque definitions, if we do *)
+-    ctx.extracted_opaque := is_opaque || !(ctx.extracted_opaque);
+-    (* We don't wrap global declaration groups between calls to functions
+-       [{start, end}_global_decl_group] (which don't exist): global declaration
+-       groups are always singletons, so the [extract_global_decl] function
+-       takes care of generating the delimiters.
+-    *)
+-    let global = GlobalDeclId.Map.find_opt id ctx.trans_globals in
+-    Extract.extract_global_decl ctx fmt global body config.interface;
+-    sc_record ctx (IdGlobal id))
+-
+ (** Utility.
+ 
+     Export a group of functions, used by {!export_functions_group}.
+@@ -1219,6 +1176,57 @@ let export_functions_group_scc (fmt : Format.formatter) (config : gen_config)
+     List.iter (fun f -> f ()) extract_defs;
+     Extract.end_fun_decl_group fmt is_rec decls)
+ 
++(** Export a global declaration.
++
++    The functions introduced for the loops of its initializer are exported
++    first: the global body calls them.
++
++    TODO: check correct behavior with opaque globals. *)
++let export_global (fmt : Format.formatter) (config : gen_config) (ctx : gen_ctx)
++    (id : GlobalDeclId.id) : unit =
++  let global_decls = ctx.trans_ctx.crate.global_decls in
++  let global = GlobalDeclId.Map.find id global_decls in
++  let trans =
++    [%silent_unwrap_opt_span] None
++      (FunDeclId.Map.find_opt global.init ctx.trans_funs)
++  in
++  let body = trans.f in
++
++  let is_opaque = Option.is_none body.Pure.body in
++
++  (* Check if we extract the global *)
++  let extract =
++    config.extract_globals
++    && (((not is_opaque) && config.extract_transparent)
++       || (is_opaque && config.extract_opaque))
++  in
++  (* Check if it is a builtin global - if yes, we ignore it because we
++     map the definition to one in the standard library *)
++  let open ExtractBuiltin in
++  let extract =
++    extract
++    && match_name_find_opt ctx.trans_ctx global.item_meta.name
++         (builtin_globals_map ())
++       = None
++  in
++  if extract then (
++    (* Save the fact that we extract opaque definitions, if we do *)
++    ctx.extracted_opaque := is_opaque || !(ctx.extracted_opaque);
++    (* We don't wrap global declaration groups between calls to functions
++       [{start, end}_global_decl_group] (which don't exist): global declaration
++       groups are always singletons, so the [extract_global_decl] function
++       takes care of generating the delimiters.
++    *)
++    let loops = trans.loops @ trans.bodies in
++    List.iter
++      (fun (is_rec, decls) ->
++        export_functions_group_scc fmt config ctx is_rec decls)
++      (ReorderDecls.group_reorder_fun_decls
++         ~inline_trait_impls:ctx.inline_trait_impls loops);
++    let global = GlobalDeclId.Map.find_opt id ctx.trans_globals in
++    Extract.extract_global_decl ctx fmt global body config.interface;
++    sc_record ctx (IdGlobal id))
++
+ (** Export a group of function declarations.
+ 
+     In case of (non-mutually) recursive functions, we use a simple procedure to
+@@ -2046,13 +2054,9 @@ let extract_translated_crate (filename : string) (dest_dir : string)
+                      (def.Pure.def_id, def.Pure.loop_id)
+                      rec_functions
+               in
+-              (* Register the names, only if the function is not a global body -
+-               * those are handled later *)
+-              let is_global = trans.f.Pure.is_global_decl_body in
+-              if is_global then ctx
+-              else
+-                Extract.extract_fun_decl_register_names ctx gen_decr_clause
+-                  trans)
++              (* Register the names (for a global body: only its loops - the
++                 global itself is handled later) *)
++              Extract.extract_fun_decl_register_names ctx gen_decr_clause trans)
+         with CFailure error ->
+           (* An exception was raised: ignore it *)
+           let name = name_to_string trans_ctx trans.f.item_meta.name in
+diff --git a/src/extract/Extract.ml b/src/extract/Extract.ml
+index 4471bec..5e168c8 100644
+--- a/src/extract/Extract.ml
++++ b/src/extract/Extract.ml
+@@ -31,10 +31,31 @@ let texpr_to_string (ctx : extraction_ctx) =
+   PrintPure.texpr_to_string (extraction_ctx_to_fmt_env ctx) false "" "  "
+ 
+ (** Compute the names for all the pure functions generated from a rust function.
+-*)
++
++    The initializer of a global is registered with the global
++    ({!extract_global_decl_register_names}): we only register the functions
++    introduced for its loops. *)
+ let extract_fun_decl_register_names (ctx : extraction_ctx)
+     (has_decreases_clause : fun_decl -> bool) (def : pure_fun_translation) :
+     extraction_ctx =
++  (* Register the functions of a non-builtin declaration *)
++  let register_funs ctx funs =
++    let register_decreases ctx def =
++      if has_decreases_clause def then
++        (* Add the termination measure *)
++        let ctx = ctx_add_termination_measure def ctx in
++        (* Add the decreases proof for Lean only *)
++        match backend () with
++        | Coq | FStar -> ctx
++        | HOL4 -> [%craise] def.item_meta.span "Unexpected"
++        | Lean -> ctx_add_decreases_proof def ctx
++      else ctx
++    in
++    (* Register the decrease clauses *)
++    let ctx = List.fold_left register_decreases ctx funs in
++    (* Register the names of the functions *)
++    List.fold_left (fun ctx f -> ctx_add_fun_decl f ctx) ctx funs
++  in
+   match def.f.src with
+   | TraitDeclItem (_, _, false) ->
+       (* Ignore the trait methods **declarations** (rem.: we do not ignore the trait
+@@ -42,6 +63,7 @@ let extract_fun_decl_register_names (ctx : extraction_ctx)
+          only use their type for the fields of the records we generate for the trait
+          declarations *)
+       ctx
++  | _ when def.f.is_global_decl_body -> register_funs ctx (def.loops @ def.bodies)
+   | _ -> (
+       (* Use the builtin names if necessary *)
+       match def.f.builtin_info with
+@@ -71,28 +93,9 @@ let extract_fun_decl_register_names (ctx : extraction_ctx)
+           in
+           ctx_add_builtin_fun_decl def.f ctx
+       | None ->
+-          (* Not builtin *)
+-          (* Register the decrease clauses, if necessary *)
+-          let register_decreases ctx def =
+-            if has_decreases_clause def then
+-              (* Add the termination measure *)
+-              let ctx = ctx_add_termination_measure def ctx in
+-              (* Add the decreases proof for Lean only *)
+-              match backend () with
+-              | Coq | FStar -> ctx
+-              | HOL4 -> [%craise] def.item_meta.span "Unexpected"
+-              | Lean -> ctx_add_decreases_proof def ctx
+-            else ctx
+-          in
+-          (* We have to register the function itself, and the loops it
+-             may contain (which are extracted as functions) *)
+-          let funs = (def.f :: def.loops) @ def.bodies in
+-          (* Register the decrease clauses *)
+-          let ctx = List.fold_left register_decreases ctx funs in
+-          (* Register the name of the function and the loops *)
+-          let register_fun ctx f = ctx_add_fun_decl f ctx in
+-          let register_funs ctx fl = List.fold_left register_fun ctx fl in
+-          register_funs ctx funs)
++          (* Not builtin: we have to register the function itself, and the
++             loops it may contain (which are extracted as functions) *)
++          register_funs ctx ((def.f :: def.loops) @ def.bodies))
+ 
+ (** Simply add the global name to the context. *)
+ let extract_global_decl_register_names (ctx : extraction_ctx)
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index f592caa..bf56e03 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -3154,6 +3154,36 @@ let merge_abs_conts_aux (span : Meta.span) (ctx : eval_ctx) (abs0 : abs)
+   register_held_pending abs0;
+   register_held_pending abs1;
+ 
++  (* Likewise, an abstraction may hold a mutable loan that its continuation
++     does not consume: the copy of a shared payload holding a mutable borrow
++     (see [InterpJoin.reborrow_ashared_loans]) holds the loan of the copied
++     borrow, and ignores the value given back to it (the copy is only read),
++     while the join of two such copies consumes it ([Join(abs)[ML l]]). When
++     the two sides of a join hold the same loan and only one side consumes it,
++     the composed continuation receives it once, for both sides. *)
++  let register_held_loans (abs : abs) : unit =
++    List.iter
++      (fun (av : tavalue) ->
++        match av.value with
++        | ALoan (AMutLoan (pm, bid, _)) -> (
++            match BorrowId.Map.find_opt bid !bound.input_loans with
++            | Some (fid, [ pm' ], ty)
++              when (pm = PLeft && pm' = PRight) || (pm = PRight && pm' = PLeft)
++              ->
++                bound :=
++                  {
++                    !bound with
++                    input_loans =
++                      BorrowId.Map.add bid (fid, [ pm; pm' ], ty)
++                        !bound.input_loans;
++                  }
++            | _ -> ())
++        | _ -> ())
++      abs.avalues
++  in
++  register_held_loans abs0;
++  register_held_loans abs1;
++
+   (* Create the outputs for the composed continuation, and its corresponding inputs.
+ 
+      We simply list all the bound outputs which were not consumed (the free variables
+diff --git a/src/interp/InterpJoinCore.ml b/src/interp/InterpJoinCore.ml
+index fdfaa72..d5c73d8 100644
+--- a/src/interp/InterpJoinCore.ml
++++ b/src/interp/InterpJoinCore.ml
+@@ -788,6 +788,12 @@ let tavalue_add_marker (span : Meta.span) (ctx : eval_ctx) (pm : proj_marker)
+       method! visit_borrow_content in_shared bc =
+         match (in_shared, bc) with
+         | true, VSharedBorrow _ -> super#visit_borrow_content in_shared bc
++        | true, VMutBorrow _ ->
++            (* A shared payload may hold a mutable borrow (e.g., the field
++               [native : &'n mut T] of the payload of [&C<'n>], or of a copy of
++               it, see [InterpJoin.reborrow_ashared_loans]): it is only read
++               through the loan, and its loan is in another abstraction. *)
++            super#visit_borrow_content in_shared bc
+         | _ -> [%craise] span "Unexpected borrow outside a shared payload"
+ 
+       method! visit_loan_content in_shared lc =
+diff --git a/src/interp/InterpLoops.ml b/src/interp/InterpLoops.ml
+index 8d36f2d..9b8345a 100644
+--- a/src/interp/InterpLoops.ml
++++ b/src/interp/InterpLoops.ml
+@@ -368,13 +368,41 @@ let bottom_locals (ctx : eval_ctx) : Expressions.LocalId.id list =
+ (** A local which is uninitialized when entering a loop is initialized by an
+     iteration before being read, so its value at a [continue] is dead: the next
+     iteration never reads it, and the joins at the loop entry discard it (they
+-    join it with [⊥]). When such a value holds shared borrows (and no loans or
+-    mutable borrows, so that discarding it gives nothing back), discard it
+-    before the joins instead, and end the borrows and abstractions which were
+-    only kept alive by it, e.g. the shared borrow returned by an indexing
+-    ([let r = &lim[0]; ... *r ...]) and the abstractions of that call.
+-    Otherwise, the join has to reconcile the borrow graph of these
+-    abstractions, which exists in the continue context only. *)
++    join it with [⊥]). When such a value holds borrows (and no loans, so that
++    discarding it invalidates nothing), discard it before the joins instead,
++    and end the borrows and abstractions which were only kept alive by it, e.g.
++    the shared borrow returned by an indexing ([let r = &lim[0]; ... *r ...])
++    and the abstractions of that call. A concrete mutable borrow gives its
++    value back when it ends (e.g., the borrow returned by [index_mut] on an
++    array of references, written through: [strs[i] = s], which gives the
++    array back with the new reference). Otherwise, the join has to reconcile
++    the borrow graph of these abstractions, which exists in the continue
++    context only (with nested borrows, the pending loans of the indexing
++    call cannot be collapsed). The symbolic values with mutable borrows are
++    kept: dropping them would not end their borrows. *)
++let dead_value_is_droppable (ctx : eval_ctx) (v : tvalue) : bool =
++  let exception Found in
++  let visitor =
++    object
++      inherit [_] iter_tvalue as super
++      method! visit_VLoan _ _ = raise Found
++
++      method! visit_VBorrow env bc =
++        match bc with
++        | VSharedBorrow _ -> ()
++        | VMutBorrow _ -> super#visit_VBorrow env bc
++        | VReservedMutBorrow _ -> raise Found
++
++      method! visit_VSymbolic _ sv =
++        if TypesUtils.ty_has_mut_borrows ctx.type_ctx.type_infos sv.sv_ty then
++          raise Found
++    end
++  in
++  try
++    visitor#visit_tvalue () v;
++    true
++  with Found -> false
++
+ let drop_dead_locals_at_continue (config : config) (span : Meta.span)
+     (dead : Expressions.LocalId.id list) (eval_loop_body : stl_cm_fun) :
+     stl_cm_fun =
+@@ -393,7 +421,7 @@ let drop_dead_locals_at_continue (config : config) (span : Meta.span)
+                   let v = ctx_lookup_var_value span ctx id in
+                   if
+                     value_has_borrows (Some span) ctx v.value
+-                    && InterpBorrows.value_has_only_shared_borrows ctx v
++                    && dead_value_is_droppable ctx v
+                   then (
+                     [%ltrace
+                       "dropping dead local "
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 9dd0303..a54b31f 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -852,6 +852,17 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       (SymbolicValueId.id * SymbolicValueId.id, symbolic_value) Hashtbl.t =
+     Hashtbl.create 16
+ 
++  (** Cache for joined shared loans: when borrows of the same pair [(bid0, bid1)]
++      of distinct source/target shared loans are encountered more than once
++      (e.g., [x -> Some (SB l0), y -> SB l0] and
++      [x -> Some (SB l1), y -> SB l1]), they all borrow the joined loan
++      introduced for the first one. Introducing a loan per borrow would split
++      a loan which is shared by several borrows in both contexts, and the
++      joined context would no longer match them. *)
++  let joined_shared_loan_cache : (BorrowId.id * BorrowId.id, BorrowId.id) Hashtbl.t
++      =
++    Hashtbl.create 16
++
+   (* Matching a looked-up shared payload copies it: unlike a payload reached
+      structurally through its loan, the original remains live in the context. *)
+   let matching_shared_copy = ref false
+@@ -1301,6 +1312,11 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+        *)
+       let sid = ctx0.fresh_shared_borrow_id () in
+       (bid0, sid)
++    else if Hashtbl.mem joined_shared_loan_cache (bid0, bid1) then
++      (* Another borrow of the same pair of loans: it borrows the same joined
++         loan (see [joined_shared_loan_cache]) *)
++      let sid = ctx0.fresh_shared_borrow_id () in
++      (Hashtbl.find joined_shared_loan_cache (bid0, bid1), sid)
+     else
+       (* We replace bid0 and bid1 with a fresh borrow id, and introduce
+          an abstraction which links all of them:
+@@ -1310,6 +1326,7 @@ module MakeJoinMatcher (S : MatchJoinState) : PrimMatcher = struct
+       *)
+       let rid = ctx0.fresh_region_id () in
+       let bid2 = ctx0.fresh_borrow_id () in
++      Hashtbl.add joined_shared_loan_cache (bid0, bid1) bid2;
+ 
+       (* Lookup the shared values and match them *)
+       let sv0 =
+diff --git a/src/interp/InterpProjectors.ml b/src/interp/InterpProjectors.ml
+index 951ada7..e7c06ec 100644
+--- a/src/interp/InterpProjectors.ml
++++ b/src/interp/InterpProjectors.ml
+@@ -95,7 +95,19 @@ let rec apply_proj_borrows_on_shared_borrow (span : Meta.span) (ctx : eval_ctx)
+           (not
+              (projections_intersect span ctx ctx.ended_regions s.sv_ty regions
+                 ty));
+-        [ AsbProjReborrows { sv_id = s.sv_id; proj_ty = ty } ]
++        (* The projection may select only positions where the type of the
++           symbolic value has the static region: the instantiation of a
++           generic parameter with a static reference gets a fresh region
++           (e.g., the elements of [xs : &[&'static u32]] given to
++           [<[T]>::len] with [T = &'2 u32]). The static borrows have no lender
++           and outlive the abstraction: it holds none of them. *)
++        if
++          not
++            (compare_rtys span ctx false ( || )
++               (fun r_sv r -> r_sv <> RStatic && region_in_set r regions)
++               s.sv_ty ty)
++        then []
++        else [ AsbProjReborrows { sv_id = s.sv_id; proj_ty = ty } ]
+     | VAdt adt, TArray (ty, _) ->
+         List.flatten
+           (List.map
+diff --git a/src/llbc/FunsAnalysis.ml b/src/llbc/FunsAnalysis.ml
+index 28b4693..69f1b94 100644
+--- a/src/llbc/FunsAnalysis.ml
++++ b/src/llbc/FunsAnalysis.ml
+@@ -208,10 +208,12 @@ let analyze_module (m : crate) (funs_map : fun_decl FunDeclId.Map.t) :
+      * fail: the result of the analysis is not used yet to adjust the translation
+      * so that the functions which syntactically can't fail don't use an error monad.
+      * However, we do keep the result of the analysis for global bodies and for
+-     * builtin functions which are marked as non-fallible.
++     * builtin functions which are marked as non-fallible. A global body containing
++     * a loop calls the function introduced for the loop, which is fallible (the
++     * loop may diverge).
+      *)
+     can_fail :=
+-      if is_global_decl_body then !can_fail
++      if is_global_decl_body then !can_fail || !can_diverge
+       else if !group_has_builtin_info then !can_fail
+       else true;
+     {
+diff --git a/src/llbc/TypesAnalysis.ml b/src/llbc/TypesAnalysis.ml
+index 04b369b..88008ef 100644
+--- a/src/llbc/TypesAnalysis.ml
++++ b/src/llbc/TypesAnalysis.ml
+@@ -41,6 +41,13 @@ type 'p g_type_info = {
+   has_regions : bool;
+   mut_regions : RegionId.Set.t;
+       (** The set of regions used in mutable borrows *)
++  unfrozen_mut_regions : RegionId.Set.t;
++      (** The subset of [mut_regions] used in mutable borrows which are not
++          below a shared borrow: the mutable borrows below a shared borrow are
++          frozen, and a value of the type gives nothing back to them (e.g., the
++          region ['n] of [struct View<'a, 'n> { c: &'a Checker<'n> }] where
++          [Checker<'n>] holds a [&'n mut u32], or of a closure capturing
++          [&'a Checker<'n>]). For the opaque types: [mut_regions]. *)
+   is_rec : bool;  (** This field is only meaningful for type definitions *)
+   captured_params : TypeVarId.Set.t option;
+       (** For a closure state type: the type parameters of which it captures
+@@ -98,6 +105,7 @@ let initialize_g_type_info (is_tuple_struct : bool) ~(is_rec : bool)
+     is_tuple_struct;
+     param_infos;
+     mut_regions;
++    unfrozen_mut_regions = mut_regions;
+     is_rec;
+     has_regions;
+     captured_params;
+@@ -240,6 +248,7 @@ let type_decl_info_to_partial_type_info (info : type_decl_info) :
+     is_tuple_struct = info.is_tuple_struct;
+     param_infos = Some info.param_infos;
+     mut_regions = info.mut_regions;
++    unfrozen_mut_regions = info.unfrozen_mut_regions;
+     is_rec = info.is_rec;
+     has_regions = info.has_regions;
+     captured_params = info.captured_params;
+@@ -252,6 +261,7 @@ let partial_type_info_to_type_decl_info (info : partial_type_info) :
+     is_tuple_struct = info.is_tuple_struct;
+     param_infos = Option.get info.param_infos;
+     mut_regions = info.mut_regions;
++    unfrozen_mut_regions = info.unfrozen_mut_regions;
+     is_rec = info.is_rec;
+     has_regions = info.has_regions;
+     captured_params = info.captured_params;
+@@ -344,9 +354,27 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+     }
+   in
+ 
+-  (* The recursive function which explores the type *)
++  (* Register a region used in a mutable borrow which is not below a shared
++     borrow (see [unfrozen_mut_regions]) *)
++  let add_unfrozen_region (ty_info : partial_type_info) (r : region) :
++      partial_type_info =
++    match r with
++    | RVar (Free rid)
++      when not (RegionId.Set.mem rid ty_info.unfrozen_mut_regions) ->
++        updated := true;
++        {
++          ty_info with
++          unfrozen_mut_regions =
++            RegionId.Set.add rid ty_info.unfrozen_mut_regions;
++        }
++    | _ -> ty_info
++  in
++
++  (* The recursive function which explores the type. [frozen]: whether we are
++     below a shared borrow. *)
+   let rec analyze (span : Meta.span option) (expl_info : expl_info)
+-      (ty_info : partial_type_info) (ty : ty) : partial_type_info =
++      ~(frozen : bool) (ty_info : partial_type_info) (ty : ty) :
++      partial_type_info =
+     match ty with
+     | TLiteral _ | TNever | TDynTrait _ -> ty_info
+     | TTraitType (tref, _) ->
+@@ -410,6 +438,10 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+           }
+         in
+         let ty_info = update_ty_info ty_info region ty_b_info in
++        let ty_info =
++          if is_mut && not frozen then add_unfrozen_region ty_info r
++          else ty_info
++        in
+         (* Update the exploration info *)
+         let expl_info =
+           {
+@@ -418,17 +450,17 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+           }
+         in
+         (* Continue exploring *)
+-        analyze span expl_info ty_info rty
++        analyze span expl_info ~frozen:(frozen || rkind = RShared) ty_info rty
+     | TRawPtr (rty, _) ->
+         (* TODO: not sure what to do here *)
+-        analyze span expl_info ty_info rty
++        analyze span expl_info ~frozen ty_info rty
+     | TArray (ty, _) | TSlice ty ->
+         (* Nothing to update: just explore the type parameters *)
+-        analyze span expl_info ty_info ty
++        analyze span expl_info ~frozen ty_info ty
+     | TAdt { id = TTuple | TBuiltin (TBox | TStr); generics } ->
+         (* Nothing to update: just explore the type parameters *)
+         List.fold_left
+-          (fun ty_info ty -> analyze span expl_info ty_info ty)
++          (fun ty_info ty -> analyze span expl_info ~frozen ty_info ty)
+           ty_info generics.types
+     | TAdt { id = TAdtId adt_id; generics } ->
+         (* Lookup the information for this type definition *)
+@@ -512,8 +544,9 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+                     expl_info.under_mut_borrow || param_info.under_mut_borrow;
+                 }
+               in
+-              (* Continue exploring *)
+-              analyze span expl_info ty_info ty)
++              (* Continue exploring (the parameters of the ADT below its shared
++                 borrows count as unfrozen: an over-approximation) *)
++              analyze span expl_info ~frozen ty_info ty)
+             ty_info params_tys
+         in
+         (* For every region parameter: do the same *)
+@@ -533,17 +566,26 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+             ty_info.mut_regions
+             (RegionId.mapi (fun adt_rid r -> (adt_rid, r)) generics.regions)
+         in
+-        (* Return *)
+-        { ty_info with mut_regions }
++        let ty_info = { ty_info with mut_regions } in
++        (* The unfrozen ones *)
++        if frozen then ty_info
++        else
++          List.fold_left
++            (fun ty_info (adt_rid, r) ->
++              if RegionId.Set.mem adt_rid adt_info.unfrozen_mut_regions then
++                add_unfrozen_region ty_info r
++              else ty_info)
++            ty_info
++            (RegionId.mapi (fun adt_rid r -> (adt_rid, r)) generics.regions)
+     | TFnPtr fn_sig ->
+         let { Types.inputs; output; _ } = fn_sig.binder_value in
+         (* Just dive into the arrow *)
+         let ty_info =
+           List.fold_left
+-            (fun ty_info ty -> analyze span expl_info ty_info ty)
++            (fun ty_info ty -> analyze span expl_info ~frozen ty_info ty)
+             ty_info inputs
+         in
+-        analyze span expl_info ty_info output
++        analyze span expl_info ~frozen ty_info output
+     | TFnDef _ ->
+         (* Function items are noncapturing values. Borrows in the instantiated
+            callee signature belong to its arguments/results, not to the item. *)
+@@ -553,7 +595,7 @@ let analyze_full_ty (span : Meta.span option) (updated : bool ref)
+         [%craise_opt_span] span "Found type error in the output of charon"
+   in
+   (* Explore *)
+-  analyze span expl_info_init ty_info ty
++  analyze span expl_info_init ~frozen:false ty_info ty
+ 
+ let type_decl_is_opaque (d : type_decl) : bool =
+   match d.kind with
+diff --git a/src/llbc/TypesUtils.ml b/src/llbc/TypesUtils.ml
+index 318ed54..93c3f68 100644
+--- a/src/llbc/TypesUtils.ml
++++ b/src/llbc/TypesUtils.ml
+@@ -295,7 +295,8 @@ let ty_has_borrow_under_mut span (infos : TypesAnalysis.type_infos) (ty : ty) :
+     region from a given set.
+ 
+     If [frozen_under_shared] is true, we ignore the borrows below a shared
+-    reference (they are frozen). *)
++    reference (they are frozen), including inside ADTs (see
++    [TypesAnalysis.unfrozen_mut_regions]). *)
+ let ty_has_mut_borrow_for_region_in_pred ?(frozen_under_shared = false)
+     (infos : TypesAnalysis.type_infos) (pred : region -> bool) (ty : ty) : bool
+     =
+@@ -328,9 +329,13 @@ let ty_has_mut_borrow_for_region_in_pred ?(frozen_under_shared = false)
+                     ("Missing borrow analysis for the type declaration "
+                     ^ TypeDeclId.to_string adt_id)
+             in
++            let mut_regions =
++              if frozen_under_shared then info.unfrozen_mut_regions
++              else info.mut_regions
++            in
+             RegionId.iteri
+               (fun adt_rid r ->
+-                if RegionId.Set.mem adt_rid info.mut_regions && pred r then
++                if RegionId.Set.mem adt_rid mut_regions && pred r then
+                   raise Found
+                 else ())
+               tref.generics.regions;
+@@ -353,9 +358,10 @@ let ty_has_mut_borrow_for_region_in_pred ?(frozen_under_shared = false)
+     false
+   with Found -> true
+ 
+-let ty_has_mut_borrow_for_region_in_set (infos : TypesAnalysis.type_infos)
+-    (regions : RegionId.Set.t) (ty : ty) : bool =
+-  ty_has_mut_borrow_for_region_in_pred infos
++let ty_has_mut_borrow_for_region_in_set ?(frozen_under_shared = false)
++    (infos : TypesAnalysis.type_infos) (regions : RegionId.Set.t) (ty : ty) :
++    bool =
++  ty_has_mut_borrow_for_region_in_pred ~frozen_under_shared infos
+     (function
+       | RVar (Free rid) -> RegionId.Set.mem rid regions
+       | _ -> false)
+diff --git a/src/pure/PureMicroPassesLoops.ml b/src/pure/PureMicroPassesLoops.ml
+index ad09afe..8c2a1ec 100644
+--- a/src/pure/PureMicroPassesLoops.ml
++++ b/src/pure/PureMicroPassesLoops.ml
+@@ -3256,7 +3256,9 @@ let decompose_loops_aux (ctx : ctx) (def : fun_decl) (body : fun_body) :
+         loop_pos;
+         name = def.name;
+         signature = loop_sig;
+-        is_global_decl_body = def.is_global_decl_body;
++        (* The loop of a global initializer is an ordinary function, exported
++           before the global (see [Translate.export_global]) *)
++        is_global_decl_body = false;
+         body = Some fun_body;
+       }
+     in
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index ce71029..16b5c46 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -1805,10 +1805,14 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+                      regions_hierarchy)
+                     .regions
+               in
++              (* The frozen mutable borrows of the state below shared borrows
++                 give nothing back (see
++                 [SymbolicToPureTypes.back_input_is_frozen]) *)
+               if
+                 not
+                   (TypesUtils.ty_has_mut_borrow_for_region_in_set
+-                     ctx.type_ctx.type_infos regions state_ty)
++                     ~frozen_under_shared:true ctx.type_ctx.type_infos regions
++                     state_ty)
+               then None
+               else (
+                 [%cassert] span
+@@ -2027,7 +2031,7 @@ let adapt_dictionary_method ?through ?(give_back_args = false) span
+                 in
+                 let mentions ty =
+                   TypesUtils.ty_has_mut_borrow_for_region_in_set
+-                    ctx.type_ctx.type_infos regions ty
++                    ~frozen_under_shared:true ctx.type_ctx.type_infos regions ty
+                 in
+                 if not (mentions ty) then None
+                 else
+@@ -2449,7 +2453,8 @@ let closure_state_fun_body (span : Meta.span) (ctx : Contexts.decls_ctx)
+               List.filter
+                 (fun (_, input) ->
+                   TypesUtils.ty_has_mut_borrow_for_region_in_set
+-                    ctx.type_ctx.type_infos regions input)
++                    ~frozen_under_shared:true ctx.type_ctx.type_infos regions
++                    input)
+                 (List.mapi (fun i ty -> (i, ty)) decl.signature.inputs)
+             in
+             match holders with
+diff --git a/src/symbolic/SymbolicToPureTypes.ml b/src/symbolic/SymbolicToPureTypes.ml
+index ec683b6..9f84ab6 100644
+--- a/src/symbolic/SymbolicToPureTypes.ml
++++ b/src/symbolic/SymbolicToPureTypes.ml
+@@ -905,7 +905,9 @@ and back_sig_stage_map (span : Meta.span option) (decls_ctx : C.decls_ctx)
+   let paths = back_ty_paths span decls_ctx get_region_group gid in
+   let positions =
+     List.sort_uniq compare
+-      (List.concat_map (fun ty -> List.map (fun p -> (true, p)) (paths ty)) inputs
++      (List.concat_map
++         (fun ty -> List.map (fun p -> (true, p)) (paths ty))
++         (back_sig_inputs decls_ctx get_region_group gid inputs)
+       @ List.map (fun p -> (false, p)) (paths output))
+   in
+   let depth =
+@@ -1070,6 +1072,39 @@ and back_ty_needs_nested_scheme (span : Meta.span option)
+         || compute_back_ty_num_levels span decls_ctx get_region_group gid ty
+            <> max_level + 1)
+ 
++(** Whether the mutable borrows of the region group [gid] in the type [ty] of an
++    input are all frozen below shared borrows (e.g., [&'a &'n mut T], or
++    [View<'a, 'n>] where [struct View<'a, 'n> { c: &'a Checker<'n> }] and
++    [Checker<'n>] holds a [&'n mut u32], or a closure capturing
++    [&'a Checker<'n>]): the input then gives nothing back to the region group
++    and receives nothing from it. The translation of the shared references
++    already ignores their mutable borrows; the ADTs need the type analysis (see
++    [TypesAnalysis.unfrozen_mut_regions]). The output is not concerned: the
++    backward functions receive the final values of its frozen mutable borrows
++    (see [translate_back_ty_aux]). *)
++and back_input_is_frozen (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (ty : T.ty) : bool =
++  let keep_region (r : T.region) =
++    match r with
++    | T.RVar (Free _) -> get_region_group r = gid
++    | _ -> false
++  in
++  let has_mut ~frozen_under_shared =
++    TypesUtils.ty_has_mut_borrow_for_region_in_pred ~frozen_under_shared
++      decls_ctx.type_ctx.type_infos keep_region ty
++  in
++  has_mut ~frozen_under_shared:false && not (has_mut ~frozen_under_shared:true)
++
++(** The inputs of a signature which count for the region group [gid] (see
++    [back_input_is_frozen]) *)
++and back_sig_inputs (decls_ctx : C.decls_ctx)
++    (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
++    (inputs : T.ty list) : T.ty list =
++  List.filter
++    (fun ty -> not (back_input_is_frozen decls_ctx get_region_group gid ty))
++    inputs
++
+ (** Whether the region group [gid] of a signature is translated with the
+     nested-borrows scheme ([translate_back_nested_ty], possibly staged: see
+     [Pure.back_early_sg]). This is the case if one of the input types needs it
+@@ -1088,7 +1123,7 @@ and back_sig_is_nested (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (inputs : T.ty list) (output : T.ty) : bool =
+   List.exists
+     (back_ty_needs_nested_scheme span decls_ctx get_region_group gid)
+-    inputs
++    (back_sig_inputs decls_ctx get_region_group gid inputs)
+   ||
+   let max_level =
+     back_ty_max_level span decls_ctx get_region_group gid output
+@@ -1123,7 +1158,10 @@ and compute_back_tys_num_levels (span : Meta.span option)
+     then max_level + 1
+     else compute_back_ty_num_levels span decls_ctx get_region_group gid ty
+   in
+-  List.fold_left (fun n ty -> max n (num_levels ty)) (num_levels output) inputs
++  List.fold_left
++    (fun n ty -> max n (num_levels ty))
++    (num_levels output)
++    (back_sig_inputs decls_ctx get_region_group gid inputs)
+ 
+ (** The values of a region abstraction projected from an input of a function
+     are lent at the even levels (the backward function outputs them) and
+@@ -1151,6 +1189,9 @@ and translate_back_output_ty ?(stage : back_stage option) ~(nested : bool)
+     (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+     (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
++  if from_input && back_input_is_frozen decls_ctx get_region_group gid ty then
++    None
++  else
+   let deep =
+     back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+   in
+@@ -1183,6 +1224,9 @@ and translate_back_input_ty ?(stage : back_stage option) ~(nested : bool)
+     (span : Meta.span option) (decls_ctx : C.decls_ctx)
+     (get_region_group : T.region -> T.region_group_id) (gid : T.region_group_id)
+     (level : int) ~(from_input : bool) (ty : T.ty) : ty option =
++  if from_input && back_input_is_frozen decls_ctx get_region_group gid ty then
++    None
++  else
+   let deep =
+     back_ty_is_deeply_nested ~nested span decls_ctx get_region_group gid ty
+   in
+diff --git a/tests/lean/FrozenAdtRegions.lean b/tests/lean/FrozenAdtRegions.lean
+new file mode 100644
+index 0000000..151ecaa
+--- /dev/null
++++ b/tests/lean/FrozenAdtRegions.lean
+@@ -0,0 +1 @@
++import FrozenAdtRegions.Checks
+diff --git a/tests/lean/FrozenAdtRegions/Checks.lean b/tests/lean/FrozenAdtRegions/Checks.lean
+new file mode 100644
+index 0000000..d48c9d3
+--- /dev/null
++++ b/tests/lean/FrozenAdtRegions/Checks.lean
+@@ -0,0 +1,26 @@
++import FrozenAdtRegions.FrozenAdtRegions
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/frozen-adt-regions.rs` on the inputs of
++    its `native` test module and compare with the native results
++    (rustc 1.97.1). The driver calls the `&self` methods whose closures capture
++    `&self` (given to `Option::or_else`, `and_then`, `is_some_and`) and a
++    function taking a struct which holds `&Checker`, writes through the mutable
++    borrow of the checker between the calls (directly and through `&mut self`),
++    and observes the borrowed counter after the checker is gone. -/
++
++namespace frozen_adt_regions.checks
++
++def val8 (r : Result (U32 × U32 × U32 × U32 × U32 × U32 × U32 × U32)) :
++    Option (Nat × Nat × Nat × Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d, e, f, g, h) =>
++      some (a.val, b.val, c.val, d.val, e.val, f.val, g.val, h.val)
++  | _ => none
++
++-- native::drives
++#guard val8 (drive 0#u8) == some (12, 0, 24, 4, 17, 26, 35, 32)
++#guard val8 (drive 1#u8) == some (10, 1, 1000, 4, 16, 25, 32, 31)
++#guard val8 (drive 2#u8) == some (13, 2, 42, 5, 20, 29, 39, 35)
++
++end frozen_adt_regions.checks
+diff --git a/tests/lean/FrozenAdtRegions/FrozenAdtRegions.lean b/tests/lean/FrozenAdtRegions/FrozenAdtRegions.lean
+new file mode 100644
+index 0000000..8fe4e61
+--- /dev/null
++++ b/tests/lean/FrozenAdtRegions/FrozenAdtRegions.lean
+@@ -0,0 +1,374 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [frozen_adt_regions]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace frozen_adt_regions
++
++/-- [frozen_adt_regions::Checker]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 16:0-19:1
++    Visibility: public -/
++structure Checker where
++  native : _root_.Aeneas.Std.U32
++  top : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 28:24-28:69 -/
++@[reducible]
++def Checker.pick.closure := _root_.frozen_adt_regions.Checker
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:19-35:65 -/
++@[reducible]
++def Checker.lookup.closure := _root_.frozen_adt_regions.Checker
++
++/-- [core::option::{core::option::Option<T>}::is_some_and]:
++    Source: '/rustc/library/core/src/option.rs', lines 661:4-661:96
++    Name pattern: [core::option::{core::option::Option<@T>}::is_some_and]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::is_some_and"]
++def core.option.Option.is_some_and
++  {T : Type} {T1 : Type} (opsfunctionFnOnceT1TupleTBoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce T1 T _root_.Bool)
++  (self : _root_.Option T) (f : T1) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok false
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceT1TupleTBoolInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [core::option::{core::option::Option<T>}::map]:
++    Source: '/rustc/library/core/src/option.rs', lines 1160:4-1162:53
++    Name pattern: [core::option::{core::option::Option<@T>}::map]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<@T>}::map"]
++def core.option.Option.map
++  {T : Type} {U : Type} {F : Type} (opsfunctionFnOnceFTupleTUInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F T U) (self : _root_.Option T)
++  (f : F) :
++  _root_.Aeneas.Std.Result (_root_.Option U)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ← opsfunctionFnOnceFTupleTUInst.call_once f x
++    _root_.Aeneas.Std.Result.ok (some model_state)
++
++/-- [core::option::{core::option::Option<T>}::and_then::<T0, T1, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure<0, 1, 2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1541:4-1543:61
++    Name pattern: [core::option::{core::option::Option<@T>}::and_then<@T0, @T1, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure<'0, '1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::and_then<@T0, @T1, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure<'0, '1, '2>>"]
++def
++  core.option.Option.and_thenT0T1closure_specialized_5641de5a2c0135df5dbad53ac9327c0f
++  {T0 : Type} {T1 : Type} (opsfunctionFnOnceclosureTupleT0OptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.lookup.closure T0 (_root_.Option T1))
++  (self : _root_.Option T0)
++  (f : _root_.frozen_adt_regions.Checker.lookup.closure) :
++  _root_.Aeneas.Std.Result (_root_.Option T1)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some x =>
++    let (model_state, _) ←
++      opsfunctionFnOnceclosureTupleT0OptionInst.call_once f x
++    _root_.Aeneas.Std.Result.ok model_state
++
++/-- [core::option::{core::option::Option<T>}::or_else::<T0, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure<0, 1, 2>>]:
++    Source: '/rustc/library/core/src/option.rs', lines 1647:4-1652:28
++    Name pattern: [core::option::{core::option::Option<@T>}::or_else<@T0, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure<'0, '1, '2>>]
++    Visibility: public -/
++@[rust_fun
++  "core::option::{core::option::Option<@T>}::or_else<@T0, frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure<'0, '1, '2>>"]
++def
++  core.option.Option.or_elseT0closure_specialized_052d85de35910b637e41085fc34cfd2a
++  {T0 : Type} (opsfunctionFnOnceclosureTupleOptionInst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.pick.closure _root_.Unit (_root_.Option
++  T0)) (self : _root_.Option T0)
++  (f : _root_.frozen_adt_regions.Checker.pick.closure) :
++  _root_.Aeneas.Std.Result (_root_.Option T0)
++  := do
++  match self with
++  | none =>
++    let (model_state, _) ←
++      opsfunctionFnOnceclosureTupleOptionInst.call_once f ()
++    _root_.Aeneas.Std.Result.ok model_state
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [frozen_adt_regions::View]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 21:0-24:1
++    Visibility: public -/
++structure View where
++  c : _root_.frozen_adt_regions.Checker
++  bias : _root_.Aeneas.Std.U32
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::{core::ops::function::FnOnce<(), core::option::Option<u32>> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure<'n, 1, 2>}::call_once]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 28:24-28:69 -/
++def Checker.pick.closure.Insts.CoreOpsFunctionFnOnceTupleOptionU32.call_once
++  (c : _root_.frozen_adt_regions.Checker.pick.closure) (_ : _root_.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len c.top
++  let i1 ← lift (UScalar.cast .U32 i)
++  let i2 ← c.native + i1
++  _root_.Aeneas.Std.Result.ok (some i2)
++
++/-- Trait implementation: [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::{core::ops::function::FnOnce<(), core::option::Option<u32>> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick::closure<'n, 1, 2>}]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 28:24-28:69 -/
++@[reducible]
++def Checker.pick.closure.Insts.CoreOpsFunctionFnOnceTupleOptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.pick.closure _root_.Unit (_root_.Option
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.frozen_adt_regions.Checker.pick.closure.Insts.CoreOpsFunctionFnOnceTupleOptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::pick]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 27:4-32:5
++    Visibility: public -/
++def Checker.pick
++  (self : _root_.frozen_adt_regions.Checker)
++  (k : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let o ←
++    _root_.frozen_adt_regions.core.option.Option.or_elseT0closure_specialized_052d85de35910b637e41085fc34cfd2a
++      _root_.frozen_adt_regions.Checker.pick.closure.Insts.CoreOpsFunctionFnOnceTupleOptionU32
++      k self
++  match o with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some x => _root_.Aeneas.Std.Result.ok x
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure::closure]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:43-35:64 -/
++@[reducible]
++def Checker.lookup.closure.closure := _root_.Aeneas.Std.U32
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure::{core::ops::function::FnOnce<(&'_ (u32)), u32> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure::closure<'n, 1>}::call_once]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:43-35:64 -/
++def
++  Checker.lookup.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.frozen_adt_regions.Checker.lookup.closure.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  tupled_args + c
++
++/-- Trait implementation: [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure::{core::ops::function::FnOnce<(&'_ (u32)), u32> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure::closure<'n, 1>}]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:43-35:64 -/
++@[reducible]
++def Checker.lookup.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.lookup.closure.closure
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.frozen_adt_regions.Checker.lookup.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::{core::ops::function::FnOnce<(usize), core::option::Option<u32>> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure<'n, 1, 2>}::call_once]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:19-35:65 -/
++def
++  Checker.lookup.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeOptionU32.call_once
++  (c : _root_.frozen_adt_regions.Checker.lookup.closure)
++  (tupled_args : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref c.top
++  let o ←
++    _root_.Aeneas.Std.core.slice.Slice.get
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) s tupled_args
++  _root_.frozen_adt_regions.core.option.Option.map
++    _root_.frozen_adt_regions.Checker.lookup.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++    o c.native
++
++/-- Trait implementation: [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::{core::ops::function::FnOnce<(usize), core::option::Option<u32>> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup::closure<'n, 1, 2>}]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 35:19-35:65 -/
++@[reducible]
++def Checker.lookup.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeOptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.lookup.closure _root_.Aeneas.Std.Usize
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.frozen_adt_regions.Checker.lookup.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeOptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::lookup]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 34:4-36:5
++    Visibility: public -/
++def Checker.lookup
++  (self : _root_.frozen_adt_regions.Checker)
++  (k : _root_.Option _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  _root_.frozen_adt_regions.core.option.Option.and_thenT0T1closure_specialized_5641de5a2c0135df5dbad53ac9327c0f
++    _root_.frozen_adt_regions.Checker.lookup.closure.Insts.CoreOpsFunctionFnOnceTupleUsizeOptionU32
++    k self
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above::closure]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 39:22-39:42 -/
++@[reducible]
++def Checker.above.closure := _root_.Aeneas.Std.U32
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above::{core::ops::function::FnOnce<(u32), bool> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above::closure<'n, 1>}::call_once]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 39:22-39:42 -/
++def Checker.above.closure.Insts.CoreOpsFunctionFnOnceTupleU32Bool.call_once
++  (c : _root_.frozen_adt_regions.Checker.above.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args > c)
++
++/-- Trait implementation: [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above::{core::ops::function::FnOnce<(u32), bool> for frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above::closure<'n, 1>}]
++    Source: 'tests/src/frozen-adt-regions.rs', lines 39:22-39:42 -/
++@[reducible]
++def Checker.above.closure.Insts.CoreOpsFunctionFnOnceTupleU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.frozen_adt_regions.Checker.above.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.frozen_adt_regions.Checker.above.closure.Insts.CoreOpsFunctionFnOnceTupleU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::above]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 38:4-40:5
++    Visibility: public -/
++def Checker.above
++  (self : _root_.frozen_adt_regions.Checker)
++  (k : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.frozen_adt_regions.core.option.Option.is_some_and
++    _root_.frozen_adt_regions.Checker.above.closure.Insts.CoreOpsFunctionFnOnceTupleU32Bool
++    k self.native
++
++/-- [frozen_adt_regions::{frozen_adt_regions::Checker<'n>}::bump]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 42:4-44:5
++    Visibility: public -/
++def Checker.bump
++  (self : _root_.frozen_adt_regions.Checker) (d : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.frozen_adt_regions.Checker ×
++    (_root_.frozen_adt_regions.Checker → _root_.frozen_adt_regions.Checker))
++  := do
++  let i ← self.native + d
++  let back'n :=
++    (fun self1 => { self with native := self1.native } :
++      _root_.frozen_adt_regions.Checker → _root_.frozen_adt_regions.Checker)
++  _root_.Aeneas.Std.Result.ok ({ self with native := i }, back'n)
++
++/-- [frozen_adt_regions::read_view]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 47:0-49:1
++    Visibility: public -/
++def read_view
++  (v : _root_.frozen_adt_regions.View) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len v.c.top
++  let i1 ← lift (UScalar.cast .U32 i)
++  let i2 ← v.c.native + i1
++  i2 + v.bias
++
++/-- [frozen_adt_regions::drive]:
++    Source: 'tests/src/frozen-adt-regions.rs', lines 54:0-79:1
++    Visibility: public -/
++def drive
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let top ←
++    match which with
++    | 0#uscalar =>
++      do
++      let s ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [ 3#u32, 12#u32 ] :
++          _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s)
++    | 1#uscalar =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.vec.Vec.new
++        _root_.Aeneas.Std.U32)
++    | _ =>
++      do
++      let s ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 3#usize [ 11#u32, 30#u32, 5#u32 ] :
++          _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s)
++  let p0 ←
++    _root_.frozen_adt_regions.Checker.pick { native := 10#u32, top } none
++  let i ← lift (UScalar.cast .U32 which)
++  let p1 ←
++    _root_.frozen_adt_regions.Checker.pick { native := 10#u32, top } (some i)
++  let i1 ← 10#u32 + 2#u32
++  let o ←
++    _root_.frozen_adt_regions.Checker.lookup { native := i1, top } (some
++      1#usize)
++  let l0 ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 1000#u32
++    | some x => _root_.Aeneas.Std.Result.ok x
++  let (c, bump_back) ←
++    _root_.frozen_adt_regions.Checker.bump { native := i1, top } 3#u32
++  let i2 ← lift (UScalar.cast .U32 which)
++  let i3 ← 2#u32 * i2
++  let i4 ← 13#u32 + i3
++  let b ← _root_.frozen_adt_regions.Checker.above c (some i4)
++  let i5 ← lift (UScalar.cast_fromBool .U32 b)
++  let b1 ← _root_.frozen_adt_regions.Checker.above c none
++  let i6 ← lift (UScalar.cast_fromBool .U32 b1)
++  let i7 ← 2#u32 * i6
++  let i8 ← i5 + i7
++  let b2 ← _root_.frozen_adt_regions.Checker.above c (some 20#u32)
++  let i9 ← lift (UScalar.cast_fromBool .U32 b2)
++  let i10 ← 4#u32 * i9
++  let a0 ← i8 + i10
++  let i11 ← lift (UScalar.cast .U32 which)
++  let v0 ← _root_.frozen_adt_regions.read_view { c, bias := i11 }
++  let i12 ← c.native + v0
++  let i13 ←
++    _root_.frozen_adt_regions.Checker.pick { c with native := i12 } (some
++      9#u32)
++  let f0 ← v0 + i13
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push c.top f0
++  let p2 ←
++    _root_.frozen_adt_regions.Checker.pick { native := i12, top := v } none
++  let c1 := bump_back { c with native := i12 }
++  _root_.Aeneas.Std.Result.ok (p0, p1, l0, a0, v0, f0, p2, c1.native)
++
++end frozen_adt_regions
+diff --git a/tests/lean/GlobalInitLoop.lean b/tests/lean/GlobalInitLoop.lean
+new file mode 100644
+index 0000000..66203ce
+--- /dev/null
++++ b/tests/lean/GlobalInitLoop.lean
+@@ -0,0 +1 @@
++import GlobalInitLoop.Checks
+diff --git a/tests/lean/GlobalInitLoop/Checks.lean b/tests/lean/GlobalInitLoop/Checks.lean
+new file mode 100644
+index 0000000..db8ffce
+--- /dev/null
++++ b/tests/lean/GlobalInitLoop/Checks.lean
+@@ -0,0 +1,34 @@
++import GlobalInitLoop.GlobalInitLoop
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/global-init-loop.rs` on the inputs of its
++    `native` test module and compare with the native results (rustc 1.97.1).
++    The globals `ALL_STRS` (a `while` loop filling an array of `'static`
++    strings), `PREFIX_LENS` (nested loops) and `SPIN` (a loop which can only
++    diverge) are computed by the functions introduced for their loops. -/
++
++namespace global_init_loop.checks
++
++def val3 (r : Result (Usize × Usize × U32)) : Option (Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c) => some (a.val, b.val, c.val)
++  | _ => none
++
++def str (r : Result Str) : Option String :=
++  match r with
++  | ok s => match s.toString with
++    | ok t => some t
++    | _ => none
++  | _ => none
++
++-- native::drives
++#guard val3 (drive 0#usize) == some (6, 6, 21)
++#guard str (spelling 0#usize) == some "module"
++#guard val3 (drive 1#usize) == some (6, 12, 21)
++#guard str (spelling 1#usize) == some "import"
++#guard val3 (drive 2#usize) == some (3, 15, 21)
++#guard str (spelling 2#usize) == some "def"
++-- Out of bounds: the Rust indexing panics.
++#guard val3 (drive 3#usize) == none
++
++end global_init_loop.checks
+diff --git a/tests/lean/GlobalInitLoop/GlobalInitLoop.lean b/tests/lean/GlobalInitLoop/GlobalInitLoop.lean
+new file mode 100644
+index 0000000..88899f7
+--- /dev/null
++++ b/tests/lean/GlobalInitLoop/GlobalInitLoop.lean
+@@ -0,0 +1,289 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [global_init_loop]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace global_init_loop
++
++/-- [global_init_loop::Tag]
++    Source: 'tests/src/global-init-loop.rs', lines 14:0-18:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Tag where
++| Module : Tag
++| Import : Tag
++| Def : Tag
++
++/-- [global_init_loop::{core::clone::Clone for global_init_loop::Tag}::clone]:
++    Source: 'tests/src/global-init-loop.rs', lines 13:9-13:14
++    Visibility: public -/
++def Tag.Insts.CoreCloneClone.clone
++  (self : _root_.global_init_loop.Tag) :
++  _root_.Aeneas.Std.Result _root_.global_init_loop.Tag
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [global_init_loop::{core::clone::Clone for global_init_loop::Tag}]
++    Source: 'tests/src/global-init-loop.rs', lines 13:9-13:14 -/
++@[reducible]
++def Tag.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.global_init_loop.Tag := {
++  clone := _root_.global_init_loop.Tag.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [global_init_loop::{core::marker::Copy for global_init_loop::Tag}]
++    Source: 'tests/src/global-init-loop.rs', lines 13:16-13:20 -/
++@[reducible]
++def Tag.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.global_init_loop.Tag := {
++  cloneInst := _root_.global_init_loop.Tag.Insts.CoreCloneClone
++}
++
++/-- [global_init_loop::{global_init_loop::Tag}::COUNT]
++    Source: 'tests/src/global-init-loop.rs', lines 21:4-21:31
++    Visibility: public -/
++@[global_simps, irreducible] def Tag.COUNT : _root_.Aeneas.Std.Usize := 3#usize
++
++/-- [global_init_loop::{global_init_loop::Tag}::ALL]
++    Source: 'tests/src/global-init-loop.rs', lines 23:4-23:81
++    Visibility: public -/
++@[global_simps, irreducible]
++def Tag.ALL : _root_.Aeneas.Std.Array _root_.global_init_loop.Tag 3#usize :=
++  _root_.Aeneas.Std.Array.make 3#usize [
++    _root_.global_init_loop.Tag.Module, _root_.global_init_loop.Tag.Import,
++    _root_.global_init_loop.Tag.Def
++    ]
++
++/-- [global_init_loop::{global_init_loop::Tag}::as_str]:
++    Source: 'tests/src/global-init-loop.rs', lines 25:4-31:5
++    Visibility: public -/
++def Tag.as_str
++  (self : _root_.global_init_loop.Tag) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
++  := do
++  match self with
++  | _root_.global_init_loop.Tag.Module =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "module")
++  | _root_.global_init_loop.Tag.Import =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "import")
++  | _root_.global_init_loop.Tag.Def =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.toStr "def")
++
++/-- [global_init_loop::{global_init_loop::Tag}::ALL_STRS]: loop body 0:
++    Source: 'tests/src/global-init-loop.rs', lines 37:8-40:9
++    Visibility: public -/
++@[rust_loop_body]
++def Tag.ALL_STRS_loop.body
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    3#usize))
++  := do
++  if i < _root_.global_init_loop.Tag.COUNT
++  then
++    let t ← Array.index_usize _root_.global_init_loop.Tag.ALL i
++    let s ← _root_.global_init_loop.Tag.as_str t
++    let strs1 ← Array.update strs i s
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (strs1,
++      i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done strs)
++
++/-- [global_init_loop::{global_init_loop::Tag}::ALL_STRS]: loop 0:
++    Source: 'tests/src/global-init-loop.rs', lines 37:8-40:9
++    Visibility: public -/
++@[rust_loop]
++def Tag.ALL_STRS_loop
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    3#usize)
++  := do
++  loop
++    (fun (strs1, i1) => _root_.global_init_loop.Tag.ALL_STRS_loop.body strs1 i1
++      : ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.Str 3#usize) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize)))
++    (strs, i)
++
++/-- [global_init_loop::{global_init_loop::Tag}::ALL_STRS]
++    Source: 'tests/src/global-init-loop.rs', lines 34:4-42:6
++    Visibility: public -/
++@[global_simps, irreducible]
++def Tag.ALL_STRS
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    3#usize)
++  :=
++  let strs := Array.repeat 3#usize (_root_.Aeneas.Std.toStr "")
++  _root_.global_init_loop.Tag.ALL_STRS_loop strs 0#usize
++
++/-- [global_init_loop::{global_init_loop::Tag}::PREFIX_LENS]: loop body 1:
++    Source: 'tests/src/global-init-loop.rs', lines 50:12-53:13
++    Visibility: public -/
++@[rust_loop_body]
++def Tag.PREFIX_LENS_loop0_loop0.body
++  (i : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)
++  (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize
++    3#usize))
++  := do
++  if j <= i
++  then
++    let a ← _root_.global_init_loop.Tag.ALL_STRS
++    let s ← Array.index_usize a j
++    let i1 ← _root_.Aeneas.Std.core.str.Str.len s
++    let i2 ← Array.index_usize out i
++    let i3 ← i2 + i1
++    let out1 ← Array.update out i i3
++    let j1 ← j + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (out1, j1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++
++/-- [global_init_loop::{global_init_loop::Tag}::PREFIX_LENS]: loop 1:
++    Source: 'tests/src/global-init-loop.rs', lines 50:12-53:13
++    Visibility: public -/
++@[rust_loop]
++def Tag.PREFIX_LENS_loop0_loop0
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)
++  (i : _root_.Aeneas.Std.Usize) (j : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize
++    3#usize)
++  := do
++  loop
++    (fun (out1, j1) => _root_.global_init_loop.Tag.PREFIX_LENS_loop0_loop0.body
++       i out1 j1 : ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)
++      × _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.Usize 3#usize) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)))
++    (out, j)
++
++/-- [global_init_loop::{global_init_loop::Tag}::PREFIX_LENS]: loop body 0:
++    Source: 'tests/src/global-init-loop.rs', lines 48:8-55:9
++    Visibility: public -/
++@[rust_loop_body]
++def Tag.PREFIX_LENS_loop0.body
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize
++    3#usize))
++  := do
++  if i < _root_.global_init_loop.Tag.COUNT
++  then
++    let out1 ←
++      _root_.global_init_loop.Tag.PREFIX_LENS_loop0_loop0 out i 0#usize
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (out1, i1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++
++/-- [global_init_loop::{global_init_loop::Tag}::PREFIX_LENS]: loop 0:
++    Source: 'tests/src/global-init-loop.rs', lines 48:8-55:9
++    Visibility: public -/
++@[rust_loop]
++def Tag.PREFIX_LENS_loop0
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize
++    3#usize)
++  := do
++  loop
++    (fun (out1, i1) => _root_.global_init_loop.Tag.PREFIX_LENS_loop0.body out1
++       i1 : ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.Usize 3#usize) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize 3#usize)))
++    (out, i)
++
++/-- [global_init_loop::{global_init_loop::Tag}::PREFIX_LENS]
++    Source: 'tests/src/global-init-loop.rs', lines 45:4-57:6
++    Visibility: public -/
++@[global_simps, irreducible]
++def Tag.PREFIX_LENS
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Usize
++    3#usize)
++  :=
++  let out := Array.repeat 3#usize 0#usize
++  _root_.global_init_loop.Tag.PREFIX_LENS_loop0 out 0#usize
++
++/-- [global_init_loop::{global_init_loop::Tag}::SPIN]: loop body 0:
++    Source: 'tests/src/global-init-loop.rs', lines 63:8-66:9
++    Visibility: public -/
++@[rust_loop_body]
++def Tag.SPIN_loop.body
++  (x : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  if x != 0#u32
++  then
++    let x1 ← lift (core.num.U32.wrapping_sub x 1#u32)
++    let n1 ← lift (core.num.U32.wrapping_add n 3#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (x1, n1))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done n)
++
++/-- [global_init_loop::{global_init_loop::Tag}::SPIN]: loop 0:
++    Source: 'tests/src/global-init-loop.rs', lines 63:8-66:9
++    Visibility: public -/
++@[rust_loop]
++def Tag.SPIN_loop
++  (x : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (x1, n1) => _root_.global_init_loop.Tag.SPIN_loop.body x1 n1 :
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (x, n)
++
++/-- [global_init_loop::{global_init_loop::Tag}::SPIN]
++    Source: 'tests/src/global-init-loop.rs', lines 60:4-68:6
++    Visibility: public -/
++@[global_simps, irreducible]
++def Tag.SPIN : _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32 :=
++  _root_.global_init_loop.Tag.SPIN_loop 7#u32 0#u32
++
++/-- [global_init_loop::spelling]:
++    Source: 'tests/src/global-init-loop.rs', lines 71:0-73:1
++    Visibility: public -/
++def spelling
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Str
++  := do
++  let a ← _root_.global_init_loop.Tag.ALL_STRS
++  Array.index_usize a i
++
++/-- [global_init_loop::drive]:
++    Source: 'tests/src/global-init-loop.rs', lines 75:0-78:1
++    Visibility: public -/
++def drive
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.U32)
++  := do
++  let s ← _root_.global_init_loop.spelling i
++  let i1 ← _root_.Aeneas.Std.core.str.Str.len s
++  let a ← _root_.global_init_loop.Tag.PREFIX_LENS
++  let i2 ← Array.index_usize a i
++  let i3 ← _root_.global_init_loop.Tag.SPIN
++  _root_.Aeneas.Std.Result.ok (i1, i2, i3)
++
++end global_init_loop
+diff --git a/tests/lean/JoinSharedPayloadMutBorrow.lean b/tests/lean/JoinSharedPayloadMutBorrow.lean
+new file mode 100644
+index 0000000..1f7463f
+--- /dev/null
++++ b/tests/lean/JoinSharedPayloadMutBorrow.lean
+@@ -0,0 +1 @@
++import JoinSharedPayloadMutBorrow.Checks
+diff --git a/tests/lean/JoinSharedPayloadMutBorrow/Checks.lean b/tests/lean/JoinSharedPayloadMutBorrow/Checks.lean
+new file mode 100644
+index 0000000..6634dec
+--- /dev/null
++++ b/tests/lean/JoinSharedPayloadMutBorrow/Checks.lean
+@@ -0,0 +1,24 @@
++import JoinSharedPayloadMutBorrow.JoinSharedPayloadMutBorrow
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/join-shared-payload-mut-borrow.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.97.1). The driver queries the checker (joins after `matches!`),
++    writes through its mutable borrow between the queries and after pushing a
++    function, and observes the borrowed counter after the checker is gone. -/
++
++namespace join_shared_payload_mut_borrow.checks
++
++def val5 (r : Result (U32 × U32 × U32 × U32 × U32)) :
++    Option (Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d, e) => some (a.val, b.val, c.val, d.val, e.val)
++  | _ => none
++
++-- native::drives
++#guard val5 (drive 0#u8) == some (1, 0, 0, 1, 4)
++#guard val5 (drive 1#u8) == some (1, 0, 3, 3, 11)
++#guard val5 (drive 2#u8) == some (1, 7, 3, 3, 13)
++#guard val5 (drive 3#u8) == some (1, 7, 3, 3, 15)
++
++end join_shared_payload_mut_borrow.checks
+diff --git a/tests/lean/JoinSharedPayloadMutBorrow/JoinSharedPayloadMutBorrow.lean b/tests/lean/JoinSharedPayloadMutBorrow/JoinSharedPayloadMutBorrow.lean
+new file mode 100644
+index 0000000..b53bab2
+--- /dev/null
++++ b/tests/lean/JoinSharedPayloadMutBorrow/JoinSharedPayloadMutBorrow.lean
+@@ -0,0 +1,346 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_shared_payload_mut_borrow]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_shared_payload_mut_borrow
++
++/-- [join_shared_payload_mut_borrow::Ty]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 13:0-16:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Ty where
++| Ref : _root_.Aeneas.Std.U32 → Ty
++| Int : Ty
++
++/-- [join_shared_payload_mut_borrow::Param]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 18:0-20:1
++    Visibility: public -/
++structure Param where
++  display_type : _root_.join_shared_payload_mut_borrow.Ty
++
++/-- [join_shared_payload_mut_borrow::Meta]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 22:0-24:1
++    Visibility: public -/
++structure Meta where
++  params : _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.join_shared_payload_mut_borrow.Param
++
++/-- [join_shared_payload_mut_borrow::Checker]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 26:0-29:1
++    Visibility: public -/
++structure Checker where
++  native : _root_.Aeneas.Std.U32
++  functions : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.join_shared_payload_mut_borrow.Meta)
++
++/-- [join_shared_payload_mut_borrow::{join_shared_payload_mut_borrow::Checker<'n>}::get]: loop body 0:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 33:8-39:5 -/
++@[rust_loop_body]
++def Checker.get_loop.body
++  (name1 : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.join_shared_payload_mut_borrow.Meta)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.join_shared_payload_mut_borrow.Meta)) (_root_.Option
++    _root_.join_shared_payload_mut_borrow.Meta))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done none)
++  | some p =>
++    let (k, m) := p
++    if k = name1
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (some m))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++
++/-- [join_shared_payload_mut_borrow::{join_shared_payload_mut_borrow::Checker<'n>}::get]: loop 0:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 33:8-39:5 -/
++@[rust_loop]
++def Checker.get_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.join_shared_payload_mut_borrow.Meta)) (name1 : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.join_shared_payload_mut_borrow.Meta)
++  := do
++  loop
++    (fun iter1 => _root_.join_shared_payload_mut_borrow.Checker.get_loop.body
++       name1 iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.join_shared_payload_mut_borrow.Meta) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++      _root_.join_shared_payload_mut_borrow.Meta)) (_root_.Option
++      _root_.join_shared_payload_mut_borrow.Meta)))
++    iter
++
++/-- [join_shared_payload_mut_borrow::{join_shared_payload_mut_borrow::Checker<'n>}::get]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 32:4-39:5 -/
++def Checker.get
++  (self : _root_.join_shared_payload_mut_borrow.Checker)
++  (name1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option
++    _root_.join_shared_payload_mut_borrow.Meta)
++  := do
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref self.functions
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  _root_.join_shared_payload_mut_borrow.Checker.get_loop iter name1
++
++/-- [join_shared_payload_mut_borrow::{join_shared_payload_mut_borrow::Checker<'n>}::arg_is_borrowed]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 41:4-52:5
++    Visibility: public -/
++def Checker.arg_is_borrowed
++  (self : _root_.join_shared_payload_mut_borrow.Checker)
++  (func : _root_.Option _root_.Aeneas.Std.U32) (idx : _root_.Aeneas.Std.Usize)
++  :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let joined ←
++    match func with
++    | none =>
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) : _root_.Sum
++        (_root_.Aeneas.Std.U32 → _root_.Unit) _root_.Bool)
++    | some callee =>
++      do
++      let o ← _root_.join_shared_payload_mut_borrow.Checker.get self callee
++      let joined1 ←
++        match o with
++        | none =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) :
++            _root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit) (_root_.Sum
++            (_root_.Aeneas.Std.U32 → _root_.Unit) _root_.Bool))
++        | some meta1 =>
++          do
++          let s := _root_.Aeneas.Std.alloc.vec.Vec.deref meta1.params
++          let o1 ←
++            _root_.Aeneas.Std.core.slice.Slice.get
++              (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++              _root_.join_shared_payload_mut_borrow.Param) s idx
++          let joined2 ←
++            match o1 with
++            | none =>
++              _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) :
++                _root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit) (_root_.Sum
++                (_root_.Aeneas.Std.U32 → _root_.Unit) (_root_.Sum
++                (_root_.Aeneas.Std.U32 → _root_.Unit) _root_.Bool)))
++            | some param =>
++              do
++              let b ←
++                match param.display_type with
++                | _root_.join_shared_payload_mut_borrow.Ty.Ref _ =>
++                  _root_.Aeneas.Std.Result.ok true
++                | _root_.join_shared_payload_mut_borrow.Ty.Int =>
++                  _root_.Aeneas.Std.Result.ok false
++              if b
++              then
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++                  (_root_.Sum.inr true)) : _root_.Sum (_root_.Aeneas.Std.U32
++                  → _root_.Unit) (_root_.Sum (_root_.Aeneas.Std.U32 →
++                  _root_.Unit) (_root_.Sum (_root_.Aeneas.Std.U32 →
++                  _root_.Unit) _root_.Bool)))
++              else
++                _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) :
++                  _root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit)
++                  (_root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit)
++                  (_root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit)
++                  _root_.Bool)))
++          match joined2 with
++          | _root_.Sum.inl _ =>
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) :
++              _root_.Sum (_root_.Aeneas.Std.U32 → _root_.Unit) (_root_.Sum
++              (_root_.Aeneas.Std.U32 → _root_.Unit) _root_.Bool))
++          | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++      match joined1 with
++      | _root_.Sum.inl _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (fun i => ()) : _root_.Sum
++          (_root_.Aeneas.Std.U32 → _root_.Unit) _root_.Bool)
++      | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++  match joined with
++  | _root_.Sum.inl _ => _root_.Aeneas.Std.Result.ok (self.native > 3#u32)
++  | _root_.Sum.inr exit => _root_.Aeneas.Std.Result.ok exit
++
++/-- [join_shared_payload_mut_borrow::mk_meta::closure]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 56:39-56:76 -/
++@[reducible]
++def mk_meta.closure := _root_.Unit
++
++/-- [join_shared_payload_mut_borrow::mk_meta::{core::ops::function::FnMut<(join_shared_payload_mut_borrow::Ty), join_shared_payload_mut_borrow::Param> for join_shared_payload_mut_borrow::mk_meta::closure}::call_mut]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 56:39-56:76 -/
++def mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam.call_mut
++  (c : _root_.join_shared_payload_mut_borrow.mk_meta.closure)
++  (tupled_args : _root_.join_shared_payload_mut_borrow.Ty) :
++  _root_.Aeneas.Std.Result (_root_.join_shared_payload_mut_borrow.Param ×
++    _root_.join_shared_payload_mut_borrow.mk_meta.closure)
++  := do
++  _root_.Aeneas.Std.Result.ok ({ display_type := tupled_args }, c)
++
++/-- [join_shared_payload_mut_borrow::mk_meta::{core::ops::function::FnOnce<(join_shared_payload_mut_borrow::Ty), join_shared_payload_mut_borrow::Param> for join_shared_payload_mut_borrow::mk_meta::closure}::call_once]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 56:39-56:76 -/
++def mk_meta.closure.Insts.CoreOpsFunctionFnOnceTupleTyParam.call_once
++  (c : _root_.join_shared_payload_mut_borrow.mk_meta.closure)
++  (t : _root_.join_shared_payload_mut_borrow.Ty) :
++  _root_.Aeneas.Std.Result _root_.join_shared_payload_mut_borrow.Param
++  := do
++  let (p, _) ←
++    _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam.call_mut
++      c t
++  _root_.Aeneas.Std.Result.ok p
++
++/-- Trait implementation: [join_shared_payload_mut_borrow::mk_meta::{core::ops::function::FnOnce<(join_shared_payload_mut_borrow::Ty), join_shared_payload_mut_borrow::Param> for join_shared_payload_mut_borrow::mk_meta::closure}]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 56:39-56:76 -/
++@[reducible]
++def mk_meta.closure.Insts.CoreOpsFunctionFnOnceTupleTyParam :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.join_shared_payload_mut_borrow.mk_meta.closure
++  _root_.join_shared_payload_mut_borrow.Ty
++  _root_.join_shared_payload_mut_borrow.Param := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnOnceTupleTyParam.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [join_shared_payload_mut_borrow::mk_meta::{core::ops::function::FnMut<(join_shared_payload_mut_borrow::Ty), join_shared_payload_mut_borrow::Param> for join_shared_payload_mut_borrow::mk_meta::closure}]
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 56:39-56:76 -/
++@[reducible]
++def mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.join_shared_payload_mut_borrow.mk_meta.closure
++  _root_.join_shared_payload_mut_borrow.Ty
++  _root_.join_shared_payload_mut_borrow.Param := {
++  FnOnceInst :=
++    _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnOnceTupleTyParam
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [join_shared_payload_mut_borrow::mk_meta]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 55:0-57:1 -/
++def mk_meta
++  (tys : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.join_shared_payload_mut_borrow.Ty) :
++  _root_.Aeneas.Std.Result _root_.join_shared_payload_mut_borrow.Meta
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter tys
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.join_shared_payload_mut_borrow.Ty)
++      _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam
++      model_state ()
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.join_shared_payload_mut_borrow.Ty)
++      _root_.join_shared_payload_mut_borrow.mk_meta.closure.Insts.CoreOpsFunctionFnMutTupleTyParam)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.join_shared_payload_mut_borrow.Param) model_state1
++  _root_.Aeneas.Std.Result.ok { params := model_state2 }
++
++/-- [join_shared_payload_mut_borrow::drive]:
++    Source: 'tests/src/join-shared-payload-mut-borrow.rs', lines 62:0-76:1
++    Visibility: public -/
++def drive
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let i ← lift (UScalar.cast .U32 which)
++  let ctr ← i * 2#u32
++  let s ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.join_shared_payload_mut_borrow.Ty.Int,
++         _root_.join_shared_payload_mut_borrow.Ty.Ref 3#u32
++         ] : _root_.Aeneas.Std.Array _root_.join_shared_payload_mut_borrow.Ty
++      2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let m ← _root_.join_shared_payload_mut_borrow.mk_meta v
++  let m1 ←
++    _root_.join_shared_payload_mut_borrow.mk_meta
++      (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.join_shared_payload_mut_borrow.Ty)
++  let s1 ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [ (1#u32, m), (2#u32, m1) ] :
++      _root_.Aeneas.Std.Array (_root_.Aeneas.Std.U32 ×
++      _root_.join_shared_payload_mut_borrow.Meta) 2#usize))
++  let functions := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++  let b ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := ctr, functions } (some 1#u32) 1#usize
++  let b0 ← lift (UScalar.cast_fromBool .U32 b)
++  let b1 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := ctr, functions } (some 1#u32) 0#usize
++  let i1 ← lift (UScalar.cast_fromBool .U32 b1)
++  let b2 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := ctr, functions } none 0#usize
++  let i2 ← lift (UScalar.cast_fromBool .U32 b2)
++  let i3 ← 2#u32 * i2
++  let i4 ← i1 + i3
++  let b3 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := ctr, functions } (some 2#u32) 0#usize
++  let i5 ← lift (UScalar.cast_fromBool .U32 b3)
++  let i6 ← 4#u32 * i5
++  let b11 ← i4 + i6
++  let i7 ← ctr + 3#u32
++  let b4 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := i7, functions } (some 1#u32) 0#usize
++  let i8 ← lift (UScalar.cast_fromBool .U32 b4)
++  let b5 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := i7, functions } (some 9#u32) 1#usize
++  let i9 ← lift (UScalar.cast_fromBool .U32 b5)
++  let i10 ← 2#u32 * i9
++  let b21 ← i8 + i10
++  let s2 ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.join_shared_payload_mut_borrow.Ty.Int,
++         _root_.join_shared_payload_mut_borrow.Ty.Ref 0#u32
++         ] : _root_.Aeneas.Std.Array _root_.join_shared_payload_mut_borrow.Ty
++      2#usize))
++  let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s2
++  let m2 ← _root_.join_shared_payload_mut_borrow.mk_meta v1
++  let v2 ← _root_.Aeneas.Std.alloc.vec.Vec.push functions (9#u32, m2)
++  let b6 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := i7, functions := v2 } (some 9#u32) 1#usize
++  let i11 ← lift (UScalar.cast_fromBool .U32 b6)
++  let b7 ←
++    _root_.join_shared_payload_mut_borrow.Checker.arg_is_borrowed
++      { native := i7, functions := v2 } (some 9#u32) 2#usize
++  let i12 ← lift (UScalar.cast_fromBool .U32 b7)
++  let i13 ← 2#u32 * i12
++  let b31 ← i11 + i13
++  let i14 ← b31 + b21
++  let ctr1 ← i7 + i14
++  _root_.Aeneas.Std.Result.ok (b0, b11, b21, b31, ctr1)
++
++end join_shared_payload_mut_borrow
+diff --git a/tests/lean/LoopIndexMutNested.lean b/tests/lean/LoopIndexMutNested.lean
+new file mode 100644
+index 0000000..5b5dec0
+--- /dev/null
++++ b/tests/lean/LoopIndexMutNested.lean
+@@ -0,0 +1 @@
++import LoopIndexMutNested.Checks
+diff --git a/tests/lean/LoopIndexMutNested/Checks.lean b/tests/lean/LoopIndexMutNested/Checks.lean
+new file mode 100644
+index 0000000..bfb89a5
+--- /dev/null
++++ b/tests/lean/LoopIndexMutNested/Checks.lean
+@@ -0,0 +1,27 @@
++import LoopIndexMutNested.LoopIndexMutNested
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/loop-index-mut-nested.rs` on the inputs
++    of its `native` test module and compare with the native results
++    (rustc 1.97.1). The driver fills arrays of references in loops through
++    `index_mut` (a local initialized by `[t; 3]`, an input moved into the
++    loop, an array behind a mutable borrow given back to the caller, and an
++    array of `'static` strings) and observes the arrays after the loops. -/
++
++namespace loop_index_mut_nested.checks
++
++def val9 (r : Result (U32 × U32 × U32 × U32 × U32 × U32 × U32 × Usize × Usize)) :
++    Option (Nat × Nat × Nat × Nat × Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d, e, f, g, h, i) =>
++      some (a.val, b.val, c.val, d.val, e.val, f.val, g.val, h.val, i.val)
++  | _ => none
++
++-- native::drives
++#guard val9 (drive 0#usize) == some (111111, 5, 5, 11, 7, 5, 11, 1, 1)
++#guard val9 (drive 1#usize) == some (111105, 7, 5, 11, 7, 7, 11, 2, 21)
++#guard val9 (drive 2#usize) == some (110505, 7, 7, 11, 7, 7, 7, 3, 321)
++#guard val9 (drive 3#usize) == some (50505, 7, 7, 7, 7, 7, 7, 3, 1321)
++#guard val9 (drive 4#usize) == some (50505, 7, 7, 7, 7, 7, 7, 3, 1321)
++
++end loop_index_mut_nested.checks
+diff --git a/tests/lean/LoopIndexMutNested/LoopIndexMutNested.lean b/tests/lean/LoopIndexMutNested/LoopIndexMutNested.lean
+new file mode 100644
+index 0000000..a6df210
+--- /dev/null
++++ b/tests/lean/LoopIndexMutNested/LoopIndexMutNested.lean
+@@ -0,0 +1,418 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_index_mut_nested]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_index_mut_nested
++
++/-- [loop_index_mut_nested::fill]: loop body 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-23:5
++    Visibility: public -/
++@[rust_loop_body]
++def fill_loop.body
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i < 3#usize
++      then
++        do
++        let strs1 ← Array.update strs i s
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (n, s,
++          strs1, i1)) : _root_.Sum _root_.Unit (_root_.Sum
++          (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.Usize)))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Sum (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.Usize)))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++        (_root_.Sum (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++        (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++        _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++        _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++        3#usize) × _root_.Aeneas.Std.Usize)))
++  match joined with
++  | _root_.Sum.inl () =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done strs)
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (_, _, exit, _)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [loop_index_mut_nested::fill]: loop 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-23:5
++    Visibility: public -/
++@[rust_loop]
++def fill_loop
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize)
++  := do
++  loop
++    (fun (n1, s1, strs1, i1) => _root_.loop_index_mut_nested.fill_loop.body n1
++       s1 strs1 i1 : (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++      3#usize) × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 3#usize)))
++    (n, s, strs, i)
++
++/-- [loop_index_mut_nested::fill]:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 17:0-25:1
++    Visibility: public -/
++def fill
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (t : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize)
++  := do
++  let strs := Array.repeat 3#usize t
++  _root_.loop_index_mut_nested.fill_loop n s strs 0#usize
++
++/-- [loop_index_mut_nested::fill_arr]: loop body 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-32:5
++    Visibility: public -/
++@[rust_loop_body]
++def fill_arr_loop.body
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i < 3#usize
++      then
++        do
++        let strs1 ← Array.update strs i s
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (n, s,
++          strs1, i1)) : _root_.Sum _root_.Unit (_root_.Sum
++          (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.Usize)))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Sum (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++          _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.Usize)))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++        (_root_.Sum (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++        (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++        _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++        _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++        3#usize) × _root_.Aeneas.Std.Usize)))
++  match joined with
++  | _root_.Sum.inl () =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done strs)
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (_, _, exit, _)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [loop_index_mut_nested::fill_arr]: loop 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-32:5
++    Visibility: public -/
++@[rust_loop]
++def fill_arr_loop
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize)
++  := do
++  loop
++    (fun (n1, s1, strs1, i1) => _root_.loop_index_mut_nested.fill_arr_loop.body
++       n1 s1 strs1 i1 : (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++      3#usize) × _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 3#usize)))
++    (n, s, strs, i)
++
++/-- [loop_index_mut_nested::fill_arr]:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 27:0-34:1
++    Visibility: public -/
++@[reducible]
++def fill_arr
++  (n : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.U32)
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++    3#usize)
++  := do
++  _root_.loop_index_mut_nested.fill_arr_loop n s strs 0#usize
++
++/-- [loop_index_mut_nested::fill_mut]: loop body 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-41:5
++    Visibility: public -/
++@[rust_loop_body]
++def fill_mut_loop.body
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (s : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.Usize ×
++    (_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)))
++  := do
++  let joined ←
++    if i < n
++    then
++      if i < 3#usize
++      then
++        do
++        let strs1 ← Array.update strs i s
++        let i1 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (strs1, s,
++          n, i1)) : _root_.Sum _root_.Unit (_root_.Sum
++          ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++          _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Sum ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++          × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++        (_root_.Sum ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) ×
++        _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++        _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.Array
++        _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.U32 ×
++        _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)))
++  match joined with
++  | _root_.Sum.inl () =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (i, strs))
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (exit, _, _, exit1)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (exit1,
++      exit))
++
++/-- [loop_index_mut_nested::fill_mut]: loop 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-41:5
++    Visibility: public -/
++@[rust_loop]
++def fill_mut_loop
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (s : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++    _root_.Aeneas.Std.U32 3#usize))
++  := do
++  loop
++    (fun (strs1, s1, n1, i1) => _root_.loop_index_mut_nested.fill_mut_loop.body
++       strs1 s1 n1 i1 : ((_root_.Aeneas.Std.Array _root_.Aeneas.Std.U32
++      3#usize) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 3#usize) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 3#usize))))
++    (strs, s, n, i)
++
++/-- [loop_index_mut_nested::fill_mut]:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 36:0-43:1
++    Visibility: public -/
++@[reducible]
++def fill_mut
++  (strs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (s : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++    _root_.Aeneas.Std.U32 3#usize))
++  := do
++  _root_.loop_index_mut_nested.fill_mut_loop strs s n 0#usize
++
++/-- [loop_index_mut_nested::NAMES]
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 45:0-45:44 -/
++@[global_simps, irreducible]
++def NAMES : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 3#usize :=
++  _root_.Aeneas.Std.Array.make 3#usize [
++    _root_.Aeneas.Std.toStr "x", _root_.Aeneas.Std.toStr "yy",
++    _root_.Aeneas.Std.toStr "zzz"
++    ]
++
++/-- [loop_index_mut_nested::all_strs]: loop body 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-53:5
++    Visibility: public -/
++@[rust_loop_body]
++def all_strs_loop.body
++  (k : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize)
++  (i : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    4#usize) × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Str)
++    (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize))
++  := do
++  let joined ←
++    if i < 4#usize
++    then
++      if i <= k
++      then
++        do
++        let i1 ← i % 3#usize
++        let s1 ← Array.index_usize _root_.loop_index_mut_nested.NAMES i1
++        let out1 ← Array.update out i s1
++        let i2 ← i + 1#usize
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl (k, out1,
++          i2, s)) : _root_.Sum _root_.Unit (_root_.Sum (_root_.Aeneas.Std.Usize
++          × (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Str)
++          (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.Str 4#usize) × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Str)))
++      else
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++          (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++          _root_.Aeneas.Std.Str 4#usize) × _root_.Aeneas.Std.Usize ×
++          _root_.Aeneas.Std.Str) (_root_.Aeneas.Std.Usize ×
++          (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize) ×
++          _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Str)))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Sum.inl () : _root_.Sum _root_.Unit
++        (_root_.Sum (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++        _root_.Aeneas.Std.Str 4#usize) × _root_.Aeneas.Std.Usize ×
++        _root_.Aeneas.Std.Str) (_root_.Aeneas.Std.Usize ×
++        (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize) ×
++        _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Str)))
++  match joined with
++  | _root_.Sum.inl () =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit,
++      exit1, exit2, exit3))
++  | _root_.Sum.inr (_root_.Sum.inr (_, exit, _, _)) =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done exit)
++
++/-- [loop_index_mut_nested::all_strs]: loop 0:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 1:0-53:5
++    Visibility: public -/
++@[rust_loop]
++def all_strs_loop
++  (k : _root_.Aeneas.Std.Usize)
++  (out : _root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize)
++  (i : _root_.Aeneas.Std.Usize) (s : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    4#usize)
++  := do
++  loop
++    (fun (k1, out1, i1, s1) => _root_.loop_index_mut_nested.all_strs_loop.body
++       k1 out1 i1 s1 : (_root_.Aeneas.Std.Usize × (_root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.Str 4#usize) × _root_.Aeneas.Std.Usize ×
++      _root_.Aeneas.Std.Str) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.Usize ×
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize) ×
++      _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Str)
++      (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str 4#usize)))
++    (k, out, i, s)
++
++/-- [loop_index_mut_nested::all_strs]:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 47:0-55:1
++    Visibility: public -/
++def all_strs
++  (k : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Array _root_.Aeneas.Std.Str
++    4#usize)
++  := do
++  let out := Array.repeat 4#usize (_root_.Aeneas.Std.toStr "")
++  _root_.loop_index_mut_nested.all_strs_loop k out 0#usize
++    (_root_.Aeneas.Std.toStr "")
++
++/-- [loop_index_mut_nested::drive]:
++    Source: 'tests/src/loop-index-mut-nested.rs', lines 57:0-75:1
++    Visibility: public -/
++def drive
++  (n : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.Usize)
++  := do
++  let f ← _root_.loop_index_mut_nested.fill n 5#u32 11#u32
++  let i ← Array.index_usize f 0#usize
++  let i1 ← Array.index_usize f 1#usize
++  let i2 ← 100#u32 * i1
++  let i3 ← i + i2
++  let i4 ← Array.index_usize f 2#usize
++  let i5 ← 10000#u32 * i4
++  let f0 ← i3 + i5
++  let g ←
++    _root_.loop_index_mut_nested.fill_arr n 7#u32
++      (_root_.Aeneas.Std.Array.make 3#usize [ 5#u32, 5#u32, 11#u32 ])
++  let g0 ← Array.index_usize g 0#usize
++  let g1 ← Array.index_usize g 1#usize
++  let g2 ← Array.index_usize g 2#usize
++  let i6 ← n + 1#usize
++  let (k, m) ←
++    _root_.loop_index_mut_nested.fill_mut
++      (_root_.Aeneas.Std.Array.make 3#usize [ 11#u32, 5#u32, 11#u32 ]) 7#u32 i6
++  let m0 ← Array.index_usize m 0#usize
++  let m1 ← Array.index_usize m 1#usize
++  let m2 ← Array.index_usize m 2#usize
++  let strs ← _root_.loop_index_mut_nested.all_strs n
++  let s ← Array.index_usize strs 0#usize
++  let i7 ← _root_.Aeneas.Std.core.str.Str.len s
++  let s1 ← Array.index_usize strs 1#usize
++  let i8 ← _root_.Aeneas.Std.core.str.Str.len s1
++  let i9 ← 10#usize * i8
++  let i10 ← i7 + i9
++  let s2 ← Array.index_usize strs 2#usize
++  let i11 ← _root_.Aeneas.Std.core.str.Str.len s2
++  let i12 ← 100#usize * i11
++  let i13 ← i10 + i12
++  let s3 ← Array.index_usize strs 3#usize
++  let i14 ← _root_.Aeneas.Std.core.str.Str.len s3
++  let i15 ← 1000#usize * i14
++  let l ← i13 + i15
++  _root_.Aeneas.Std.Result.ok (f0, g0, g1, g2, m0, m1, m2, k, l)
++
++end loop_index_mut_nested
+diff --git a/tests/lean/LoopSharedLoanTwoBorrows.lean b/tests/lean/LoopSharedLoanTwoBorrows.lean
+new file mode 100644
+index 0000000..f1f6e4c
+--- /dev/null
++++ b/tests/lean/LoopSharedLoanTwoBorrows.lean
+@@ -0,0 +1 @@
++import LoopSharedLoanTwoBorrows.Checks
+diff --git a/tests/lean/LoopSharedLoanTwoBorrows/Checks.lean b/tests/lean/LoopSharedLoanTwoBorrows/Checks.lean
+new file mode 100644
+index 0000000..c73662d
+--- /dev/null
++++ b/tests/lean/LoopSharedLoanTwoBorrows/Checks.lean
+@@ -0,0 +1,23 @@
++import LoopSharedLoanTwoBorrows.LoopSharedLoanTwoBorrows
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/loop-shared-loan-two-borrows.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.97.1). The driver registers (nested loops over shared loans, early
++    returns through `?`), writes through the counter given back by the first
++    registration, registers again and observes the counter given back. -/
++
++namespace loop_shared_loan_two_borrows.checks
++
++def val4 (r : Result (U32 × U32 × U32 × U32)) : Option (Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d) => some (a.val, b.val, c.val, d.val)
++  | _ => none
++
++-- native::drives
++#guard val4 (drive 0#u8) == some (1703, 0, 501, 114)
++#guard val4 (drive 1#u8) == some (0, 9, 501, 112)
++#guard val4 (drive 2#u8) == some (701, 0, 0, 111)
++#guard val4 (drive 3#u8) == some (0, 0, 1302, 112)
++
++end loop_shared_loan_two_borrows.checks
+diff --git a/tests/lean/LoopSharedLoanTwoBorrows/LoopSharedLoanTwoBorrows.lean b/tests/lean/LoopSharedLoanTwoBorrows/LoopSharedLoanTwoBorrows.lean
+new file mode 100644
+index 0000000..458724c
+--- /dev/null
++++ b/tests/lean/LoopSharedLoanTwoBorrows/LoopSharedLoanTwoBorrows.lean
+@@ -0,0 +1,644 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_shared_loan_two_borrows]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_shared_loan_two_borrows
++
++/-- [loop_shared_loan_two_borrows::Resolver]
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 15:0-18:1
++    Visibility: public -/
++structure Resolver where
++  headers : _root_.Aeneas.Std.U32
++  next : _root_.Aeneas.Std.U32
++
++/-- [loop_shared_loan_two_borrows::Expr]
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 20:0-23:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Expr where
++| Atom : _root_.Aeneas.Std.U32 → Expr
++| Node : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.NestedVec Expr → Expr
++
++/-- [loop_shared_loan_two_borrows::{loop_shared_loan_two_borrows::Resolver<'r>}::resolve]:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 26:4-35:5
++    Visibility: public -/
++def Resolver.resolve
++  (self : _root_.loop_shared_loan_two_borrows.Resolver)
++  (vg : _root_.Aeneas.Std.U32) (e : _root_.loop_shared_loan_two_borrows.Expr) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32)
++  := do
++  match e with
++  | _root_.loop_shared_loan_two_borrows.Expr.Atom a =>
++    let vg1 ← vg + 1#u32
++    let i ← self.next + 1#u32
++    let i1 ← a + self.headers
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i1,
++      { self with next := i }, vg1)
++  | _root_.loop_shared_loan_two_borrows.Expr.Node t _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err t,
++      self, vg)
++
++/-- [loop_shared_loan_two_borrows::register]: loop body 1:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 1:0-56:5
++    Visibility: public -/
++@[rust_loop_body]
++def register_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) (headers : _root_.Aeneas.Std.U32)
++  (vg : _root_.Aeneas.Std.U32)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++  (resolver : _root_.loop_shared_loan_two_borrows.Resolver)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (vchildren : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.loop_shared_loan_two_borrows.Expr)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr) ×
++    _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    _root_.loop_shared_loan_two_borrows.Expr ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inr (headers, vg, children, resolver.headers, resolver.next,
++      n, iter1, (), (), (), (), (), ())))
++  | some field_expr =>
++    let joined ←
++      match field_expr with
++      | _root_.loop_shared_loan_two_borrows.Expr.Atom _ =>
++        _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (field_expr, model_state1)
++          : _root_.Sum (_root_.loop_shared_loan_two_borrows.Expr ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++          (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr) ×
++          _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32
++          × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.loop_shared_loan_two_borrows.Expr) ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr) ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++          _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++          ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++          _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++          _root_.loop_shared_loan_two_borrows.Expr) ×
++          _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32
++          × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++          _root_.loop_shared_loan_two_borrows.Expr) ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr) ×
++          _root_.loop_shared_loan_two_borrows.Expr ×
++          (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++          _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++          (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr) ×
++          _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++          _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++          _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++          _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++          _root_.Unit))))
++      | _root_.loop_shared_loan_two_borrows.Expr.Node i1 f =>
++        let f1 := _root_.Aeneas.Std.NestedVec.toVec f
++        match i1 with
++        | 8#uscalar =>
++          do
++          let e ←
++            _root_.Aeneas.Std.alloc.vec.Vec.index
++              (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++              _root_.loop_shared_loan_two_borrows.Expr) f1 1#usize
++          let (r, resolver1, vg1) ←
++            _root_.loop_shared_loan_two_borrows.Resolver.resolve resolver vg e
++          let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++          match cf with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++            let n1 ← n + val
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inl
++              (headers, vg1, children, resolver1, n1, i, vchildren, iter1,
++              model_state1, (), (), (), ())) : _root_.Sum
++              (_root_.loop_shared_loan_two_borrows.Expr ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++              (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Resolver ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Resolver ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Expr ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit))))
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            let r1 ←
++              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++                _root_.Aeneas.Std.U32) residual
++            _root_.Aeneas.Std.Result.ok (_root_.Sum.inr (_root_.Sum.inr
++              (_root_.Sum.inl (r1, headers, vg1, children, resolver1, n, i,
++              vchildren, iter1, field_expr, model_state1, (), (), (), (), (),
++              ()))) : _root_.Sum (_root_.loop_shared_loan_two_borrows.Expr ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++              (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Resolver ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++              ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++              _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Resolver ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.alloc.vec.Vec
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.loop_shared_loan_two_borrows.Expr ×
++              (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              (_root_.Aeneas.Std.Slice
++              _root_.loop_shared_loan_two_borrows.Expr) ×
++              _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++              _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++              _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++              _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++              _root_.Unit))))
++        | _ =>
++          _root_.Aeneas.Std.Result.ok (_root_.Sum.inl (field_expr,
++            model_state1) : _root_.Sum
++            (_root_.loop_shared_loan_two_borrows.Expr ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++            (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++            × _root_.loop_shared_loan_two_borrows.Resolver ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.loop_shared_loan_two_borrows.Expr) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++            _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Sum
++            ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++            _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++            _root_.loop_shared_loan_two_borrows.Expr) ×
++            _root_.loop_shared_loan_two_borrows.Resolver ×
++            _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.alloc.vec.Vec
++            _root_.loop_shared_loan_two_borrows.Expr) ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr) ×
++            _root_.loop_shared_loan_two_borrows.Expr ×
++            (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++            (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++            × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++            _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++            _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit ×
++            _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++            _root_.Unit))))
++    match joined with
++    | _root_.Sum.inl (field_expr1, iter2) =>
++      let (r, resolver1, vg1) ←
++        _root_.loop_shared_loan_two_borrows.Resolver.resolve resolver vg
++          field_expr1
++      let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++      match cf with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++        let n1 ← n + val
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter2,
++          headers, vg1, children, resolver1, n1, i, vchildren, iter1))
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        let r1 ←
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++            _root_.Aeneas.Std.U32) residual
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Sum.inl (r1, headers, vg1, children, resolver1, n, i,
++          vchildren, iter1, field_expr1, iter2, (), (), (), (), (), ())))
++    | _root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5,
++      exit6, exit7, exit8, (), (), (), ())) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (exit8,
++        exit, exit1, exit2, exit3, exit4, exit5, exit6, exit7))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inl (exit, exit1, exit2,
++      exit3, exit4, exit5, exit6, exit7, exit8, exit9, exit10, (), (), (), (),
++      (), ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inl (exit, exit1, exit2, exit3, exit4, exit5, exit6, exit7,
++        exit8, exit9, exit10, (), (), (), (), (), ())))
++    | _root_.Sum.inr (_root_.Sum.inr (_root_.Sum.inr (exit, exit1, exit2,
++      exit3, exit4, exit5, exit6, (), (), (), (), (), ()))) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (exit, exit1, exit2, exit3, exit4, exit5, exit6, (),
++        (), (), (), (), ())))
++
++/-- [loop_shared_loan_two_borrows::register]: loop 1:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 1:0-56:5
++    Visibility: public -/
++@[rust_loop]
++def register_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) (headers : _root_.Aeneas.Std.U32)
++  (vg : _root_.Aeneas.Std.U32)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++  (resolver : _root_.loop_shared_loan_two_borrows.Resolver)
++  (n : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (vchildren : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.loop_shared_loan_two_borrows.Expr)
++  (iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) :
++  _root_.Aeneas.Std.Result (_root_.Sum ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) ×
++    _root_.loop_shared_loan_two_borrows.Expr ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter2, headers1, vg1, children1, resolver1, n1, i1, vchildren1,
++       iter3) => _root_.loop_shared_loan_two_borrows.register_loop0_loop0.body
++       iter2 headers1 vg1 children1 resolver1 n1 i1 vchildren1 iter3 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr)) (_root_.Sum
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++      × (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr) ×
++      _root_.loop_shared_loan_two_borrows.Resolver × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) ×
++      _root_.loop_shared_loan_two_borrows.Expr ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++      × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))))
++    (iter, headers, vg, children, resolver, n, i, vchildren, iter1)
++
++/-- [loop_shared_loan_two_borrows::register]: loop body 0:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 1:0-58:1
++    Visibility: public -/
++@[rust_loop_body]
++def register_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) (headers : _root_.Aeneas.Std.U32)
++  (vg : _root_.Aeneas.Std.U32)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++  (headers1 : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++    _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    let i1 ← n * 100#u32
++    let i2 ← i1 + i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok i2, vg))
++  | some variant_expr =>
++    match variant_expr with
++    | _root_.loop_shared_loan_two_borrows.Expr.Atom _ =>
++      let i1 ← n * 100#u32
++      let i2 ← i1 + i
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Aeneas.Std.core.result.Result.Ok i2, vg))
++    | _root_.loop_shared_loan_two_borrows.Expr.Node i1 c =>
++      let c1 := _root_.Aeneas.Std.NestedVec.toVec c
++      let (model_state2, _) ←
++        _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter c1
++      let exit ←
++        _root_.loop_shared_loan_two_borrows.register_loop0_loop0 model_state2
++          headers vg children { headers := headers1, next := i } n i1 c1
++          model_state1
++      match exit with
++      | _root_.Sum.inl (r, _, vg1, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r,
++          vg1))
++      | _root_.Sum.inr (headers2, vg1, children1, i2, i3, n1, iter1, _, _, _,
++        _, _, _) =>
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++          headers2, vg1, children1, i2, i3, n1))
++
++/-- [loop_shared_loan_two_borrows::register]: loop 0:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 1:0-58:1
++    Visibility: public -/
++@[rust_loop]
++def register_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_shared_loan_two_borrows.Expr) (headers : _root_.Aeneas.Std.U32)
++  (vg : _root_.Aeneas.Std.U32)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++  (headers1 : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, headers2, vg1, children1, headers3, i1, n1) =>
++       _root_.loop_shared_loan_two_borrows.register_loop0.body iter1 headers2
++       vg1 children1 headers3 i1 n1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.Slice
++      _root_.loop_shared_loan_two_borrows.Expr) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++      ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)))
++    (iter, headers, vg, children, headers1, i, n)
++
++/-- [loop_shared_loan_two_borrows::register]:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 38:0-58:1
++    Visibility: public -/
++def register
++  (headers : _root_.Aeneas.Std.U32) (vg : _root_.Aeneas.Std.U32)
++  (children : _root_.Aeneas.Std.Slice _root_.loop_shared_loan_two_borrows.Expr)
++  :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter
++      children
++  _root_.loop_shared_loan_two_borrows.register_loop0 model_state headers vg
++    children headers 0#u32 0#u32
++
++/-- [loop_shared_loan_two_borrows::field]:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 60:0-62:1 -/
++def field
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.loop_shared_loan_two_borrows.Expr
++  := do
++  let s ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++         _root_.loop_shared_loan_two_borrows.Expr.Atom a,
++         _root_.loop_shared_loan_two_borrows.Expr.Atom b
++         ] : _root_.Aeneas.Std.Array _root_.loop_shared_loan_two_borrows.Expr
++      2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  _root_.Aeneas.Std.Result.ok (_root_.loop_shared_loan_two_borrows.Expr.Node
++    8#u32 (_root_.Aeneas.Std.alloc.vec.Vec.toNested v))
++
++/-- [loop_shared_loan_two_borrows::drive]:
++    Source: 'tests/src/loop-shared-loan-two-borrows.rs', lines 65:0-85:1
++    Visibility: public -/
++def drive
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let children ←
++    match which with
++    | 0#uscalar =>
++      do
++      let e ← _root_.loop_shared_loan_two_borrows.field 0#u32 5#u32
++      let s ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 1#u32, e
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++      let s1 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 1#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 2#u32
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 1#usize))
++      let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++      let s2 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Node 1#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v),
++             _root_.loop_shared_loan_two_borrows.Expr.Node 2#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v1)
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s2)
++    | 1#uscalar =>
++      do
++      let s ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 1#u32,
++             _root_.loop_shared_loan_two_borrows.Expr.Node 9#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested
++             (_root_.Aeneas.Std.alloc.vec.Vec.new
++             _root_.loop_shared_loan_two_borrows.Expr))
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++      let s1 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 1#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 2#u32
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 1#usize))
++      let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++      let s2 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Node 1#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v),
++             _root_.loop_shared_loan_two_borrows.Expr.Node 2#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v1)
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s2)
++    | 2#uscalar =>
++      do
++      let e ← _root_.loop_shared_loan_two_borrows.field 0#u32 4#u32
++      let s ←
++        lift (Std.Array.to_slice (_root_.Aeneas.Std.Array.make 1#usize [ e ] :
++          _root_.Aeneas.Std.Array _root_.loop_shared_loan_two_borrows.Expr
++          1#usize))
++      let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++      let s1 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 1#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 2#u32
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 1#usize))
++      let v1 := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s1
++      let s2 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 3#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Node 1#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v),
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 7#u32,
++             _root_.loop_shared_loan_two_borrows.Expr.Node 2#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v1)
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 3#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s2)
++    | _ =>
++      do
++      let e ← _root_.loop_shared_loan_two_borrows.field 1#u32 1#u32
++      let s ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             e, _root_.loop_shared_loan_two_borrows.Expr.Atom 6#u32
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++      let s1 ←
++        lift (Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 2#usize [
++             _root_.loop_shared_loan_two_borrows.Expr.Atom 0#u32,
++             _root_.loop_shared_loan_two_borrows.Expr.Node 3#u32
++             (_root_.Aeneas.Std.alloc.vec.Vec.toNested v)
++             ] : _root_.Aeneas.Std.Array
++          _root_.loop_shared_loan_two_borrows.Expr 2#usize))
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.alloc.slice.Slice.into_vec
++        s1)
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref children
++  let (r, i) ← _root_.loop_shared_loan_two_borrows.register 3#u32 10#u32 s
++  let (r0, e0) ←
++    match r with
++    | _root_.Aeneas.Std.core.result.Result.Ok r1 =>
++      _root_.Aeneas.Std.Result.ok (r1, 0#u32)
++    | _root_.Aeneas.Std.core.result.Result.Err e =>
++      _root_.Aeneas.Std.Result.ok (0#u32, e)
++  let v ← i + 100#u32
++  let s1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++      _root_.loop_shared_loan_two_borrows.Expr) children { start := 1#usize }
++  let (r1, vg) ← _root_.loop_shared_loan_two_borrows.register 3#u32 v s1
++  match r1 with
++  | _root_.Aeneas.Std.core.result.Result.Ok r2 =>
++    _root_.Aeneas.Std.Result.ok (r0, e0, r2, vg)
++  | _root_.Aeneas.Std.core.result.Result.Err e =>
++    let r11 ← 1000#u32 + e
++    _root_.Aeneas.Std.Result.ok (r0, e0, r11, vg)
++
++end loop_shared_loan_two_borrows
+diff --git a/tests/lean/StaticSharedProjection.lean b/tests/lean/StaticSharedProjection.lean
+new file mode 100644
+index 0000000..920d13d
+--- /dev/null
++++ b/tests/lean/StaticSharedProjection.lean
+@@ -0,0 +1 @@
++import StaticSharedProjection.Checks
+diff --git a/tests/lean/StaticSharedProjection/Checks.lean b/tests/lean/StaticSharedProjection/Checks.lean
+new file mode 100644
+index 0000000..d814039
+--- /dev/null
++++ b/tests/lean/StaticSharedProjection/Checks.lean
+@@ -0,0 +1,25 @@
++import StaticSharedProjection.StaticSharedProjection
++open Aeneas Aeneas.Std Result
++
++/-! Evaluate the model of `tests/src/static-shared-projection.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (rustc 1.97.1). The driver gives shared borrows of slices, arrays and a
++    vector holding `'static` references to generic functions (`len`,
++    indexing, `iter().copied()`, `first()`, a `for` loop), and reads them in
++    a loop which writes through a mutable borrow (observed after the call). -/
++
++namespace static_shared_projection.checks
++
++def val8 (r : Result (Usize × U32 × U32 × Usize × Usize × Usize × Usize × U32)) :
++    Option (Nat × Nat × Nat × Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (a, b, c, d, e, f, g, h) =>
++      some (a.val, b.val, c.val, d.val, e.val, f.val, g.val, h.val)
++  | _ => none
++
++-- native::drives
++#guard val8 (drive 0#u8) == some (3, 13, 11, 2, 2, 6, 3, 31)
++#guard val8 (drive 1#u8) == some (2, 13, 11, 4, 4, 10, 2, 25)
++#guard val8 (drive 2#u8) == some (0, 0, 11, 50, 100, 11, 0, 2)
++
++end static_shared_projection.checks
+diff --git a/tests/lean/StaticSharedProjection/StaticSharedProjection.lean b/tests/lean/StaticSharedProjection/StaticSharedProjection.lean
+new file mode 100644
+index 0000000..9b7b9ac
+--- /dev/null
++++ b/tests/lean/StaticSharedProjection/StaticSharedProjection.lean
+@@ -0,0 +1,338 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [static_shared_projection]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace static_shared_projection
++
++/-- Trait implementation: [core::clone::impls::{core::clone::Clone for &0 (T)}]
++    Source: '/rustc/library/core/src/clone.rs', lines 679:4-679:44
++    Name pattern: [core::clone::Clone<&'0 @T>] -/
++@[reducible, rust_trait_impl "core::clone::Clone<&'0 @T>"]
++def Shared0T.Insts.CoreCloneClone (T : Type) :
++  _root_.Aeneas.Std.core.clone.Clone T := {
++  clone := _root_.Aeneas.Std.core.clone.impls.CloneShared.clone
++}
++
++/-- Trait implementation: [core::marker::{core::marker::Copy for &0 (T)}]
++    Source: '/rustc/library/core/src/marker.rs', lines 491:0-491:33
++    Name pattern: [core::marker::Copy<&'0 @T>] -/
++@[reducible, rust_trait_impl "core::marker::Copy<&'0 @T>"]
++def Shared0T.Insts.CoreMarkerCopy (T : Type) :
++  _root_.Aeneas.Std.core.marker.Copy T := {
++  cloneInst := _root_.static_shared_projection.Shared0T.Insts.CoreCloneClone T
++}
++
++/-- [core::option::{core::option::Option<&0 (T)>}::copied]:
++    Source: '/rustc/library/core/src/option.rs', lines 2119:4-2121:16
++    Name pattern: [core::option::{core::option::Option<&'0 @T>}::copied]
++    Visibility: public -/
++@[rust_fun "core::option::{core::option::Option<&'0 @T>}::copied"]
++def core.option.OptionShared0T.copied
++  {T : Type} (markerCopyInst : _root_.Aeneas.Std.core.marker.Copy T)
++  (self : _root_.Option T) :
++  _root_.Aeneas.Std.Result (_root_.Option T)
++  := do
++  match self with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some _ => _root_.Aeneas.Std.Result.ok self
++
++/-- [static_shared_projection::len_static]:
++    Source: 'tests/src/static-shared-projection.rs', lines 16:0-18:1
++    Visibility: public -/
++def len_static
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.Slice.len xs)
++
++/-- [static_shared_projection::index_static]:
++    Source: 'tests/src/static-shared-projection.rs', lines 20:0-22:1
++    Visibility: public -/
++def index_static
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  Slice.index_usize xs i
++
++/-- [static_shared_projection::index_array]:
++    Source: 'tests/src/static-shared-projection.rs', lines 24:0-26:1
++    Visibility: public -/
++def index_array
++  (xs : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  Array.index_usize xs 1#usize
++
++/-- [static_shared_projection::first_copied]:
++    Source: 'tests/src/static-shared-projection.rs', lines 28:0-30:1
++    Visibility: public -/
++def first_copied
++  (names : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.Str)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter names
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.Str)
++      (_root_.static_shared_projection.Shared0T.Insts.CoreMarkerCopy
++      _root_.Aeneas.Std.Str)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.Str) i
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.adapters.copied.IteratorCopied.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.Str)
++      (_root_.static_shared_projection.Shared0T.Insts.CoreMarkerCopy
++      _root_.Aeneas.Std.Str) c
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [static_shared_projection::first_len]:
++    Source: 'tests/src/static-shared-projection.rs', lines 32:0-37:1
++    Visibility: public -/
++def first_len
++  (names : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let o ← _root_.Aeneas.Std.core.slice.Slice.first names
++  let o1 ←
++    _root_.static_shared_projection.core.option.OptionShared0T.copied
++      (_root_.static_shared_projection.Shared0T.Insts.CoreMarkerCopy
++      _root_.Aeneas.Std.Str) o
++  match o1 with
++  | none => _root_.Aeneas.Std.Result.ok 100#usize
++  | some n => _root_.Aeneas.Std.core.str.Str.len n
++
++/-- [static_shared_projection::sites_loop]: loop body 0:
++    Source: 'tests/src/static-shared-projection.rs', lines 41:4-43:5
++    Visibility: public -/
++@[rust_loop_body]
++def sites_loop_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.Str)) (s : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.Str)) × _root_.Aeneas.Std.Usize)
++    _root_.Aeneas.Std.Usize)
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none => _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done s)
++  | some p =>
++    let (i, s1) := p
++    let i1 ← _root_.Aeneas.Std.core.str.Str.len s1
++    let i2 ← lift (UScalar.cast .Usize i)
++    let i3 ← i1 + i2
++    let s2 ← s + i3
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, s2))
++
++/-- [static_shared_projection::sites_loop]: loop 0:
++    Source: 'tests/src/static-shared-projection.rs', lines 41:4-43:5
++    Visibility: public -/
++@[rust_loop]
++def sites_loop_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.Str)) (s : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  loop
++    (fun (iter1, s1) => _root_.static_shared_projection.sites_loop_loop.body
++       iter1 s1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Str)) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Str)) ×
++      _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.Usize))
++    (iter, s)
++
++/-- [static_shared_projection::sites_loop]:
++    Source: 'tests/src/static-shared-projection.rs', lines 39:0-45:1
++    Visibility: public -/
++def sites_loop
++  (sites : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.Aeneas.Std.Str)) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter sites
++  _root_.static_shared_projection.sites_loop_loop model_state 0#usize
++
++/-- [static_shared_projection::accumulate]: loop body 0:
++    Source: 'tests/src/static-shared-projection.rs', lines 50:4-53:5
++    Visibility: public -/
++@[rust_loop_body]
++def accumulate_loop.body
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  let i1 := _root_.Aeneas.Std.Slice.len xs
++  if i < i1
++  then
++    let i2 ← Slice.index_usize xs i
++    let acc1 ← acc + i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (acc1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++
++/-- [static_shared_projection::accumulate]: loop 0:
++    Source: 'tests/src/static-shared-projection.rs', lines 50:4-53:5
++    Visibility: public -/
++@[rust_loop]
++def accumulate_loop
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (acc1, i1) => _root_.static_shared_projection.accumulate_loop.body xs
++       acc1 i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize)
++      _root_.Aeneas.Std.U32))
++    (acc, i)
++
++/-- [static_shared_projection::accumulate]:
++    Source: 'tests/src/static-shared-projection.rs', lines 48:0-55:1
++    Visibility: public -/
++def accumulate
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (acc : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)
++  := do
++  let acc1 ← _root_.static_shared_projection.accumulate_loop xs acc 0#usize
++  let i := _root_.Aeneas.Std.Slice.len xs
++  _root_.Aeneas.Std.Result.ok (i, acc1)
++
++/-- [static_shared_projection::run]:
++    Source: 'tests/src/static-shared-projection.rs', lines 57:0-79:1 -/
++def run
++  (three : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 3#usize)
++  (nums : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (names : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.Str)
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let s ←
++    lift (Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [
++        (1#u32, _root_.Aeneas.Std.toStr "x"), (2#u32, _root_.Aeneas.Std.toStr
++        "yz")
++        ]))
++  let sites := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let sites1 ←
++    if which > 0#u8
++    then
++      do
++      let i ← lift (UScalar.cast .U32 which)
++      _root_.Aeneas.Std.alloc.vec.Vec.push sites (i, _root_.Aeneas.Std.toStr
++        "uvw")
++    else _root_.Aeneas.Std.Result.ok sites
++  let l ← _root_.static_shared_projection.len_static nums
++  let i0 ←
++    if l > 0#usize
++    then
++      do
++      let i ← l - 1#usize
++      _root_.static_shared_projection.index_static nums i
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  let a1 ← _root_.static_shared_projection.index_array three
++  let o ← _root_.static_shared_projection.first_copied names
++  let f ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok 50#usize
++    | some n => _root_.Aeneas.Std.core.str.Str.len n
++  let fl ← _root_.static_shared_projection.first_len names
++  let s1 ← _root_.static_shared_projection.sites_loop sites1
++  let acc ← lift (UScalar.cast .U32 which)
++  let (n, acc1) ← _root_.static_shared_projection.accumulate nums acc
++  _root_.Aeneas.Std.Result.ok (l, i0, a1, f, fl, s1, n, acc1)
++
++/-- [static_shared_projection::drive]:
++    Source: 'tests/src/static-shared-projection.rs', lines 81:0-91:1
++    Visibility: public -/
++def drive
++  (which : _root_.Aeneas.Std.U8) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32)
++  := do
++  if which = 0#u8
++  then
++    let s ←
++      _root_.Aeneas.Std.core.array.Array.index
++        (_root_.Aeneas.Std.core.ops.index.IndexSlice
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFullSlice
++        _root_.Aeneas.Std.U32))
++        (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ]) ()
++    let s1 ←
++      _root_.Aeneas.Std.core.array.Array.index
++        (_root_.Aeneas.Std.core.ops.index.IndexSlice
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice
++        _root_.Aeneas.Std.Str))
++        (_root_.Aeneas.Std.Array.make 3#usize [
++          _root_.Aeneas.Std.toStr "ab", _root_.Aeneas.Std.toStr "cde",
++          _root_.Aeneas.Std.toStr "fghi"
++          ]) { «end» := 2#usize }
++    _root_.static_shared_projection.run
++      (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ]) s s1
++      which
++  else
++    if which = 1#u8
++    then
++      let s ←
++        _root_.Aeneas.Std.core.array.Array.index
++          (_root_.Aeneas.Std.core.ops.index.IndexSlice
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++          _root_.Aeneas.Std.U32))
++          (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ])
++          { start := 1#usize }
++      let s1 ←
++        _root_.Aeneas.Std.core.array.Array.index
++          (_root_.Aeneas.Std.core.ops.index.IndexSlice
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++          _root_.Aeneas.Std.Str))
++          (_root_.Aeneas.Std.Array.make 3#usize [
++            _root_.Aeneas.Std.toStr "ab", _root_.Aeneas.Std.toStr "cde",
++            _root_.Aeneas.Std.toStr "fghi"
++            ]) { start := 2#usize }
++      _root_.static_shared_projection.run
++        (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ]) s s1
++        which
++    else
++      let s ←
++        _root_.Aeneas.Std.core.array.Array.index
++          (_root_.Aeneas.Std.core.ops.index.IndexSlice
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++          _root_.Aeneas.Std.U32))
++          (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ])
++          { start := 3#usize }
++      let s1 ←
++        _root_.Aeneas.Std.core.array.Array.index
++          (_root_.Aeneas.Std.core.ops.index.IndexSlice
++          (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++          _root_.Aeneas.Std.Str))
++          (_root_.Aeneas.Std.Array.make 3#usize [
++            _root_.Aeneas.Std.toStr "ab", _root_.Aeneas.Std.toStr "cde",
++            _root_.Aeneas.Std.toStr "fghi"
++            ]) { start := 3#usize }
++      _root_.static_shared_projection.run
++        (_root_.Aeneas.Std.Array.make 3#usize [ 7#u32, 11#u32, 13#u32 ]) s s1
++        which
++
++end static_shared_projection
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 59ed695..1092b61 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -93,8 +93,10 @@ package «tests» {}
+ @[default_target] lean_lib FnOnceMutArgMutArg
+ @[default_target] lean_lib FromIterLoopState
+ @[default_target] lean_lib FromTo
++@[default_target] lean_lib FrozenAdtRegions
+ @[default_target] lean_lib FrozenNestedRegion
+ @[default_target] lean_lib GenericIntoIteratorLoop
++@[default_target] lean_lib GlobalInitLoop
+ @[default_target] lean_lib Hashmap
+ @[default_target] lean_lib Into
+ @[default_target] lean_lib IterMutFind
+@@ -125,6 +127,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopFixedPointAbsIds
+ @[default_target] lean_lib LoopJoinBorrows
+ @[default_target] lean_lib LoopHigherRankedClause
++@[default_target] lean_lib LoopIndexMutNested
+ @[default_target] lean_lib LoopJoinClosures
+ @[default_target] lean_lib LoopBreakSharedLocalLoan
+ @[default_target] lean_lib LoopClosureNestedSharedCapture
+@@ -140,9 +143,11 @@ package «tests» {}
+ @[default_target] lean_lib JoinFrozenInputLoan
+ @[default_target] lean_lib JoinDistinctSharedReborrows
+ @[default_target] lean_lib JoinSharedBorrowField
++@[default_target] lean_lib JoinSharedPayloadMutBorrow
+ @[default_target] lean_lib JoinSharedProjGiveBack
+ @[default_target] lean_lib JoinStaticNested
+ @[default_target] lean_lib LoopSharedLoanInJoin
++@[default_target] lean_lib LoopSharedLoanTwoBorrows
+ @[default_target] lean_lib LoopThenCollectJoin
+ @[default_target] lean_lib Loops
+ @[default_target] lean_lib LoopsRec
+@@ -187,6 +192,7 @@ package «tests» {}
+ @[default_target] lean_lib StartFromCanonical
+ @[default_target] lean_lib Static
+ @[default_target] lean_lib StaticRefs
++@[default_target] lean_lib StaticSharedProjection
+ @[default_target] lean_lib StepBy
+ @[default_target] lean_lib StrCharPattern
+ @[default_target] lean_lib StrSplit
+diff --git a/tests/src/frozen-adt-regions.rs b/tests/src/frozen-adt-regions.rs
+new file mode 100644
+index 0000000..4910adb
+--- /dev/null
++++ b/tests/src/frozen-adt-regions.rs
+@@ -0,0 +1,91 @@
++//@ [!lean] skip
++//@ [lean] subdir=FrozenAdtRegions
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Mutable borrows frozen below the shared borrows of an ADT: a closure
++//! capturing `&self` of a context holding a mutable borrow
++//! (`chelis_types::linearity::Checker<'n> { native: &'n mut _, .. }`), given to
++//! the `Option` combinators (`or_else`, `and_then`, `is_some_and`), and a
++//! struct holding a shared borrow of such a context (`View<'a, 'n>`).
++//! The region `'n` of the closure state and of `View` is only used below a
++//! shared borrow: it is frozen, and a value of these types gives nothing back
++//! to it (like `&'a Checker<'n>`), in the signatures and in the bodies.
++//! `FrozenAdtRegions/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub struct Checker<'n> {
++    pub native: &'n mut u32,
++    pub top: Vec<u32>,
++}
++
++pub struct View<'a, 'n> {
++    pub c: &'a Checker<'n>,
++    pub bias: u32,
++}
++
++impl<'n> Checker<'n> {
++    pub fn pick(&self, k: Option<u32>) -> u32 {
++        match k.or_else(|| Some(*self.native + self.top.len() as u32)) {
++            Some(x) => x,
++            None => 0,
++        }
++    }
++
++    pub fn lookup(&self, k: Option<usize>) -> Option<u32> {
++        k.and_then(|i| self.top.get(i).map(|v| *v + *self.native))
++    }
++
++    pub fn above(&self, k: Option<u32>) -> bool {
++        k.is_some_and(|x| x > *self.native)
++    }
++
++    pub fn bump(&mut self, d: u32) {
++        *self.native += d;
++    }
++}
++
++pub fn read_view(v: View<'_, '_>) -> u32 {
++    *v.c.native + v.c.top.len() as u32 + v.bias
++}
++
++/// Calls the closures and `read_view`, writes through the mutable borrow
++/// between the calls (directly and through `&mut self`), and observes the
++/// borrowed counter after the checker is gone.
++pub fn drive(which: u8) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
++    let mut ctr = 10;
++    let top = match which {
++        0 => vec![3, 12],
++        1 => vec![],
++        _ => vec![11, 30, 5],
++    };
++    let mut c = Checker { native: &mut ctr, top };
++    let p0 = c.pick(None);
++    let p1 = c.pick(Some(which as u32));
++    *c.native += 2;
++    let l0 = match c.lookup(Some(1)) {
++        Some(x) => x,
++        None => 1000,
++    };
++    c.bump(3);
++    let a0 = c.above(Some(13 + 2 * which as u32)) as u32
++        + 2 * c.above(None) as u32
++        + 4 * c.above(Some(20)) as u32;
++    let v0 = read_view(View { c: &c, bias: which as u32 });
++    *c.native += v0;
++    let f0 = v0 + c.pick(Some(9));
++    c.top.push(f0);
++    let p2 = c.pick(None);
++    (p0, p1, l0, a0, v0, f0, p2, ctr)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for which in 0u8..3 {
++            println!("{} {:?}", which, drive(which));
++        }
++    }
++}
+diff --git a/tests/src/global-init-loop.rs b/tests/src/global-init-loop.rs
+new file mode 100644
+index 0000000..83bc825
+--- /dev/null
++++ b/tests/src/global-init-loop.rs
+@@ -0,0 +1,96 @@
++//@ [!lean] skip
++//@ [lean] subdir=GlobalInitLoop
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Globals whose initializer contains a loop (the shape of `chelis_deep`'s
++//! `DeepTag::ALL_STRS`: an array of `'static` strings filled by a `while` loop
++//! in a `const` block). The functions introduced for the loops are extracted
++//! before the global, which calls them; the global is fallible even when its
++//! loop can only diverge (`SPIN`).
++//! `GlobalInitLoop/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++#[derive(Clone, Copy)]
++pub enum Tag {
++    Module,
++    Import,
++    Def,
++}
++
++impl Tag {
++    pub const COUNT: usize = 3;
++
++    pub const ALL: [Self; Self::COUNT] = [Self::Module, Self::Import, Self::Def];
++
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Module => "module",
++            Self::Import => "import",
++            Self::Def => "def",
++        }
++    }
++
++    /// The spellings, index-aligned with [`Self::ALL`].
++    pub const ALL_STRS: [&'static str; Self::COUNT] = {
++        let mut strs = [""; Self::COUNT];
++        let mut i = 0;
++        while i < Self::COUNT {
++            strs[i] = Self::ALL[i].as_str();
++            i += 1;
++        }
++        strs
++    };
++
++    /// Nested loops: the sums of the prefixes of the spelling lengths.
++    pub const PREFIX_LENS: [usize; Self::COUNT] = {
++        let mut out = [0; Self::COUNT];
++        let mut i = 0;
++        while i < Self::COUNT {
++            let mut j = 0;
++            while j <= i {
++                out[i] += Self::ALL_STRS[j].len();
++                j += 1;
++            }
++            i += 1;
++        }
++        out
++    };
++
++    /// A loop which can not fail (it can only diverge).
++    pub const SPIN: u32 = {
++        let mut x: u32 = 7;
++        let mut n: u32 = 0;
++        while x != 0 {
++            x = x.wrapping_sub(1);
++            n = n.wrapping_add(3);
++        }
++        n
++    };
++}
++
++pub fn spelling(i: usize) -> &'static str {
++    Tag::ALL_STRS[i]
++}
++
++pub fn drive(i: usize) -> (usize, usize, u32) {
++    let s = spelling(i);
++    (s.len(), Tag::PREFIX_LENS[i], Tag::SPIN)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for i in 0usize..3 {
++            println!("{} {:?} {:?}", i, drive(i), spelling(i));
++        }
++    }
++
++    #[test]
++    #[should_panic]
++    fn out_of_bounds() {
++        drive(3);
++    }
++}
+diff --git a/tests/src/join-shared-payload-mut-borrow.rs b/tests/src/join-shared-payload-mut-borrow.rs
+new file mode 100644
+index 0000000..9b7c5c5
+--- /dev/null
++++ b/tests/src/join-shared-payload-mut-borrow.rs
+@@ -0,0 +1,88 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinSharedPayloadMutBorrow
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A join after `matches!` in a `&self` method of a struct holding a mutable
++//! borrow (chelis_types::linearity::Checker<'n>::arg_is_borrowed): the joined
++//! abstractions hold the shared payload of `&self`, whose field `native` is a
++//! mutable borrow. Marking the payload for the join must accept it: it is only
++//! read through the loan, and its loan is in another abstraction.
++//! `JoinSharedPayloadMutBorrow/Checks.lean` evaluates the model on the inputs
++//! of the `native` test module below and compares with the native results.
++
++pub enum Ty {
++    Ref(u32),
++    Int,
++}
++
++pub struct Param {
++    pub display_type: Ty,
++}
++
++pub struct Meta {
++    pub params: Vec<Param>,
++}
++
++pub struct Checker<'n> {
++    pub native: &'n mut u32,
++    pub functions: Vec<(u32, Meta)>,
++}
++
++impl<'n> Checker<'n> {
++    fn get(&self, name: u32) -> Option<&Meta> {
++        for (k, m) in self.functions.iter() {
++            if *k == name {
++                return Some(m);
++            }
++        }
++        None
++    }
++
++    pub fn arg_is_borrowed(&self, func: Option<u32>, idx: usize) -> bool {
++        if let Some(callee) = func {
++            if let Some(meta) = self.get(callee) {
++                if let Some(param) = meta.params.get(idx) {
++                    if matches!(param.display_type, Ty::Ref(_)) {
++                        return true;
++                    }
++                }
++            }
++        }
++        *self.native > 3
++    }
++}
++
++fn mk_meta(tys: Vec<Ty>) -> Meta {
++    Meta { params: tys.into_iter().map(|display_type| Param { display_type }).collect() }
++}
++
++/// Queries the checker, writes through its mutable borrow between the queries
++/// and after pushing a function, and observes the borrowed counter after the
++/// checker is gone.
++pub fn drive(which: u8) -> (u32, u32, u32, u32, u32) {
++    let mut ctr = which as u32 * 2;
++    let functions = vec![(1, mk_meta(vec![Ty::Int, Ty::Ref(3)])), (2, mk_meta(vec![]))];
++    let mut c = Checker { native: &mut ctr, functions };
++    let b0 = c.arg_is_borrowed(Some(1), 1) as u32;
++    let b1 = c.arg_is_borrowed(Some(1), 0) as u32
++        + 2 * c.arg_is_borrowed(None, 0) as u32
++        + 4 * c.arg_is_borrowed(Some(2), 0) as u32;
++    *c.native += 3;
++    let b2 = c.arg_is_borrowed(Some(1), 0) as u32 + 2 * c.arg_is_borrowed(Some(9), 1) as u32;
++    c.functions.push((9, mk_meta(vec![Ty::Int, Ty::Ref(0)])));
++    let b3 = c.arg_is_borrowed(Some(9), 1) as u32 + 2 * c.arg_is_borrowed(Some(9), 2) as u32;
++    *c.native += b3 + b2;
++    (b0, b1, b2, b3, ctr)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for which in 0u8..4 {
++            println!("{} {:?}", which, drive(which));
++        }
++    }
++}
+diff --git a/tests/src/loop-index-mut-nested.rs b/tests/src/loop-index-mut-nested.rs
+new file mode 100644
+index 0000000..6baaac7
+--- /dev/null
++++ b/tests/src/loop-index-mut-nested.rs
+@@ -0,0 +1,87 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopIndexMutNested
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop writing a reference into an array of references through
++//! `index_mut` (`strs[i] = s`, the shape of `chelis_deep`'s `ALL_STRS`
++//! initialization): the borrow returned by `index_mut` (`&'3 mut &'4 u32`) is
++//! dead at the `continue`, but still keeps the abstractions of the call alive,
++//! whose abstraction of `'4` holds the pending loans of the array given back.
++//! Dropping the dead borrow at the `continue` gives the array back (with the
++//! new reference) before the loop join. The array is a local initialized by a
++//! call, an input moved into the loop, or behind a mutable borrow given back
++//! to the caller.
++//! `LoopIndexMutNested/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module below and compares with the native results.
++
++pub fn fill<'a>(n: usize, s: &'a u32, t: &'a u32) -> [&'a u32; 3] {
++    let mut strs = [t; 3];
++    let mut i = 0;
++    while i < n && i < 3 {
++        strs[i] = s;
++        i += 1;
++    }
++    strs
++}
++
++pub fn fill_arr<'a>(n: usize, s: &'a u32, mut strs: [&'a u32; 3]) -> [&'a u32; 3] {
++    let mut i = 0;
++    while i < n && i < 3 {
++        strs[i] = s;
++        i += 1;
++    }
++    strs
++}
++
++pub fn fill_mut<'a>(strs: &mut [&'a u32; 3], s: &'a u32, n: usize) -> usize {
++    let mut i = 0;
++    while i < n && i < 3 {
++        strs[i] = s;
++        i += 1;
++    }
++    i
++}
++
++const NAMES: [&str; 3] = ["x", "yy", "zzz"];
++
++pub fn all_strs(k: usize) -> [&'static str; 4] {
++    let mut out = [""; 4];
++    let mut i = 0;
++    while i < 4 && i <= k {
++        out[i] = NAMES[i % 3];
++        i += 1;
++    }
++    out
++}
++
++pub fn drive(n: usize) -> (u32, u32, u32, u32, u32, u32, u32, usize, usize) {
++    let a = 5;
++    let b = 7;
++    let c = 11;
++    let f = fill(n, &a, &c);
++    let f0 = *f[0] + 100 * *f[1] + 10000 * *f[2];
++    let g = fill_arr(n, &b, [&a, &a, &c]);
++    let g0 = *g[0];
++    let g1 = *g[1];
++    let g2 = *g[2];
++    let mut m = [&c, &a, &c];
++    let k = fill_mut(&mut m, &b, n + 1);
++    let m0 = *m[0];
++    let m1 = *m[1];
++    let m2 = *m[2];
++    let strs = all_strs(n);
++    let l = strs[0].len() + 10 * strs[1].len() + 100 * strs[2].len() + 1000 * strs[3].len();
++    (f0, g0, g1, g2, m0, m1, m2, k, l)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for n in 0usize..5 {
++            println!("{} {:?}", n, drive(n));
++        }
++    }
++}
+diff --git a/tests/src/loop-shared-loan-two-borrows.rs b/tests/src/loop-shared-loan-two-borrows.rs
+new file mode 100644
+index 0000000..57aea22
+--- /dev/null
++++ b/tests/src/loop-shared-loan-two-borrows.rs
+@@ -0,0 +1,97 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopSharedLoanTwoBorrows
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop whose continue context holds a shared loan borrowed by two locals
++//! (chelis_types::adt::AdtRegistry::register_deftype: `for field_expr in
++//! vchildren` binds the `Option<&Expr>` of `next` and `field_expr` to the same
++//! loan), with an early return (`?`) through a resolver holding a shared
++//! reference. Joining the fixed point with a continue context pairs the two
++//! borrows of the loan with the two borrows of the other context's loan: they
++//! must borrow one joined loan, not two.
++//! `LoopSharedLoanTwoBorrows/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++pub struct Resolver<'r> {
++    pub headers: &'r u32,
++    pub next: u32,
++}
++
++pub enum Expr {
++    Atom(u32),
++    Node(u32, Vec<Expr>),
++}
++
++impl<'r> Resolver<'r> {
++    pub fn resolve(&mut self, vg: &mut u32, e: &Expr) -> Result<u32, u32> {
++        match e {
++            Expr::Atom(a) => {
++                *vg += 1;
++                self.next += 1;
++                Ok(*a + *self.headers)
++            }
++            Expr::Node(t, _) => Err(*t),
++        }
++    }
++}
++
++pub fn register(headers: &u32, vg: &mut u32, children: &[Expr]) -> Result<u32, u32> {
++    let mut resolver = Resolver { headers, next: 0 };
++    let mut n = 0;
++    for variant_expr in children {
++        let vchildren = match variant_expr {
++            Expr::Node(_, c) => c,
++            Expr::Atom(_) => break,
++        };
++        for field_expr in vchildren {
++            match field_expr {
++                Expr::Node(8, f) => {
++                    n += resolver.resolve(vg, &f[1])?;
++                }
++                _ => {
++                    n += resolver.resolve(vg, field_expr)?;
++                }
++            }
++        }
++    }
++    Ok(n * 100 + resolver.next)
++}
++
++fn field(a: u32, b: u32) -> Expr {
++    Expr::Node(8, vec![Expr::Atom(a), Expr::Atom(b)])
++}
++
++/// Registers, writes through the counter given back, registers again.
++pub fn drive(which: u8) -> (u32, u32, u32, u32) {
++    let headers = 3;
++    let mut vg = 10;
++    let children = match which {
++        0 => vec![Expr::Node(1, vec![Expr::Atom(1), field(0, 5)]), Expr::Node(2, vec![Expr::Atom(2)])],
++        1 => vec![Expr::Node(1, vec![Expr::Atom(1), Expr::Node(9, vec![])]), Expr::Node(2, vec![Expr::Atom(2)])],
++        2 => vec![Expr::Node(1, vec![field(0, 4)]), Expr::Atom(7), Expr::Node(2, vec![Expr::Atom(2)])],
++        _ => vec![Expr::Atom(0), Expr::Node(3, vec![field(1, 1), Expr::Atom(6)])],
++    };
++    let (r0, e0) = match register(&headers, &mut vg, &children) {
++        Ok(r) => (r, 0),
++        Err(e) => (0, e),
++    };
++    let v = &mut vg;
++    *v += 100;
++    let r1 = match register(&headers, &mut vg, &children[1..]) {
++        Ok(r) => r,
++        Err(e) => 1000 + e,
++    };
++    (r0, e0, r1, vg)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for which in 0u8..4 {
++            println!("{} {:?}", which, drive(which));
++        }
++    }
++}
+diff --git a/tests/src/static-shared-projection.rs b/tests/src/static-shared-projection.rs
+new file mode 100644
+index 0000000..a9ce14d
+--- /dev/null
++++ b/tests/src/static-shared-projection.rs
+@@ -0,0 +1,103 @@
++//@ [!lean] skip
++//@ [lean] subdir=StaticSharedProjection
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Shared borrows of values holding `'static` references given to generic
++//! functions (`<[T]>::len`, indexing, `iter().copied()`, `first()`, a `for`
++//! loop over `&Vec<(u32, &'static str)>`: the production shapes of
++//! `chelis_types::deep_type::nearest_dtype` and `sites_loop`). The generic
++//! parameter is instantiated with a fresh region (`T = &'2 u32`), and the call
++//! abstraction projects the shared payload over positions which are `'static`
++//! in the value: the static borrows have no lender, and the abstraction holds
++//! none of them.
++//! `StaticSharedProjection/Checks.lean` evaluates the model on the inputs of
++//! the `native` test module below and compares with the native results.
++
++pub fn len_static(xs: &[&'static u32]) -> usize {
++    xs.len()
++}
++
++pub fn index_static(xs: &[&'static u32], i: usize) -> &'static u32 {
++    xs[i]
++}
++
++pub fn index_array(xs: &[&'static u32; 3]) -> &'static u32 {
++    xs[1]
++}
++
++pub fn first_copied(names: &[&'static str]) -> Option<&'static str> {
++    names.iter().copied().next()
++}
++
++pub fn first_len(names: &[&'static str]) -> usize {
++    match names.first().copied() {
++        Some(n) => n.len(),
++        None => 100,
++    }
++}
++
++pub fn sites_loop(sites: &Vec<(u32, &'static str)>) -> usize {
++    let mut s = 0;
++    for claim in sites {
++        s += claim.1.len() + claim.0 as usize;
++    }
++    s
++}
++
++/// Reads the slice of static references and writes through a mutable borrow.
++pub fn accumulate(xs: &[&'static u32], acc: &mut u32) -> usize {
++    let mut i = 0;
++    while i < xs.len() {
++        *acc += *xs[i];
++        i += 1;
++    }
++    xs.len()
++}
++
++fn run(
++    three: &[&'static u32; 3],
++    nums: &[&'static u32],
++    names: &[&'static str],
++    which: u8,
++) -> (usize, u32, u32, usize, usize, usize, usize, u32) {
++    let mut sites = vec![(1, "x"), (2, "yz")];
++    if which > 0 {
++        sites.push((which as u32, "uvw"));
++    }
++    let l = len_static(nums);
++    let i0 = if l > 0 { *index_static(nums, l - 1) } else { 0 };
++    let a1 = *index_array(three);
++    let f = match first_copied(names) {
++        Some(n) => n.len(),
++        None => 50,
++    };
++    let fl = first_len(names);
++    let s = sites_loop(&sites);
++    let mut acc = which as u32;
++    let n = accumulate(nums, &mut acc);
++    (l, i0, a1, f, fl, s, n, acc)
++}
++
++pub fn drive(which: u8) -> (usize, u32, u32, usize, usize, usize, usize, u32) {
++    let three: [&'static u32; 3] = [&7, &11, &13];
++    let all_names: [&'static str; 3] = ["ab", "cde", "fghi"];
++    if which == 0 {
++        run(&three, &three[..], &all_names[..2], which)
++    } else if which == 1 {
++        run(&three, &three[1..], &all_names[2..], which)
++    } else {
++        run(&three, &three[3..], &all_names[3..], which)
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for which in 0u8..3 {
++            println!("{} {:?}", which, drive(which));
++        }
++    }
++}

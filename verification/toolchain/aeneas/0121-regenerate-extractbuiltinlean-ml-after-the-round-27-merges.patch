@@ -1,0 +1,76 @@
+# aeneas integration step 121 after cba11f3beb: commit f44d2e41aaa47eff61d472125fe97e5dfdd4cabd
+# first parent 35a58a66058893b81c76edf606a6bf612f608656
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Regenerate ExtractBuiltinLean.ml after the round-27 merges
+
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 2a63253..eb2330d 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -98,7 +98,7 @@ let lean_builtin_types = [
+   mk_type "core::iter::adapters::zip::Zip" "_root_.Aeneas.Std.core.iter.adapters.zip.Zip" ~state_merge:(Some ("Aeneas.Std.core.iter.adapters.zip.Zip.recombine", [0; 1]));
+   (* file: "Aeneas/Std/IteratorSources.lean", line: 282 *)
+   mk_type "core::iter::sources::once::Once" "_root_.Aeneas.Std.core.iter.sources.once.Once";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 51 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 90 *)
+   mk_type "core::mem::Discriminant" "_root_.Aeneas.Std.core.mem.Discriminant" ~kind:(KStruct [("value", Some "value"); ("bits", Some "bits")]);
+   (* file: "Aeneas/Std/Parse.lean", line: 161 *)
+   mk_type "core::num::dec2flt::FloatErrorKind" "_root_.Aeneas.Std.core.num.dec2flt.FloatErrorKind" ~kind:(KEnum [("Empty", Some "Empty"); ("Invalid", Some "Invalid")]);
+@@ -1050,7 +1050,7 @@ let lean_builtin_funs = [
+   mk_fun "core::hint::must_use" "_root_.Aeneas.Std.core.hint.must_use" ~can_fail:false;
+   (* file: "Aeneas/Std/Core/Core.lean", line: 92 *)
+   mk_fun "core::hint::unreachable_unchecked::precondition_check" "_root_.Aeneas.Std.core.hint.unreachable_unchecked.precondition_check";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 35 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 74 *)
+   mk_fun "core::intrinsics::discriminant_value" "_root_.Aeneas.Std.core.intrinsics.discriminant_value";
+   (* file: "Aeneas/Std/IteratorCombinators.lean", line: 140 *)
+   mk_fun "core::iter::adapters::chain::{core::iter::traits::iterator::Iterator<core::iter::adapters::chain::Chain<@A, @B>, @Clause0_Item>}::advance_by" "_root_.Aeneas.Std.core.iter.adapters.chain.IteratorChain.advance_by";
+@@ -1454,7 +1454,7 @@ let lean_builtin_funs = [
+   mk_fun "core::iter::traits::iterator::{core::iter::traits::iterator::Iterator<&'a mut @I, @Item>}::size_hint" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut.size_hint";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 441 *)
+   mk_fun "core::iter::traits::iterator::{core::iter::traits::iterator::Iterator<&'a mut @I, @Item>}::try_fold" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut.try_fold";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 61 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 100 *)
+   mk_fun "core::mem::discriminant" "_root_.Aeneas.Std.core.mem.discriminant";
+   (* file: "Aeneas/Std/Core/Core.lean", line: 162 *)
+   mk_fun "core::mem::replace" "_root_.Aeneas.Std.core.mem.replace" ~can_fail:false ~lift:false;
+@@ -1462,9 +1462,9 @@ let lean_builtin_funs = [
+   mk_fun "core::mem::swap" "_root_.Aeneas.Std.core.mem.swap" ~can_fail:false ~lift:false;
+   (* file: "Aeneas/Std/Core/Default.lean", line: 34 *)
+   mk_fun "core::mem::take" "_root_.Aeneas.Std.core.mem.take";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 68 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 107 *)
+   mk_fun "core::mem::{core::cmp::PartialEq<core::mem::Discriminant<@T>, core::mem::Discriminant<@T>>}::eq" "_root_.Aeneas.Std.core.mem.PartialEqDiscriminant.eq";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 80 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 119 *)
+   mk_fun "core::mem::{core::fmt::Debug<core::mem::Discriminant<@T>>}::fmt" "_root_.Aeneas.Std.core.mem.DebugDiscriminant.fmt";
+   (* file: "Aeneas/Std/Parse.lean", line: 302 *)
+   mk_fun "core::num::dec2flt::{core::fmt::Debug<core::num::dec2flt::ParseFloatError>}::fmt" "_root_.Aeneas.Std.core.num.dec2flt.DebugParseFloatError.fmt";
+@@ -2271,7 +2271,7 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "core::iter::traits::iterator::Iterator" "_root_.Aeneas.Std.core.iter.traits.iterator.Iterator" ~methods:[("next", "next"); ("fold", "fold"); ("try_fold", "try_fold"); ("advance_by", "advance_by"); ("nth", "nth"); ("size_hint", "size_hint"); ("step_by", "step_by"); ("enumerate", "enumerate"); ("take", "take"); ("filter_map", "filter_map"); ("count", "count"); ("any", "any"); ("all", "all"); ("find", "find"); ("find_map", "find_map"); ("position", "position")] ~default_methods:["step_by"; "enumerate"; "take"; "filter_map"; "count"; "any"; "all"; "find"; "find_map"; "position"; "advance_by"; "nth"; "fold"; "try_fold"; "size_hint"] ~default_only_methods:["collect"];
+   (* file: "Aeneas/Std/Core/Core.lean", line: 137 *)
+   mk_trait_decl "core::marker::Copy" "_root_.Aeneas.Std.core.marker.Copy" ~parent_clauses:["cloneInst"];
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 17 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 56 *)
+   mk_trait_decl "core::marker::DiscriminantKind" "_root_.Aeneas.Std.DiscriminantKind" ~parent_clauses:["cloneInst"; "copyInst"; "debugInst"; "partialEqInst"; "eqInst"; "hashInst"] ~types:[("Discriminant", "Discriminant")];
+   (* file: "Aeneas/Std/Core/Marker.lean", line: 8 *)
+   mk_trait_decl "core::marker::Freeze" "_root_.Aeneas.Std.core.marker.Freeze";
+@@ -2506,7 +2506,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<bool, bool>" "_root_.Aeneas.Std.core.cmp.PartialEqBool";
+   (* file: "Aeneas/Std/Core/Cmp.lean", line: 232 *)
+   mk_trait_impl "core::cmp::PartialEq<char, char>" "_root_.Aeneas.Std.core.cmp.PartialEqChar";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 72 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 111 *)
+   mk_trait_impl "core::cmp::PartialEq<core::mem::Discriminant<@T>, core::mem::Discriminant<@T>>" "_root_.Aeneas.Std.core.mem.PartialEqDiscriminant";
+   (* file: "Aeneas/Std/Float.lean", line: 424 *)
+   mk_trait_impl "core::cmp::PartialEq<f32, f32>" "_root_.Aeneas.Std.core.cmp.PartialEqF32";
+@@ -2638,7 +2638,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<bool>" "_root_.Aeneas.Std.core.fmt.DebugBool";
+   (* file: "Aeneas/Std/Array/ArraySlice.lean", line: 169 *)
+   mk_trait_impl "core::fmt::Debug<core::array::TryFromSliceError>" "_root_.Aeneas.Std.core.fmt.DebugTryFromSliceError";
+-  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 86 *)
++  (* file: "Aeneas/Std/Core/Discriminant.lean", line: 125 *)
+   mk_trait_impl "core::fmt::Debug<core::mem::Discriminant<@T>>" "_root_.Aeneas.Std.core.mem.DebugDiscriminant";
+   (* file: "Aeneas/Std/Parse.lean", line: 307 *)
+   mk_trait_impl "core::fmt::Debug<core::num::dec2flt::ParseFloatError>" "_root_.Aeneas.Std.core.fmt.DebugParseFloatError";

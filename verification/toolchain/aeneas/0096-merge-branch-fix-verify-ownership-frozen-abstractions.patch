@@ -1,0 +1,1583 @@
+# aeneas integration step 96 after cba11f3beb: commit 1e0e73eb35e6388717a454520643b1cbda656660
+# first parent 11c70c1c4f3efd31ad429bb52bbf81b341e5fbf6, merged 88bf64b353930542b52040ad46e31e8643d34698
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/verify-ownership' (frozen abstractions' symbols map to themselves in context matching; each loop exit binds only its own outputs)
+
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 9bd3273..98f793a 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -3216,6 +3216,30 @@ let match_ctxs (span : Meta.span) ~(check_equiv : bool)
+         | _ -> ())
+       aid_map
+   end;
++  (* The fixed abstractions are matched with themselves ([match_envs] checks
++     that they are equal), so their symbolic values map to themselves. A join
++     can introduce fresh symbolic values in them: expanding a symbolic value
++     also expands its copies in the shared loans of the frozen input
++     abstractions, and the join of the branches where it was expanded
++     differently gives the loan value a fresh symbolic value, which is an
++     output of the join (see [compute_ctx_fresh_ordered_symbolic_values]).
++     Only the values no other element mapped are added. *)
++  if not check_equiv then
++    List.iter
++      (fun (e : env_elem) ->
++        match e with
++        | EAbs abs when AbsId.Set.mem abs.abs_id fixed_ids.aids ->
++            let _, { sids_to_values } = compute_abs_ids abs in
++            SymbolicValueId.Map.iter
++              (fun sid sv ->
++                if not (SymbolicValueId.Map.mem sid !sid_to_value_map) then
++                  sid_to_value_map :=
++                    SymbolicValueId.Map.add sid
++                      (mk_tvalue_from_symbolic_value sv)
++                      !sid_to_value_map)
++              sids_to_values
++        | _ -> ())
++      ctx0.env;
+   let maps =
+     {
+       aid_map = !aid_map;
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index 38d0b53..e82f803 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -4593,9 +4593,14 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+     (ctx, (exit, exit_values, outputs, mk_simpl_tuple_pat outputs))
+   in
+   (* Different exits can output the same symbolic values: the bindings of an
+-     exit are only valid in the expression which follows this exit (we bind
+-     them again below, before translating the expression of each exit when
+-     there are several). *)
++     exit are only valid in the expression which follows this exit. When there
++     are several exits, we bind the outputs of each exit again, in the context
++     before the exits ([exits_ctx]), before translating its expression: the
++     bindings of the other exits are not in scope there. The context of an exit
++     can still hold the symbolic values the other exits output (e.g., a loop
++     input the early return does not output), and the meta-information of its
++     expression looks them up. *)
++  let exits_ctx = ctx in
+   let ctx, exits = List.fold_left_map bind_exit ctx loop.exits in
+   (* A loop with several exits outputs the payload of the exit it took,
+      injected in a (right-nested) sum type, and we dispatch on it afterwards. *)
+@@ -4860,17 +4865,16 @@ and translate_loop (loop : S.loop) (ctx0 : bs_ctx) : texpr =
+       (* Create the let-binding *)
+       [%add_loc] mk_closed_checked_let ctx true output loop_e next_e
+   | _ ->
+-      let ctx, result = fresh_var (Some "exit") break_ty ctx in
+-      let _, branches =
+-        List.fold_left_map
+-          (fun ctx (i, (exit : S.loop_exit)) ->
++      let ctx, result = fresh_var (Some "exit") break_ty exits_ctx in
++      let branches =
++        List.mapi
++          (fun i (exit : S.loop_exit) ->
+             let ctx, (_, exit_values, _, output) = bind_exit ctx exit in
+             let branch =
+               translate_expr exit.exit_expr (exit_owned_state ctx i exit_values)
+             in
+-            (ctx, close_branch ctx.span (inject_pattern i exit_tys output) branch))
+-          ctx
+-          (List.mapi (fun i exit -> (i, exit)) loop.exits)
++            close_branch ctx.span (inject_pattern i exit_tys output) branch)
++          loop.exits
+       in
+       let empty_ty =
+         match branches with
+diff --git a/tests/lean/JoinFrozenInputLoan.lean b/tests/lean/JoinFrozenInputLoan.lean
+new file mode 100644
+index 0000000..38c7158
+--- /dev/null
++++ b/tests/lean/JoinFrozenInputLoan.lean
+@@ -0,0 +1 @@
++import JoinFrozenInputLoan.Checks
+diff --git a/tests/lean/JoinFrozenInputLoan/Checks.lean b/tests/lean/JoinFrozenInputLoan/Checks.lean
+new file mode 100644
+index 0000000..77f5aac
+--- /dev/null
++++ b/tests/lean/JoinFrozenInputLoan/Checks.lean
+@@ -0,0 +1,73 @@
++import JoinFrozenInputLoan.JoinFrozenInputLoan
++
++/-! Evaluate the model of `tests/src/join-frozen-input-loan.rs` on the inputs
++    of its `native` test module and compare with the native results. For
++    `tally` and `tally_all`, the second component is the count given back
++    through the `&mut` (the caller then writes `set` through it, if any, and
++    reads it). -/
++
++namespace join_frozen_input_loan.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def unit (kind : UnitKind) (body : Option Nat) (entry : Nat) : Unit :=
++  { «name» := u 7, kind, body := body.map (fun e => { entry := u e }), entry := u entry }
++
++def a := unit .Roots none 3
++def b := unit .Roots (some 5) 4
++def c := unit .Function (some 6) 8
++def d := unit .Function none 9
++
++def res (r : Result U32) : Option Nat :=
++  match r with
++  | ok x => some x.val
++  | _ => none
++
++def resE (r : Result (core.result.Result U32 U32)) : Option (Except Nat Nat) :=
++  match r with
++  | ok (.Ok x) => some (.ok x.val)
++  | ok (.Err e) => some (.error e.val)
++  | _ => none
++
++/-- `run(&mut count)`, then the caller writes `set` (if any) through the
++    reference given back, then reads the count -/
++def onCount (run : U32 → Result (U32 × U32)) (count : Nat) (set : Option Nat := none) :
++    Option (Nat × Nat) :=
++  match run (u count) with
++  | ok (r, c1) => some (r.val, (set.getD c1.val))
++  | _ => none
++
++def sl (xs : List Unit) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice Unit :=
++  ⟨xs, h⟩
++
++-- agree_or_entry_native
++#guard res (agree_or_entry a) == some 1
++#guard res (agree_or_entry b) == some 4
++#guard res (agree_or_entry c) == some 1
++#guard res (agree_or_entry d) == some 9
++
++-- check_kind_native
++#guard resE (check_kind a) == some (.ok 3)
++#guard resE (check_kind b) == some (.error 7)
++#guard resE (check_kind c) == some (.ok 8)
++#guard resE (check_kind d) == some (.error 7)
++
++-- tally_native
++#guard onCount (tally a) 10 == some (0, 11)
++#guard onCount (tally b) 10 == some (5, 14)
++#guard onCount (tally c) 10 == some (6, 11)
++#guard onCount (tally d) 10 == some (0, 19)
++#guard onCount (tally b) max == some (5, 3)
++#guard onCount (tally b) 10 (set := some 42) == some (5, 42)
++
++-- tally_all_native
++#guard onCount (tally_all (sl [a, b, c, d])) 0 == some (11, 215)
++#guard onCount (tally_all (sl [a])) 0 == some (0, 1)
++#guard onCount (tally_all (sl [b, c])) 0 == some (11, 105)
++#guard onCount (tally_all (sl [])) 0 == some (0, 0)
++#guard onCount (tally_all (sl [a, b, c, d])) 0 (set := some 5) == some (11, 5)
++
++end join_frozen_input_loan.checks
+diff --git a/tests/lean/JoinFrozenInputLoan/JoinFrozenInputLoan.lean b/tests/lean/JoinFrozenInputLoan/JoinFrozenInputLoan.lean
+new file mode 100644
+index 0000000..b3b7d5a
+--- /dev/null
++++ b/tests/lean/JoinFrozenInputLoan/JoinFrozenInputLoan.lean
+@@ -0,0 +1,334 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [join_frozen_input_loan]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace join_frozen_input_loan
++
++/-- [join_frozen_input_loan::UnitKind]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 22:0-25:1
++    Visibility: public -/
++@[discriminant isize]
++inductive UnitKind where
++| Roots : UnitKind
++| Function : UnitKind
++
++/-- [join_frozen_input_loan::{core::clone::Clone for join_frozen_input_loan::UnitKind}::clone]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:9-21:14
++    Visibility: public -/
++def UnitKind.Insts.CoreCloneClone.clone
++  (self : _root_.join_frozen_input_loan.UnitKind) :
++  _root_.Aeneas.Std.Result _root_.join_frozen_input_loan.UnitKind
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [join_frozen_input_loan::{core::clone::Clone for join_frozen_input_loan::UnitKind}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:9-21:14 -/
++@[reducible]
++def UnitKind.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.join_frozen_input_loan.UnitKind := {
++  clone := _root_.join_frozen_input_loan.UnitKind.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [join_frozen_input_loan::{core::marker::Copy for join_frozen_input_loan::UnitKind}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:16-21:20 -/
++@[reducible]
++def UnitKind.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.join_frozen_input_loan.UnitKind := {
++  cloneInst := _root_.join_frozen_input_loan.UnitKind.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [join_frozen_input_loan::{core::marker::StructuralPartialEq for join_frozen_input_loan::UnitKind}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:22-21:31 -/
++@[reducible]
++def UnitKind.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.join_frozen_input_loan.UnitKind := {
++}
++
++/-- [join_frozen_input_loan::{core::cmp::PartialEq<join_frozen_input_loan::UnitKind> for join_frozen_input_loan::UnitKind}::eq]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:22-21:31
++    Visibility: public -/
++def UnitKind.Insts.CoreCmpPartialEqUnitKind.eq
++  (self : _root_.join_frozen_input_loan.UnitKind)
++  (other : _root_.join_frozen_input_loan.UnitKind) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let self1 := read_discriminant self
++  let other1 := read_discriminant other
++  _root_.Aeneas.Std.Result.ok (self1 = other1)
++
++/-- Trait implementation: [join_frozen_input_loan::{core::cmp::PartialEq<join_frozen_input_loan::UnitKind> for join_frozen_input_loan::UnitKind}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:22-21:31 -/
++@[reducible]
++def UnitKind.Insts.CoreCmpPartialEqUnitKind :
++  _root_.Aeneas.Std.core.cmp.PartialEq _root_.join_frozen_input_loan.UnitKind
++  _root_.join_frozen_input_loan.UnitKind := {
++  eq :=
++    _root_.join_frozen_input_loan.UnitKind.Insts.CoreCmpPartialEqUnitKind.eq
++}
++
++/-- [join_frozen_input_loan::{core::cmp::Eq for join_frozen_input_loan::UnitKind}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:33-21:35
++    Visibility: public -/
++def UnitKind.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.join_frozen_input_loan.UnitKind) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [join_frozen_input_loan::{core::cmp::Eq for join_frozen_input_loan::UnitKind}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 21:33-21:35 -/
++@[reducible]
++def UnitKind.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.join_frozen_input_loan.UnitKind := {
++  partialEqInst :=
++    _root_.join_frozen_input_loan.UnitKind.Insts.CoreCmpPartialEqUnitKind
++  assert_receiver_is_total_eq :=
++    _root_.join_frozen_input_loan.UnitKind.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [join_frozen_input_loan::Body]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 28:0-30:1
++    Visibility: public -/
++structure Body where
++  entry : _root_.Aeneas.Std.U32
++
++/-- [join_frozen_input_loan::{core::clone::Clone for join_frozen_input_loan::Body}::clone]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:9-27:14
++    Visibility: public -/
++def Body.Insts.CoreCloneClone.clone
++  (self : _root_.join_frozen_input_loan.Body) :
++  _root_.Aeneas.Std.Result _root_.join_frozen_input_loan.Body
++  := do
++  _root_.Aeneas.Std.Result.ok self
++
++/-- Trait implementation: [join_frozen_input_loan::{core::clone::Clone for join_frozen_input_loan::Body}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:9-27:14 -/
++@[reducible]
++def Body.Insts.CoreCloneClone : _root_.Aeneas.Std.core.clone.Clone
++  _root_.join_frozen_input_loan.Body := {
++  clone := _root_.join_frozen_input_loan.Body.Insts.CoreCloneClone.clone
++}
++
++/-- Trait implementation: [join_frozen_input_loan::{core::marker::Copy for join_frozen_input_loan::Body}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:16-27:20 -/
++@[reducible]
++def Body.Insts.CoreMarkerCopy : _root_.Aeneas.Std.core.marker.Copy
++  _root_.join_frozen_input_loan.Body := {
++  cloneInst := _root_.join_frozen_input_loan.Body.Insts.CoreCloneClone
++}
++
++/-- Trait implementation: [join_frozen_input_loan::{core::marker::StructuralPartialEq for join_frozen_input_loan::Body}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:22-27:31 -/
++@[reducible]
++def Body.Insts.CoreMarkerStructuralPartialEq :
++  _root_.Aeneas.Std.core.marker.StructuralPartialEq
++  _root_.join_frozen_input_loan.Body := {
++}
++
++/-- [join_frozen_input_loan::{core::cmp::PartialEq<join_frozen_input_loan::Body> for join_frozen_input_loan::Body}::eq]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:22-27:31
++    Visibility: public -/
++def Body.Insts.CoreCmpPartialEqBody.eq
++  (self : _root_.join_frozen_input_loan.Body)
++  (other : _root_.join_frozen_input_loan.Body) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (self.entry = other.entry)
++
++/-- Trait implementation: [join_frozen_input_loan::{core::cmp::PartialEq<join_frozen_input_loan::Body> for join_frozen_input_loan::Body}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:22-27:31 -/
++@[reducible]
++def Body.Insts.CoreCmpPartialEqBody : _root_.Aeneas.Std.core.cmp.PartialEq
++  _root_.join_frozen_input_loan.Body _root_.join_frozen_input_loan.Body := {
++  eq := _root_.join_frozen_input_loan.Body.Insts.CoreCmpPartialEqBody.eq
++}
++
++/-- [join_frozen_input_loan::{core::cmp::Eq for join_frozen_input_loan::Body}::assert_receiver_is_total_eq]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:33-27:35
++    Visibility: public -/
++def Body.Insts.CoreCmpEq.assert_receiver_is_total_eq
++  (self : _root_.join_frozen_input_loan.Body) :
++  _root_.Aeneas.Std.Result _root_.Unit
++  := do
++  _root_.Aeneas.Std.Result.ok ()
++
++/-- Trait implementation: [join_frozen_input_loan::{core::cmp::Eq for join_frozen_input_loan::Body}]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 27:33-27:35 -/
++@[reducible]
++def Body.Insts.CoreCmpEq : _root_.Aeneas.Std.core.cmp.Eq
++  _root_.join_frozen_input_loan.Body := {
++  partialEqInst :=
++    _root_.join_frozen_input_loan.Body.Insts.CoreCmpPartialEqBody
++  assert_receiver_is_total_eq :=
++    _root_.join_frozen_input_loan.Body.Insts.CoreCmpEq.assert_receiver_is_total_eq
++}
++
++/-- [join_frozen_input_loan::Unit]
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 32:0-37:1
++    Visibility: public -/
++structure Unit where
++  «name» : _root_.Aeneas.Std.U32
++  kind : _root_.join_frozen_input_loan.UnitKind
++  body : _root_.Option _root_.join_frozen_input_loan.Body
++  entry : _root_.Aeneas.Std.U32
++
++/-- [join_frozen_input_loan::agree_or_entry]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 40:0-46:1
++    Visibility: public -/
++def agree_or_entry
++  (u : _root_.join_frozen_input_loan.Unit) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let b ←
++    match u.kind with
++    | _root_.join_frozen_input_loan.UnitKind.Roots =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok true
++      | some _ => _root_.Aeneas.Std.Result.ok false
++    | _root_.join_frozen_input_loan.UnitKind.Function =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok false
++      | some _ => _root_.Aeneas.Std.Result.ok true
++  if b
++  then _root_.Aeneas.Std.Result.ok 1#u32
++  else _root_.Aeneas.Std.Result.ok u.entry
++
++/-- [join_frozen_input_loan::check_kind]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 49:0-54:1
++    Visibility: public -/
++def check_kind
++  (u : _root_.join_frozen_input_loan.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let b ←
++    match u.kind with
++    | _root_.join_frozen_input_loan.UnitKind.Roots =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok true
++      | some _ => _root_.Aeneas.Std.Result.ok false
++    | _root_.join_frozen_input_loan.UnitKind.Function =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok false
++      | some _ => _root_.Aeneas.Std.Result.ok true
++  if b
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok
++      u.entry)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      u.«name»)
++
++/-- [join_frozen_input_loan::tally]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 57:0-68:1
++    Visibility: public -/
++def tally
++  (u : _root_.join_frozen_input_loan.Unit) (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let agree ←
++    match u.kind with
++    | _root_.join_frozen_input_loan.UnitKind.Roots =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok true
++      | some _ => _root_.Aeneas.Std.Result.ok false
++    | _root_.join_frozen_input_loan.UnitKind.Function =>
++      match u.body with
++      | none => _root_.Aeneas.Std.Result.ok false
++      | some _ => _root_.Aeneas.Std.Result.ok true
++  let count1 ←
++    if agree
++    then _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add count 1#u32)
++    else _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add count u.entry)
++  match u.body with
++  | none => _root_.Aeneas.Std.Result.ok (0#u32, count1)
++  | some b => _root_.Aeneas.Std.Result.ok (b.entry, count1)
++
++/-- [join_frozen_input_loan::tally_all]: loop body 0:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 73:8-75:37
++    Visibility: public -/
++@[rust_loop_body]
++def tally_all_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.join_frozen_input_loan.Unit) (count : _root_.Aeneas.Std.U32)
++  (entries : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.join_frozen_input_loan.Unit) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (entries,
++      count))
++  | some u =>
++    let (i, count1) ← _root_.join_frozen_input_loan.tally u count
++    let entries1 ← lift (core.num.U32.wrapping_add entries i)
++    let (count2, iter1, b) ←
++      match u.kind with
++      | _root_.join_frozen_input_loan.UnitKind.Roots =>
++        do
++        let b1 ←
++          match u.body with
++          | none => _root_.Aeneas.Std.Result.ok true
++          | some _ => _root_.Aeneas.Std.Result.ok false
++        _root_.Aeneas.Std.Result.ok (count1, model_state1, b1)
++      | _root_.join_frozen_input_loan.UnitKind.Function =>
++        do
++        let b1 ←
++          match u.body with
++          | none => _root_.Aeneas.Std.Result.ok false
++          | some _ => _root_.Aeneas.Std.Result.ok true
++        _root_.Aeneas.Std.Result.ok (count1, model_state1, b1)
++    let count3 ←
++      if b
++      then _root_.Aeneas.Std.Result.ok count2
++      else
++        _root_.Aeneas.Std.Result.ok (core.num.U32.wrapping_add count2 100#u32)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      count3, entries1))
++
++/-- [join_frozen_input_loan::tally_all]: loop 0:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 73:8-75:37
++    Visibility: public -/
++@[rust_loop]
++def tally_all_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.join_frozen_input_loan.Unit) (count : _root_.Aeneas.Std.U32)
++  (entries : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, count1, entries1) =>
++       _root_.join_frozen_input_loan.tally_all_loop.body iter1 count1 entries1
++      : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.join_frozen_input_loan.Unit) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.join_frozen_input_loan.Unit) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)))
++    (iter, count, entries)
++
++/-- [join_frozen_input_loan::tally_all]:
++    Source: 'tests/src/join-frozen-input-loan.rs', lines 71:0-80:1
++    Visibility: public -/
++def tally_all
++  (units : _root_.Aeneas.Std.Slice _root_.join_frozen_input_loan.Unit)
++  (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter units
++  _root_.join_frozen_input_loan.tally_all_loop model_state count 0#u32
++
++end join_frozen_input_loan
+diff --git a/tests/lean/LoopExitBindings.lean b/tests/lean/LoopExitBindings.lean
+new file mode 100644
+index 0000000..2f327fe
+--- /dev/null
++++ b/tests/lean/LoopExitBindings.lean
+@@ -0,0 +1 @@
++import LoopExitBindings.Checks
+diff --git a/tests/lean/LoopExitBindings/Checks.lean b/tests/lean/LoopExitBindings/Checks.lean
+new file mode 100644
+index 0000000..b7af95d
+--- /dev/null
++++ b/tests/lean/LoopExitBindings/Checks.lean
+@@ -0,0 +1,65 @@
++import LoopExitBindings.LoopExitBindings
++
++/-! Evaluate the model of `tests/src/loop-exit-bindings.rs` on the inputs of
++    its `native` test module and compare with the native results. For `scan`,
++    the second component is the count given back through the `&mut` (the
++    caller then writes `set` through it, if any, and reads it). -/
++
++namespace loop_exit_bindings.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def max := 4294967295
++
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by simp <;> scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++
++def edge (n : Nat) (h : n ≤ Usize.max := by scalar_tac) : Edge :=
++  { terminals := ⟨List.replicate n (u 0), by simp; scalar_tac⟩ }
++
++/-- A unit with one block whose edges have the given numbers of terminals -/
++def unit (canonical : Bool) (provisional : Option Nat) (edges : List Edge) (owners : Nat)
++    (h0 : edges.length ≤ Usize.max := by simp <;> scalar_tac) (h1 : owners ≤ Usize.max := by scalar_tac) : Unit :=
++  { canonical
++    provisional := provisional.map u
++    blocks := vec [{ edges := ⟨edges, h0⟩ }]
++    owners := ⟨List.replicate owners (u 0), by simp; scalar_tac⟩ }
++
++def sl (xs : List Unit) (h : xs.length ≤ Usize.max := by simp <;> scalar_tac) : Slice Unit := ⟨xs, h⟩
++
++def resE (r : Result (core.result.Result U32 U32)) : Option (Except Nat Nat) :=
++  match r with
++  | ok (.Ok x) => some (.ok x.val)
++  | ok (.Err e) => some (.error e.val)
++  | _ => none
++
++/-- `run(&mut seen)`, then the caller writes `set` (if any) through the
++    reference given back, then reads the count -/
++def onSeen (run : U32 → Result (core.result.Result U32 U32 × U32)) (seen : Nat)
++    (set : Option Nat := none) : Option (Except Nat Nat × Nat) :=
++  match run (u seen) with
++  | ok (r, s1) =>
++    let r := match r with
++      | .Ok x => Except.ok x.val
++      | .Err e => Except.error e.val
++    some (r, set.getD s1.val)
++  | _ => none
++
++-- verify_native
++#guard resE (verify (sl [])) == some (.ok 0)
++#guard resE (verify (sl [unit false none [edge 1, edge 2] 2, unit false none [edge 0] 0])) == some (.ok 4)
++#guard resE (verify (sl [unit false none [edge 1] 1, unit false (some 5) [] 2])) == some (.error 8)
++#guard resE (verify (sl [unit false none [edge 1] 1, unit false none [edge 2, edge 3] 1])) == some (.error 100)
++#guard resE (verify (sl [unit false none [edge 1] 4])) == some (.error 1)
++
++-- scan_native
++#guard onSeen (scan (sl [])) 0 == some (.ok 0, 0)
++#guard onSeen (scan (sl [unit false none [edge 1, edge 2] 2, unit false none [edge 0] 0])) 10
++  == some (.ok 4, 13)
++#guard onSeen (scan (sl [unit false none [edge 1] 1, unit true none [edge 1] 2])) 10 == some (.error 3, 11)
++#guard onSeen (scan (sl [unit false none [edge 1, edge 3, edge 1] 0])) 10 == some (.error 200, 12)
++#guard onSeen (scan (sl [unit false none [edge 1] 0])) max == some (.ok 1, 0)
++#guard onSeen (scan (sl [unit false none [edge 1] 4])) 0 == some (.error 1, 0)
++#guard onSeen (scan (sl [unit false none [edge 1, edge 3, edge 1] 0])) 10 (set := some 7) == some (.error 200, 7)
++
++end loop_exit_bindings.checks
+diff --git a/tests/lean/LoopExitBindings/LoopExitBindings.lean b/tests/lean/LoopExitBindings/LoopExitBindings.lean
+new file mode 100644
+index 0000000..3ff1c49
+--- /dev/null
++++ b/tests/lean/LoopExitBindings/LoopExitBindings.lean
+@@ -0,0 +1,650 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_exit_bindings]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_exit_bindings
++
++/-- [loop_exit_bindings::Edge]
++    Source: 'tests/src/loop-exit-bindings.rs', lines 19:0-21:1
++    Visibility: public -/
++structure Edge where
++  terminals : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [loop_exit_bindings::Block]
++    Source: 'tests/src/loop-exit-bindings.rs', lines 23:0-25:1
++    Visibility: public -/
++structure Block where
++  edges : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Edge
++
++/-- [loop_exit_bindings::Unit]
++    Source: 'tests/src/loop-exit-bindings.rs', lines 27:0-32:1
++    Visibility: public -/
++structure Unit where
++  canonical : _root_.Bool
++  provisional : _root_.Option _root_.Aeneas.Std.U32
++  blocks : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block
++  owners : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [loop_exit_bindings::provisional_in]:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 34:0-39:1 -/
++def provisional_in
++  (unit : _root_.loop_exit_bindings.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32))
++  := do
++  match unit.provisional with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some owner =>
++    let i ← owner + 1#u32
++    _root_.Aeneas.Std.Result.ok (some (owner, i))
++
++/-- [loop_exit_bindings::check]:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 41:0-47:1 -/
++def check
++  (unit : _root_.loop_exit_bindings.Unit) (owner : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let i := _root_.Aeneas.Std.alloc.vec.Vec.len unit.owners
++  if i > 3#usize
++  then
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err
++      owner)
++  else
++    let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len unit.owners
++    let i2 ← lift (UScalar.cast .U32 i1)
++    let i3 ← owner + i2
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i3)
++
++/-- [loop_exit_bindings::verify]: loop body 2:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-64:9
++    Visibility: public -/
++@[rust_loop_body]
++def verify_loop0_loop0_loop0.body
++  (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (b : _root_.Bool) (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++  (v2 : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Edge)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Edge) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Edge)
++    (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Edge) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Edge) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (total, i, b, o, v, v1, first, i1, v2, model_state1, (),
++      (), (), (), (), (), (), (), (), ())))
++  | some edge =>
++    let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len edge.terminals
++    if i2 = 3#usize
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr ((), (), (), (), (), (), (), (), (), (), ())))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        model_state1)
++
++/-- [loop_exit_bindings::verify]: loop 2:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-64:9
++    Visibility: public -/
++@[rust_loop]
++def verify_loop0_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Edge) (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (b : _root_.Bool) (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++  (v2 : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Edge) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Edge) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Edge) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit) (_root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun iter1 => _root_.loop_exit_bindings.verify_loop0_loop0_loop0.body total
++       i b o v v1 first i1 v2 iter1 : _root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Edge → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Edge) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++      × _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_exit_bindings.Edge) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Edge)
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit) (_root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit))))
++    iter
++
++/-- [loop_exit_bindings::verify]: loop body 1:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-64:9
++    Visibility: public -/
++@[rust_loop_body]
++def verify_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Block) (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (b : _root_.Bool) (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++    × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Unit) × _root_.Bool × (_root_.Option
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Unit) × _root_.Bool × (_root_.Option
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit) (_root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (total, i, b, o, v, v1, first, model_state1, (), (), (),
++      (), (), (), ())))
++  | some block =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter block.edges
++    let exit ←
++      _root_.loop_exit_bindings.verify_loop0_loop0_loop0 model_state2 total i b
++        o v v1 first model_state1 block.edges
++    match exit with
++    | _root_.Sum.inl (total1, i1, b1, o1, v2, v3, first1, iter1, _, _, _, _, _,
++      _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        total1, i1, b1, o1, v2, v3, first1))
++    | _root_.Sum.inr (_, _, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr ((), (), (), (), (), (), (), (), (), (), ())))
++
++/-- [loop_exit_bindings::verify]: loop 1:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-64:9
++    Visibility: public -/
++@[rust_loop]
++def verify_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Block) (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (b : _root_.Bool) (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit))
++  := do
++  loop
++    (fun (iter1, total1, i1, b1, o1, v2, v3, first1) =>
++       _root_.loop_exit_bindings.verify_loop0_loop0.body iter1 total1 i1 b1 o1
++       v2 v3 first1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++      × _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++      × _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++      × _root_.Bool × (_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++      (_root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit))))
++    (iter, total, i, b, o, v, v1, first)
++
++/-- [loop_exit_bindings::verify]: loop body 0:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-68:1
++    Visibility: public -/
++@[rust_loop_body]
++def verify_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Unit) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok total))
++  | some unit =>
++    let r ← _root_.loop_exit_bindings.check unit 1#u32
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      let o ← _root_.loop_exit_bindings.provisional_in unit
++      match o with
++      | none =>
++        let (model_state2, _) ←
++          _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter
++            unit.blocks
++        let exit ←
++          _root_.loop_exit_bindings.verify_loop0_loop0 model_state2 total
++            model_state1 unit.canonical unit.provisional unit.blocks
++            unit.owners val
++        match exit with
++        | _root_.Sum.inl (total1, iter1, _, _, _, _, first, _, _, _, _, _, _,
++          _, _) =>
++          let total2 ← lift (core.num.U32.wrapping_add total1 first)
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++            (iter1, total2))
++        | _root_.Sum.inr (_, _, _, _, _, _, _, _, _, _, _) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++            (_root_.Aeneas.Std.core.result.Result.Err 100#u32))
++      | some p =>
++        let (owner, _) := p
++        let i ← owner + val
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Aeneas.Std.core.result.Result.Err i))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++          _root_.Aeneas.Std.U32) residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done r1)
++
++/-- [loop_exit_bindings::verify]: loop 0:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-68:1
++    Visibility: public -/
++@[rust_loop]
++def verify_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Unit) (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, total1) => _root_.loop_exit_bindings.verify_loop0.body iter1
++       total1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++      × _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++    (iter, total)
++
++/-- [loop_exit_bindings::verify]:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 51:0-68:1
++    Visibility: public -/
++def verify
++  (units : _root_.Aeneas.Std.Slice _root_.loop_exit_bindings.Unit) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter units
++  _root_.loop_exit_bindings.verify_loop0 model_state 0#u32
++
++/-- [loop_exit_bindings::scan]: loop body 2:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-85:9
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop0_loop0_loop0.body
++  (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++  (v2 : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Edge)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Edge) (seen : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Edge) ×
++    _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Edge) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Edge) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (seen, total, i, o, v, v1, first, i1, v2, model_state1,
++      (), (), (), (), (), (), (), (), ())))
++  | some edge =>
++    let seen1 ← lift (core.num.U32.wrapping_add seen 1#u32)
++    let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len edge.terminals
++    if i2 = 3#usize
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (seen1, (), (), (), (), (), (), (), (), (), ())))
++    else
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1, seen1))
++
++/-- [loop_exit_bindings::scan]: loop 2:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-85:9
++    Visibility: public -/
++@[rust_loop]
++def scan_loop0_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Edge) (seen : _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++  (v2 : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Edge) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Edge) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Edge) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter1, seen1) =>
++       _root_.loop_exit_bindings.scan_loop0_loop0_loop0.body total i o v v1
++       first i1 v2 iter1 seen1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Edge) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Edge)
++      × _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.loop_exit_bindings.Edge) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Edge)
++      × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++      (_root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit))))
++    (iter, seen)
++
++/-- [loop_exit_bindings::scan]: loop body 1:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-85:9
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop0_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Block) (seen : _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block)
++    × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) (_root_.Sum
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.loop_exit_bindings.Block) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Block) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit) (_root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Sum.inl (seen, total, i, o, v, v1, first, model_state1, (), (),
++      (), (), (), ())))
++  | some block =>
++    let (model_state2, _) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter block.edges
++    let exit ←
++      _root_.loop_exit_bindings.scan_loop0_loop0_loop0 model_state2 seen total
++        i o v v1 first model_state1 block.edges
++    match exit with
++    | _root_.Sum.inl (seen1, total1, i1, o1, v2, v3, first1, iter1, _, _, _, _,
++      _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        seen1, total1, i1, o1, v2, v3, first1))
++    | _root_.Sum.inr (seen1, _, _, _, _, _, _, _, _, _, _) =>
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (_root_.Sum.inr (seen1, (), (), (), (), (), (), (), (), (), ())))
++
++/-- [loop_exit_bindings::scan]: loop 1:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-85:9
++    Visibility: public -/
++@[rust_loop]
++def scan_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Block) (seen : _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit)
++  (o : _root_.Option _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block)
++  (v1 : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (first : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Sum (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.loop_exit_bindings.Block) × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++    (_root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit))
++  := do
++  loop
++    (fun (iter1, seen1, total1, i1, o1, v2, v3, first1) =>
++       _root_.loop_exit_bindings.scan_loop0_loop0.body iter1 seen1 total1 i1 o1
++       v2 v3 first1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Sum (_root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × (_root_.Option _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.loop_exit_bindings.Block) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Block) × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit)
++      (_root_.Aeneas.Std.U32 × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit
++      × _root_.Unit × _root_.Unit))))
++    (iter, seen, total, i, o, v, v1, first)
++
++/-- [loop_exit_bindings::scan]: loop body 0:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-89:1
++    Visibility: public -/
++@[rust_loop_body]
++def scan_loop0.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Unit) (seen : _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.loop_exit_bindings.Unit) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++    ((_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (_root_.Aeneas.Std.core.result.Result.Ok total, seen))
++  | some unit =>
++    let r ← _root_.loop_exit_bindings.check unit 1#u32
++    let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++    match cf with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++      if unit.canonical
++      then
++        _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++          (_root_.Aeneas.Std.core.result.Result.Err val, seen))
++      else
++        let (model_state2, _) ←
++          _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter
++            unit.blocks
++        let exit ←
++          _root_.loop_exit_bindings.scan_loop0_loop0 model_state2 seen total
++            model_state1 unit.provisional unit.blocks unit.owners val
++        match exit with
++        | _root_.Sum.inl (seen1, total1, iter1, _, _, _, first, _, _, _, _, _,
++          _, _) =>
++          let total2 ← lift (core.num.U32.wrapping_add total1 first)
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++            (iter1, seen1, total2))
++        | _root_.Sum.inr (i, _, _, _, _, _, _, _, _, _, _) =>
++          _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++            (_root_.Aeneas.Std.core.result.Result.Err 200#u32, i))
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      let r1 ←
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.convert.FromSame
++          _root_.Aeneas.Std.U32) residual
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (r1,
++        seen))
++
++/-- [loop_exit_bindings::scan]: loop 0:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 1:0-89:1
++    Visibility: public -/
++@[rust_loop]
++def scan_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter
++  _root_.loop_exit_bindings.Unit) (seen : _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, seen1, total1) => _root_.loop_exit_bindings.scan_loop0.body
++       iter1 seen1 total1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.loop_exit_bindings.Unit) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) ((_root_.Aeneas.Std.core.result.Result
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)))
++    (iter, seen, total)
++
++/-- [loop_exit_bindings::scan]:
++    Source: 'tests/src/loop-exit-bindings.rs', lines 71:0-89:1
++    Visibility: public -/
++def scan
++  (units : _root_.Aeneas.Std.Slice _root_.loop_exit_bindings.Unit)
++  (seen : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.slice.iter.IntoIteratorSharedSlice.into_iter units
++  _root_.loop_exit_bindings.scan_loop0 model_state seen 0#u32
++
++end loop_exit_bindings
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index b609228..11ed2a0 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -108,6 +108,7 @@ package «tests» {}
+ @[default_target] lean_lib ListBorrows
+ @[default_target] lean_lib LoopEndedSharedInput
+ @[default_target] lean_lib LoopEntrySharedPayload
++@[default_target] lean_lib LoopExitBindings
+ @[default_target] lean_lib LoopExitSharedChildren
+ @[default_target] lean_lib LoopFixedPointAbsIds
+ @[default_target] lean_lib LoopJoinBorrows
+@@ -120,6 +121,7 @@ package «tests» {}
+ @[default_target] lean_lib LoopOptionNestedBorrow
+ @[default_target] lean_lib LoopReturnedVecIter
+ @[default_target] lean_lib LoopSharedComponents
++@[default_target] lean_lib JoinFrozenInputLoan
+ @[default_target] lean_lib JoinSharedBorrowField
+ @[default_target] lean_lib JoinSharedProjGiveBack
+ @[default_target] lean_lib JoinStaticNested
+diff --git a/tests/src/join-frozen-input-loan.rs b/tests/src/join-frozen-input-loan.rs
+new file mode 100644
+index 0000000..14a8810
+--- /dev/null
++++ b/tests/src/join-frozen-input-loan.rs
+@@ -0,0 +1,152 @@
++//@ [!lean] skip
++//@ [lean] subdir=JoinFrozenInputLoan
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A join after matching a copy of a field read through a shared borrow of
++//! the input (`matches!((u.kind, u.body), ..)` in chelis-ir's
++//! `ownership::verify::verify_unit`). Expanding the copied field also expands
++//! the field inside the shared loan of the input's (frozen) region
++//! abstraction, so the branches of the inner match give that loan value
++//! different values (`None` / `Some(_)`) and the join gives it a fresh symbolic
++//! value, which is an output of the join. The contexts of the branches used to
++//! be matched with the joined context without mapping that value ("Could not
++//! find symbolic value .. in src_to_joined_map"): the fixed abstractions are
++//! now matched with themselves, value by value.
++//!
++//! JoinFrozenInputLoan/Checks.lean compares the model with the native results
++//! asserted in the native test module, including the value the caller writes
++//! through the `&mut` given back after the join (`tally`) and after the loop
++//! (`tally_all`).
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub enum UnitKind {
++    Roots,
++    Function,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub struct Body {
++    pub entry: u32,
++}
++
++pub struct Unit {
++    pub name: u32,
++    pub kind: UnitKind,
++    pub body: Option<Body>,
++    pub entry: u32,
++}
++
++/// The join is followed by a read of the input.
++pub fn agree_or_entry(u: &Unit) -> u32 {
++    if matches!((u.kind, u.body), (UnitKind::Roots, None) | (UnitKind::Function, Some(_))) {
++        1
++    } else {
++        u.entry
++    }
++}
++
++/// The shape of `verify_unit`: an early error, then a read of the input.
++pub fn check_kind(u: &Unit) -> Result<u32, u32> {
++    if !matches!((u.kind, u.body), (UnitKind::Roots, None) | (UnitKind::Function, Some(_))) {
++        return Err(u.name);
++    }
++    Ok(u.entry)
++}
++
++/// The join also updates a mutable borrow the caller gives back.
++pub fn tally(u: &Unit, count: &mut u32) -> u32 {
++    let agree = matches!((u.kind, u.body), (UnitKind::Roots, None) | (UnitKind::Function, Some(_)));
++    if agree {
++        *count = count.wrapping_add(1);
++    } else {
++        *count = count.wrapping_add(u.entry);
++    }
++    match u.body {
++        Some(b) => b.entry,
++        None => 0,
++    }
++}
++
++/// The same join inside a loop over the units.
++pub fn tally_all(units: &[Unit], count: &mut u32) -> u32 {
++    let mut entries = 0u32;
++    for u in units {
++        entries = entries.wrapping_add(tally(u, count));
++        if !matches!((u.kind, u.body), (UnitKind::Roots, None) | (UnitKind::Function, Some(_))) {
++            *count = count.wrapping_add(100);
++        }
++    }
++    entries
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn unit(kind: UnitKind, body: Option<u32>, entry: u32) -> Unit {
++        Unit { name: 7, kind, body: body.map(|entry| Body { entry }), entry }
++    }
++
++    fn units() -> [Unit; 4] {
++        [
++            unit(UnitKind::Roots, None, 3),
++            unit(UnitKind::Roots, Some(5), 4),
++            unit(UnitKind::Function, Some(6), 8),
++            unit(UnitKind::Function, None, 9),
++        ]
++    }
++
++    #[test]
++    fn agree_or_entry_native() {
++        let [a, b, c, d] = units();
++        assert_eq!(agree_or_entry(&a), 1);
++        assert_eq!(agree_or_entry(&b), 4);
++        assert_eq!(agree_or_entry(&c), 1);
++        assert_eq!(agree_or_entry(&d), 9);
++    }
++
++    #[test]
++    fn check_kind_native() {
++        let [a, b, c, d] = units();
++        assert_eq!(check_kind(&a), Ok(3));
++        assert_eq!(check_kind(&b), Err(7));
++        assert_eq!(check_kind(&c), Ok(8));
++        assert_eq!(check_kind(&d), Err(7));
++    }
++
++    /// `run(&mut count)`, then the caller writes `set` (if any) through the
++    /// reference given back, then reads the count
++    fn on_count<R>(count: u32, set: Option<u32>, run: impl FnOnce(&mut u32) -> R) -> (R, u32) {
++        let mut c = count;
++        let r = {
++            let rc = &mut c;
++            let r = run(&mut *rc);
++            if let Some(v) = set {
++                *rc = v;
++            }
++            r
++        };
++        (r, c)
++    }
++
++    #[test]
++    fn tally_native() {
++        let [a, b, c, d] = units();
++        assert_eq!(on_count(10, None, |n| tally(&a, n)), (0, 11));
++        assert_eq!(on_count(10, None, |n| tally(&b, n)), (5, 14));
++        assert_eq!(on_count(10, None, |n| tally(&c, n)), (6, 11));
++        assert_eq!(on_count(10, None, |n| tally(&d, n)), (0, 19));
++        assert_eq!(on_count(u32::MAX, None, |n| tally(&b, n)), (5, 3));
++        assert_eq!(on_count(10, Some(42), |n| tally(&b, n)), (5, 42));
++    }
++
++    #[test]
++    fn tally_all_native() {
++        let us = units();
++        assert_eq!(on_count(0, None, |n| tally_all(&us, n)), (11, 215));
++        assert_eq!(on_count(0, None, |n| tally_all(&us[..1], n)), (0, 1));
++        assert_eq!(on_count(0, None, |n| tally_all(&us[1..3], n)), (11, 105));
++        assert_eq!(on_count(0, None, |n| tally_all(&[], n)), (0, 0));
++        assert_eq!(on_count(0, Some(5), |n| tally_all(&us, n)), (11, 5));
++    }
++}
+diff --git a/tests/src/loop-exit-bindings.rs b/tests/src/loop-exit-bindings.rs
+new file mode 100644
+index 0000000..74540af
+--- /dev/null
++++ b/tests/src/loop-exit-bindings.rs
+@@ -0,0 +1,152 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopExitBindings
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Nested loops with an early return, inside a loop which carries a value
++//! computed before them (`first`), in the shape of chelis-ir's
++//! `ownership::last_use::verify_canonical`. The inner loops have several exits:
++//! the normal end outputs `first` (a loop input) and the early return does not.
++//! The expression following each exit used to be translated with the bindings
++//! of the exits translated before it still in scope, so the meta-information
++//! of the early return named `first` with a variable bound only in the other
++//! branch ("found unexpected fvars"). Every exit now binds its outputs in the
++//! context before the exits.
++//!
++//! LoopExitBindings/Checks.lean compares the model with the native results
++//! asserted in the native test module, including the count given back through
++//! the `&mut` (`scan`), after which the caller writes through it.
++
++pub struct Edge {
++    pub terminals: Vec<u32>,
++}
++
++pub struct Block {
++    pub edges: Vec<Edge>,
++}
++
++pub struct Unit {
++    pub canonical: bool,
++    pub provisional: Option<u32>,
++    pub blocks: Vec<Block>,
++    pub owners: Vec<u32>,
++}
++
++fn provisional_in(unit: &Unit) -> Option<(u32, u32)> {
++    match unit.provisional {
++        Some(owner) => Some((owner, owner + 1)),
++        None => None,
++    }
++}
++
++fn check(unit: &Unit, owner: u32) -> Result<u32, u32> {
++    if unit.owners.len() > 3 {
++        Err(owner)
++    } else {
++        Ok(owner + unit.owners.len() as u32)
++    }
++}
++
++/// `verify_canonical`: an error of `check`, an early return using `first`,
++/// then an early return from the nested loops.
++pub fn verify(units: &[Unit]) -> Result<u32, u32> {
++    let mut total = 0u32;
++    for unit in units {
++        let first = check(unit, 1)?;
++        if let Some((owner, _)) = provisional_in(unit) {
++            return Err(owner + first);
++        }
++        for block in &unit.blocks {
++            for edge in &block.edges {
++                if edge.terminals.len() == 3 {
++                    return Err(100);
++                }
++            }
++        }
++        total = total.wrapping_add(first);
++    }
++    Ok(total)
++}
++
++/// The same loops updating a counter the caller gives back.
++pub fn scan(units: &[Unit], seen: &mut u32) -> Result<u32, u32> {
++    let mut total = 0u32;
++    for unit in units {
++        let first = check(unit, 1)?;
++        if unit.canonical {
++            return Err(first);
++        }
++        for block in &unit.blocks {
++            for edge in &block.edges {
++                *seen = seen.wrapping_add(1);
++                if edge.terminals.len() == 3 {
++                    return Err(200);
++                }
++            }
++        }
++        total = total.wrapping_add(first);
++    }
++    Ok(total)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    fn unit(canonical: bool, provisional: Option<u32>, edges: &[usize], owners: usize) -> Unit {
++        Unit {
++            canonical,
++            provisional,
++            blocks: vec![Block {
++                edges: edges.iter().map(|n| Edge { terminals: vec![0; *n] }).collect(),
++            }],
++            owners: vec![0; owners],
++        }
++    }
++
++    /// `run(&mut seen)`, then the caller writes `set` (if any) through the
++    /// reference given back, then reads the count
++    fn on_seen<R>(seen: u32, set: Option<u32>, run: impl FnOnce(&mut u32) -> R) -> (R, u32) {
++        let mut s = seen;
++        let r = {
++            let rs = &mut s;
++            let r = run(&mut *rs);
++            if let Some(v) = set {
++                *rs = v;
++            }
++            r
++        };
++        (r, s)
++    }
++
++    #[test]
++    fn verify_native() {
++        assert_eq!(verify(&[]), Ok(0));
++        assert_eq!(verify(&[unit(false, None, &[1, 2], 2), unit(false, None, &[0], 0)]), Ok(4));
++        assert_eq!(verify(&[unit(false, None, &[1], 1), unit(false, Some(5), &[], 2)]), Err(8));
++        assert_eq!(verify(&[unit(false, None, &[1], 1), unit(false, None, &[2, 3], 1)]), Err(100));
++        assert_eq!(verify(&[unit(false, None, &[1], 4)]), Err(1));
++    }
++
++    #[test]
++    fn scan_native() {
++        assert_eq!(on_seen(0, None, |s| scan(&[], s)), (Ok(0), 0));
++        assert_eq!(
++            on_seen(10, None, |s| scan(&[unit(false, None, &[1, 2], 2), unit(false, None, &[0], 0)], s)),
++            (Ok(4), 13)
++        );
++        assert_eq!(
++            on_seen(10, None, |s| scan(&[unit(false, None, &[1], 1), unit(true, None, &[1], 2)], s)),
++            (Err(3), 11)
++        );
++        assert_eq!(
++            on_seen(10, None, |s| scan(&[unit(false, None, &[1, 3, 1], 0)], s)),
++            (Err(200), 12)
++        );
++        assert_eq!(on_seen(u32::MAX, None, |s| scan(&[unit(false, None, &[1], 0)], s)), (Ok(1), 0));
++        assert_eq!(on_seen(0, None, |s| scan(&[unit(false, None, &[1], 4)], s)), (Err(1), 0));
++        assert_eq!(
++            on_seen(10, Some(7), |s| scan(&[unit(false, None, &[1, 3, 1], 0)], s)),
++            (Err(200), 7)
++        );
++    }
++}

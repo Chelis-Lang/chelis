@@ -1,0 +1,1618 @@
+# aeneas integration step 142 after cba11f3beb: commit 0663198017b3fcd0e594a29ffe15e554c373186f
+# first parent 0b50c4e48d30802e29d20e752f5f390661158da0, merged 9e6fe43d0b393d061bef05a6367e4c326f55f29d
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/tests-lean' (non-token reserved Lean names bind no declaration: the P0 name clashes on PreparedDropout.parameters and ActivationElement::constant)
+
+diff --git a/src/extract/ExtractBase.ml b/src/extract/ExtractBase.ml
+index c19b201..f34556a 100644
+--- a/src/extract/ExtractBase.ml
++++ b/src/extract/ExtractBase.ml
+@@ -378,6 +378,9 @@ type names_maps = {
+           dependently typed language, we might have an issue if the field of a
+           record has, say, the name "u32", and another field of the same record
+           refers to "u32" (for instance in its type). *)
++  var_reserved_names : StringSet.t;
++      (** Names that the generated variables do not take, but which are not
++          keywords: a declaration, field or method may use them. *)
+   adt_projectors : StringSet.t;
+       (** For Lean, we store the set of fully qualifed field projectors to check
+           if some names are shared between methods and fields. If this happens,
+@@ -1430,35 +1433,6 @@ let keywords () =
+     | Lean ->
+         (* Not [return]: it is the name of the builtin monadic return *)
+         List.filter (fun t -> t <> "return") lean_tokens
+-        @ [
+-            (* Other names that generated variables do not take *)
+-          "BuiltinFn";
+-          "BuiltinFnMut";
+-          "BuiltinFnOnce";
+-          "Pi";
+-          "axioms";
+-          "begin";
+-          "const";
+-          "constant";
+-          "constants";
+-          "definition";
+-          "opaque_defs";
+-          "override";
+-          "parameter";
+-          "parameters";
+-          "precedence";
+-          "prelude";
+-          "raw";
+-          "record";
+-          "reduce";
+-          "replacing";
+-          "reserve";
+-          "simp";
+-          "theory";
+-          "toStr";
+-          "universes";
+-          "using_well_founded";
+-          ]
+     | HOL4 ->
+         [
+           "Axiom";
+@@ -1484,6 +1458,42 @@ let keywords () =
+   in
+   List.concat [ named_unops; named_binops; misc ]
+ 
++(** Names which generated variables must not take but which user declarations,
++    fields and methods may take: they parse as plain identifiers, and the
++    generated code never refers to them unqualified. *)
++let var_reserved_names () : string list =
++  match backend () with
++  | Lean ->
++      [
++        "BuiltinFn";
++        "BuiltinFnMut";
++        "BuiltinFnOnce";
++        "Pi";
++        "axioms";
++        "begin";
++        "const";
++        "constant";
++        "constants";
++        "definition";
++        "opaque_defs";
++        "override";
++        "parameter";
++        "parameters";
++        "precedence";
++        "prelude";
++        "raw";
++        "record";
++        "reduce";
++        "replacing";
++        "reserve";
++        "simp";
++        "theory";
++        "toStr";
++        "universes";
++        "using_well_founded";
++      ]
++  | FStar | Coq | HOL4 -> []
++
+ let builtin_adts () : (builtin_ty * string) list =
+   (* We voluntarily omit the type [Error]: it is never directly
+      referenced in the generated translation, and easily collides
+@@ -1712,6 +1722,7 @@ let initialize_names_maps () : names_maps =
+       unsafe_names_map;
+       strict_names_map;
+       adt_projectors = StringSet.empty;
++      var_reserved_names = StringSet.of_list (var_reserved_names ());
+     }
+   in
+   (* Then we add:
+@@ -2504,6 +2515,7 @@ let basename_to_unique (ctx : extraction_ctx) (name : string) =
+        the backend allows such collisions *)
+     StringSet.mem s ctx.names_maps.names_map.names_set
+     || StringSet.mem s ctx.names_maps.strict_names_map.names_set
++    || StringSet.mem s ctx.names_maps.var_reserved_names
+   in
+ 
+   basename_to_unique_aux collision name_append_index name
+diff --git a/src/extract/ExtractTypes.ml b/src/extract/ExtractTypes.ml
+index bd9728c..b20db9c 100644
+--- a/src/extract/ExtractTypes.ml
++++ b/src/extract/ExtractTypes.ml
+@@ -913,6 +913,9 @@ and extract_trait_instance_id (span : Meta.span) (ctx : extraction_ctx)
+         | [ _; input; output ] -> { generics with types = [ input; output ] }
+         | _ -> [%internal_error] span
+       in
++      let builtin_fn_name (name : string) : string =
++        if backend () = Lean then "_root_.Aeneas.Std." ^ name else name
++      in
+       let name, generics =
+         match data with
+         | BuiltinClone -> ("BuiltinClone", generics)
+@@ -922,9 +925,14 @@ and extract_trait_instance_id (span : Meta.span) (ctx : extraction_ctx)
+               "Extracted an unexpected builtin clause of kind `Discriminant`: \
+                this will not type-check"];
+             ("BuiltinDiscriminantKind", generics)
+-        | BuiltinFn -> ("BuiltinFn", builtin_fn_update_generics generics)
+-        | BuiltinFnMut -> ("BuiltinFnMut", builtin_fn_update_generics generics)
+-        | BuiltinFnOnce -> ("BuiltinFnOnce", builtin_fn_update_generics generics)
++        (* Printed from the root in Lean: user declarations may take these
++           names (they are only reserved for the generated variables) *)
++        | BuiltinFn ->
++            (builtin_fn_name "BuiltinFn", builtin_fn_update_generics generics)
++        | BuiltinFnMut ->
++            (builtin_fn_name "BuiltinFnMut", builtin_fn_update_generics generics)
++        | BuiltinFnOnce ->
++            (builtin_fn_name "BuiltinFnOnce", builtin_fn_update_generics generics)
+       in
+       if inside then F.pp_print_string fmt "(";
+       F.pp_print_string fmt name;
+diff --git a/tests/lean/ClosureUncapturedGenerics/ClosureUncapturedGenerics.lean b/tests/lean/ClosureUncapturedGenerics/ClosureUncapturedGenerics.lean
+index 8441908..6f96a35 100644
+--- a/tests/lean/ClosureUncapturedGenerics/ClosureUncapturedGenerics.lean
++++ b/tests/lean/ClosureUncapturedGenerics/ClosureUncapturedGenerics.lean
+@@ -239,7 +239,7 @@ def DimExpr.map_symbols
+     | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
+       let o ←
+         _root_.closure_uncaptured_generics.core.option.Option.map
+-          (BuiltinFnOnce _root_.Aeneas.Std.Usize
++          (_root_.Aeneas.Std.BuiltinFnOnce _root_.Aeneas.Std.Usize
+           _root_.closure_uncaptured_generics.DimExpr) val
+           (_root_.closure_uncaptured_generics.DimExpr.Concrete.ctor)
+       let de ←
+@@ -337,7 +337,7 @@ def DimExpr.map_symbols01T0closure_specialized_7b6f8733a27e468dec90d7aa8971af95
+     | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
+       let o ←
+         _root_.closure_uncaptured_generics.core.option.Option.map
+-          (BuiltinFnOnce _root_.Aeneas.Std.Usize
++          (_root_.Aeneas.Std.BuiltinFnOnce _root_.Aeneas.Std.Usize
+           _root_.closure_uncaptured_generics.DimExpr) val
+           (_root_.closure_uncaptured_generics.DimExpr.Concrete.ctor)
+       let de ←
+diff --git a/tests/lean/Closures.lean b/tests/lean/Closures.lean
+index 6a0cba6..30ee03b 100644
+--- a/tests/lean/Closures.lean
++++ b/tests/lean/Closures.lean
+@@ -511,8 +511,9 @@ def map_fn_pointer
+   let _ ←
+     _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
+       (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
+-      _root_.Aeneas.Std.U8) (BuiltinFnMut _root_.Aeneas.Std.U8
+-      _root_.Aeneas.Std.U8) model_state (_root_.closures.u8_id)
++      _root_.Aeneas.Std.U8) (_root_.Aeneas.Std.BuiltinFnMut
++      _root_.Aeneas.Std.U8 _root_.Aeneas.Std.U8) model_state
++      (_root_.closures.u8_id)
+   _root_.Aeneas.Std.Result.ok ()
+ 
+ end closures
+diff --git a/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean b/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean
+index 2aa2bb7..d341231 100644
+--- a/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean
++++ b/tests/lean/CollectUserIteratorHint/CollectUserIteratorHint.lean
+@@ -87,7 +87,7 @@ def countdowns
+       _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32
+       (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
+       _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32)
+-      (BuiltinFnMut _root_.Aeneas.Std.U32
++      (_root_.Aeneas.Std.BuiltinFnMut _root_.Aeneas.Std.U32
+       _root_.collect_user_iterator_hint.Countdown) n
+       (_root_.collect_user_iterator_hint.Countdown.ctor)
+   let (model_state1, _) ←
+@@ -96,7 +96,7 @@ def countdowns
+       _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32
+       (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
+       _root_.collect_user_iterator_hint.Countdown.Insts.CoreIterTraitsIteratorIteratorU32)
+-      (BuiltinFnMut _root_.Aeneas.Std.U32
++      (_root_.Aeneas.Std.BuiltinFnMut _root_.Aeneas.Std.U32
+       _root_.collect_user_iterator_hint.Countdown))
+       (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
+       _root_.Aeneas.Std.U32) model_state
+diff --git a/tests/lean/JoinObservedLocal/JoinObservedLocal.lean b/tests/lean/JoinObservedLocal/JoinObservedLocal.lean
+index a06464c..ba00c23 100644
+--- a/tests/lean/JoinObservedLocal/JoinObservedLocal.lean
++++ b/tests/lean/JoinObservedLocal/JoinObservedLocal.lean
+@@ -264,14 +264,14 @@ def View.list
+         let model_state ←
+           _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
+             (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-            _root_.join_observed_local.Expr) (BuiltinFnMut
++            _root_.join_observed_local.Expr) (_root_.Aeneas.Std.BuiltinFnMut
+             _root_.join_observed_local.Expr _root_.join_observed_local.View) i
+             (_root_.join_observed_local.View.Ast.ctor)
+         let (model_state1, _) ←
+           _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
+             (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
+             (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-            _root_.join_observed_local.Expr) (BuiltinFnMut
++            _root_.join_observed_local.Expr) (_root_.Aeneas.Std.BuiltinFnMut
+             _root_.join_observed_local.Expr _root_.join_observed_local.View))
+             (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
+             _root_.join_observed_local.View) model_state
+diff --git a/tests/lean/LeanReservedNames.lean b/tests/lean/LeanReservedNames.lean
+new file mode 100644
+index 0000000..88ce871
+--- /dev/null
++++ b/tests/lean/LeanReservedNames.lean
+@@ -0,0 +1,2 @@
++import LeanReservedNames.Checks
++import LeanReservedNames.LeanReservedNames
+diff --git a/tests/lean/LeanReservedNames/Checks.lean b/tests/lean/LeanReservedNames/Checks.lean
+new file mode 100644
+index 0000000..834d107
+--- /dev/null
++++ b/tests/lean/LeanReservedNames/Checks.lean
+@@ -0,0 +1,103 @@
++import LeanReservedNames.LeanReservedNames
++
++/-! Evaluate the model of `tests/src/lean-reserved-names.rs` on the inputs of
++    its `native` test module and compare with the native results, including
++    the values given back by `record`, `PreparedDropout::theory` and
++    `Theory::override` (the callers read the updated fields after the calls). -/
++
++namespace lean_reserved_names.checks
++open Aeneas Aeneas.Std Result
++open lean_reserved_names (PreparedDropout)
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++def res {α β : Type} (f : α → β) : Result α → Option β
++  | ok v => some (f v)
++  | _ => none
++
++def n : Result U32 → Option Nat := res (·.val)
++
++def get {α : Type} : Result α → Option α := res id
++
++/-- The model's `prepare seed` (every field `seed + i`), then `k`. -/
++def prep {β : Type} (seed : Nat) (k : PreparedDropout → Option β) : Option β :=
++  get (lean_reserved_names.prepare (u seed)) >>= k
++
++-- native `fields`
++#guard (prep 1 (fun d => get (lean_reserved_names.digest d))).map (·.val) == some 3034827181
++#guard (prep 1 (fun d => get (lean_reserved_names.parameters d))).map (·.val) == some 11
++-- `record` returns the old `parameters` and gives back the updated value
++#guard (prep 10 (fun d => get (lean_reserved_names.record d (u 0x0f)))).map
++    (fun (o, (d : PreparedDropout)) => (o.val, d.parameters.val, d.const.val, d.BuiltinFn.val))
++  == some (10, 0x0f, 30, 28)
++#guard (prep 10 (fun d => get (lean_reserved_names.record d (u 0x0f)) >>= fun (_, d) =>
++    get (lean_reserved_names.digest d))).map (·.val) == some 1007958329
++-- `record_then_bump` writes through the value `record` gives back
++#guard (prep 10 (fun d => get (lean_reserved_names.record d (u 0x0f)) >>= fun (_, d) =>
++    get (lean_reserved_names.record_then_bump d (u 3)))).map
++    (fun (o, (d : PreparedDropout)) => (o.val, d.parameters.val, d.const.val, d.prelude.val))
++  == some (0x0f, 3, 33, 1019)
++#guard (prep 10 (fun d => get (lean_reserved_names.record d (u 0x0f)) >>= fun (_, d) =>
++    get (lean_reserved_names.record_then_bump d (u 3)) >>= fun (_, d) =>
++    get (lean_reserved_names.PreparedDropout.impl.simp d))).map (·.val) == some 27
++-- `PreparedDropout::theory` returns the old `theory` and gives back the updated value
++#guard (prep 10 (fun d => get (lean_reserved_names.record d (u 0x0f)) >>= fun (_, d) =>
++    get (lean_reserved_names.record_then_bump d (u 3)) >>= fun (_, d) =>
++    get (lean_reserved_names.PreparedDropout.impl.theory d (u 0x40)))).map
++    (fun (o, (d : PreparedDropout)) => (o.val, d.theory.val, d.reduce.val))
++  == some (18, 0x40, 27)
++
++-- native `functions`
++#guard lean_reserved_names.constant.val == 5
++#guard n (lean_reserved_names.simp (u 3)) == some 8
++#guard n (lean_reserved_names.const (u 3)) == some 16
++#guard n (lean_reserved_names.theory (u 3)) == some 31
++#guard n (lean_reserved_names.prelude (u 3)) == some 30
++#guard n (lean_reserved_names.universes (u 3)) == some 15
++#guard n (lean_reserved_names.using_well_founded (u 4)) == some 18
++#guard lean_reserved_names.reduce (u 4) == ok true
++#guard lean_reserved_names.reserve (u 4) == ok false
++#guard n (lean_reserved_names.override (u 3)) == some 21
++#guard n (lean_reserved_names.override (u 4)) == some 4
++#guard n (lean_reserved_names.begin (u 3)) == some 22
++#guard n (lean_reserved_names.axioms (u 3)) == some 278
++#guard n (lean_reserved_names.definition (u 3)) == some 278
++#guard n (lean_reserved_names.toStr (u 3)) == some 280
++#guard n (lean_reserved_names.Pi (u 3)) == some 840
++#guard n (lean_reserved_names.parameter (u 3)) == some 861
++#guard n (lean_reserved_names.constants (u 3)) == some 930
++#guard n (lean_reserved_names.precedence (u 3)) == some 933
++#guard n (lean_reserved_names.replacing (u 3)) == some 233
++#guard n (lean_reserved_names.opaque_defs (u 3)) == some 234
++
++-- native `types`
++#guard res (fun (a, b, c) => (a.val, b.val, c.val))
++    (lean_reserved_names.use_fn_items { raw := u 4 } (u 3)) == some (15, 0x56, 9)
++#guard res (fun (r : lean_reserved_names.raw) => (r.prelude.val, r.Pi.val))
++    (lean_reserved_names.mk_raw (u 4)) == some (4, 5)
++#guard n (lean_reserved_names.reserved .parameters) == some 0
++#guard n (lean_reserved_names.reserved (.record (u 3))) == some 8
++#guard n (lean_reserved_names.reserved (.simp (u 3))) == some 4
++#guard n (lean_reserved_names.reserved .const) == some 2
++#guard n (lean_reserved_names.reserved (.Pi (u 3))) == some 9
++#guard n (lean_reserved_names.reserved .BuiltinFn) == some 4
++#guard n (lean_reserved_names.reserved (.toStr (u 3))) == some 13
++#guard n (lean_reserved_names.mk_reserved (u 7) >>= lean_reserved_names.reserved) == some 0
++#guard n (lean_reserved_names.mk_reserved (u 8) >>= lean_reserved_names.reserved) == some 13
++#guard n (lean_reserved_names.mk_reserved (u 9) >>= lean_reserved_names.reserved) == some 10
++#guard n (lean_reserved_names.mk_reserved (u 10) >>= lean_reserved_names.reserved) == some 2
++#guard n (lean_reserved_names.mk_reserved (u 11) >>= lean_reserved_names.reserved) == some 33
++#guard n (lean_reserved_names.mk_reserved (u 12) >>= lean_reserved_names.reserved) == some 4
++#guard n (lean_reserved_names.mk_reserved (u 13) >>= lean_reserved_names.reserved) == some 23
++-- `Theory::override` returns the old `override` and gives back the updated value
++#guard (prep 1 (fun d => get (lean_reserved_names.use_theory
++    lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory d (u 3)))).map
++    (fun ((a, b, c, o), (d : PreparedDropout)) => (a.val, b.val, c.val, o.val, d.override.val))
++  == some (1, 15, 21, 15, 3)
++-- the method without `self` (`Theory::constant`, as `ActivationElement::constant`)
++#guard n (lean_reserved_names.use_constant
++    lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory (u 4)) == some 8
++#guard res (fun (d : PreparedDropout) => d.constant.val)
++    (lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.constant (u 4)) == some 14
++
++end lean_reserved_names.checks
+diff --git a/tests/lean/LeanReservedNames/LeanReservedNames.lean b/tests/lean/LeanReservedNames/LeanReservedNames.lean
+new file mode 100644
+index 0000000..25589b6
+--- /dev/null
++++ b/tests/lean/LeanReservedNames/LeanReservedNames.lean
+@@ -0,0 +1,737 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [lean_reserved_names]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace lean_reserved_names
++
++/-- [lean_reserved_names::constant]
++    Source: 'tests/src/lean-reserved-names.rs', lines 21:0-21:28
++    Visibility: public -/
++@[global_simps, irreducible] def constant : _root_.Aeneas.Std.U32 := 5#u32
++
++/-- [lean_reserved_names::PreparedDropout]
++    Source: 'tests/src/lean-reserved-names.rs', lines 23:0-50:1
++    Visibility: public -/
++structure PreparedDropout where
++  parameters : _root_.Aeneas.Std.U32
++  parameter : _root_.Aeneas.Std.U32
++  record : _root_.Aeneas.Std.U32
++  raw : _root_.Aeneas.Std.U32
++  simp : _root_.Aeneas.Std.U32
++  const : _root_.Aeneas.Std.U32
++  constant : _root_.Aeneas.Std.U32
++  constants : _root_.Aeneas.Std.U32
++  theory : _root_.Aeneas.Std.U32
++  prelude : _root_.Aeneas.Std.U32
++  universes : _root_.Aeneas.Std.U32
++  using_well_founded : _root_.Aeneas.Std.U32
++  reduce : _root_.Aeneas.Std.U32
++  reserve : _root_.Aeneas.Std.U32
++  override : _root_.Aeneas.Std.U32
++  begin : _root_.Aeneas.Std.U32
++  axioms : _root_.Aeneas.Std.U32
++  definition : _root_.Aeneas.Std.U32
++  toStr : _root_.Aeneas.Std.U32
++  Pi : _root_.Aeneas.Std.U32
++  BuiltinFn : _root_.Aeneas.Std.U32
++  BuiltinFnMut : _root_.Aeneas.Std.U32
++  BuiltinFnOnce : _root_.Aeneas.Std.U32
++  precedence : _root_.Aeneas.Std.U32
++  replacing : _root_.Aeneas.Std.U32
++  opaque_defs : _root_.Aeneas.Std.U32
++
++/-- [lean_reserved_names::prepare]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 53:0-82:1
++    Visibility: public -/
++def prepare
++  (seed : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.lean_reserved_names.PreparedDropout
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 1#u32)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 2#u32)
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 3#u32)
++  let i3 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 4#u32)
++  let i4 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 5#u32)
++  let i5 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 6#u32)
++  let i6 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 7#u32)
++  let i7 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 8#u32)
++  let i8 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 9#u32)
++  let i9 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 10#u32)
++  let i10 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 11#u32)
++  let i11 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 12#u32)
++  let i12 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 13#u32)
++  let i13 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 14#u32)
++  let i14 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 15#u32)
++  let i15 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 16#u32)
++  let i16 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 17#u32)
++  let i17 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 18#u32)
++  let i18 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 19#u32)
++  let i19 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 20#u32)
++  let i20 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 21#u32)
++  let i21 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 22#u32)
++  let i22 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 23#u32)
++  let i23 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 24#u32)
++  let i24 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add seed 25#u32)
++  _root_.Aeneas.Std.Result.ok
++    {
++      parameters := seed,
++      parameter := i,
++      record := i1,
++      raw := i2,
++      simp := i3,
++      const := i4,
++      constant := i5,
++      constants := i6,
++      theory := i7,
++      prelude := i8,
++      universes := i9,
++      using_well_founded := i10,
++      reduce := i11,
++      reserve := i12,
++      override := i13,
++      begin := i14,
++      axioms := i15,
++      definition := i16,
++      toStr := i17,
++      Pi := i18,
++      BuiltinFn := i19,
++      BuiltinFnMut := i20,
++      BuiltinFnOnce := i21,
++      precedence := i22,
++      replacing := i23,
++      opaque_defs := i24
++    }
++
++/-- [lean_reserved_names::digest]: loop body 0:
++    Source: 'tests/src/lean-reserved-names.rs', lines 116:4-119:5
++    Visibility: public -/
++@[rust_loop_body]
++def digest_loop.body
++  (fields : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 26#usize)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32)
++  := do
++  if i < 26#usize
++  then
++    let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul acc 31#u32)
++    let i2 ← _root_.Aeneas.Std.Array.index_usize fields i
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i1 i2)
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (acc1, i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++
++/-- [lean_reserved_names::digest]: loop 0:
++    Source: 'tests/src/lean-reserved-names.rs', lines 116:4-119:5
++    Visibility: public -/
++@[rust_loop]
++def digest_loop
++  (fields : _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 26#usize)
++  (acc : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (acc1, i1) => _root_.lean_reserved_names.digest_loop.body fields acc1
++       i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize) _root_.Aeneas.Std.U32))
++    (acc, i)
++
++/-- [lean_reserved_names::digest]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 85:0-121:1
++    Visibility: public -/
++@[reducible]
++def digest
++  (d : _root_.lean_reserved_names.PreparedDropout) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.lean_reserved_names.digest_loop
++    (_root_.Aeneas.Std.Array.make 26#usize [
++      d.parameters, d.parameter, d.record, d.raw, d.simp, d.const, d.constant,
++      d.constants, d.theory, d.prelude, d.universes, d.using_well_founded,
++      d.reduce, d.reserve, d.override, d.begin, d.axioms, d.definition,
++      d.toStr, d.Pi, d.BuiltinFn, d.BuiltinFnMut, d.BuiltinFnOnce,
++      d.precedence, d.replacing, d.opaque_defs
++      ]) 0#u32 0#usize
++
++/-- [lean_reserved_names::parameters]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 124:0-129:1
++    Visibility: public -/
++def parameters
++  (d : _root_.lean_reserved_names.PreparedDropout) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul d.parameters 3#u32)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add i d.record)
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i1
++    d.simp)
++
++/-- [lean_reserved_names::record]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 132:0-138:1
++    Visibility: public -/
++def record
++  (d : _root_.lean_reserved_names.PreparedDropout) (v : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_reserved_names.PreparedDropout)
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add d.const v)
++  _root_.Aeneas.Std.Result.ok (d.parameters,
++    { d with parameters := v, const := i, BuiltinFn := d.toStr })
++
++/-- [lean_reserved_names::record_then_bump]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 141:0-145:1
++    Visibility: public -/
++def record_then_bump
++  (d : _root_.lean_reserved_names.PreparedDropout) (v : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_reserved_names.PreparedDropout)
++  := do
++  let (old, d1) ← _root_.lean_reserved_names.record d v
++  let i ← d1.prelude + 1000#u32
++  _root_.Aeneas.Std.Result.ok (old, { d1 with prelude := i })
++
++/-- [lean_reserved_names::simp]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 147:0-149:1
++    Visibility: public -/
++def simp
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add x
++    _root_.lean_reserved_names.constant)
++
++/-- [lean_reserved_names::const]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 151:0-153:1
++    Visibility: public -/
++def const
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.simp x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul i
++    2#u32)
++
++/-- [lean_reserved_names::theory]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 155:0-157:1
++    Visibility: public -/
++def theory
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.const x
++  _root_.Aeneas.Std.Result.ok (i ^^^ 15#u32)
++
++/-- [lean_reserved_names::prelude]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 159:0-161:1
++    Visibility: public -/
++def prelude
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.theory x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_sub i
++    1#u32)
++
++/-- [lean_reserved_names::universes]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 163:0-165:1
++    Visibility: public -/
++def universes
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.prelude x
++  i >>> 1#i32
++
++/-- [lean_reserved_names::using_well_founded]: loop body 0:
++    Source: 'tests/src/lean-reserved-names.rs', lines 170:4-173:5
++    Visibility: public -/
++@[rust_loop_body]
++def using_well_founded_loop.body
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32)
++  := do
++  if i < n
++  then
++    let i1 ← _root_.lean_reserved_names.universes i
++    let acc1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add acc i1)
++    let i2 ← i + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (acc1, i2))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done acc)
++
++/-- [lean_reserved_names::using_well_founded]: loop 0:
++    Source: 'tests/src/lean-reserved-names.rs', lines 170:4-173:5
++    Visibility: public -/
++@[rust_loop]
++def using_well_founded_loop
++  (n : _root_.Aeneas.Std.U32) (acc : _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  loop
++    (fun (acc1, i1) => _root_.lean_reserved_names.using_well_founded_loop.body
++       n acc1 i1 : (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) _root_.Aeneas.Std.U32))
++    (acc, i)
++
++/-- [lean_reserved_names::using_well_founded]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 167:0-175:1
++    Visibility: public -/
++@[reducible]
++def using_well_founded
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.lean_reserved_names.using_well_founded_loop n 0#u32 0#u32
++
++mutual
++
++/-- [lean_reserved_names::reduce]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 178:0-180:1
++    Visibility: public -/
++def reduce
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.Bool := do
++  if n = 0#u32
++  then _root_.Aeneas.Std.Result.ok true
++  else let i ← n - 1#u32
++       reserve i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++/-- [lean_reserved_names::reserve]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 182:0-184:1
++    Visibility: public -/
++def reserve
++  (n : _root_.Aeneas.Std.U32) : _root_.Aeneas.Std.Result _root_.Bool := do
++  if n = 0#u32
++  then _root_.Aeneas.Std.Result.ok false
++  else let i ← n - 1#u32
++       reduce i
++partial_fixpoint monotonicity by aeneas_monotonicity
++
++end
++
++/-- [lean_reserved_names::override]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 186:0-188:1
++    Visibility: public -/
++def override
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let b ← _root_.lean_reserved_names.reduce x
++  if b
++  then _root_.Aeneas.Std.Result.ok x
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul x
++      7#u32)
++
++/-- [lean_reserved_names::begin]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 190:0-192:1
++    Visibility: public -/
++def begin
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.override x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    1#u32)
++
++/-- [lean_reserved_names::axioms]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 194:0-196:1
++    Visibility: public -/
++def axioms
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.begin x
++  _root_.Aeneas.Std.Result.ok (i ||| 256#u32)
++
++/-- [lean_reserved_names::definition]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 198:0-200:1
++    Visibility: public -/
++def definition
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.axioms x
++  _root_.Aeneas.Std.Result.ok (i &&& 511#u32)
++
++/-- [lean_reserved_names::toStr]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 202:0-204:1
++    Visibility: public -/
++def toStr
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.definition x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    2#u32)
++
++/-- [lean_reserved_names::Pi]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 206:0-208:1
++    Visibility: public -/
++def Pi
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.toStr x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul i
++    3#u32)
++
++/-- [lean_reserved_names::parameter]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 210:0-212:1
++    Visibility: public -/
++def parameter
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.Pi x
++  let pd ← _root_.lean_reserved_names.prepare x
++  let i1 ← _root_.lean_reserved_names.parameters pd
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    i1)
++
++/-- [lean_reserved_names::constants]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 214:0-216:1
++    Visibility: public -/
++def constants
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.parameter x
++  _root_.Aeneas.Std.Result.ok (i ^^^ 255#u32)
++
++/-- [lean_reserved_names::precedence]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 218:0-220:1
++    Visibility: public -/
++def precedence
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.constants x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    3#u32)
++
++/-- [lean_reserved_names::replacing]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 222:0-224:1
++    Visibility: public -/
++def replacing
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.precedence x
++  i >>> 2#i32
++
++/-- [lean_reserved_names::opaque_defs]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 226:0-228:1
++    Visibility: public -/
++def opaque_defs
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let i ← _root_.lean_reserved_names.replacing x
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add i
++    1#u32)
++
++/-- [lean_reserved_names::BuiltinFn]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 232:0-234:1
++    Visibility: public -/
++def BuiltinFn
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul x
++    5#u32)
++
++/-- [lean_reserved_names::BuiltinFnMut]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 236:0-238:1
++    Visibility: public -/
++def BuiltinFnMut
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (x ^^^ 85#u32)
++
++/-- [lean_reserved_names::BuiltinFnOnce]
++    Source: 'tests/src/lean-reserved-names.rs', lines 241:0-243:1
++    Visibility: public -/
++structure BuiltinFnOnce where
++  raw : _root_.Aeneas.Std.U32
++
++/-- [lean_reserved_names::apply]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 245:0-247:1
++    Visibility: public -/
++def apply
++  {F : Type} (coreopsfunctionFnFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.Fn F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  coreopsfunctionFnFTupleU32U32Inst.call f x
++
++/-- [lean_reserved_names::apply_mut]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 249:0-251:1
++    Visibility: public -/
++def apply_mut
++  {F : Type} (coreopsfunctionFnMutFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnMut F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ← coreopsfunctionFnMutFTupleU32U32Inst.call_mut f x
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [lean_reserved_names::apply_once]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 253:0-255:1
++    Visibility: public -/
++def apply_once
++  {F : Type} (coreopsfunctionFnOnceFTupleU32U32Inst :
++  _root_.Aeneas.Std.core.ops.function.FnOnce F _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (f : F) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (model_state, _) ← coreopsfunctionFnOnceFTupleU32U32Inst.call_once f x
++  _root_.Aeneas.Std.Result.ok model_state
++
++/-- [lean_reserved_names::use_fn_items]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 257:0-259:1
++    Visibility: public -/
++def use_fn_items
++  (o : _root_.lean_reserved_names.BuiltinFnOnce) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32)
++  := do
++  let i ←
++    _root_.lean_reserved_names.apply (_root_.Aeneas.Std.BuiltinFn
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++      (_root_.lean_reserved_names.BuiltinFn) x
++  let i1 ←
++    _root_.lean_reserved_names.apply_mut (_root_.Aeneas.Std.BuiltinFnMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++      (_root_.lean_reserved_names.BuiltinFnMut) x
++  let i2 ←
++    _root_.lean_reserved_names.apply_once (_root_.Aeneas.Std.BuiltinFnOnce
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++      (_root_.lean_reserved_names.simp) o.raw
++  _root_.Aeneas.Std.Result.ok (i, i1, i2)
++
++/-- [lean_reserved_names::raw]
++    Source: 'tests/src/lean-reserved-names.rs', lines 262:0-265:1
++    Visibility: public -/
++structure raw where
++  prelude : _root_.Aeneas.Std.U32
++  Pi : _root_.Aeneas.Std.U32
++
++/-- [lean_reserved_names::mk_raw]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 267:0-269:1
++    Visibility: public -/
++def mk_raw
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.lean_reserved_names.raw
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add x 1#u32)
++  _root_.Aeneas.Std.Result.ok { prelude := x, Pi := i }
++
++/-- [lean_reserved_names::Reserved]
++    Source: 'tests/src/lean-reserved-names.rs', lines 271:0-279:1
++    Visibility: public -/
++@[discriminant isize]
++inductive Reserved where
++| parameters : Reserved
++| record : _root_.Aeneas.Std.U32 → Reserved
++| simp : _root_.Aeneas.Std.U32 → Reserved
++| const : Reserved
++| Pi : _root_.Aeneas.Std.U32 → Reserved
++| BuiltinFn : Reserved
++| toStr : _root_.Aeneas.Std.U32 → Reserved
++
++/-- [lean_reserved_names::reserved]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 281:0-291:1
++    Visibility: public -/
++def reserved
++  (r : _root_.lean_reserved_names.Reserved) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match r with
++  | _root_.lean_reserved_names.Reserved.parameters =>
++    _root_.Aeneas.Std.Result.ok 0#u32
++  | _root_.lean_reserved_names.Reserved.record n =>
++    _root_.lean_reserved_names.simp n
++  | _root_.lean_reserved_names.Reserved.simp raw1 => raw1 + 1#u32
++  | _root_.lean_reserved_names.Reserved.const =>
++    _root_.Aeneas.Std.Result.ok 2#u32
++  | _root_.lean_reserved_names.Reserved.Pi n =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul n
++      3#u32)
++  | _root_.lean_reserved_names.Reserved.BuiltinFn =>
++    _root_.Aeneas.Std.Result.ok 4#u32
++  | _root_.lean_reserved_names.Reserved.toStr prelude1 =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add
++      prelude1 10#u32)
++
++/-- [lean_reserved_names::mk_reserved]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 293:0-303:1
++    Visibility: public -/
++def mk_reserved
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.lean_reserved_names.Reserved
++  := do
++  let i ← n % 7#u32
++  match i with
++  | 0#uscalar =>
++    _root_.Aeneas.Std.Result.ok _root_.lean_reserved_names.Reserved.parameters
++  | 1#uscalar =>
++    _root_.Aeneas.Std.Result.ok (_root_.lean_reserved_names.Reserved.record n)
++  | 2#uscalar =>
++    _root_.Aeneas.Std.Result.ok (_root_.lean_reserved_names.Reserved.simp n)
++  | 3#uscalar =>
++    _root_.Aeneas.Std.Result.ok _root_.lean_reserved_names.Reserved.const
++  | 4#uscalar =>
++    _root_.Aeneas.Std.Result.ok (_root_.lean_reserved_names.Reserved.Pi n)
++  | 5#uscalar =>
++    _root_.Aeneas.Std.Result.ok _root_.lean_reserved_names.Reserved.BuiltinFn
++  | _ =>
++    _root_.Aeneas.Std.Result.ok (_root_.lean_reserved_names.Reserved.toStr n)
++
++/-- [lean_reserved_names::{lean_reserved_names::PreparedDropout}::simp]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 307:4-309:5
++    Visibility: public -/
++def PreparedDropout.impl.simp
++  (self : _root_.lean_reserved_names.PreparedDropout) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_add
++    self.simp self.raw)
++
++/-- [lean_reserved_names::{lean_reserved_names::PreparedDropout}::theory]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 312:4-317:5
++    Visibility: public -/
++def PreparedDropout.impl.theory
++  (self : _root_.lean_reserved_names.PreparedDropout)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_reserved_names.PreparedDropout)
++  := do
++  let i ←
++    _root_.lean_reserved_names.PreparedDropout.impl.simp
++      { self with theory := v }
++  _root_.Aeneas.Std.Result.ok (self.theory,
++    { self with theory := v, reduce := i })
++
++/-- Trait declaration: [lean_reserved_names::Theory]
++    Source: 'tests/src/lean-reserved-names.rs', lines 320:0-327:1
++    Visibility: public -/
++structure Theory (Self : Type) where
++  parameters : Self → _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  simp : Self → _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++    _root_.Aeneas.Std.U32
++  BuiltinFn : Self → _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  override : Self → _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.U32 × Self)
++  constant : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Result Self
++
++/-- [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}::constant]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 345:4-347:5
++    Visibility: public -/
++def PreparedDropout.Insts.Lean_reserved_namesTheory.constant
++  (value : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.lean_reserved_names.PreparedDropout
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul value 2#u32)
++  _root_.lean_reserved_names.prepare i
++
++/-- [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}::override]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 340:4-344:5
++    Visibility: public -/
++def PreparedDropout.Insts.Lean_reserved_namesTheory.override
++  (self : _root_.lean_reserved_names.PreparedDropout)
++  (v : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.lean_reserved_names.PreparedDropout)
++  := do
++  _root_.Aeneas.Std.Result.ok (self.override, { self with override := v })
++
++/-- [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}::BuiltinFn]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 336:4-338:5
++    Visibility: public -/
++def PreparedDropout.Insts.Lean_reserved_namesTheory.BuiltinFn
++  (self : _root_.lean_reserved_names.PreparedDropout) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok self.BuiltinFn
++
++/-- [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}::simp]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 333:4-335:5
++    Visibility: public -/
++def PreparedDropout.Insts.Lean_reserved_namesTheory.simp
++  (self : _root_.lean_reserved_names.PreparedDropout)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.num.U32.wrapping_mul
++    self.simp x)
++
++/-- [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}::parameters]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 330:4-332:5
++    Visibility: public -/
++def PreparedDropout.Insts.Lean_reserved_namesTheory.parameters
++  (self : _root_.lean_reserved_names.PreparedDropout) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  _root_.Aeneas.Std.Result.ok self.parameters
++
++/-- Trait implementation: [lean_reserved_names::{lean_reserved_names::Theory for lean_reserved_names::PreparedDropout}]
++    Source: 'tests/src/lean-reserved-names.rs', lines 329:0-348:1 -/
++@[reducible]
++def PreparedDropout.Insts.Lean_reserved_namesTheory :
++  _root_.lean_reserved_names.Theory _root_.lean_reserved_names.PreparedDropout
++  := {
++  parameters :=
++    _root_.lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.parameters
++  simp :=
++    _root_.lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.simp
++  BuiltinFn :=
++    _root_.lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.BuiltinFn
++  override :=
++    _root_.lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.override
++  constant :=
++    _root_.lean_reserved_names.PreparedDropout.Insts.Lean_reserved_namesTheory.constant
++}
++
++/-- [lean_reserved_names::use_theory]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 350:0-353:1
++    Visibility: public -/
++def use_theory
++  {T : Type} (TheoryInst : _root_.lean_reserved_names.Theory T) (t : T)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) × T)
++  := do
++  let (old, t1) ← TheoryInst.override t x
++  let i ← TheoryInst.parameters t1
++  let i1 ← TheoryInst.simp t1 x
++  let i2 ← TheoryInst.BuiltinFn t1
++  _root_.Aeneas.Std.Result.ok ((i, i1, i2, old), t1)
++
++/-- [lean_reserved_names::use_constant]:
++    Source: 'tests/src/lean-reserved-names.rs', lines 355:0-357:1
++    Visibility: public -/
++def use_constant
++  {T : Type} (TheoryInst : _root_.lean_reserved_names.Theory T)
++  (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let t ← TheoryInst.constant x
++  TheoryInst.parameters t
++
++end lean_reserved_names
+diff --git a/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean b/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean
+index b0a59ab..5368342 100644
+--- a/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean
++++ b/tests/lean/NestedCollectionsAliases/NestedCollectionsAliases.lean
+@@ -1523,8 +1523,9 @@ def owner_byte_cost_loop.body
+   | none =>
+     let o ← lift (_root_.Aeneas.Std.U64.checked_mul elements width)
+     let o1 ←
+-      _root_.nested_collections_aliases.core.option.Option.map (BuiltinFnOnce
+-        _root_.Aeneas.Std.U64 _root_.nested_collections_aliases.ByteBound) o
++      _root_.nested_collections_aliases.core.option.Option.map
++        (_root_.Aeneas.Std.BuiltinFnOnce _root_.Aeneas.Std.U64
++        _root_.nested_collections_aliases.ByteBound) o
+         (_root_.nested_collections_aliases.ByteBound.Exact.ctor)
+     let r ←
+       _root_.Aeneas.Std.core.option.Option.ok_or o1
+diff --git a/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+index 5c754dc..531a40b 100644
+--- a/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
++++ b/tests/lean/RecursiveAdapterClosures/RecursiveAdapterClosures.lean
+@@ -99,14 +99,14 @@ def Tree.to_wire
+     let model_state ←
+       _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
+         (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-        _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++        _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.BuiltinFnMut
+         _root_.recursive_adapter_closures.Tree
+         _root_.recursive_adapter_closures.Wire) i (Tree.to_wire)
+     let (model_state1, _) ←
+       _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
+         (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
+         (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-        _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++        _root_.recursive_adapter_closures.Tree) (_root_.Aeneas.Std.BuiltinFnMut
+         _root_.recursive_adapter_closures.Tree
+         _root_.recursive_adapter_closures.Wire))
+         (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
+@@ -782,14 +782,16 @@ def size
+       let model_state ←
+         _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
+           (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-          _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++          _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.BuiltinFnMut
+           _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize) i1
+           (size)
+       let (model_state1, _) ←
+         _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.sum.default
+           (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
+           (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
+-          _root_.recursive_adapter_closures.Tree) (BuiltinFnMut
++          _root_.recursive_adapter_closures.Tree)
++          (_root_.Aeneas.Std.BuiltinFnMut
+           _root_.recursive_adapter_closures.Tree _root_.Aeneas.Std.Usize))
+           _root_.Aeneas.Std.core.iter.traits.accum.SumUsizeUsize model_state
+       _root_.Aeneas.Std.Result.ok model_state1
+diff --git a/tests/lean/SharedObservationConsumed/SharedObservationConsumed.lean b/tests/lean/SharedObservationConsumed/SharedObservationConsumed.lean
+index 9658cad..ebd621c 100644
+--- a/tests/lean/SharedObservationConsumed/SharedObservationConsumed.lean
++++ b/tests/lean/SharedObservationConsumed/SharedObservationConsumed.lean
+@@ -127,7 +127,8 @@ def wrt
+           _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter p.children
+         let (model_state1, _, _) ←
+           (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
+-            _root_.shared_observation_consumed.View).all (BuiltinFnMut
++            _root_.shared_observation_consumed.View).all
++            (_root_.Aeneas.Std.BuiltinFnMut
+             _root_.shared_observation_consumed.View _root_.Bool) model_state
+             (_root_.shared_observation_consumed.is_var)
+         _root_.Aeneas.Std.Result.ok model_state1
+@@ -280,9 +281,9 @@ def first_after_consume
+     _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter p.children
+   let (model_state1, _, _) ←
+     (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
+-      _root_.shared_observation_consumed.View).all (BuiltinFnMut
+-      _root_.shared_observation_consumed.View _root_.Bool) model_state
+-      (_root_.shared_observation_consumed.is_var)
++      _root_.shared_observation_consumed.View).all
++      (_root_.Aeneas.Std.BuiltinFnMut _root_.shared_observation_consumed.View
++      _root_.Bool) model_state (_root_.shared_observation_consumed.is_var)
+   let o ← _root_.shared_observation_consumed.View.name first
+   _root_.Aeneas.Std.Result.ok (o, model_state1)
+ 
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 13836c7..ee98de1 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -125,6 +125,7 @@ package «tests» {}
+ @[default_target] lean_lib JoinNestedStaged
+ @[default_target] lean_lib JoinObservedLocal
+ @[default_target] lean_lib LeanKeywordNames
++@[default_target] lean_lib LeanReservedNames
+ @[default_target] lean_lib LiftedAssocRegions
+ @[default_target] lean_lib ListBorrows
+ @[default_target] lean_lib LoopEndedSharedInput
+diff --git a/tests/src/lean-reserved-names.rs b/tests/src/lean-reserved-names.rs
+new file mode 100644
+index 0000000..0f96739
+--- /dev/null
++++ b/tests/src/lean-reserved-names.rs
+@@ -0,0 +1,429 @@
++//@ [!lean] skip
++//@ [lean] subdir=LeanReservedNames
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Declarations named like the names which the generated Lean variables do
++//! not take but which are not Lean tokens (`parameters`, `record`, `raw`,
++//! `simp`, `const`, `constant`, `theory`, `prelude`, `BuiltinFn`, ...):
++//! structure fields (as chelis-types' `PreparedDropout::parameters`),
++//! functions, a global, types, enumeration variants, inherent and trait
++//! methods (as chelis-types' `ActivationElement::constant`), and locals. They
++//! parse as plain identifiers, so they are neither escaped nor reserved for
++//! declarations: registering them as keywords made every such field or trait
++//! method a name clash. `BuiltinFn` and `BuiltinFnMut` are user functions passed as
++//! `Fn`/`FnMut` arguments and `BuiltinFnOnce` a user type, while the model
++//! refers to Aeneas' builtin instances of the same names.
++//! `LeanReservedNames/Checks.lean` evaluates the model on the inputs of the
++//! `native` test module and compares with the native results, including the
++//! values given back through `&mut`.
++#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
++
++pub const constant: u32 = 5;
++
++pub struct PreparedDropout {
++    pub parameters: u32,
++    pub parameter: u32,
++    pub record: u32,
++    pub raw: u32,
++    pub simp: u32,
++    pub r#const: u32,
++    pub constant: u32,
++    pub constants: u32,
++    pub theory: u32,
++    pub prelude: u32,
++    pub universes: u32,
++    pub using_well_founded: u32,
++    pub reduce: u32,
++    pub reserve: u32,
++    pub r#override: u32,
++    pub begin: u32,
++    pub axioms: u32,
++    pub definition: u32,
++    pub toStr: u32,
++    pub Pi: u32,
++    pub BuiltinFn: u32,
++    pub BuiltinFnMut: u32,
++    pub BuiltinFnOnce: u32,
++    pub precedence: u32,
++    pub replacing: u32,
++    pub opaque_defs: u32,
++}
++
++/// Every field gets a distinct value: `seed + i` for the i-th field.
++pub fn prepare(seed: u32) -> PreparedDropout {
++    PreparedDropout {
++        parameters: seed,
++        parameter: seed.wrapping_add(1),
++        record: seed.wrapping_add(2),
++        raw: seed.wrapping_add(3),
++        simp: seed.wrapping_add(4),
++        r#const: seed.wrapping_add(5),
++        constant: seed.wrapping_add(6),
++        constants: seed.wrapping_add(7),
++        theory: seed.wrapping_add(8),
++        prelude: seed.wrapping_add(9),
++        universes: seed.wrapping_add(10),
++        using_well_founded: seed.wrapping_add(11),
++        reduce: seed.wrapping_add(12),
++        reserve: seed.wrapping_add(13),
++        r#override: seed.wrapping_add(14),
++        begin: seed.wrapping_add(15),
++        axioms: seed.wrapping_add(16),
++        definition: seed.wrapping_add(17),
++        toStr: seed.wrapping_add(18),
++        Pi: seed.wrapping_add(19),
++        BuiltinFn: seed.wrapping_add(20),
++        BuiltinFnMut: seed.wrapping_add(21),
++        BuiltinFnOnce: seed.wrapping_add(22),
++        precedence: seed.wrapping_add(23),
++        replacing: seed.wrapping_add(24),
++        opaque_defs: seed.wrapping_add(25),
++    }
++}
++
++/// Reads every field, each with its own weight.
++pub fn digest(d: &PreparedDropout) -> u32 {
++    let fields = [
++        d.parameters,
++        d.parameter,
++        d.record,
++        d.raw,
++        d.simp,
++        d.r#const,
++        d.constant,
++        d.constants,
++        d.theory,
++        d.prelude,
++        d.universes,
++        d.using_well_founded,
++        d.reduce,
++        d.reserve,
++        d.r#override,
++        d.begin,
++        d.axioms,
++        d.definition,
++        d.toStr,
++        d.Pi,
++        d.BuiltinFn,
++        d.BuiltinFnMut,
++        d.BuiltinFnOnce,
++        d.precedence,
++        d.replacing,
++        d.opaque_defs,
++    ];
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < 26 {
++        acc = acc.wrapping_mul(31).wrapping_add(fields[i]);
++        i += 1;
++    }
++    acc
++}
++
++/// Locals named after the reserved names.
++pub fn parameters(d: &PreparedDropout) -> u32 {
++    let parameters = d.parameters;
++    let record = d.record;
++    let simp = d.simp;
++    parameters.wrapping_mul(3).wrapping_add(record).wrapping_add(simp)
++}
++
++/// Writes through `d`: the caller sees the updated fields.
++pub fn record(d: &mut PreparedDropout, v: u32) -> u32 {
++    let old = d.parameters;
++    d.parameters = v;
++    d.r#const = d.r#const.wrapping_add(v);
++    d.BuiltinFn = d.toStr;
++    old
++}
++
++/// The caller writes through the value `record` gives back.
++pub fn record_then_bump(d: &mut PreparedDropout, v: u32) -> u32 {
++    let old = record(d, v);
++    d.prelude += 1000;
++    old
++}
++
++pub fn simp(x: u32) -> u32 {
++    x.wrapping_add(constant)
++}
++
++pub fn r#const(x: u32) -> u32 {
++    simp(x).wrapping_mul(2)
++}
++
++pub fn theory(x: u32) -> u32 {
++    r#const(x) ^ 0x0f
++}
++
++pub fn prelude(x: u32) -> u32 {
++    theory(x).wrapping_sub(1)
++}
++
++pub fn universes(x: u32) -> u32 {
++    prelude(x) >> 1
++}
++
++pub fn using_well_founded(n: u32) -> u32 {
++    let mut acc = 0u32;
++    let mut i = 0;
++    while i < n {
++        acc = acc.wrapping_add(universes(i));
++        i += 1;
++    }
++    acc
++}
++
++/// `reduce` and `reserve` are mutually recursive.
++pub fn reduce(n: u32) -> bool {
++    if n == 0 { true } else { reserve(n - 1) }
++}
++
++pub fn reserve(n: u32) -> bool {
++    if n == 0 { false } else { reduce(n - 1) }
++}
++
++pub fn r#override(x: u32) -> u32 {
++    if reduce(x) { x } else { x.wrapping_mul(7) }
++}
++
++pub fn begin(x: u32) -> u32 {
++    r#override(x).wrapping_add(1)
++}
++
++pub fn axioms(x: u32) -> u32 {
++    begin(x) | 0x100
++}
++
++pub fn definition(x: u32) -> u32 {
++    axioms(x) & 0x1ff
++}
++
++pub fn toStr(x: u32) -> u32 {
++    definition(x).wrapping_add(2)
++}
++
++pub fn Pi(x: u32) -> u32 {
++    toStr(x).wrapping_mul(3)
++}
++
++pub fn parameter(x: u32) -> u32 {
++    Pi(x).wrapping_add(parameters(&prepare(x)))
++}
++
++pub fn constants(x: u32) -> u32 {
++    parameter(x) ^ 0xff
++}
++
++pub fn precedence(x: u32) -> u32 {
++    constants(x).wrapping_add(3)
++}
++
++pub fn replacing(x: u32) -> u32 {
++    precedence(x) >> 2
++}
++
++pub fn opaque_defs(x: u32) -> u32 {
++    replacing(x).wrapping_add(1)
++}
++
++/// User functions named like Aeneas' builtin instances of `Fn`/`FnMut`,
++/// passed to generic functions (the model uses those builtin instances).
++pub fn BuiltinFn(x: u32) -> u32 {
++    x.wrapping_mul(5)
++}
++
++pub fn BuiltinFnMut(x: u32) -> u32 {
++    x ^ 0x55
++}
++
++/// A user type named like Aeneas' builtin instance of `FnOnce`.
++pub struct BuiltinFnOnce {
++    pub raw: u32,
++}
++
++pub fn apply<F: Fn(u32) -> u32>(f: F, x: u32) -> u32 {
++    f(x)
++}
++
++pub fn apply_mut<F: FnMut(u32) -> u32>(mut f: F, x: u32) -> u32 {
++    f(x)
++}
++
++pub fn apply_once<F: FnOnce(u32) -> u32>(f: F, x: u32) -> u32 {
++    f(x)
++}
++
++pub fn use_fn_items(o: &BuiltinFnOnce, x: u32) -> (u32, u32, u32) {
++    (apply(BuiltinFn, x), apply_mut(BuiltinFnMut, x), apply_once(simp, o.raw))
++}
++
++/// A type named like a reserved name, with reserved field names.
++pub struct raw {
++    pub prelude: u32,
++    pub Pi: u32,
++}
++
++pub fn mk_raw(x: u32) -> raw {
++    raw { prelude: x, Pi: x.wrapping_add(1) }
++}
++
++pub enum Reserved {
++    parameters,
++    record(u32),
++    simp { raw: u32 },
++    r#const,
++    Pi(u32),
++    BuiltinFn,
++    toStr { prelude: u32 },
++}
++
++pub fn reserved(r: &Reserved) -> u32 {
++    match r {
++        Reserved::parameters => 0,
++        Reserved::record(n) => simp(*n),
++        Reserved::simp { raw } => *raw + 1,
++        Reserved::r#const => 2,
++        Reserved::Pi(n) => n.wrapping_mul(3),
++        Reserved::BuiltinFn => 4,
++        Reserved::toStr { prelude } => prelude.wrapping_add(10),
++    }
++}
++
++pub fn mk_reserved(n: u32) -> Reserved {
++    match n % 7 {
++        0 => Reserved::parameters,
++        1 => Reserved::record(n),
++        2 => Reserved::simp { raw: n },
++        3 => Reserved::r#const,
++        4 => Reserved::Pi(n),
++        5 => Reserved::BuiltinFn,
++        _ => Reserved::toStr { prelude: n },
++    }
++}
++
++impl PreparedDropout {
++    /// An inherent method named like a field.
++    pub fn simp(&self) -> u32 {
++        self.simp.wrapping_add(self.raw)
++    }
++
++    /// Writes through `self`.
++    pub fn theory(&mut self, v: u32) -> u32 {
++        let old = self.theory;
++        self.theory = v;
++        self.reduce = self.simp();
++        old
++    }
++}
++
++pub trait Theory {
++    fn parameters(&self) -> u32;
++    fn simp(&self, x: u32) -> u32;
++    fn BuiltinFn(&self) -> u32;
++    fn r#override(&mut self, v: u32) -> u32;
++    /// A method without `self` (as chelis-types' `ActivationElement::constant`).
++    fn constant(value: u32) -> Self;
++}
++
++impl Theory for PreparedDropout {
++    fn parameters(&self) -> u32 {
++        self.parameters
++    }
++    fn simp(&self, x: u32) -> u32 {
++        self.simp.wrapping_mul(x)
++    }
++    fn BuiltinFn(&self) -> u32 {
++        self.BuiltinFn
++    }
++    /// Writes through `self`.
++    fn r#override(&mut self, v: u32) -> u32 {
++        let old = self.r#override;
++        self.r#override = v;
++        old
++    }
++    fn constant(value: u32) -> Self {
++        prepare(value.wrapping_mul(2))
++    }
++}
++
++pub fn use_theory<T: Theory>(t: &mut T, x: u32) -> (u32, u32, u32, u32) {
++    let old = t.r#override(x);
++    (t.parameters(), t.simp(x), t.BuiltinFn(), old)
++}
++
++pub fn use_constant<T: Theory>(x: u32) -> u32 {
++    T::constant(x).parameters()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn fields() {
++        let d = prepare(1);
++        assert_eq!(digest(&d), 3034827181);
++        assert_eq!(parameters(&d), 11);
++        let mut d = prepare(10);
++        assert_eq!(record(&mut d, 0x0f), 10);
++        assert_eq!((d.parameters, d.r#const, d.BuiltinFn), (0x0f, 30, 28));
++        assert_eq!(digest(&d), 1007958329);
++        assert_eq!(record_then_bump(&mut d, 3), 0x0f);
++        assert_eq!((d.parameters, d.r#const, d.prelude), (3, 33, 1019));
++        assert_eq!(d.simp(), 27);
++        assert_eq!(d.theory(0x40), 18);
++        assert_eq!((d.theory, d.reduce), (0x40, 27));
++    }
++
++    #[test]
++    fn functions() {
++        assert_eq!(constant, 5);
++        assert_eq!(simp(3), 8);
++        assert_eq!(r#const(3), 16);
++        assert_eq!(theory(3), 31);
++        assert_eq!(prelude(3), 30);
++        assert_eq!(universes(3), 15);
++        assert_eq!(using_well_founded(4), 18);
++        assert_eq!(reduce(4), true);
++        assert_eq!(reserve(4), false);
++        assert_eq!(r#override(3), 21);
++        assert_eq!(r#override(4), 4);
++        assert_eq!(begin(3), 22);
++        assert_eq!(axioms(3), 278);
++        assert_eq!(definition(3), 278);
++        assert_eq!(toStr(3), 280);
++        assert_eq!(Pi(3), 840);
++        assert_eq!(parameter(3), 861);
++        assert_eq!(constants(3), 930);
++        assert_eq!(precedence(3), 933);
++        assert_eq!(replacing(3), 233);
++        assert_eq!(opaque_defs(3), 234);
++    }
++
++    #[test]
++    fn types() {
++        assert_eq!(use_fn_items(&BuiltinFnOnce { raw: 4 }, 3), (15, 0x56, 9));
++        let r = mk_raw(4);
++        assert_eq!((r.prelude, r.Pi), (4, 5));
++        assert_eq!(reserved(&Reserved::parameters), 0);
++        assert_eq!(reserved(&Reserved::record(3)), 8);
++        assert_eq!(reserved(&Reserved::simp { raw: 3 }), 4);
++        assert_eq!(reserved(&Reserved::r#const), 2);
++        assert_eq!(reserved(&Reserved::Pi(3)), 9);
++        assert_eq!(reserved(&Reserved::BuiltinFn), 4);
++        assert_eq!(reserved(&Reserved::toStr { prelude: 3 }), 13);
++        assert_eq!(reserved(&mk_reserved(7)), 0);
++        assert_eq!(reserved(&mk_reserved(8)), 13);
++        assert_eq!(reserved(&mk_reserved(9)), 10);
++        assert_eq!(reserved(&mk_reserved(10)), 2);
++        assert_eq!(reserved(&mk_reserved(11)), 33);
++        assert_eq!(reserved(&mk_reserved(12)), 4);
++        assert_eq!(reserved(&mk_reserved(13)), 23);
++        let mut d = prepare(1);
++        assert_eq!(use_theory(&mut d, 3), (1, 15, 21, 15));
++        assert_eq!(d.r#override, 3);
++        assert_eq!(use_constant::<PreparedDropout>(4), 8);
++        assert_eq!(<PreparedDropout as Theory>::constant(4).constant, 14);
++    }
++}

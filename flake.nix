@@ -44,6 +44,7 @@
           };
           upstream = aeneas.packages.${system};
           modelRust = aeneas.inputs.charon.packages.${system}.rustToolchain;
+          isNameMatcherParser = p: (p.pname or "") == "name_matcher_parser";
           patchedAeneasSource = pkgs.applyPatches {
             name = "aeneas-source";
             src = aeneas;
@@ -55,9 +56,22 @@
               patches = (old.patches or [ ]) ++ series "charon";
               inherit patchFlags;
             });
+            # charon-ml's name_matcher_parser is a separate dune package (a propagated input
+            # built from the same source), so the charon-ml series must patch it too.
+            name-matcher-parser =
+              (nixpkgs.lib.findFirst isNameMatcherParser (throw "charon-ml has no name_matcher_parser input")
+                upstream.charon-ml.propagatedBuildInputs
+              ).overrideAttrs
+                (old: {
+                  patches = (old.patches or [ ]) ++ series "charon-ml";
+                  inherit patchFlags;
+                });
             charon-ml = upstream.charon-ml.overrideAttrs (old: {
               patches = (old.patches or [ ]) ++ series "charon-ml";
               inherit patchFlags;
+              propagatedBuildInputs = map (
+                p: if isNameMatcherParser p then name-matcher-parser else p
+              ) old.propagatedBuildInputs;
             });
             aeneas = (upstream.aeneas.override { inherit charon charon-ml; }).overrideAttrs (_: {
               src = "${patchedAeneasSource}/src";
