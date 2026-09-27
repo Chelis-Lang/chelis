@@ -143,6 +143,62 @@ disposition = "owner"
 """
 
 
+GATE_REASON = "the gate needs a checkout the PR workers do not have"
+Q_GATE = "`cargo test -p q --test smoke q_case -- --ignored --exact`"
+
+
+def manual_gate_row(
+    package: str = "q",
+    name: str = "smoke",
+    **overrides: object,
+) -> str:
+    """One manual_gate_target row; an override of None drops that field."""
+    values = {
+        "package": package,
+        "name": name,
+        "manual_gates": ["q_gate"],
+        "reason": GATE_REASON,
+        "tracking_issue": "chelis#1824",
+        **overrides,
+    }
+    fields = "\n".join(
+        f"{key} = {json.dumps(value)}"
+        for key, value in values.items()
+        if value is not None
+    )
+    return f"\n[[manual_gate_target]]\n{fields}\n"
+
+
+def manual_gates_doc(*rows: tuple[str, str]) -> str:
+    """A docs/manual_gates.md whose wired table holds exactly ``rows``.
+
+    The following section also runs ``q::smoke``; only the wired table may
+    bind or stale a manual-gate row.
+    """
+    body = "\n".join(
+        f"| `{name}` | `q` | {command} | none | test |" for name, command in rows
+    )
+    return (
+        "# Chelis Manual Gates\n\n"
+        "## Ignored tests (wired manual gates)\n\n"
+        "| Test | Crate | Manual command | Prerequisite | Owning phase |\n"
+        "|---|---|---|---|---|\n"
+        f"{body}\n\n"
+        "## Not yet wired (named in spec, no `#[ignore]`'d test)\n\n"
+        "| Gate | Crate | Manual command | Prerequisite | Owning phase |\n"
+        "|---|---|---|---|---|\n"
+        "| `q_unwired` | `q` | `cargo test -p q --test smoke` | none | test |\n"
+    )
+
+
+def gate_sources(document: str | None = None) -> dict[str, str]:
+    sources = fixture_sources()
+    sources[owned.MANUAL_GATES_PATH] = (
+        manual_gates_doc(("q_gate", Q_GATE)) if document is None else document
+    )
+    return sources
+
+
 def fixture_metadata() -> dict:
     return metadata(
         package(
@@ -467,6 +523,175 @@ class SchemaTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_config(content)
 
+    def test_manual_gate_rows_are_exact_and_combine_with_no_other_row(self) -> None:
+        config = load_config(config_text() + manual_gate_row())
+        self.assertEqual(
+            config.manual_gate_targets,
+            {
+                owned.Identity("q", "smoke"): owned.ManualGate(
+                    ("q_gate",), GATE_REASON, "chelis#1824"
+                )
+            },
+        )
+        cases = [
+            (config_text() + manual_gate_row(workflow="ci.yml"), "requires exactly"),
+            (config_text() + manual_gate_row(reason=None), "requires exactly"),
+            (config_text() + manual_gate_row(manual_gates=None), "requires exactly"),
+            (config_text() + manual_gate_row(reason=" "), "reason must be"),
+            (config_text() + manual_gate_row(manual_gates=[]), "manual_gates must"),
+            (
+                config_text() + manual_gate_row(manual_gates=["q_gate", "q_gate"]),
+                "manual_gates must",
+            ),
+            (config_text() + manual_gate_row(manual_gates=[" q_gate"]), "manual_gates must"),
+            (config_text() + manual_gate_row(manual_gates="q_gate"), "manual_gates must"),
+            (config_text() + manual_gate_row(tracking_issue="#1824"), "chelis#N"),
+            (
+                config_text() + manual_gate_row() + manual_gate_row(),
+                "duplicate manual_gate_target",
+            ),
+            (config_text() + manual_gate_row("p", "heavy"), "excluded targets"),
+            (
+                config_text(standing=("q", "smoke")) + manual_gate_row(),
+                "cannot be standing",
+            ),
+            (
+                config_text(manual_only_target=("q", "smoke")) + manual_gate_row(),
+                "manual-only",
+            ),
+            (
+                config_text(standing=("q", "smoke"))
+                + manual_gate_row("p", "smoke"),
+                "test exclusions are forbidden",
+            ),
+        ]
+        for content, message in cases:
+            with self.subTest(message=message, row=content[-160:]):
+                with self.assertRaisesRegex(ValueError, message):
+                    load_config(content)
+
+    def test_manual_gate_rows_bind_exactly_the_wired_entries_that_run_them(
+        self,
+    ) -> None:
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(row: str, sources: dict[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + row),
+                fixture_metadata(),
+                tracked,
+                sources.__getitem__,
+            )
+
+        validate(manual_gate_row(), gate_sources())
+        validate(
+            manual_gate_row(manual_gates=["q_gate", "q_nextest"]),
+            gate_sources(
+                manual_gates_doc(
+                    ("q_gate", Q_GATE),
+                    (
+                        "q_nextest",
+                        "`CHELIS_X=1 cargo nextest run --package=q --test=smoke "
+                        "-- --ignored`",
+                    ),
+                )
+            ),
+        )
+        other_target = "`cargo test -p q --test other -- --ignored`"
+        cases = [
+            (manual_gate_row(package="missing"), gate_sources(), "stale manual-gate package"),
+            (manual_gate_row(name="missing"), gate_sources(), "stale manual-gate target"),
+            (manual_gate_row(), fixture_sources(), "cannot read docs/manual_gates.md"),
+            (manual_gate_row(manual_gates=["absent"]), gate_sources(), "names 0 rows"),
+            (manual_gate_row(manual_gates=["q_unwired"]), gate_sources(), "names 0 rows"),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", Q_GATE), ("q_gate", Q_GATE))),
+                "names 2 rows",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", other_target))),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", "`cargo test -p p --test smoke`"))
+                ),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", "`scripts/hip_test.py -p q --test smoke`"))
+                ),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(
+                        ("q_gate", Q_GATE[:-1] + " && " + other_target[1:])
+                    )
+                ),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", "Run the smoke suite by hand"))),
+                "not one code span",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(
+                        ("q_gate", Q_GATE),
+                        ("q_other", "`cargo nextest run -p q --test smoke`"),
+                    )
+                ),
+                "does not cite docs/manual_gates.md entries that run it",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", Q_GATE)).replace(
+                        "## Ignored tests (wired manual gates)",
+                        "## Ignored tests",
+                    )
+                ),
+                "exactly one",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", Q_GATE)).replace(
+                        "| Manual command |", "| Command |", 1
+                    )
+                ),
+                "has no Test",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", Q_GATE + " | extra"))),
+                "malformed docs/manual_gates.md table row",
+            ),
+        ]
+        for row, sources, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate(row, sources)
+
+    def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
+        """The check behind script-unit's docs/manual_gates.md path rule."""
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        self.assertTrue(config.manual_gate_targets)
+        owned.validate_manual_gate_entries(
+            config.manual_gate_targets,
+            (root / owned.MANUAL_GATES_PATH).read_text(),
+        )
+
     def test_repository_manifest_has_exact_selected_inventory_and_owners(self) -> None:
         config = owned.read_config(
             Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
@@ -483,6 +708,25 @@ class SchemaTests(unittest.TestCase):
                 owned.Identity("chelis-backend-hip", "device_entry_execution"),
                 owned.Identity(
                     "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
+                ),
+            },
+        )
+        self.assertEqual(
+            {
+                identity: (gate.entries, gate.tracking_issue)
+                for identity, gate in config.manual_gate_targets.items()
+            },
+            {
+                owned.Identity("chelis-cli", "shoals_oracle"): (
+                    (
+                        "phase3l_shoals_oracle",
+                        "phase3l_shoals_oracle_grad_greeks_match_analytic",
+                    ),
+                    "chelis#1824",
+                ),
+                owned.Identity("chelis-python", "manual_reef_context"): (
+                    ("reef_context_manual_acceptance_oracle",),
+                    "chelis#1824",
                 ),
             },
         )
@@ -1426,6 +1670,7 @@ class DurationBaselineTests(unittest.TestCase):
             "standing_targets": [],
             "standing_coverage_reuse": [],
             "manual_only_targets": [],
+            "manual_gate_targets": [],
             "target_exclusions": [],
             "test_exclusions": [],
             **shard_fields([identity], []),
@@ -1483,6 +1728,7 @@ class DurationBaselineTests(unittest.TestCase):
                 "executed_targets": selected,
                 "selected_tests": tests,
                 "executed_tests": tests,
+                "manual_gate_tests": [],
                 "commands_file": "commands.json",
                 "timings_file": "timings.json",
                 "test_list_file": "test-list.json",
@@ -1681,8 +1927,9 @@ class PlanningTests(unittest.TestCase):
         candidate: dict | None = None,
         config: owned.Config | None = None,
         tracked: set[str] | None = None,
+        sources: dict[str, str] | None = None,
     ) -> dict:
-        sources = fixture_sources()
+        sources = sources or fixture_sources()
         return owned.make_plan(
             mode="push",
             base_sha="a" * 40,
@@ -1811,6 +2058,7 @@ class PlanningTests(unittest.TestCase):
                 for identity in (identity,)
                 if identity in repository_config.manual_only_targets
             },
+            manual_gate_targets={},
             target_exclusions={
                 identity: repository_config.target_exclusions[identity]
                 for identity in (identity,)
@@ -2054,6 +2302,57 @@ class PlanningTests(unittest.TestCase):
         mutated["manual_only_targets"] = []
         with self.assertRaises(ValueError):
             owned.verify_plan_digest(mutated)
+
+    def test_direct_manual_gate_target_is_required_listed_and_plan_bound(
+        self,
+    ) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")],
+            config=load_config(config_text() + manual_gate_row()),
+            sources=gate_sources(),
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        self.assertEqual(
+            plan["manual_gate_targets"],
+            [
+                {
+                    "identity": "q::smoke",
+                    "manual_gates": ["q_gate"],
+                    "reason": GATE_REASON,
+                    "tracking_issue": "chelis#1824",
+                }
+            ],
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["execution_mode"],
+            "manual-gate",
+        )
+        owned.verify_plan_digest(plan)
+        mutated = copy.deepcopy(plan)
+        mutated["manual_gate_targets"] = []
+        with self.assertRaisesRegex(ValueError, "digest"):
+            owned.verify_plan_digest(mutated)
+        # A redigested plan still cannot declare a malformed or conflicting row.
+        row = plan["manual_gate_targets"][0]
+        for label, rows, extra in (
+            ("extra field", [{**row, "owner": OWNER}], {}),
+            ("no entries", [{**row, "manual_gates": []}], {}),
+            ("ineligible", [{**row, "identity": "q::missing"}], {}),
+            ("duplicate", [row, row], {}),
+            ("standing", [{**row, "identity": "p::smoke"}], {}),
+            (
+                "excluded",
+                [row],
+                {"target_exclusions": [{"identity": "q::smoke", "owner": OWNER}]},
+            ),
+        ):
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(plan)
+                mutated["manual_gate_targets"] = rows
+                mutated.update(extra)
+                owned.attach_plan_digest(mutated)
+                with self.assertRaisesRegex(ValueError, "manual.gate"):
+                    owned.verify_plan_digest(mutated)
 
     def test_candidate_baseline_rejects_self_consistent_duration_rewrite(
         self,
@@ -3237,6 +3536,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "standing_targets": [],
             "standing_coverage_reuse": [],
             "manual_only_targets": [],
+            "manual_gate_targets": [],
             "target_exclusions": [],
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
@@ -3469,6 +3769,98 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 command[command.index("--run-ignored") + 1],
                 "all",
             )
+
+    def _manual_gate_receipt(
+        self, testcases: dict[str, bool]
+    ) -> tuple[dict, list[list[str]]]:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan()
+        plan["manual_gate_targets"] = [
+            {
+                "identity": identity.canonical,
+                "manual_gates": ["p_gate"],
+                "reason": GATE_REASON,
+                "tracking_issue": "chelis#1824",
+            }
+        ]
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "build":
+                    return successful_product_build(command, kwargs)
+                self.assertEqual(command[1:3], ["nextest", "list"])
+                payload = {
+                    "rust-suites": {
+                        identity.canonical: {
+                            "testcases": {
+                                name: {
+                                    "ignored": ignored,
+                                    "filter-match": {"status": "matches"},
+                                }
+                                for name, ignored in testcases.items()
+                            }
+                        }
+                    }
+                }
+                return mock.Mock(
+                    stdout=json.dumps(payload), stderr="", returncode=0
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"CARGO_TARGET_DIR": str(root / "target")}
+                ),
+                mock.patch.object(owned, "_commit", return_value="b" * 40),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+        return receipt, calls
+
+    def test_manual_gate_target_is_listed_with_ignored_tests_and_never_run(
+        self,
+    ) -> None:
+        receipt, calls = self._manual_gate_receipt(
+            {"ignored_case": True, "other_ignored_case": True}
+        )
+        self.assertTrue(receipt["success"], receipt["failures"])
+        self.assertEqual(
+            receipt["manual_gate_tests"],
+            ["p::smoke::ignored_case", "p::smoke::other_ignored_case"],
+        )
+        self.assertEqual(receipt["selected_targets"], ["p::smoke"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertEqual(receipt["selected_tests"], [])
+        self.assertEqual(receipt["executed_tests"], [])
+        self.assertEqual([command[1:3] for command in calls[1:]], [["nextest", "list"]])
+        self.assertEqual(calls[1][calls[1].index("--run-ignored") + 1], "all")
+
+    def test_manual_gate_target_with_an_active_or_no_test_fails_closed(
+        self,
+    ) -> None:
+        for testcases, message in (
+            ({"ignored_case": True, "active_case": False}, "has active tests"),
+            ({}, "no active tests"),
+        ):
+            with self.subTest(testcases=testcases):
+                receipt, calls = self._manual_gate_receipt(testcases)
+                self.assertFalse(receipt["success"])
+                self.assertRegex(" ".join(receipt["failures"]), message)
+                self.assertEqual(receipt["manual_gate_tests"], [])
+                self.assertEqual(receipt["executed_targets"], [])
+                self.assertEqual(
+                    [command[1:3] for command in calls[1:]], [["nextest", "list"]]
+                )
 
     def test_package_expansion_accepts_an_all_ignored_ordinary_target(
         self,
@@ -4033,6 +4425,7 @@ class ReportTests(unittest.TestCase):
             "standing_targets": ["p::smoke"],
             "standing_coverage_reuse": ["p::smoke"],
             "manual_only_targets": [],
+            "manual_gate_targets": [],
             "target_exclusions": [{"identity": "p::heavy", "owner": OWNER}],
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
@@ -4069,7 +4462,7 @@ class ReportTests(unittest.TestCase):
             )[str(shard)]
             tests = [f"{identity}::fast_case" for identity in selected]
             receipt = {
-                "version": 1,
+                "version": owned.RECEIPT_VERSION,
                 "lane": surface.replace("_", "-"),
                 "shard": shard,
                 "plan_digest": self.plan["plan_digest"],
@@ -4077,6 +4470,7 @@ class ReportTests(unittest.TestCase):
                 "executed_targets": selected,
                 "selected_tests": tests,
                 "executed_tests": tests,
+                "manual_gate_tests": [],
                 "commands_file": "commands.json",
                 "timings_file": "timings.json",
                 "test_list_file": "test-list.json",
@@ -4123,6 +4517,119 @@ class ReportTests(unittest.TestCase):
             {row["actual_milliseconds"] for row in report["shard_durations"]},
             {1000},
         )
+
+    GATE_ROW = {
+        "identity": "q::smoke",
+        "manual_gates": ["q_gate"],
+        "reason": GATE_REASON,
+        "tracking_issue": "chelis#1824",
+    }
+
+    def gate_receipts(self, **fields: object) -> list[dict]:
+        """Receipts whose q::smoke shard listed it as a manual gate."""
+        receipts = self.receipts()
+        for receipt in receipts:
+            if "q::smoke" in receipt["selected_targets"]:
+                receipt.update(
+                    executed_targets=[],
+                    selected_tests=[],
+                    executed_tests=[],
+                    manual_gate_tests=["q::smoke::ignored_case"],
+                )
+                receipt.update(fields)
+                owned.attach_receipt_digest(receipt)
+        return receipts
+
+    def test_required_report_records_a_manual_gate_as_not_executed(self) -> None:
+        self.plan["manual_gate_targets"] = [self.GATE_ROW]
+        owned.attach_plan_digest(self.plan)
+        report = owned.validate_change_owned_report(
+            self.plan,
+            self.gate_receipts(),
+            self.standing_coverage(),
+        )
+        self.assertEqual(report["covered_targets"], ["p::smoke"])
+        self.assertEqual(
+            report["manual_gate_targets"],
+            [
+                {
+                    **self.GATE_ROW,
+                    "status": "manual gate, not executed in PR CI",
+                    "listed_tests": ["q::smoke::ignored_case"],
+                }
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            owned._write_report_files(Path(tmp), report)
+            summary = (Path(tmp) / "summary.md").read_text()
+        self.assertIn("- Covered targets: 1\n", summary)
+        self.assertIn("- Manual gates, not executed in PR CI: 1\n", summary)
+        self.assertIn(
+            "  - `q::smoke`: manual gate, not executed in PR CI. Ignored tests "
+            "listed: 1, run: 0. Run by hand: docs/manual_gates.md `q_gate` "
+            "(chelis#1824)\n",
+            summary,
+        )
+
+    def test_required_report_rejects_a_manual_gate_run_unlisted_or_self_declared(
+        self,
+    ) -> None:
+        coverage = self.standing_coverage()
+        plain_plan = copy.deepcopy(self.plan)
+        self.plan["manual_gate_targets"] = [self.GATE_ROW]
+        owned.attach_plan_digest(self.plan)
+        cases = [
+            (
+                "executed",
+                self.plan,
+                self.gate_receipts(
+                    executed_targets=["q::smoke"],
+                    selected_tests=["q::smoke::ignored_case"],
+                    executed_tests=["q::smoke::ignored_case"],
+                    manual_gate_tests=[],
+                ),
+                "executed target coverage mismatch",
+            ),
+            (
+                "unlisted",
+                self.plan,
+                self.gate_receipts(manual_gate_tests=[]),
+                "manual-gate listing mismatch",
+            ),
+            (
+                "self-declared",
+                plain_plan,
+                self.gate_receipts(),
+                "manual-gate listing mismatch",
+            ),
+        ]
+        for label, plan, receipts, message in cases:
+            with self.subTest(label=label):
+                if plan is plain_plan:
+                    for receipt in receipts:
+                        receipt["plan_digest"] = plain_plan["plan_digest"]
+                        owned.attach_receipt_digest(receipt)
+                with self.assertRaisesRegex(ValueError, message):
+                    owned.validate_change_owned_report(plan, receipts, coverage)
+
+    def test_receipt_manual_gate_tests_are_unexecuted_change_owned_listings(
+        self,
+    ) -> None:
+        receipt = next(
+            row for row in self.gate_receipts() if row["manual_gate_tests"]
+        )
+        owned.verify_receipt_digest(receipt)
+        for label, fields in (
+            ("wrong lane", {"lane": "package-expansion", "soft_budget_seconds": owned.SOFT_BUDGET_SECONDS}),
+            ("unselected target", {"manual_gate_tests": ["p::heavy::case"]}),
+            ("also executed", {"executed_targets": ["q::smoke"]}),
+            ("also selected", {"selected_tests": ["q::smoke::ignored_case"]}),
+        ):
+            with self.subTest(label=label):
+                mutated = {**receipt, **fields}
+                owned.attach_receipt_digest(mutated)
+                with self.assertRaisesRegex(ValueError, "manual_gate_tests"):
+                    owned.verify_receipt_digest(mutated)
 
     def test_required_report_rejects_missing_digest_duplicate_uncovered_excluded_and_failure(self) -> None:
         mutations = [

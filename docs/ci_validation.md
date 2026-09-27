@@ -212,7 +212,11 @@ An exact `manual_only_target` row keeps an all-ignored integration target in
 required change-owned coverage. Its plan-bound execution mode lists ignored
 tests, rejects the row if any default-enabled test appears, and runs the complete
 ignored suite with the same target and per-test receipts. It is not an exclusion
-and zero active tests do not count as success.
+and zero active tests do not count as success. A `manual_gate_target` row takes
+the same listing and rejection for a target whose prerequisites no Linux PR
+worker has, cites the `docs/manual_gates.md` wired-gate rows whose commands run
+exactly that target, runs none of its tests, and appears in the report as a
+manual gate not executed in PR CI rather than as a covered target.
 
 Test-authored C fixtures, the C a test writes and compiles with `cc`, are
 portability tests whether or not they were written as one (chelis#2496).

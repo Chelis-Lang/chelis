@@ -66,6 +66,7 @@ def plan() -> dict:
         "standing_targets": [],
         "standing_coverage_reuse": [],
         "manual_only_targets": [],
+        "manual_gate_targets": [],
         "target_exclusions": [],
         "test_exclusions": [],
         "shard_planning": {

@@ -192,7 +192,11 @@ If a directly modified target contains only ignored tests, it still fails closed
 unless `.config/ci-test-targets.toml` gives that exact target a reviewed
 `manual_only_target` execution mode. That mode executes the complete ignored
 suite and records exact per-test results. It becomes stale if an active test is
-added and cannot be combined with a target or test exclusion.
+added and cannot be combined with a target or test exclusion. When the ignored
+tests need prerequisites no Linux PR worker has, a `manual_gate_target` row
+instead cites every `docs/manual_gates.md` entry whose command runs that exact
+target; the same rules apply, and the report lists the ignored tests, runs none,
+and records the target as a manual gate not executed in PR CI.
 
 If planning reports an unknown shared path, add a reviewed mapping to its real
 packages or existing automated owner in `.config/ci-test-targets.toml`. Do not
