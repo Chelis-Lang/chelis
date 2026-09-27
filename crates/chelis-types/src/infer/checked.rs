@@ -106,11 +106,11 @@ pub(super) struct InferenceProduct {
     /// (`group_link::link_group_references`).
     group_references: Vec<GroupReference>,
     group_member_types: Vec<(String, Type)>,
-    /// chelis#2626: the provisional monomorphic type of each member of the
-    /// recursive group being inferred whose declaration writes no signature.
-    /// Every reference shares it, so a sibling inferred earlier can determine
-    /// it. Dropped when the group completes.
-    group_provisional_types: Vec<Type>,
+    /// chelis#2626: the name and provisional monomorphic type of each member
+    /// of the recursive group being inferred whose declaration writes no
+    /// signature. Every reference shares it, so a sibling inferred earlier can
+    /// determine it. Dropped when the group completes.
+    group_provisional_types: Vec<(String, Type)>,
 }
 
 struct InferredAdmissionContract {
@@ -401,9 +401,12 @@ impl InferenceProduct {
         self.group_member_types.push((name.to_string(), ty));
     }
 
-    /// chelis#2626: the provisional types of the members of the recursive
-    /// group about to be inferred that write no signature.
-    pub(super) fn record_group_provisional_types(&mut self, types: impl IntoIterator<Item = Type>) {
+    /// chelis#2626: the names and provisional types of the members of the
+    /// recursive group about to be inferred that write no signature.
+    pub(super) fn record_group_provisional_types(
+        &mut self,
+        types: impl IntoIterator<Item = (String, Type)>,
+    ) {
         self.group_provisional_types.extend(types);
     }
 
@@ -429,9 +432,46 @@ impl InferenceProduct {
         let Type::Var(var) = subst.apply(ty) else {
             return false;
         };
-        self.group_provisional_types
+        self.group_provisional_types.iter().any(|(_, provisional)| {
+            crate::env::free_tvars(&resolved(provisional, subst)).contains(&var)
+        })
+    }
+
+    /// chelis#2651: the first member of the recursive group being inferred
+    /// that writes no signature and that `operand` names, or calls from a
+    /// lambda's body, where the operand is written. `vmap` decides which
+    /// parameters and result it batches from the mapped function's type, and
+    /// such a member's type is its provisional one, which a sibling inferred
+    /// earlier or later determines. The answer is read off the syntax and the
+    /// group, which the reference graph fixes, so it is the same in every
+    /// declaration order.
+    ///
+    /// A name the operand binds itself (a lambda parameter, a `let`, a `match`
+    /// arm) is not the member, and neither is one bound in the enclosing
+    /// scope: there `env` binds the name to something other than the member's
+    /// provisional type.
+    pub(super) fn vmap_operand_group_member(
+        &self,
+        operand: &deep::Expr,
+        env: &Env,
+    ) -> Option<&str> {
+        if self.group_provisional_types.is_empty() {
+            return None;
+        }
+        let vertex_by_name: UnordMap<String, usize> = self
+            .group_provisional_types
             .iter()
-            .any(|provisional| crate::env::free_tvars(&resolved(provisional, subst)).contains(&var))
+            .enumerate()
+            .map(|(index, (name, _))| (name.clone(), index))
+            .collect();
+        let mut references = std::collections::BTreeSet::new();
+        collect_top_level_references(operand, &vertex_by_name, &mut Vec::new(), &mut references);
+        references.iter().find_map(|reference| {
+            let (name, provisional) = &self.group_provisional_types[reference.target];
+            env.lookup(name)
+                .is_some_and(|scheme| scheme.body == *provisional)
+                .then_some(name.as_str())
+        })
     }
 
     /// The component's in-group references and member types, taken for its

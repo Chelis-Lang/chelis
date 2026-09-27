@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::unsupported::{SpanRef, Stage, Unsupported, UnsupportedKind};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
@@ -645,6 +646,9 @@ pub(super) fn infer_vmap(
     let axis = axis as usize;
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    if let Some(member) = product.vmap_operand_group_member(&kids[0], env) {
+        return report(errors, vmap_group_member_fence(node, member));
+    }
     let resolved = subst.apply(&f_ty);
 
     match resolved {
@@ -698,6 +702,42 @@ pub(super) fn infer_vmap(
             ),
         ),
     }
+}
+
+/// chelis#2651: `vmap` decides which parameters and result it batches from
+/// the mapped function's type where it is inferred. When the operand is, or
+/// is a lambda that calls, a member of the caller's own recursive group that
+/// writes no signature, that type is the member's provisional one, which a
+/// sibling determines before or after this point depending on the order the
+/// group is written in ([04-INF-5]). Deciding the batching then gave a
+/// different verdict in each order, and in one order accepted a program whose
+/// evaluation contradicts its type. Deciding it once the group completes is
+/// not implemented, so the case is rejected, in every order: whether it
+/// applies is read off the operand's syntax and the group's membership, which
+/// the reference graph fixes.
+fn vmap_group_member_fence(node: &DeepNode, member: &str) -> CheckError {
+    let unsupported = Unsupported::new(
+        UnsupportedKind::Construct(format!(
+            "`vmap` over the signature-less recursive-group member `{member}`"
+        )),
+        "the batching decision, made before the group determines that member's types",
+        Stage::Checker,
+        crate::unimplemented_rejection!(
+            2651,
+            "write the signature of the recursive-group member that the mapped function is or \
+             calls; `vmap` over a member whose types its group has yet to determine is not \
+             implemented"
+        ),
+    )
+    .with_span(SpanRef {
+        offset: None,
+        len: None,
+        span_id: node_span_id(node).map(str::to_owned),
+    })
+    .with_supported_alternative(format!(
+        "write `{member}`'s signature, with every parameter and result type"
+    ));
+    CheckError::from_unsupported(unsupported)
 }
 
 fn vmap_transform_dims(

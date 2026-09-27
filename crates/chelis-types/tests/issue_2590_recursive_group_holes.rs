@@ -935,6 +935,93 @@ fn grad_decides_a_local_variable_where_it_is_inferred_beside_a_group_variable() 
 }
 
 // ---------------------------------------------------------------------------
+// chelis#2651: `vmap` over a member whose signature is not written.
+
+/// Round 4's `vA`, `vB`, `vC` and `vD`: `g` maps a lambda that calls `f`, or
+/// `f` itself, and `f`'s parameter and result types are its provisional ones,
+/// which `f`'s body determines.
+const VMAP_OVER_A_SIGNATURE_LESS_MEMBER: [&str; 4] = [
+    "def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  v = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+    "def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else {\n  k = g(n - 1i32)\n  1.0f32\n}\n\n\
+     def g(n: i32) = if eq(n, 0) then to_tensor([0.0f32, 0.0f32]) else vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\n\
+     def main() -> tensor[2, f32] = g(1)\n",
+    "def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  v = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  add(v, 1.0f32)\n}\n\n\
+     def main() -> f32 = g(1)\n",
+    "def f(x) = {\n  k = g(0i32)\n  tensor_to_scalar(sum(x, 0))\n}\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  v = vmap(f)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+];
+
+/// REGRESSION TEST (fails on `448018919`, which accepted `vA` and `vB` with
+/// `f` declared first and rejected them with `g` first, and accepted `vC` with
+/// `g` first, where `chelis eval` returns a tensor for its `f32` result, as
+/// `main` also does). chelis#2651: `vmap` decides its batching where it is
+/// inferred, which in one order is before `f`'s body has determined `f`'s
+/// types. Deciding it once the group completes is not implemented, so a
+/// `vmap` over a member of its own recursive group that writes no signature,
+/// or over a lambda that calls one, is rejected in every order with the typed
+/// not-yet-supported diagnostic, which names the member and asks for its
+/// signature. `main` rejects `vA`, `vB` and `vD` in both orders, with other
+/// diagnostics.
+#[test]
+fn vmap_over_a_signature_less_member_of_its_own_group_is_fenced_in_every_order() {
+    for program in VMAP_OVER_A_SIGNATURE_LESS_MEMBER {
+        let orders = declaration_orders(program);
+        let first = outcome(&orders[0]);
+        for order in &orders {
+            rejects_with(
+                order,
+                &[
+                    "[unsupported_feature]",
+                    "unsupported: `vmap` over the signature-less recursive-group member `f`",
+                    "unimplemented chelis#2651",
+                    "write the signature",
+                ],
+            );
+            assert_eq!(outcome(order), first, "{order}");
+        }
+    }
+}
+
+/// A member whose signature is written, a function outside the group, a
+/// lambda parameter named like the member, and a local binding that shadows
+/// the member's name.
+const VMAP_OVER_A_FUNCTION_THE_GROUP_DOES_NOT_TYPE: [&str; 4] = [
+    "def f(x: tensor[3, f32], n: i32) -> f32 = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {\n  v = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+    "def rowsum(x: tensor[3, f32]) = tensor_to_scalar(sum(x, 0))\n\n\
+     def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then f(to_tensor([1.0f32, 1.0f32, 1.0f32]), 0i32) else {\n  v = vmap(fn (row: tensor[3, f32]) -> rowsum(row))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+    "def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then f(to_tensor([1.0f32, 1.0f32, 1.0f32]), 0i32) else {\n  v = vmap(fn (f: tensor[3, f32]) -> tensor_to_scalar(sum(f, 0)))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+    "def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)\n\n\
+     def g(n: i32) -> f32 = if eq(n, 0) then f(to_tensor([1.0f32, 1.0f32, 1.0f32]), 0i32) else {\n  f = fn (r: tensor[3, f32]) -> tensor_to_scalar(sum(r, 0))\n  v = vmap(fn (row: tensor[3, f32]) -> f(row))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n  tensor_to_scalar(sum(v, 0))\n}\n\n\
+     def main() -> f32 = g(1)\n",
+];
+
+/// LOCK (`448018919` accepts these in every order; `main` rejected the
+/// `f`-first order of all but the first, before the group rule). The fence
+/// is decided by which function the operand refers to: a lambda that calls a
+/// member whose signature is written, a function outside the group, its own
+/// parameter named like the member, or a local binding that shadows the
+/// member's name is not fenced. `chelis eval` and `chelis build --target c`
+/// both give 21.0 for each.
+#[test]
+fn vmap_over_a_function_the_group_does_not_type_is_not_fenced() {
+    for program in VMAP_OVER_A_FUNCTION_THE_GROUP_DOES_NOT_TYPE {
+        for order in declaration_orders(program) {
+            accepts(&order);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The order-independence oracle.
 
 /// What the oracle compares across declaration orders: the verdict, each

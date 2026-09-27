@@ -562,7 +562,9 @@ pub(super) fn infer_program_with_product_in_session(
             provisional_types
                 .to_sorted()
                 .into_iter()
-                .map(|(_, ty)| ty.clone()),
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
         );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
@@ -1633,7 +1635,9 @@ pub(super) fn infer_ir_program_with_state(
             provisional_types
                 .to_sorted()
                 .into_iter()
-                .map(|(_, ty)| ty.clone()),
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
         );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not

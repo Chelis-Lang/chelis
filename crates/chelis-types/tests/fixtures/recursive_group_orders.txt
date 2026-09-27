@@ -1734,3 +1734,81 @@ def f(x, y, n: i32) = if eq(n, 0) then x else g(x, y, n - 1)
 def g(u, v, n: i32) = if eq(n, 0) then u else if eq(n, 1) then v else f(u, v, n - 1)
 
 def main() -> i32 = f(1i32, 2i32, 3)
+==== round4/gn-tup-lambda
+def fst2[a](p: (a, i32)) -> a = p.0
+
+def f(x, n) = {
+  k = fst2(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d((3.0f32, 1i32))
+  r.0
+}
+
+def h(n: i32) -> f32 = f((2.0f32, 1i32), n)
+
+def main() -> f32 = g(1)
+==== round4/gn-ten-lambda
+def first3[p](t: tensor[3, p]) -> tensor[3, p] = t
+
+def f(x, n) = {
+  k = first3(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+  tensor_to_scalar(sum(r, 0))
+}
+
+def h(n: i32) -> f32 = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), n)
+
+def main() -> f32 = g(1)
+==== round4/gn-lst-lambda
+def firstl[a](xs: List[a]) -> List[a] = xs
+
+def f(x, n) = {
+  k = firstl(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d([3.0f32])
+  index(r, 0i64)
+}
+
+def h(n: i32) -> f32 = f([2.0f32], n)
+
+def main() -> f32 = g(1)
+==== round4/grad-local-both
+def fst2b[a, b](p: (a, b)) -> a = p.0
+
+def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (p) -> f(fst2b(p), 0i32))
+  r = d((2.0f32, 3.0f32))
+  add(r.0, r.1)
+}
+
+def h(n: i32) -> f32 = f(2.0f32, n)
+
+def main() -> f32 = g(1)
+==== round4/grad-linked-both
+def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z, w) -> f(z, 0i32))
+  k = fn (u) -> d((u, 1i32), u)
+  r = k(2.0f32)
+  add(r.0, r.1)
+}
+
+def h(n: i32) -> f32 = f((2.0f32, 1i32), n)
+
+def main() -> f32 = g(1)
