@@ -819,6 +819,48 @@ class SchemaTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "'q_gate'"):
                     validate(("q_gate", f"`{spelling}`"))
 
+    def test_manual_gate_rows_are_only_the_rows_the_wired_table_shows(self) -> None:
+        """A cited row the rendered wired-gates table does not show is rejected."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(document: str) -> None:
+            owned.validate_config(
+                load_config(config_text() + manual_gate_row()),
+                fixture_metadata(),
+                tracked,
+                gate_sources(document).__getitem__,
+            )
+
+        document = manual_gates_doc(("q_gate", Q_GATE))
+        header = "| Test | Crate | Manual command | Prerequisite | Owning phase |"
+        separator = "|---|---|---|---|---|"
+        row = f"| `q_gate` | `q` | {Q_GATE} | none | test |"
+        table = f"{header}\n{separator}\n{row}"
+        self.assertIn(table, document)
+        validate(document)
+        placements = {
+            "an HTML comment": document.replace(row, f"<!--\n{row}\n-->"),
+            "a fenced block": document.replace(row, f"```\n{row}\n```"),
+            "prose after the table": document.replace(
+                row, f"\nThe table ends above.\n\n{row}"
+            ),
+            "a separate ### table": document.replace(
+                row, f"\n### Retired gates\n\n{header}\n{separator}\n{row}"
+            ),
+            "a second table": document.replace(
+                row, f"\n{header}\n{separator}\n{row}"
+            ),
+            "a commented-out whole table": document.replace(
+                table, f"<!--\n{table}\n-->"
+            ),
+        }
+        for placement, hidden in placements.items():
+            with self.subTest(placement=placement):
+                with self.assertRaisesRegex(
+                    ValueError, "lies outside the wired-gates table"
+                ):
+                    validate(hidden)
+
     def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
         """The check behind script-unit's docs/manual_gates.md path rule."""
         root = Path(__file__).resolve().parents[1]
@@ -1788,10 +1830,11 @@ class DurationBaselineTests(unittest.TestCase):
         list_seconds: float,
         run_seconds: float,
         receipt_success: bool,
+        plan_version: int = owned.PLAN_VERSION,
     ) -> tuple[Path, Path]:
         identity = owned.Identity("p", "smoke")
         plan = {
-            "version": owned.PLAN_VERSION,
+            "version": plan_version,
             "mode": "push",
             "base_sha": "a" * 40,
             "candidate_sha": candidate_sha,
@@ -1991,6 +2034,23 @@ class DurationBaselineTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "finite"):
                 owned.build_duration_baseline([sample])
+
+    def test_builder_rejects_a_plan_older_than_the_current_version(self) -> None:
+        """Receipts of the current version bind only a current plan."""
+        for version in (2, 3, owned.PLAN_VERSION - 1):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                sample = self._write_sample(
+                    Path(tmp),
+                    candidate_sha="b" * 40,
+                    list_seconds=1.0,
+                    run_seconds=1.0,
+                    receipt_success=True,
+                    plan_version=version,
+                )
+                with self.assertRaisesRegex(
+                    ValueError, f"unsupported duration sample plan version: {version}"
+                ):
+                    owned.build_duration_baseline([sample])
 
 
 class MetadataAndDiffTests(unittest.TestCase):

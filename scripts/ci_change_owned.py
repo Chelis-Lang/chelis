@@ -849,6 +849,12 @@ def _manual_gate_cells(line: str) -> list[str]:
 def manual_gate_entries(document: str) -> dict[str, list[str]]:
     """Map each wired manual-gate row identifier to its command cells.
 
+    The section holds nothing but its table, one unbroken run of ``|`` lines,
+    so every row read here is a row the rendered page shows. Any other
+    nonblank line, such as a row inside an HTML comment or a fenced block, a
+    row after prose, or a second table, is rejected rather than read or
+    skipped.
+
     The identifier is the row's first cell with its code-span backticks
     removed. A repeated identifier keeps every command, so a citation of it is
     rejected as ambiguous rather than resolved to one of them.
@@ -859,12 +865,22 @@ def manual_gate_entries(document: str) -> dict[str, list[str]]:
             f"{MANUAL_GATES_PATH} must contain exactly one "
             f"{MANUAL_GATES_SECTION!r} section"
         )
+    start = lines.index(MANUAL_GATES_SECTION) + 1
     rows = []
-    for line in lines[lines.index(MANUAL_GATES_SECTION) + 1 :]:
+    last = None
+    for number, line in enumerate(lines[start:], start + 1):
         if line.startswith("## "):
             break
-        if line.startswith("|"):
-            rows.append(_manual_gate_cells(line))
+        if not line.strip():
+            continue
+        if not line.startswith("|") or (last is not None and number != last + 1):
+            raise ValueError(
+                f"{MANUAL_GATES_PATH} line {number} lies outside the wired-gates "
+                f"table, the only content {MANUAL_GATES_SECTION!r} may hold: "
+                f"{line!r}"
+            )
+        rows.append(_manual_gate_cells(line))
+        last = number
     if (
         len(rows) < 2
         or tuple(rows[0]) != MANUAL_GATES_HEADER
@@ -4609,41 +4625,7 @@ def _verify_duration_sample_plan(plan: Mapping[str, Any]) -> None:
     if version == PLAN_VERSION and has_package_execution:
         verify_plan_digest(plan)
         return
-    if version not in {2, 3}:
-        raise ValueError(f"unsupported duration sample plan version: {version!r}")
-    candidate_sha = plan.get("candidate_sha")
-    if not isinstance(candidate_sha, str) or not SHA.fullmatch(candidate_sha):
-        raise ValueError("duration sample plan candidate_sha is malformed")
-    digest = plan.get("plan_digest")
-    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-        raise ValueError("duration sample plan digest is malformed")
-    if digest != _digest_without(plan, "plan_digest"):
-        raise ValueError("duration sample plan digest mismatch")
-    change_owned = set(_identity_list(plan, "change_owned"))
-    standing_reuse = set(_identity_list(plan, "standing_coverage_reuse"))
-    expected = change_owned - standing_reuse
-    shards = plan.get("shards")
-    if not isinstance(shards, dict):
-        raise ValueError("duration sample plan shards are malformed")
-    lane_shards = shards.get("change_owned")
-    if not isinstance(lane_shards, dict) or set(lane_shards) != {
-        str(shard) for shard in SHARDS
-    }:
-        raise ValueError("duration sample plan requires four change-owned shards")
-    flattened: list[str] = []
-    for shard in SHARDS:
-        rows = lane_shards[str(shard)]
-        if not isinstance(rows, list):
-            raise ValueError("duration sample shard target list is malformed")
-        for canonical in rows:
-            Identity.parse(canonical)
-        flattened.extend(rows)
-    if len(flattened) != len(set(flattened)):
-        raise ValueError("duration sample plan contains duplicate shard targets")
-    if set(flattened) != expected:
-        raise ValueError(
-            "duration sample plan shards do not exactly cover change-owned execution"
-        )
+    raise ValueError(f"unsupported duration sample plan version: {version!r}")
 
 
 def _duration_seconds(value: Any, label: str) -> float:
