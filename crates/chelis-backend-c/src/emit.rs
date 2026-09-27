@@ -2520,6 +2520,28 @@ impl CEmitter {
         }
     }
 
+    /// The checked projection of each distinct input's element step, taken and
+    /// shape-checked only where that input's read condition holds: [05-OP-53]'s
+    /// `where` reads only the branches its condition selects. An unread input's
+    /// step is 0 and carries no check. Returns the identity condition.
+    fn emit_elementwise_index_steps_read_under(
+        &mut self,
+        id: usize,
+        reads: &BTreeMap<usize, String>,
+        ty: &TensorType,
+    ) -> String {
+        let shape = Self::tagged_shape_literal(ty);
+        let rank = Self::ndim(ty);
+        let mut identity = Vec::new();
+        for (input, read) in reads {
+            self.line(&format!(
+                "const int64_t t{id}_input{input}_step = {read} ? chelis_tensor_elementwise_index_step_for_shape(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0;"
+            ));
+            identity.push(format!("(!{read} || t{id}_input{input}_step == 1)"));
+        }
+        format!("t{id}_size <= 1 || ({})", identity.join(" && "))
+    }
+
     fn tagged_shape_literal(ty: &TensorType) -> String {
         let shape = ty
             .dims
@@ -3748,21 +3770,19 @@ impl CEmitter {
         ] {
             reads.entry(node).or_default().push(read);
         }
-        let shape = Self::tagged_shape_literal(ty);
-        let rank = Self::ndim(ty);
-        let mut identity = Vec::new();
-        let mut contiguity = Vec::new();
-        for (node, roles) in &reads {
-            let read = format!("({})", roles.join(" || "));
-            self.line(&format!(
-                "const int64_t t{id}_input{node}_step = {read} ? chelis_tensor_elementwise_index_step_for_shape(t{node}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0;"
-            ));
-            identity.push(format!("(!{read} || t{id}_input{node}_step == 1)"));
-            contiguity.push(format!(
-                "(!{read} || (chelis_is_contiguous(t{node}) && t{node}_size == t{id}_size))"
-            ));
-        }
-        let identity = format!("t{id}_size <= 1 || ({})", identity.join(" && "));
+        let reads = reads
+            .into_iter()
+            .map(|(node, roles)| (node, format!("({})", roles.join(" || "))))
+            .collect::<BTreeMap<_, _>>();
+        let identity = self.emit_elementwise_index_steps_read_under(id, &reads, ty);
+        let contiguity = reads
+            .iter()
+            .map(|(node, read)| {
+                format!(
+                    "(!{read} || (chelis_is_contiguous(t{node}) && t{node}_size == t{id}_size))"
+                )
+            })
+            .collect::<Vec<_>>();
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "uint8_t* restrict __where_out_{id} = (uint8_t*)t{id}_data;"
