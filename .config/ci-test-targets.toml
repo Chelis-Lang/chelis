@@ -1526,11 +1526,6 @@ disposition = "packages"
 packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
 
 [[path_rule]]
-prefix = "tests/support/runtime_archive.rs"
-disposition = "packages"
-packages = ["chelis-backend-c", "chelis-cli"]
-
-[[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2114,6 +2109,15 @@ job = "smt-build"
 cadence = "pull_request and push"
 reason = "both SMT lanes execute the release verifier: the native lane proves discharge and the compatibility lane proves it under glibc 2.31"
 tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/scripts/smoke_macos_metal.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard's Metal smoke builds a Metal host with chelis build and links the archive it staged"
+tracking_issue = "chelis#1354"
 
 [[path_rule]]
 prefix = "scripts/test_glibc231_workflows.py"

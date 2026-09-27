@@ -13,9 +13,7 @@ mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
@@ -27,83 +25,6 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    // PID-suffixed tmp so concurrent test binaries (nextest runs sister
-    // exec-style tests in parallel; they all materialize the same
-    // canonical path) do not race on a shared tmp filename and trip
-    // ENOENT on rename when a peer renames it away first.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
-
 /// Compile generated C source standalone (no harness). Returns Ok(()) on
 /// successful compile, Err(stderr) otherwise.
 fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
@@ -111,21 +32,9 @@ fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(dir.join(name), contents).unwrap();
     }
-
-    // Touch the runtime lib so the runtime headers are available.
-    let _ = runtime_lib_path();
 
     let obj = dir.join("kernel.o");
     let compile = Command::new("gcc")

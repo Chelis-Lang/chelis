@@ -374,7 +374,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg(out_dir.join("libchelis_runtime.a"));
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")
@@ -397,7 +397,7 @@ fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::proc
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.args(sources);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg(out_dir.join("libchelis_runtime.a"));
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")
@@ -419,8 +419,7 @@ fn hipcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proc
         .args([
             source,
             "chelis_device_owner.cpp",
-            "-L.",
-            "-lchelis_runtime",
+            "libchelis_runtime.a",
             "-lm",
             "-lpthread",
             "-ldl",
@@ -10660,8 +10659,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
             "-mavx2",
             "-fopenmp",
             "grad_quadratic.c",
-            "-L.",
-            "-lchelis_runtime",
+            "libchelis_runtime.a",
             "-lm",
             "-lpthread",
             "-ldl",
@@ -10801,8 +10799,7 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
             "-mavx2",
             "-fopenmp",
             "combinators.c",
-            "-L.",
-            "-lchelis_runtime",
+            "libchelis_runtime.a",
             "-lm",
             "-lpthread",
             "-ldl",
@@ -11023,8 +11020,7 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
             "-mavx2",
             "-fopenmp",
             &format!("{name}.c"),
-            "-L.",
-            "-lchelis_runtime",
+            "libchelis_runtime.a",
             "-lm",
             "-lpthread",
             "-ldl",

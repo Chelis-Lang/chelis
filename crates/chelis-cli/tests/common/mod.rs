@@ -409,7 +409,7 @@ pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg(out_dir.join("libchelis_runtime.a"));
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("host compiler should run")

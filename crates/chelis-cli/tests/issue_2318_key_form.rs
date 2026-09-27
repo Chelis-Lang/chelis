@@ -87,7 +87,7 @@ fn run_driver(out_dir: &Path, stem: &str, driver: &str, args: &[&str]) -> Output
         .arg("-O2")
         .args(&toolchain.compile_flags)
         .args([format!("{stem}.c"), "driver.c".to_string()])
-        .args(["-L.", "-lchelis_runtime"])
+        .arg("libchelis_runtime.a")
         .args(&toolchain.link_flags)
         .args(["-o", "driver"])
         .status()

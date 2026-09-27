@@ -372,7 +372,7 @@ fn build_compile_run_grad(source: &str, name: &str) -> String {
         .arg("-O2")
         .args(&toolchain.compile_flags)
         .arg(&c_source)
-        .args(["-L.", "-lchelis_runtime"])
+        .arg("libchelis_runtime.a")
         .args(&toolchain.link_flags)
         .args(["-o", bin.to_str().unwrap()]);
     let link = cc.status().expect("host compiler runs");

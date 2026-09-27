@@ -116,7 +116,7 @@ fn compile_driver_for_symbol(
     command.current_dir(out);
     command.arg("-O0");
     command.args(&toolchain.compile_flags);
-    command.args(["main.c", "driver.c", "-L.", "-lchelis_runtime"]);
+    command.args(["main.c", "driver.c", "libchelis_runtime.a"]);
     command.args(&toolchain.link_flags);
     command.args(["-o", "probe"]);
     Ok(command.output().expect("run native compiler"))

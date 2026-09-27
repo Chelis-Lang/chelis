@@ -44,63 +44,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    // PID-suffixed tmp so concurrent test binaries (nextest runs sister
-    // exec-style tests in parallel; they all materialize the same
-    // canonical path) do not race on a shared tmp filename and trip
-    // ENOENT on rename when a peer renames it away first.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
 fn chelis_eval(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join(format!("{name}.ch"));
@@ -139,8 +82,7 @@ fn chelis_build_c(source: &str, name: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, name: &str) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join(name);
     let compile = StdCommand::new("gcc")
@@ -152,7 +94,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, name: &str) -> String 
             kernel_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",

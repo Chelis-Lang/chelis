@@ -197,41 +197,13 @@ def python_suite():
     )
 
 
-RUNTIME_DIR_REJECTING_PACKAGES = frozenset({"chelis-cli", "chelis-python"})
-
-
-def leg_environment(args, archive: Path):
-    """Name the pinned runtime directory for every leg whose packages still read it.
-
-    The CLI and the Python extension carry their runtime and reject
-    `CHELIS_RUNTIME_DIR`, so legs that run chelis-cli or chelis-python tests
-    never receive it. The HIP harnesses still select their runtime through it
-    and otherwise search for one (#1354), so every other leg receives the pin's
-    directory. A leg cannot mix the two kinds of package. The export goes away
-    when the HIP harnesses carry or name their runtime.
-    """
-    packages = {value for flag, value in zip(args, args[1:]) if flag == "-p"}
-    rejecting = packages & RUNTIME_DIR_REJECTING_PACKAGES
-    if not rejecting:
-        return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
-    if packages - RUNTIME_DIR_REJECTING_PACKAGES:
-        raise OracleFailure(
-            f"a leg that runs {', '.join(sorted(rejecting))} tests, which reject "
-            "CHELIS_RUNTIME_DIR, cannot also run "
-            f"{', '.join(sorted(packages - RUNTIME_DIR_REJECTING_PACKAGES))}, "
-            "which needs the pinned runtime directory"
-        )
-    return {}
-
-
-def execute_leg(name, args, required, directory, *, environment=None):
+def execute_leg(name, args, required, directory):
     print(f"+ {name}: list and execute {len(required)} required tests", flush=True)
     listed = phase1.command(
         [*phase1.nextest_command("list", args), "--message-format", "json"],
         ROOT,
         directory,
         "list",
-        scoped_environment=environment,
     )
     include_ignored = args[-2:] == ("--run-ignored", "only")
     selected, artifacts = phase1.selection(
@@ -256,7 +228,6 @@ def execute_leg(name, args, required, directory, *, environment=None):
         ROOT,
         directory,
         "run",
-        scoped_environment=environment,
     )
     if not junit.is_file():
         raise OracleFailure("nextest produced no fresh Phase 2 execution receipt")
@@ -285,20 +256,17 @@ def run() -> Path:
     python_receipt = phase1.python_execution(python_suite(), packet["python_required"])
     phase1_receipt = phase1.run()
     executions = []
-    with phase1.runtime_pin(directory / "runtime-build") as runtime_receipt:
-        (archive,) = map(Path, runtime_receipt["pinned_artifact"])
-        for index, (row, (name, args)) in enumerate(
-            zip(packet["legs"], phase2_legs(), strict=True)
-        ):
-            executions.append(
-                execute_leg(
-                    name,
-                    args,
-                    row["required"],
-                    directory / str(index),
-                    environment=leg_environment(args, archive),
-                )
+    for index, (row, (name, args)) in enumerate(
+        zip(packet["legs"], phase2_legs(), strict=True)
+    ):
+        executions.append(
+            execute_leg(
+                name,
+                args,
+                row["required"],
+                directory / str(index),
             )
+        )
     if source_identity(ROOT) != identity:
         raise OracleFailure("source changed during Phase 2 execution")
     receipt = {
@@ -308,7 +276,6 @@ def run() -> Path:
         "run_id": run_id,
         "manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
         "phase1_receipt": str(phase1_receipt),
-        "runtime": runtime_receipt,
         "python": {
             **{key: value for key, value in python_receipt.items() if key != "executed"},
             "executed": [

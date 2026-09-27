@@ -43,69 +43,9 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-/// Locate `target/debug/` from the test binary's path. The test binary
-/// lives at `<target>/debug/deps/<binary>`, so `..` twice yields the
-/// debug dir. (Mirror of `cbackend_cast_memcpy.rs`.)
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Mirror of `cbackend_cast_memcpy.rs::ensure_runtime_static_lib`. When
-/// `chelis-runtime` is built as a dev-dependency, cargo only emits the
-/// hashed staticlib in `target/debug/deps/`; the test cc invocation links
-/// against the conventional `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
 
 /// Resolve the C compiler the way the existing C-backend exec tests do:
 /// honor `$CC`, else `cc`. CI runners provide one.
@@ -143,8 +83,12 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
 /// it, and return stdout. Asserts both the compile and the run succeed --
 /// the compile assertion is the #300 regression guard.
 fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
+    assert!(
+        runtime.is_file(),
+        "`chelis build` did not stage the carried runtime at {}",
+        runtime.display()
+    );
 
     let bin = build_dir.join("issue_300_bin");
     let compile = StdCommand::new(c_compiler())
@@ -156,7 +100,7 @@ fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
             kernel_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",

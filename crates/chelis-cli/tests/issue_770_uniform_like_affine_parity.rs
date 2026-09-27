@@ -166,7 +166,7 @@ fn c_sampled_no_fp_contract(program: &str, name: &str) -> Vec<f64> {
     cmd.arg("-ffp-contract=off");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(&source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", name]);
     let status = cmd.status().expect("host compiler should run");

@@ -125,7 +125,7 @@ fn compile_and_run(work_dir: &Path, c_file: &str, bin_name: &str) -> Option<Stri
     cmd.current_dir(work_dir).arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(c_file);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", bin_name]);
     let status = cmd.status().expect("gcc should run");

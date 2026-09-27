@@ -198,9 +198,7 @@ def native_compile_cmd(binary: Path, sources: list[Path], out_dir: Path) -> list
         *(str(source) for source in sources),
         "-I",
         str(out_dir),
-        "-L",
-        str(out_dir),
-        "-lchelis_runtime",
+        str(out_dir / "libchelis_runtime.a"),
         "-lm",
         "-lpthread",
     ]

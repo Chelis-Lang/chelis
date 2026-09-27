@@ -9,7 +9,7 @@
 //!       1. `chelis check <file>`              -> score == 1.0
 //!       2. `chelis eval --file <file>`        -> stdout (IR evaluator lane)
 //!       3. `chelis build --target c <file>`   -> writes <name>.c + runtime
-//!       4. `gcc <name>.c -L. -lchelis_runtime -o <name>` -> binary
+//!       4. `gcc <name>.c libchelis_runtime.a -o <name>` -> binary
 //!       5. `<name>`                           -> stdout (C backend lane)
 //!
 //!     Then assert the eval lane and the C lane agree: every line
@@ -266,7 +266,7 @@ fn try_link(out_dir: &Path, source: &str, binary: &str) -> Result<PathBuf, Strin
     cmd.arg("-O0");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     let output = cmd

@@ -4,11 +4,9 @@
 //! The generated kernel signature is:
 //!   void func(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out)
 //! The kernel allocates output tensors internally via chelis_alloc.
-//! We link against the chelis_runtime .a to resolve those symbols.
+//! We link the carried runtime archive, staged into each probe directory.
 
 use chelis_backend_c::{CodegenOptions, MathLib};
-#[path = "../../../tests/support/runtime_archive.rs"]
-mod runtime_archive;
 
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
@@ -28,9 +26,7 @@ use chelis_types::types::Prim;
 use chelis_types::{RawTensor, finalize_tensor};
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::{codegen, codegen_with_options, emit_host_program};
 
 mod common;
@@ -38,6 +34,8 @@ mod common;
 fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
     let probe = common::probe_dir("checked_c_indexing");
     let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(dir.join("kernel.c"), source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let toolchain = chelis_backend_c::toolchain::test_toolchain(
@@ -55,10 +53,10 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         ])
         .args(toolchain.compile_flags)
         .arg("-I")
-        .arg(runtime_include_dir())
+        .arg(dir)
         .arg(dir.join("kernel.c"))
         .arg(dir.join("main.c"))
-        .arg(runtime_lib_path())
+        .arg(&staged.archive)
         .args(toolchain.link_flags)
         .arg("-o")
         .arg(&binary)
@@ -83,6 +81,8 @@ fn checked_indexing_run_batch(cases: &[(String, String)]) -> Vec<std::process::O
     assert!(!cases.is_empty());
     let probe = common::probe_dir("checked_c_batch");
     let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let mut main_source = String::new();
     for (index, (source, harness)) in cases.iter().enumerate() {
         fs::write(dir.join(format!("kernel_{index}.c")), source).unwrap();
@@ -121,13 +121,13 @@ fn checked_indexing_run_batch(cases: &[(String, String)]) -> Vec<std::process::O
         ])
         .args(toolchain.compile_flags)
         .arg("-I")
-        .arg(runtime_include_dir());
+        .arg(dir);
     for index in 0..cases.len() {
         compiler.arg(dir.join(format!("kernel_{index}.c")));
     }
     let compiled = compiler
         .arg(dir.join("main.c"))
-        .arg(runtime_lib_path())
+        .arg(&staged.archive)
         .args(toolchain.link_flags)
         .arg("-o")
         .arg(&binary)
@@ -507,11 +507,14 @@ fn blas_vendor_dimension_contract_matches_actual_function_prototypes() {
     let contract = &preamble[preamble.find("#ifndef CHELIS_C_BLAS_CONTRACT").unwrap()..];
     let probe = common::probe_dir("blas_dimension_contract");
     let compiler = chelis_backend_c::toolchain::c_compiler();
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(probe.path().join(name), contents).unwrap();
+    }
     let compile = |text: &str| {
         fs::write(probe.path().join("contract.c"), text).unwrap();
         Command::new(&compiler)
             .args(["-std=c11", "-Werror", "-c", "-I"])
-            .arg(runtime_include_dir())
+            .arg(probe.path())
             .arg(probe.path().join("contract.c"))
             .arg("-o")
             .arg(probe.path().join("contract.o"))
@@ -2091,10 +2094,6 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
 /// Host-arch SIMD ISA flag(s) for the compile-run probes.
 ///
 /// `chelis_simd.h` and the generated kernels are arch-aware (`#ifdef
@@ -2114,132 +2113,6 @@ fn simd_isa_flags() -> Vec<String> {
     }
 }
 
-/// Locate `target/debug/` for this workspace by walking up from the test binary's
-/// own location. The test binary lives at `<target>/debug/deps/<binary>`, so
-/// the parent of its parent is the debug directory we want.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    // exe = <target>/debug/deps/<test_bin>
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Ensure `target/debug/libchelis_runtime.a` exists. When `chelis-runtime` is built
-/// transitively as a dev-dependency (rather than as the top-level package), cargo
-/// only emits the staticlib to `target/debug/deps/libchelis_runtime-<hash>.a` and
-/// does not promote it to the conventional `target/debug/libchelis_runtime.a` path.
-/// The test gcc invocation links against the conventional path, so this helper
-/// copies the hashed artifact into place on first use. Idempotent and
-/// thread-safe.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    // First-pass scan of the deps dir.
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    // If cargo's incremental cache reused the rlib without re-emitting
-    // the staticlib (observed on CI cold-cache runs against
-    // `chelis-runtime` as a transitive dev-dep), force a rebuild of
-    // the lib target and rescan. `cargo build -p chelis-runtime --lib`
-    // emits both crate-types declared in chelis-runtime/Cargo.toml,
-    // producing the `libchelis_runtime-<hash>.a` artifact the
-    // gcc-link harness needs.
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            std::process::Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
-                     chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    if canonical.exists() && canonical.metadata()?.modified()? >= hashed.metadata()?.modified()? {
-        return Ok(());
-    }
-    // Use a PID-suffixed tmp filename so concurrent test binaries (this
-    // file and dtype_matrix_bf16_f16.rs both call into this helper, and
-    // nextest runs them in parallel) do not race on a shared tmp path.
-    // Each process writes its own tmp and renames into the shared
-    // canonical location; last writer wins, but the content is
-    // identical so the race is harmless. Without the PID, two
-    // processes that interleave `fs::copy` and `fs::rename` produce an
-    // ENOENT on the second rename because the first rename moved the
-    // shared tmp away.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    // The rename can still race with another process renaming its own
-    // unique tmp into the same canonical path. On POSIX, rename onto an
-    // existing file is atomic, so this is fine. If a peer beat us to
-    // it, treat NotFound from a follow-up cleanup as benign.
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = match fs::read_dir(deps_dir) {
-        Ok(it) => it,
-        // Truly cold target dirs may not have `deps/` yet; let the
-        // caller fall through to the explicit `cargo build` fallback.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    if let Some(archive) = runtime_archive::explicit() {
-        return archive;
-    }
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
-
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
 /// Compile and run like [`compile_and_run_kernel`], but return the exit
 /// status and BOTH streams instead of `None` on failure.
@@ -2248,7 +2121,7 @@ fn runtime_lib_path() -> PathBuf {
 /// with a trap line on stderr, which the success-only helper discards - it
 /// `eprintln!`s stderr and returns `None`, so a caller cannot assert on the
 /// trap it was testing for. This shares that helper's compile plumbing rather
-/// than duplicating the runtime-library discovery and include copying.
+/// than duplicating the runtime staging.
 fn compile_and_run_kernel_capturing(
     test_name: &str,
     c_source: &str,
@@ -2261,18 +2134,8 @@ fn compile_and_run_kernel_capturing(
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("trap_bin");
     let compile = Command::new("gcc")
         .arg("-O2")
@@ -2283,7 +2146,7 @@ fn compile_and_run_kernel_capturing(
             dir.to_str().unwrap(),
             dir.join("kernel.c").to_str().unwrap(),
             dir.join("main.c").to_str().unwrap(),
-            runtime_lib_path().to_str().unwrap(),
+            staged.archive.to_str().unwrap(),
             "-lm",
             "-o",
             bin.to_str().unwrap(),
@@ -2312,21 +2175,11 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Opt
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
 
     let compile = Command::new("gcc")
         .arg("-O2")
@@ -3454,21 +3307,11 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let compile = Command::new("gcc")
         .arg("-O2")
         .args(simd_isa_flags())
@@ -3746,20 +3589,11 @@ int main() {{
 
 #[test]
 fn exec_simd_nan_propagation_inconsistency_probe() {
-    let include_dir = runtime_include_dir();
     let probe = common::probe_dir("exec_nan_probe");
     let dir = probe.path().to_path_buf();
 
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(dir.join(name), contents).unwrap();
     }
 
     let c_src = r#"
@@ -3856,13 +3690,15 @@ int main() {
 
 #[test]
 fn exec_simd_header_compiles_as_cxx() {
-    let include_dir = runtime_include_dir();
     let probe = common::probe_dir("cxx_probe");
     let dir = probe.path().to_path_buf();
 
     // Copy simd header
-    let simd_src = fs::read_to_string(include_dir.join("chelis_simd.h")).unwrap();
-    fs::write(dir.join("chelis_simd.h"), &simd_src).unwrap();
+    let (_, simd_src) = chelis_runtime_bundle::PUBLIC_HEADERS
+        .iter()
+        .find(|(name, _)| *name == "chelis_simd.h")
+        .expect("chelis_simd.h is a public runtime header");
+    fs::write(dir.join("chelis_simd.h"), simd_src).unwrap();
 
     // Write a minimal C++ file that includes it
     let cxx_src = r#"
@@ -3994,21 +3830,11 @@ fn compile_and_run_kernel_with_blas(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_views.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let blas_flags = blas_link_flags().unwrap_or_default();
 
     let mut args: Vec<String> = vec!["-O2".into()];
