@@ -1812,3 +1812,14 @@ def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
 def h(n: i32) -> f32 = f((2.0f32, 1i32), n)
 
 def main() -> f32 = g(1)
+==== round4/vm-three-members
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  v = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  tensor_to_scalar(sum(v, 0))
+}
+
+def h(n: i32) = f(to_tensor([1.0f32, 1.0f32, 1.0f32]), n)
+
+def main() -> f32 = g(1)
