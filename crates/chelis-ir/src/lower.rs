@@ -19878,7 +19878,7 @@ impl<'program> LowerCtx<'program> {
         // value, and (iii) the extent source stays alive under DCE.
         let then_node = self.conform_branch_placeholder(then_node, &out_ty, else_node);
         let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
-        let condition = self.lower_if_condition(cond, &out_ty, else_node);
+        let condition = self.lower_if_condition(cond, &out_ty, then_node, else_node);
         LoweredValue::Node(self.dag.add_node(
             self.owner(),
             RiscOp::Where,
@@ -20490,11 +20490,17 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// The runtime `if`'s scalar condition expanded to the join's shape. An
+    /// arm the condition does not select may be zeros at an unchecked
+    /// claim's extent (decisions section 25), so on a runtime axis the
+    /// condition's extent is not simply the `else` arm's: see
+    /// [`Self::join_condition_extents`].
     fn lower_if_condition(
         &mut self,
         cond: NodeId,
         out_ty: &TensorType,
-        shape_source: NodeId,
+        then_node: NodeId,
+        else_node: NodeId,
     ) -> NodeId {
         let cond_ty = self
             .dag
@@ -20502,25 +20508,43 @@ impl<'program> LowerCtx<'program> {
             .map(|node| node.output_type.clone())
             .unwrap_or_else(Self::default_type);
         if cond_ty.dims.is_empty() && !out_ty.dims.is_empty() {
+            let extents = self.join_condition_extents(out_ty, then_node, else_node);
             let mut expanded = cond;
             let mut dims = Vec::new();
             for (axis, dim) in out_ty.dims.iter().enumerate() {
                 dims.push(dim.clone());
-                let size = match dim {
-                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => RtDim::Lit(*value),
-                    DimInfo::Named(_, None) => RtDim::InputAxis {
-                        tensor: 1,
-                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
+                let (size, inputs) = match dim {
+                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                        (RtDim::Lit(*value), vec![expanded])
+                    }
+                    DimInfo::Named(_, None) => match extents.get(&axis) {
+                        Some(&JoinExtent::Origin { node, axis: read }) => (
+                            RtDim::InputAxis {
+                                tensor: 1,
+                                axis: RtAxis::Lit(
+                                    i32::try_from(read).expect("tensor rank fits i32"),
+                                ),
+                            },
+                            vec![expanded, node],
+                        ),
+                        Some(&JoinExtent::Larger(extent)) => {
+                            (RtDim::Node(1), vec![expanded, extent])
+                        }
+                        None => (
+                            RtDim::InputAxis {
+                                tensor: 1,
+                                axis: RtAxis::Lit(
+                                    i32::try_from(axis).expect("tensor rank fits i32"),
+                                ),
+                            },
+                            vec![expanded, else_node],
+                        ),
                     },
                 };
                 expanded = self.dag.add_node(
                     self.owner(),
                     RiscOp::Expand { axis, size },
-                    if matches!(dim, DimInfo::Named(_, None)) {
-                        vec![expanded, shape_source]
-                    } else {
-                        vec![expanded]
-                    },
+                    inputs,
                     TensorType {
                         dims: dims.clone(),
                         precision: Prim::Bool,
@@ -20532,6 +20556,129 @@ impl<'program> LowerCtx<'program> {
         }
         cond
     }
+
+    /// Where the join condition takes its extent on each runtime axis of
+    /// `out_ty`, when not from the `else` arm. An arm's extent is not read:
+    /// where both arms' extents resolve to one origin that runs whenever the
+    /// join does, the condition reads that origin; where the arms' extents are not one
+    /// extent at all (the operand agreement `where` verifies,
+    /// [`crate::verify::axis_extents_semantically_equivalent`]), it is the
+    /// larger of the arms' extents, raised to one where the arms' shapes
+    /// differ on any such axis. The condition is then never empty when the
+    /// arms differ, so, being uniform, the `Where` yields the selected arm at
+    /// its own shape ([05-OP-53]); where the arms agree it is their shape,
+    /// which a condition mixed across `vmap` rows requires. Every input is an
+    /// extent read, so `vmap` shares them. An axis whose extents are one
+    /// otherwise (one bound name, a checked named claim, one static extent)
+    /// keeps the `else` arm's extent.
+    fn join_condition_extents(
+        &mut self,
+        out_ty: &TensorType,
+        then_node: NodeId,
+        else_node: NodeId,
+    ) -> BTreeMap<usize, JoinExtent> {
+        let arms = [then_node, else_node];
+        // The join's activation and every path it is nested in: `lower_if`
+        // builds an arm's path as `And(parent, condition)`.
+        let mut enclosing = vec![None];
+        let mut path = self.draw_activation();
+        while let Some(node) = path {
+            enclosing.push(Some(node));
+            path = self.dag.get(node).and_then(|node| {
+                matches!(node.op, RiscOp::Logical(LogicalKind::And))
+                    .then(|| node.inputs.first().copied())
+                    .flatten()
+            });
+        }
+        let runs_with_join = |dag: &Dag, node: NodeId| {
+            dag.get(node)
+                .is_some_and(|node| enclosing.contains(&node.owner.activation))
+        };
+        let mut sources = BTreeMap::new();
+        let mut axes = Vec::new();
+        for (axis, dim) in out_ty.dims.iter().enumerate() {
+            if !matches!(dim, DimInfo::Named(_, None)) {
+                continue;
+            }
+            match crate::verify::shared_axis_origin(&self.dag, then_node, else_node, axis, &arms) {
+                Some(
+                    crate::axis_sources::ExtentOrigin::ExternalAxis {
+                        load: node,
+                        axis: read,
+                    }
+                    | crate::axis_sources::ExtentOrigin::OpComputed {
+                        op: node,
+                        axis: read,
+                    },
+                ) if runs_with_join(&self.dag, node) => {
+                    sources.insert(axis, JoinExtent::Origin { node, axis: read });
+                }
+                _ if crate::verify::axis_extents_semantically_equivalent(
+                    &self.dag, then_node, else_node, axis, &arms,
+                ) => {}
+                _ => axes.push(axis),
+            }
+        }
+        let extent_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let add = |this: &mut Self, op: RiscOp, inputs: Vec<NodeId>| {
+            this.dag.add_node(
+                this.owner(),
+                op,
+                inputs,
+                extent_ty.clone(),
+                this.current_span_id.clone(),
+            )
+        };
+        let mut larger = Vec::with_capacity(axes.len());
+        let mut difference = None;
+        for &axis in &axes {
+            let then_extent = add(self, RiscOp::Shape { axis }, vec![then_node]);
+            let else_extent = add(self, RiscOp::Shape { axis }, vec![else_node]);
+            larger.push(add(self, RiscOp::MaxElem, vec![then_extent, else_extent]));
+            if axes.len() > 1 {
+                let gap = add(self, RiscOp::Sub, vec![then_extent, else_extent]);
+                let gap = add(self, RiscOp::Abs, vec![gap]);
+                difference = Some(match difference {
+                    Some(total) => add(self, RiscOp::Add, vec![total, gap]),
+                    None => gap,
+                });
+            }
+        }
+        // With one such axis, both arms empty on it means equal shapes, and
+        // the empty condition is their shape.
+        if let Some(difference) = difference {
+            let one = add(
+                self,
+                RiscOp::Const {
+                    value: scalar_from_i64("if join", Prim::Int64, 1).expect("unit extent"),
+                },
+                Vec::new(),
+            );
+            let differs = add(self, RiscOp::MinElem, vec![difference, one]);
+            for extent in &mut larger {
+                *extent = add(self, RiscOp::MaxElem, vec![*extent, differs]);
+            }
+        }
+        sources.extend(
+            axes.into_iter()
+                .zip(larger)
+                .map(|(axis, extent)| (axis, JoinExtent::Larger(extent))),
+        );
+        sources
+    }
+}
+
+/// Where a runtime `if`'s join condition reads its extent on one axis
+/// (`join_condition_extents`).
+#[derive(Clone, Copy)]
+enum JoinExtent {
+    /// The axis of the node both arms' extents resolve to.
+    Origin { node: NodeId, axis: usize },
+    /// A rank-0 `i64` node: the larger of the arms' extents.
+    Larger(NodeId),
 }
 
 #[cfg(test)]

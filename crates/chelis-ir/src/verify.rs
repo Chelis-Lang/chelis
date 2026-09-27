@@ -283,48 +283,70 @@ fn node_shapes_semantically_equivalent(
         return false;
     };
     left_node.output_type.dims.len() == right_node.output_type.dims.len()
-        && left_node
-            .output_type
-            .dims
-            .iter()
-            .zip(&right_node.output_type.dims)
-            .enumerate()
-            .all(|(axis, _)| {
-                semantic_dim_expr(dag, left, axis, dag.len(), relevant_shape_sources)
-                    .zip(semantic_dim_expr(
-                        dag,
-                        right,
-                        axis,
-                        dag.len(),
-                        relevant_shape_sources,
-                    ))
-                    .is_some_and(|(left_dim, right_dim)| left_dim == right_dim)
-                    || semantic_axis_origin(dag, left, axis, dag.len(), relevant_shape_sources)
-                        .zip(semantic_axis_origin(
-                            dag,
-                            right,
-                            axis,
-                            dag.len(),
-                            relevant_shape_sources,
-                        ))
-                        .is_some_and(|(left_origin, right_origin)| {
-                            witnessed_extent_origin_equal(
-                                dag,
-                                &left_origin,
-                                &right_origin,
-                                relevant_shape_sources,
-                            )
-                        })
-                    || static_axis_extent(dag, left, axis, dag.len(), relevant_shape_sources)
-                        .zip(static_axis_extent(
-                            dag,
-                            right,
-                            axis,
-                            dag.len(),
-                            relevant_shape_sources,
-                        ))
-                        .is_some_and(|(left_extent, right_extent)| left_extent == right_extent)
+        && (0..left_node.output_type.dims.len()).all(|axis| {
+            axis_extents_semantically_equivalent(dag, left, right, axis, relevant_shape_sources)
+        })
+}
+
+/// The origin `left`'s and `right`'s extents on `axis` both resolve to, when
+/// it is one and the same origin.
+pub(crate) fn shared_axis_origin(
+    dag: &Dag,
+    left: NodeId,
+    right: NodeId,
+    axis: usize,
+    relevant_shape_sources: &[NodeId],
+) -> Option<crate::axis_sources::ExtentOrigin> {
+    let left = semantic_axis_origin(dag, left, axis, dag.len(), relevant_shape_sources)?;
+    let right = semantic_axis_origin(dag, right, axis, dag.len(), relevant_shape_sources)?;
+    (left == right).then_some(left)
+}
+
+/// Whether `left`'s and `right`'s extents on `axis` are one extent: the
+/// same dimension expression, the same witnessed origin, or the same static
+/// extent. Where's operand-agreement rule reads it per axis, and so does the
+/// runtime `if`'s join condition (`lower.rs`, `join_condition_extents`).
+pub(crate) fn axis_extents_semantically_equivalent(
+    dag: &Dag,
+    left: NodeId,
+    right: NodeId,
+    axis: usize,
+    relevant_shape_sources: &[NodeId],
+) -> bool {
+    semantic_dim_expr(dag, left, axis, dag.len(), relevant_shape_sources)
+        .zip(semantic_dim_expr(
+            dag,
+            right,
+            axis,
+            dag.len(),
+            relevant_shape_sources,
+        ))
+        .is_some_and(|(left_dim, right_dim)| left_dim == right_dim)
+        || semantic_axis_origin(dag, left, axis, dag.len(), relevant_shape_sources)
+            .zip(semantic_axis_origin(
+                dag,
+                right,
+                axis,
+                dag.len(),
+                relevant_shape_sources,
+            ))
+            .is_some_and(|(left_origin, right_origin)| {
+                witnessed_extent_origin_equal(
+                    dag,
+                    &left_origin,
+                    &right_origin,
+                    relevant_shape_sources,
+                )
             })
+        || static_axis_extent(dag, left, axis, dag.len(), relevant_shape_sources)
+            .zip(static_axis_extent(
+                dag,
+                right,
+                axis,
+                dag.len(),
+                relevant_shape_sources,
+            ))
+            .is_some_and(|(left_extent, right_extent)| left_extent == right_extent)
 }
 
 fn node_types_semantically_equivalent(
