@@ -53,9 +53,13 @@ const DISCARDED_CAST_UNDER_GRAD: &str = "def loss(x: tensor[1, f32]) -> tensor[f
 out = grad(loss)(to_tensor([1.0f32]))
 ";
 
+/// Under `grad` a float source cast to an integer on the gradient path is a
+/// structural rejection ([04-NUM-14], chelis#2178), so this shape reaches the
+/// same `overflow in cast at i32` trap through an integer source: a
+/// comparison, which carries no cotangent, scaled past the `i32` range.
 const CONSUMED_CAST_UNDER_GRAD: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
   s = tensor_to_scalar(sum(&x, 0i32))
-  r = if gt(s, 5.0f32) then cast(cast(mul(&x, to_tensor([1e30f32])), i32), f32) else x
+  r = if gt(s, 5.0f32) then cast(cast(mul(cast(lt(&x, to_tensor([1e30f32])), i64), to_tensor([2147483648i64])), i32), f32) else x
   sum(r, 0i32)
 }
 out = grad(loss)(to_tensor([1.0f32]))

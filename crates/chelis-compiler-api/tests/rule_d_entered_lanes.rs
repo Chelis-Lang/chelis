@@ -983,12 +983,19 @@ struct ArmShape {
 /// shows fails before any trap.
 fn arm_shapes(taken: bool) -> Vec<ArmShape> {
     let cast = "cast(mul(&x, to_tensor([1e30f32])), i32)";
+    // Under `grad` a float source cast to an integer on the gradient path is
+    // a structural rejection ([04-NUM-14], chelis#2178), so the consumed
+    // gradient shape reaches the same `overflow in cast at i32` trap through
+    // an integer source: a comparison, which carries no cotangent, scaled
+    // past the `i32` range.
+    let integer_cast =
+        "cast(mul(cast(lt(&x, to_tensor([1e30f32])), i64), to_tensor([2147483648i64])), i32)";
     let discarded = |name: &str, condition: &str| {
         format!(
             "def {name}(x: tensor[1, f32]) -> tensor[f32] = {{\n  s = tensor_to_scalar(sum(&x, 0i32))\n  r = if {condition} then {{\n    dead = {cast}\n    sum(&x, 0i32)\n  }} else sum(&x, 0i32)\n  sum(x, 0i32)\n}}\n"
         )
     };
-    let consumed = |name: &str, condition: &str| {
+    let consumed = |name: &str, condition: &str, cast: &str| {
         format!(
             "def {name}(x: tensor[1, f32]) -> tensor[f32] = {{\n  s = tensor_to_scalar(sum(&x, 0i32))\n  r = if {condition} then cast({cast}, f32) else x\n  sum(r, 0i32)\n}}\n"
         )
@@ -1015,7 +1022,11 @@ fn arm_shapes(taken: bool) -> Vec<ArmShape> {
     ] {
         for (name, source, gradient) in [
             ("discarded cast", discarded("selected", condition), false),
-            ("consumed cast", consumed("selected", condition), false),
+            (
+                "consumed cast",
+                consumed("selected", condition, cast),
+                false,
+            ),
             (
                 "discarded cast under grad",
                 format!("{}{grad}", discarded("loss", condition)),
@@ -1023,7 +1034,7 @@ fn arm_shapes(taken: bool) -> Vec<ArmShape> {
             ),
             (
                 "consumed cast under grad",
-                format!("{}{grad}", consumed("loss", condition)),
+                format!("{}{grad}", consumed("loss", condition, integer_cast)),
                 true,
             ),
         ] {
