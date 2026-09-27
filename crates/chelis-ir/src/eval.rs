@@ -3802,6 +3802,9 @@ where
         } else {
             None
         };
+        if inactive_value.is_none() {
+            inactive_value = inactive_disagreeing_elementwise(node, &values)?;
+        }
         let out_prim = node.output_type.precision;
         let value = match &node.op {
             // An extent or bound check under a false activation: the value
@@ -4747,6 +4750,59 @@ where
         peak_live_values,
         peak_live_elements,
     })
+}
+
+/// spec/10 §3.2 for an elementwise node whose activation holds in no row:
+/// its operands' extent agreement is a check, so it checks nothing. An
+/// untaken arm's claim-sized node is zeros at the claimed extent (decisions
+/// section 25), while a node the arm sizes from an unclaimed origin keeps
+/// that origin's extent (a `grad` body's accumulator sized from its
+/// parameter), so an untaken arm's operands can disagree. The node then
+/// yields zeros at its first operand's shape, read only by the arm's own
+/// nodes and by the join, which does not read an unselected branch
+/// ([05-OP-53]). `None` where the operands agree or some row is active.
+fn inactive_disagreeing_elementwise(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Option<TensorValue>, String> {
+    if !matches!(
+        node.op,
+        RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::FusedElem { .. }
+    ) {
+        return Ok(None);
+    }
+    let shapes = node
+        .inputs
+        .iter()
+        .filter_map(|input| values.get(input))
+        .map(|value| &value.shape)
+        .filter(|shape| !shape.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = shapes.first() else {
+        return Ok(None);
+    };
+    if shapes.iter().all(|shape| shape == first)
+        || !matches!(node_activity(node, values)?, Activity::Inactive)
+    {
+        return Ok(None);
+    }
+    let prim = node.output_type.precision;
+    let len = admit_result("activation", first, prim)?;
+    Ok(Some(TensorValue::from_storage(
+        first.to_vec(),
+        zero_storage(prim, len)?,
+    )))
 }
 
 /// The value a node whose activation holds in no row produces without
